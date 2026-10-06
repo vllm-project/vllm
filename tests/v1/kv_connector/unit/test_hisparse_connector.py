@@ -64,6 +64,42 @@ def test_hisparse_requires_block_outermost_device_layout():
     assert HiSparseConnector.get_required_kvcache_layout(MagicMock()) == "BLHNC"
 
 
+def test_scheduler_stats_report_host_pool_usage():
+    """The scheduler-side stats sample the coordinator's host pool level."""
+    from tests.v1.core.test_prefix_caching import (
+        HISPARSE_BLOCK_SIZE,
+        make_hisparse_kv_cache_manager,
+        make_request,
+        sha256,
+    )
+    from vllm.v1.core.kv_cache_utils import init_none_hash
+
+    init_none_hash(sha256)
+
+    manager = make_hisparse_kv_cache_manager(32, host_num_blocks=8)
+    scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    scheduler.bind_coordinator(get_hisparse_coordinator(manager))
+    coordinator = scheduler.coordinator
+
+    stats = scheduler.get_kv_connector_stats()
+    assert stats.data["host_cache_usage_perc"] == [0.0]
+    assert stats.data["pending_page_transfers"] == [0]
+
+    request = make_request(
+        "request", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert manager.allocate_slots(request, num_new_tokens=64) is not None
+    host_blocks = coordinator.host_manager.req_to_blocks[request.request_id]
+    num_used = sum(not block.is_null for block in host_blocks)
+
+    # The pool reserves the null block, so 8 configured blocks yield 7 usable.
+    expected = pytest.approx(num_used / 7)
+    assert 0 < num_used <= 7
+    for _ in range(2):
+        stats = scheduler.get_kv_connector_stats()
+        assert stats.data["host_cache_usage_perc"] == [expected]
+
+
 def test_no_forward_enqueues_deferred_hisparse_transfers():
     """A zero-token step must still enqueue deferred post-forward transfers."""
     connector = object.__new__(ActiveKVConnector)

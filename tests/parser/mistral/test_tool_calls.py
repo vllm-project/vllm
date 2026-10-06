@@ -35,6 +35,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.mistral import _DEFAULT_JSON_SCHEMA, MistralParser, mistral_config
@@ -1888,6 +1889,19 @@ def test_adjust_request_structured_outputs_generates_grammar(
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
     assert len(result.structured_outputs.grammar) > 0
+
+
+def test_adjust_request_deeply_nested_json_string_rejected(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    """The schema string is parsed here, before request validation, and
+    json.loads raises RecursionError on a string nested this deeply."""
+    schema = '{"type": "array", "items": ' * 20_000 + "{}" + "}" * 20_000
+    request = _make_request(
+        structured_outputs=StructuredOutputsParams(json=schema),
+    )
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        mistral_tool_parser.adjust_request(request)
 
 
 @pytest.mark.parametrize(

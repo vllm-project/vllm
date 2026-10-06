@@ -34,6 +34,7 @@ def test_cpu_write(device):
     cpu_tensor[4, 5] = -1
 
     gpu_view.mul_(2)
+    torch.accelerator.synchronize(gpu_view.device)
     assert gpu_view[0, 0] == 2
     assert gpu_view[2, 3] == 4
     assert gpu_view[4, 5] == -2
@@ -55,6 +56,7 @@ def test_gpu_write(device):
     gpu_view[2, 3] = 2
     gpu_view[4, 5] = -1
     gpu_view.mul_(2)
+    torch.accelerator.synchronize(gpu_view.device)
 
     assert cpu_tensor[0, 0] == 2
     assert cpu_tensor[2, 3] == 4

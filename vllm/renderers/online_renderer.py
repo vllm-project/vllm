@@ -209,6 +209,18 @@ class OnlineRenderer:
             )
         )
 
+    def effective_chat_template_kwargs(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> dict[str, Any]:
+        return (
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.default_chat_template_kwargs)
+            .chat_template_kwargs
+        )
+
     async def render_chat(
         self,
         request: ChatCompletionRequest,
@@ -356,14 +368,7 @@ class OnlineRenderer:
                 else None
             ),
         )
-        chat_template_kwargs = (
-            request.build_chat_params(
-                self.chat_template,
-                self.chat_template_content_format,
-            )
-            .with_defaults(self.default_chat_template_kwargs)
-            .chat_template_kwargs
-        )
+        chat_template_kwargs = self.effective_chat_template_kwargs(request)
         _, engine_inputs = await self.preprocess_chat(
             request,
             messages,

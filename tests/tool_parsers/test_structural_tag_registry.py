@@ -21,6 +21,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.plamo3 import (
     BEGIN_TOOL_ARGUMENTS,
@@ -201,6 +203,131 @@ def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     )
 
     assert isinstance(tag, StructuralTag)
+
+
+_MCP_TOOL = {"type": "mcp", "server_label": "docs", "server_url": "http://mcp"}
+
+
+def _namespace_tool(strict: bool | None = None) -> dict[str, Any]:
+    lookup = {
+        "type": "function",
+        "name": "lookup",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}},
+    }
+    if strict is not None:
+        lookup["strict"] = strict
+    return {"type": "namespace", "name": "crm", "description": "", "tools": [lookup]}
+
+
+def _hermes_call(name: str) -> str:
+    return (
+        f'<tool_call>\n{{"name": "{name}", "arguments": {{"id": "1"}}}}\n</tool_call>'
+    )
+
+
+@pytest.mark.parametrize("model", sorted(SUPPORTED_STRUCTURAL_TAG_MODELS))
+def test_no_structural_tag_without_function_tools(model: str):
+    """Builtin tools never reach the prompt, so there is nothing to constrain."""
+    request = ResponsesRequest.model_validate(
+        {"input": "hi", "tools": [_MCP_TOOL, {"type": "web_search"}]}
+    )
+
+    tag = get_model_structural_tag(
+        model=model,
+        tools=request.tools,
+        tool_choice="auto",
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+
+    assert tag is None
+    with pytest.raises(VLLMValidationError, match="no function tool"):
+        get_model_structural_tag(
+            model=model,
+            tools=request.tools,
+            tool_choice="required",
+            reasoning=False,
+        )
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+def test_structural_tag_allows_exactly_the_prompt_tools(tool_choice: str):
+    """The grammar lets the model call every tool its prompt lists, and no other."""
+    request = ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "get_weather", "parameters": {}},
+                _namespace_tool(),
+                _MCP_TOOL,
+            ],
+        }
+    )
+    prompt_names = [
+        tool["function"]["name"]
+        for tool in construct_tool_dicts(request.tools, tool_choice)
+    ]
+
+    tag = get_model_structural_tag(
+        model="hermes",
+        tools=request.tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+
+    assert prompt_names == ["get_weather", "crm__lookup"]
+    assert tag is not None
+    grammar = Grammar.from_structural_tag(json.dumps(tag.model_dump()))
+    for name in prompt_names:
+        assert _is_grammar_accept_string(grammar, _hermes_call(name))
+    assert not _is_grammar_accept_string(grammar, _hermes_call("docs"))
+
+
+def test_strict_namespace_function_enables_auto_structural_tag():
+    request = ResponsesRequest.model_validate(
+        {"input": "hi", "tools": [_namespace_tool(strict=True)]}
+    )
+
+    tag = get_model_structural_tag(
+        model="hermes", tools=request.tools, tool_choice="auto", reasoning=False
+    )
+
+    assert tag is not None
+    grammar = Grammar.from_structural_tag(json.dumps(tag.model_dump()))
+    assert _is_grammar_accept_string(grammar, _hermes_call("crm__lookup"))
+
+
+def test_harmony_structural_tag_keeps_builtin_tools():
+    """Harmony can call builtin tools, so they still shape its grammar."""
+    request = ResponsesRequest.model_validate(
+        {"input": "hi", "tools": [{"type": "web_search"}]}
+    )
+
+    tag = get_model_structural_tag(
+        model="harmony",
+        tools=request.tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert tag is not None
+
+
+def test_glm47_default_level_allows_builtin_only_tools(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """GLM-4.7's default FUNCTION level must not reject builtin-only tools."""
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Glm47MoeModelToolParser
+
+    request = ResponsesRequest.model_validate({"input": "hi", "tools": [_MCP_TOOL]})
+    parser = TestParser(MagicMock(), tools=None)
+    parser._reasoning_parser = MagicMock(adjust_request=lambda request: request)
+
+    assert parser.adjust_request(request).structured_outputs is None
 
 
 def test_get_model_structural_tag_supports_vllm_hermes(

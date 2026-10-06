@@ -178,6 +178,7 @@ def _run_vllm_requests(
                 beam_width=n,
                 max_tokens=output_len,
                 ignore_eos=True,
+                watermarking=False,
             ),
         )
         if do_profile:

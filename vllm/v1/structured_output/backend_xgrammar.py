@@ -10,7 +10,7 @@ import torch
 import vllm.envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, check_json_nesting
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
@@ -392,6 +392,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         return
 
     if so_params.json:
+        check_json_nesting(so_params.json)
         if isinstance(so_params.json, str):
             try:
                 schema = json.loads(so_params.json)
@@ -426,6 +427,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         return
 
     if so_params.structural_tag:
+        check_json_nesting(so_params.structural_tag, structural_tag=True)
         try:
             s_tag = json.loads(so_params.structural_tag)
 
