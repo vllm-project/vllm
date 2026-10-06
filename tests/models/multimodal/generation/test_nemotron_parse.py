@@ -104,7 +104,13 @@ def run_test(
         )
 
 
-@pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-v1.2"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+        "nvidia/NVIDIA-Nemotron-Parse-2.0",
+    ],
+)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
