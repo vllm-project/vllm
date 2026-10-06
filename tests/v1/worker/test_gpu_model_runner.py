@@ -2577,9 +2577,7 @@ class TestReloadDraftWeights:
             def load_weights(self, weights):
                 for _ in weights:
                     pass
-                self.seen.append(
-                    (self.direct, self.nested, self.nonpers)
-                )
+                self.seen.append((self.direct, self.nested, self.nonpers))
                 return set()
 
         class _Draft(nn.Module):
