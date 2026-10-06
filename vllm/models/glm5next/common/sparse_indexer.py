@@ -28,8 +28,7 @@ def _build_decode_scatter_indices(
     dl = decode_lens.to(torch.int64)
     # FULL CUDA graphs pad to the captured token count. Adaptive verification
     # changes the live per-request lengths only on the GPU, so the padding
-    # amount must remain device-resident too. Appending it as one synthetic
-    # request keeps output_size exact without a GPU-to-CPU synchronization.
+    # amount must remain device-resident too.
     graph_padding = n - dl.sum()
     dl_with_discard = torch.cat((dl, graph_padding.reshape(1)))
     req_id = torch.repeat_interleave(
@@ -51,9 +50,9 @@ def _build_decode_scatter_indices(
     # own request's start.
     starts = torch.repeat_interleave(req_starts, dl_with_discard, output_size=n)
     intra = torch.arange(n, device=device, dtype=torch.int64) - starts
-    # The discard row has only ``lmax`` columns, while graph padding can be
-    # larger than ``lmax``. All padding values are discarded, so alias them to
-    # one valid cell instead of assigning increasing, potentially OOB columns.
+    # Padding may produce arbitrarily large intra-request indices, while the
+    # downstream discard row has a fixed width. Since padding values are ignored,
+    # map every padding token to column zero.
     intra = torch.where(req_id == num_requests, 0, intra)
     return req_id, intra
 
