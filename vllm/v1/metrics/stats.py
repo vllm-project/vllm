@@ -249,6 +249,7 @@ class RequestStateStats:
 
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
+    num_computed_prefill_tokens: int | None = None
 
 
 @dataclass
@@ -262,13 +263,14 @@ class FinishedRequestStats:
     num_preemptions: int = 0
     num_generation_tokens: int = 0
     max_tokens_param: int | None = None
-    queued_time: float = 0.0
-    prefill_time: float = 0.0
-    inference_time: float = 0.0
-    decode_time: float = 0.0
-    mean_time_per_output_token: float = 0.0
+    queued_time: float | None = None
+    prefill_time: float | None = None
+    inference_time: float | None = None
+    decode_time: float | None = None
+    mean_time_per_output_token: float | None = None
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    num_computed_prefill_tokens: int | None = None
 
 
 @dataclass
@@ -481,6 +483,9 @@ class IterationStats:
         if is_prefilling:
             if output.prefill_stats is not None:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
+                req_stats.num_computed_prefill_tokens = (
+                    output.prefill_stats.num_computed_tokens
+                )
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
@@ -590,7 +595,16 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            num_computed_prefill_tokens=req_stats.num_computed_prefill_tokens,
         )
+        # Omit intervals whose required timestamps have not arrived.
+        if not req_stats.queued_ts or not req_stats.scheduled_ts:
+            finished_req.queued_time = None
+        if not req_stats.first_token_ts or not req_stats.last_token_ts:
+            finished_req.decode_time = finished_req.mean_time_per_output_token = None
+            finished_req.prefill_time = finished_req.inference_time = None
+        elif not req_stats.scheduled_ts:
+            finished_req.prefill_time = finished_req.inference_time = None
         self.finished_requests.append(finished_req)
 
         # Count corrupted requests when they finish (only once per request)

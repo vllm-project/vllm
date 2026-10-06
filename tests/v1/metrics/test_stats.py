@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock, Mock, call
+
+import pytest
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
     IterationStats,
     PrefillStats,
     PromptTokenStats,
@@ -12,6 +18,45 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import compute_iteration_details
+
+
+@pytest.mark.parametrize("computed_prefill_tokens", [None, 0, 2])
+@pytest.mark.parametrize("finish_reason", [FinishReason.ABORT, FinishReason.STOP])
+def test_finished_request_metrics(computed_prefill_tokens, finish_reason):
+    stat_logger = MagicMock(
+        histogram_iteration_tokens={idx: Mock() for idx in (0, 1)},
+        counter_request_success={finish_reason: {idx: Mock() for idx in (0, 1)}},
+        kv_cache_metrics_enabled=False,
+        gauge_lora_info=None,
+    )
+    stats = IterationStats()
+    stats.finished_requests.append(
+        FinishedRequestStats(
+            finish_reason,
+            num_prompt_tokens=3,
+            num_cached_tokens=2,
+            num_computed_prefill_tokens=computed_prefill_tokens,
+        )
+    )
+    PrometheusStatLogger.record(stat_logger, None, stats, engine_idx=1)
+    observed = stat_logger.histogram_prefill_kv_computed_request[1].observe
+    expected = computed_prefill_tokens if finish_reason == FinishReason.ABORT else 1
+    assert observed.call_args_list == ([] if expected is None else [call(expected)])
+    stat_logger.histogram_num_prompt_tokens_request[1].observe.assert_called_once_with(
+        3
+    )
+
+    for sched_stats, token_count in [(None, 3), (SchedulerStats(), 0)]:
+        step_stats = IterationStats()
+        step_stats.num_generation_tokens = token_count
+        PrometheusStatLogger.record(stat_logger, sched_stats, step_stats, engine_idx=1)
+
+    counters = stat_logger.counter_request_success[finish_reason]
+    counters[1].inc.assert_called_once_with()
+    counters[0].inc.assert_not_called()
+    histograms = stat_logger.histogram_iteration_tokens
+    histograms[0].observe.assert_not_called()
+    assert histograms[1].observe.call_args_list == [call(3), call(0)]
 
 
 def test_iteration_stats_repr():
