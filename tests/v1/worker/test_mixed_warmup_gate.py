@@ -37,7 +37,6 @@ def test_mixed_warmup_disables_watermarking():
     runner = SimpleNamespace(
         is_pooling_model=False,
         max_num_reqs=2,
-        num_speculative_steps=0,
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=[
                 SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))
@@ -46,6 +45,7 @@ def test_mixed_warmup_disables_watermarking():
         ),
         vllm_config=SimpleNamespace(num_lookahead_tokens=0),
         max_model_len=128,
+        num_speculative_steps=0,
         model_state=SimpleNamespace(max_encoder_len=0),
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
     )
