@@ -813,7 +813,15 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128
         # rather than the generic ROCm 256 round-up, which would inflate
         # weights and OOM.
-        aiter_uses_128 = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+        # The a4w4 opt-in is excluded: its MXMOE kernels shuffle the e8m0 scales
+        # in groups of 8 columns, so they stride 256 elements of K per group and
+        # read past the intermediate scale buffer on a shard that is 128- but
+        # not 256-aligned. DeepSeek V4.1 at TP2 (2304 // 2 = 1152) faults in
+        # moe_sorting that way.
+        aiter_uses_128 = (
+            backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and not envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4
+        )
 
         # matmul_ogs uses block_k=128 for MXFP4 on pre-CDNA4 GPUs.
         # CDNA4's F16xMXFP4 configuration uses block_k=256.

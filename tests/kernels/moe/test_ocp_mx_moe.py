@@ -1919,6 +1919,46 @@ def test_aiter_mxfp4_bf16_silu_preserves_native_tp_shard():
     assert rounded_shape == (7168, 384)
 
 
+# DeepSeek V4.1 shards moe_intermediate 2304 to 1152 at TP2, which is 128- but
+# not 256-aligned. AITER's a4w4 MXMOE kernels stride their e8m0 scales in groups
+# of 8 columns (256 elements of K), so an unpadded 1152 makes them read past the
+# intermediate scale buffer and fault during graph capture.
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm-specific test")
+@pytest.mark.parametrize(
+    "tp_size,expected_a4w4,expected_a16w4", [(2, 1280, 1152), (4, 768, 640)]
+)
+def test_aiter_mxfp4_a4w4_rounds_intermediate_to_256(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    expected_a4w4: int,
+    expected_a16w4: int,
+):
+    """The a4w4 opt-in must not inherit the SiLU 128-alignment relaxation."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+
+    shard = 2304 // tp_size
+
+    def rounded() -> tuple[int, int]:
+        return mxfp4_round_up_hidden_size_and_intermediate_size(
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            5120,
+            shard,
+            activation=MoEActivation.SILU,
+        )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
+        assert rounded() == (5120, expected_a4w4)
+
+    with monkeypatch.context() as mp:
+        mp.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
+        assert rounded() == (5120, expected_a16w4)
+
+
 # Emulation needs each per-partition dim rounded up to OCP_MX_BLOCK_SIZE (32);
 # a non-block-aligned shard (e.g. GPT-OSS 2880 // 4 = 720) otherwise truncates
 # the scale buffer and fails weight loading.
