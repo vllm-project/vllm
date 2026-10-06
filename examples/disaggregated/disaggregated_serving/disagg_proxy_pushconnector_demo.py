@@ -178,8 +178,7 @@ class PushProxy:
                             f"{error_content}",
                         )
             except HTTPException:
-                # Re-raise as-is: the generic handler below would re-wrap it as a
-                # 500 and lose the upstream status code raised just above.
+                # Preserve the upstream status instead of wrapping it as 500.
                 raise
             except aiohttp.ClientError as e:
                 logger.error("ClientError occurred: %s", str(e))

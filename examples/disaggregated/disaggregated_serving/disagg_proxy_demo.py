@@ -22,6 +22,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import aclosing
 
 import aiohttp
 import requests
@@ -198,7 +199,7 @@ class Proxy:
                 async with session.post(
                     url=url, json=data, headers=headers
                 ) as response:
-                    if 200 <= response.status < 300 or 400 <= response.status < 500:
+                    if 200 <= response.status < 300:
                         if use_chunked:
                             async for chunk_bytes in response.content.iter_chunked(
                                 1024
@@ -224,8 +225,7 @@ class Proxy:
                             f"{error_content}",
                         )
             except HTTPException:
-                # Re-raise as-is: the generic handler below would re-wrap it as a
-                # 500 and lose the upstream status code raised just above.
+                # Preserve the upstream status instead of wrapping it as 500.
                 raise
             except aiohttp.ClientError as e:
                 logger.error("ClientError occurred: %s", str(e))
@@ -249,6 +249,33 @@ class Proxy:
         }
         return status
 
+    async def decode_response(self, decode_instance, path, request):
+        async def stream_decode():
+            try:
+                async with aclosing(
+                    self.forward_request(f"http://{decode_instance}{path}", request)
+                ) as upstream:
+                    async for chunk in upstream:
+                        yield chunk
+            except HTTPException as exc:
+                if exc.status_code >= 500:
+                    self.remove_instance_endpoint("decode", decode_instance)
+                raise
+
+        stream = stream_decode()
+        # Check upstream before StreamingResponse commits the HTTP status.
+        first_chunk = await anext(stream, b"")
+
+        async def replay_stream():
+            try:
+                yield first_chunk
+                async for chunk in stream:
+                    yield chunk
+            finally:
+                await stream.aclose()
+
+        return StreamingResponse(replay_stream())
+
     async def create_completion(self, raw_request: Request):
         try:
             request = await raw_request.json()
@@ -263,28 +290,16 @@ class Proxy:
                 ):
                     continue
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("prefill", prefill_instance)
+                if http_exc.status_code >= 500:
+                    self.remove_instance_endpoint("prefill", prefill_instance)
                 raise http_exc
 
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
 
-            # ``forward_request`` is an async generator: building it performs no
-            # I/O, so a failing decode instance can only surface once the stream is
-            # consumed, which is after the response has already started. Evict it
-            # there so later requests stop being scheduled onto a node that cannot
-            # serve them -- the prefill leg above already does this.
-            async def stream_decode():
-                try:
-                    async for chunk in self.forward_request(
-                        f"http://{decode_instance}/v1/completions", request
-                    ):
-                        yield chunk
-                except HTTPException:
-                    self.remove_instance_endpoint("decode", decode_instance)
-                    raise
-
-            return StreamingResponse(stream_decode())
+            return await self.decode_response(
+                decode_instance, "/v1/completions", request
+            )
         except HTTPException:
             raise
         except Exception as e:
@@ -312,26 +327,15 @@ class Proxy:
                 ):
                     continue
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("prefill", prefill_instance)
+                if http_exc.status_code >= 500:
+                    self.remove_instance_endpoint("prefill", prefill_instance)
                 raise http_exc
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
 
-            # Same as ``create_completion``: the decode stream is only consumed
-            # after the response has started, so evict a failing decode instance
-            # from inside the generator.
-            async def stream_decode():
-                try:
-                    async for chunk in self.forward_request(
-                        "http://" + decode_instance + "/v1/chat/completions",
-                        request,
-                    ):
-                        yield chunk
-                except HTTPException:
-                    self.remove_instance_endpoint("decode", decode_instance)
-                    raise
-
-            return StreamingResponse(content=stream_decode())
+            return await self.decode_response(
+                decode_instance, "/v1/chat/completions", request
+            )
         except HTTPException:
             raise
         except Exception as e:

@@ -1,26 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Error propagation in the XpYd disaggregated-prefill proxy demos.
-
-Exercises the REAL modules loaded from their ``examples/`` paths, so a future
-change to the demos is what these tests catch.
-
-Two regressions are pinned here.
-
-1. ``forward_request`` raised the upstream status through an ``HTTPException``
-   from inside a ``try`` whose last clause was a bare ``except Exception``.
-   ``HTTPException`` derives from ``Exception``, so the handler always caught
-   the exception it had just raised and re-wrapped it as a 500: a 503/504 from
-   a busy or dying prefill/decode instance never reached the client intact.
-2. ``create_completion`` ended in a bare ``except Exception`` that only logged
-   and fell off the end of the function, so FastAPI answered HTTP 200 with a
-   ``null`` body for every failure; ``create_chat_completion`` returned the
-   error text as an HTTP 200 ``text/event-stream`` body instead. The decode
-   leg's ``remove_instance_endpoint`` was unreachable as well, because
-   ``forward_request`` is an async generator: building it runs no user code, so
-   the ``except HTTPException`` around the call could never fire and a broken
-   decode node stayed in the round-robin cycle forever.
-"""
+"""Regression tests for upstream errors and decoder eviction in the XpYd demos."""
 
 import asyncio
 import importlib.util
@@ -28,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 EXAMPLES = "examples/disaggregated/disaggregated_serving"
 PULL_DEMO = f"{EXAMPLES}/disagg_proxy_demo.py"
@@ -62,16 +43,6 @@ class _FakeRequest:
         return self._body
 
 
-def _drain_stream(response) -> None:
-    """Consume a StreamingResponse body, discarding the chunks."""
-
-    async def _run():
-        async for _ in response.body_iterator:
-            pass
-
-    asyncio.run(_run())
-
-
 def _make_proxy(demo):
     return demo.Proxy(
         prefill_instances=["prefill-0"],
@@ -81,14 +52,7 @@ def _make_proxy(demo):
     )
 
 
-# --------------------------------------------------------------------------- #
-# 1. Upstream status codes must survive forward_request
-# --------------------------------------------------------------------------- #
-
-
 class _UpstreamResponse:
-    """A 5xx upstream response: the branch that builds an HTTPException."""
-
     def __init__(self, status: int, body: str):
         self.status = status
         self._body = body
@@ -125,15 +89,22 @@ class _FakeSession:
 
 
 @pytest.mark.parametrize(
-    "demo_fixture, proxy_cls, extra_args",
-    # forward_request(self, url, data, [headers,] use_chunked=True)
-    [("pull_demo", "Proxy", ()), ("push_demo", "PushProxy", ({},))],
+    "demo_fixture, proxy_cls, extra_args, status",
+    [("pull_demo", "Proxy", (), status) for status in (400, 429, 503, 504)]
+    + [("push_demo", "PushProxy", ({},), status) for status in (503, 504)],
 )
 def test_forward_request_preserves_the_upstream_status(
-    demo_fixture, proxy_cls, extra_args, request, monkeypatch
+    demo_fixture, proxy_cls, extra_args, request, monkeypatch, status
 ):
     demo = request.getfixturevalue(demo_fixture)
     monkeypatch.setattr(demo.aiohttp, "ClientSession", _FakeSession)
+    monkeypatch.setattr(
+        _FakeSession,
+        "post",
+        lambda self, **kwargs: _PostContext(
+            _UpstreamResponse(status, '{"error": "backend unavailable"}')
+        ),
+    )
 
     async def _call():
         generator = getattr(demo, proxy_cls).forward_request(
@@ -145,13 +116,8 @@ def test_forward_request_preserves_the_upstream_status(
     with pytest.raises(demo.HTTPException) as excinfo:
         asyncio.run(_call())
 
-    assert excinfo.value.status_code == 503
+    assert excinfo.value.status_code == status
     assert "backend unavailable" in str(excinfo.value.detail)
-
-
-# --------------------------------------------------------------------------- #
-# 2. Failures must not be reported as a successful response
-# --------------------------------------------------------------------------- #
 
 
 def _raising_forward(error_factory):
@@ -201,23 +167,94 @@ def test_upstream_http_error_is_not_reported_as_a_successful_response(
     assert excinfo.value.status_code == 503
 
 
-# --------------------------------------------------------------------------- #
-# 3. A decode node that cannot serve must leave the rotation
-# --------------------------------------------------------------------------- #
-
-
 def test_a_failing_decode_instance_is_removed_from_the_rotation(pull_demo, monkeypatch):
     async def _forward(self, url, data, *args, **kwargs):
         if "decode-0" in url:
+            yield b'{"choices": []}'
             raise pull_demo.HTTPException(status_code=502, detail="decode-0 is down")
         yield b'{"choices": []}'
 
     monkeypatch.setattr(pull_demo.Proxy, "forward_request", _forward)
     proxy = _make_proxy(pull_demo)
 
-    response = asyncio.run(proxy.create_completion(_FakeRequest({"prompt": "hi"})))
+    async def run():
+        response = await proxy.create_completion(_FakeRequest({"prompt": "hi"}))
+        async for _ in response.body_iterator:
+            pass
 
     with pytest.raises(pull_demo.HTTPException):
-        _drain_stream(response)
+        asyncio.run(run())
 
     assert proxy.decode_instances == ["decode-1"]
+
+
+@pytest.mark.parametrize("path", ["/v1/completions", "/v1/chat/completions"])
+@pytest.mark.parametrize("status", [400, 429, 503])
+def test_initial_decode_error_reaches_client_before_response_starts(
+    pull_demo, monkeypatch, path, status
+):
+    async def forward(self, url, data, *args, **kwargs):
+        if "decode-0" in url:
+            raise pull_demo.HTTPException(
+                status_code=status, detail="decode unavailable"
+            )
+        yield b'{"choices": []}'
+
+    monkeypatch.setattr(pull_demo.Proxy, "forward_request", forward)
+    proxy = _make_proxy(pull_demo)
+    app = pull_demo.FastAPI()
+    app.include_router(proxy.router)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(path, json={"prompt": "hi"})
+
+    assert response.status_code == status
+    assert response.json()["detail"] == "decode unavailable"
+    assert proxy.decode_instances == (
+        ["decode-1"] if status >= 500 else ["decode-0", "decode-1"]
+    )
+
+
+@pytest.mark.parametrize("path", ["/v1/completions", "/v1/chat/completions"])
+def test_client_prefill_error_does_not_evict_a_healthy_node(
+    pull_demo, monkeypatch, path
+):
+    monkeypatch.setattr(
+        pull_demo.Proxy,
+        "forward_request",
+        _raising_forward(
+            lambda: pull_demo.HTTPException(status_code=400, detail="invalid request")
+        ),
+    )
+    proxy = _make_proxy(pull_demo)
+    app = pull_demo.FastAPI()
+    app.include_router(proxy.router)
+    with TestClient(app) as client:
+        response = client.post(path, json={"prompt": "hi"})
+    assert response.status_code == 400
+    assert proxy.prefill_instances == ["prefill-0"]
+
+
+@pytest.mark.parametrize("path", ["/v1/completions", "/v1/chat/completions"])
+def test_preopening_decode_replays_all_chunks_and_closes_upstream(
+    pull_demo, monkeypatch, path
+):
+    closed = []
+
+    async def forward(self, url, data, *args, **kwargs):
+        try:
+            yield b"first"
+            yield b"second"
+        finally:
+            closed.append(url)
+
+    monkeypatch.setattr(pull_demo.Proxy, "forward_request", forward)
+    proxy = _make_proxy(pull_demo)
+    app = pull_demo.FastAPI()
+    app.include_router(proxy.router)
+    with TestClient(app) as client:
+        response = client.post(path, json={"prompt": "hi"})
+
+    assert response.status_code == 200
+    assert response.content == b"firstsecond"
+    assert closed == [f"http://prefill-0{path}", f"http://decode-0{path}"]
+    assert proxy.decode_instances == ["decode-0", "decode-1"]
