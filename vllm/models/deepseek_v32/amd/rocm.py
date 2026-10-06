@@ -90,6 +90,28 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
         return self.o_proj(output)[0]
 
+    def refresh_sparse_indices(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
+    ) -> None:
+        """Run only the indexer: insert its K cache entry and write the step's
+        top-k into the shared buffer, without touching the MLA cache."""
+        assert self.indexer is not None and not self.skip_topk
+        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        q_c, kv_c, k_pe = qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        kw = self.indexer.wk_weights_proj(hidden_states)[0]
+        self._fused_attention(
+            positions,
+            q_c,
+            kv_c,
+            k_pe,
+            kw[:, : self.indexer.head_dim],
+            kw[:, self.indexer.head_dim :],
+            None,
+            indexer_only=True,
+        )
+
     def _compute_ql_nope(self, q_c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -168,7 +190,8 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         k_pe: torch.Tensor,
         index_k: torch.Tensor | None,
         index_weights: torch.Tensor | None,
-        output: torch.Tensor,
+        output: torch.Tensor | None,
+        indexer_only: bool = False,
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -210,7 +233,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_cache = None
             mla_slot = None
         else:
-            mla_kv_cache = self.kv_cache
+            mla_kv_cache = None if indexer_only else self.kv_cache
             mla_k_scale = self._k_scale
 
         q_c = fused_norm_rope(
@@ -266,6 +289,9 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         if self.indexer is not None and not self.skip_topk:
             self._run_indexer(q_c, index_q_fp8, index_weights_out)
 
+        if indexer_only:
+            return
+        assert output is not None
         if attn_metadata is None:
             output.zero_()
             return
