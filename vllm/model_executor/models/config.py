@@ -47,13 +47,17 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
 
         cache_config = vllm_config.cache_config
         speculative_config = vllm_config.speculative_config
-        if (
-            cache_config.cache_dtype == "auto"
-            and current_platform.is_cuda()
-            and current_platform.is_device_capability((10, 0))
-            and (speculative_config is None or speculative_config.method != "dspark")
-        ):
-            cache_config.cache_dtype = "fp8_e4m3"
+        if cache_config.cache_dtype == "auto":
+            if current_platform.is_xpu():
+                cache_config.cache_dtype = "bfloat16"
+            elif (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability((10, 0))
+                and (
+                    speculative_config is None or speculative_config.method != "dspark"
+                )
+            ):
+                cache_config.cache_dtype = "fp8_e4m3"
 
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
