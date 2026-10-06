@@ -73,8 +73,6 @@ pub enum DatasetName {
     RandomMm,
     #[value(name = "sharegpt")]
     ShareGpt,
-    #[value(name = "sonnet")]
-    Sonnet,
     #[value(name = "speed-bench", alias = "speed_bench")]
     SpeedBench,
     #[value(name = "hf")]
@@ -520,19 +518,6 @@ pub struct BenchServeArgs {
     /// Do not shuffle the dataset.
     #[arg(long, default_value_t = false)]
     pub disable_shuffle: bool,
-
-    // --- Sonnet dataset ---
-    /// Number of input tokens per request (sonnet dataset).
-    #[arg(long, default_value_t = crate::datasets::sonnet::DEFAULT_INPUT_LEN)]
-    pub sonnet_input_len: usize,
-
-    /// Number of output tokens per request (sonnet dataset).
-    #[arg(long, default_value_t = crate::datasets::sonnet::DEFAULT_OUTPUT_LEN)]
-    pub sonnet_output_len: usize,
-
-    /// Number of prefix tokens shared across requests (sonnet dataset).
-    #[arg(long, default_value_t = crate::datasets::sonnet::DEFAULT_PREFIX_LEN)]
-    pub sonnet_prefix_len: usize,
 
     /// SPEED-Bench config/split (qualitative, throughput_1k, throughput_2k, throughput_8k,
     /// throughput_16k, throughput_32k).

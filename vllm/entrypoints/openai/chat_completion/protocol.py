@@ -33,6 +33,7 @@ from vllm.entrypoints.generate.base.protocol import (
     StopParam,
     StreamOptions,
     ToolCall,
+    TopLogprobsParam,
     structured_outputs_from_response_format,
     validate_cache_salt,
     validate_structural_tag_response_format,
@@ -222,7 +223,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     max_tokens: int | None = Field(
         default=None,
         deprecated="max_tokens is deprecated in favor of "
@@ -1095,7 +1096,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(

@@ -445,11 +445,6 @@ def _mask_rows_to_allowed(
     return logits if out is None else out
 
 
-# Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
-# on compute_sc and on sizes that coincide with the state buffers. That set
-# is small but passes Dynamo's default of 8, after which every step would run
-# eager: about twice as slow for a self-conditioned step.
-@torch._dynamo.config.patch(recompile_limit=64)
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _denoise_temperature(
     step_tensor: torch.Tensor,
@@ -464,6 +459,12 @@ def _denoise_temperature(
     return t_min + (t_max - t_min) * (remaining / max_denoising_steps)
 
 
+# Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
+# on compute_sc and on sizes that coincide with the state buffers. That set
+# is small but passes Dynamo's default of 8, after which every step would run
+# eager: about twice as slow for a self-conditioned step.
+@torch._dynamo.config.patch(recompile_limit=64)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compiled_sample_step(
     # Per-position statistics of the temperature-scaled logits, from
     # sample_row_stats: [num_decode, CL] each, and the softmax
