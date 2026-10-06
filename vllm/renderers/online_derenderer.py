@@ -28,8 +28,8 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
-    GenerateResponse,
-    GenerateStreamResponse,
+    GenerateTokensResponse,
+    GenerateTokensStreamResponse,
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -118,7 +118,7 @@ class OnlineDerenderer:
 
     async def derender_chat(
         self,
-        generate_response: GenerateResponse,
+        generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
     ) -> list[ChatCompletionResponseChoice]:
@@ -128,7 +128,7 @@ class OnlineDerenderer:
 
     def _derender_chat(
         self,
-        generate_response: GenerateResponse,
+        generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
     ) -> list[ChatCompletionResponseChoice]:
@@ -151,6 +151,12 @@ class OnlineDerenderer:
             skip_special_tokens=skip_special,
         )
 
+        chat_template_kwargs = (
+            self._resolve_chat_template_kwargs(chat_request)
+            if has_parser and chat_request is not None
+            else {}
+        )
+
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
@@ -161,83 +167,29 @@ class OnlineDerenderer:
                 else None
             )
 
+            # With a parser, special tokens are preserved so it can see
+            # markers like </think>, <tool_call>, or Harmony channel tokens.
+            # Without one, the request's skip_special_tokens is honoured
+            # (default True when no request was given).
+            decoded_text, _ = self._detokenize_delta(
+                tokenizer,
+                choice.token_ids,
+                seed_state,
+                skip_special_tokens=skip_special,
+                spaces_between_special_tokens=spaces_between,
+            )
+
             if has_parser:
-                assert self.parser is not None and chat_request is not None
-                # Parser path: decode with special tokens preserved
-                # so the parser can see markers like </think>,
-                # <tool_call>, or Harmony channel tokens.
-                decoded_text, _ = self._detokenize_delta(
+                assert chat_request is not None
+                message = self._parse_and_assemble(
                     tokenizer,
-                    choice.token_ids,
-                    seed_state,
-                    skip_special_tokens=skip_special,
-                    spaces_between_special_tokens=spaces_between,
-                )
-
-                chat_template_kwargs: dict[str, Any] = {}
-                if not self.use_harmony:
-                    chat_template_kwargs = (
-                        chat_request.build_chat_params(
-                            self.chat_template,
-                            self.chat_template_content_format,
-                        )
-                        .with_defaults(self.default_chat_template_kwargs)
-                        .chat_template_kwargs
-                    )
-
-                parser = self.parser(
-                    tokenizer,
-                    chat_request.tools,
-                    chat_template_kwargs=chat_template_kwargs,
-                    model_config=self.model_config,
-                )
-                if generate_response.prompt_token_ids is not None:
-                    parser.set_prompt_token_ids(generate_response.prompt_token_ids)
-                reasoning, content, tool_calls = parser.parse(
                     decoded_text,
+                    choice.token_ids,
                     chat_request,
-                    enable_auto_tools=self.enable_auto_tools,
-                    model_output_token_ids=choice.token_ids,
-                )
-
-                if not getattr(chat_request, "include_reasoning", True):
-                    reasoning = None
-
-                tc_items = (
-                    [
-                        ToolCall(
-                            id=random_uuid(),
-                            function=tc,
-                        )
-                        for tc in tool_calls
-                    ]
-                    if tool_calls
-                    else []
-                )
-
-                is_named_tool_choice = (
-                    type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
-                )
-                is_required_tool_choice = chat_request.tool_choice == "required"
-                if is_named_tool_choice or is_required_tool_choice:
-                    content = content or ""
-
-                message = ChatMessage(
-                    role="assistant",
-                    reasoning=reasoning,
-                    content=content,
-                    tool_calls=tc_items,
+                    chat_template_kwargs,
+                    generate_response.prompt_token_ids,
                 )
             else:
-                # No parser: plain detokenization honouring the request's
-                # skip_special_tokens (default True when no request was given).
-                decoded_text, _ = self._detokenize_delta(
-                    tokenizer,
-                    choice.token_ids,
-                    seed_state,
-                    skip_special_tokens=skip_special,
-                    spaces_between_special_tokens=spaces_between,
-                )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
             choices.append(
@@ -250,6 +202,83 @@ class OnlineDerenderer:
             )
 
         return choices
+
+    def _resolve_chat_template_kwargs(
+        self, chat_request: ChatCompletionRequest
+    ) -> dict[str, Any]:
+        if self.use_harmony:
+            return {}
+        return (
+            chat_request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.default_chat_template_kwargs)
+            .chat_template_kwargs
+        )
+
+    def _parse_and_assemble(
+        self,
+        tokenizer: TokenizerLike,
+        text: str,
+        token_ids: Sequence[int],
+        chat_request: ChatCompletionRequest,
+        chat_template_kwargs: dict[str, Any],
+        prompt_token_ids: list[int] | None,
+    ) -> ChatMessage:
+        """Parse decoded output text into an assistant `ChatMessage`.
+
+        Args:
+            tokenizer: Tokenizer handed to the parser.
+            text: Decoded output text to parse.
+            token_ids: Output token IDs the text was decoded from.
+            chat_request: Request supplying tools, `tool_choice` and
+                `include_reasoning`.
+            chat_template_kwargs: Already resolved template kwargs.
+            prompt_token_ids: Prompt token IDs, if known.
+
+        Returns:
+            The assembled assistant message.
+
+        """
+        assert self.parser is not None
+        parser = self.parser(
+            tokenizer,
+            chat_request.tools,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
+        )
+        if prompt_token_ids is not None:
+            parser.set_prompt_token_ids(prompt_token_ids)
+        reasoning, content, tool_calls = parser.parse(
+            text,
+            chat_request,
+            enable_auto_tools=self.enable_auto_tools,
+            model_output_token_ids=token_ids,
+        )
+
+        if not getattr(chat_request, "include_reasoning", True):
+            reasoning = None
+
+        tc_items = (
+            [ToolCall(id=random_uuid(), function=tc) for tc in tool_calls]
+            if tool_calls
+            else []
+        )
+
+        is_named_tool_choice = (
+            type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
+        )
+        is_required_tool_choice = chat_request.tool_choice == "required"
+        if is_named_tool_choice or is_required_tool_choice:
+            content = content or ""
+
+        return ChatMessage(
+            role="assistant",
+            reasoning=reasoning,
+            content=content,
+            tool_calls=tc_items,
+        )
 
     def _detokenize_delta(
         self,
@@ -323,7 +352,7 @@ class OnlineDerenderer:
     async def derender_chat_stream(
         self,
         model: str,
-        generate_chunk: GenerateStreamResponse,
+        generate_chunk: GenerateTokensStreamResponse,
         state: DerenderStreamState | None = None,
         chat_request: ChatCompletionRequest | None = None,
         prompt_tokens: int | None = None,
@@ -472,7 +501,7 @@ class OnlineDerenderer:
         self,
         parser_cls: type[Parser],
         model: str,
-        generate_chunk: GenerateStreamResponse,
+        generate_chunk: GenerateTokensStreamResponse,
         state: DerenderStreamState,
         chat_request: ChatCompletionRequest,
         prompt_tokens: int | None,
@@ -497,21 +526,10 @@ class OnlineDerenderer:
         """
         tokenizer = self.renderer.get_tokenizer()
 
-        chat_template_kwargs: dict[str, Any] = {}
-        if not self.use_harmony:
-            chat_template_kwargs = (
-                chat_request.build_chat_params(
-                    self.chat_template,
-                    self.chat_template_content_format,
-                )
-                .with_defaults(self.default_chat_template_kwargs)
-                .chat_template_kwargs
-            )
-
         parser = parser_cls(
             tokenizer,
             chat_request.tools,
-            chat_template_kwargs=chat_template_kwargs,
+            chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
             model_config=self.model_config,
         )
 
@@ -682,7 +700,7 @@ class OnlineDerenderer:
 
     async def derender_completion(
         self,
-        generate_responses: list[GenerateResponse],
+        generate_responses: list[GenerateTokensResponse],
         prompt_tokens: list[int] | None = None,
         completion_request: CompletionRequest | None = None,
         prompt_token_ids: list[list[int] | None] | None = None,
@@ -693,7 +711,7 @@ class OnlineDerenderer:
 
     def _derender_completion(
         self,
-        generate_responses: list[GenerateResponse],
+        generate_responses: list[GenerateTokensResponse],
         prompt_tokens: list[int] | None = None,
         completion_request: CompletionRequest | None = None,
         prompt_token_ids: list[list[int] | None] | None = None,
@@ -761,7 +779,7 @@ class OnlineDerenderer:
     async def derender_completion_stream(
         self,
         model: str,
-        generate_chunk: GenerateStreamResponse,
+        generate_chunk: GenerateTokensStreamResponse,
         state: DerenderStreamState | None = None,
         prompt_tokens: int | None = None,
         completion_request: CompletionRequest | None = None,
