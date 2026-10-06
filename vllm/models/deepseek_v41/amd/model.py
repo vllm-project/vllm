@@ -74,11 +74,10 @@ if typing.TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Delayed mHC seam (mhc_post, then mhc_pre on its output) as one op.
-# Off unless VLLM_MHC_SEAM_GFX942=1 on gfx942. Kernels stay in the
-# private gfx942 package; this file does not import it unless the flag is on.
-_MHC_SEAM_MIN_TOKENS = int(os.environ.get("VLLM_MHC_SEAM_MIN_TOKENS", "1"))
-_seam_lib = None
+# Delayed mHC seam. Off unless VLLM_MHC_SEAM_GFX942=1 on gfx942.
+# From 64 tokens this calls aiter mhc_fused_post_pre_delayed. Below that,
+# the folded post path stays on.
+_AITER_SEAM_MIN_TOKENS = 64
 
 
 def _mhc_seam_enabled() -> bool:
@@ -98,27 +97,6 @@ def _mhc_seam_enabled() -> bool:
 _MHC_SEAM = _mhc_seam_enabled()
 
 
-def _mhc_seam_library():
-    global _seam_lib
-    if _seam_lib is None:
-        import sys
-
-        for var in ("MXFP8_SKINNY_PATH", "MHC_SEAM_PATH"):
-            path = os.environ.get(var)
-            if path and path not in sys.path:
-                sys.path.insert(0, path)
-        from mhc_seam_gfx942.runtime import RND, Library
-
-        _seam_lib = Library()
-        logger.info(
-            "mhc_seam: kernels from %s (rounding %s, min tokens %d)",
-            _seam_lib.dir,
-            RND,
-            _MHC_SEAM_MIN_TOKENS,
-        )
-    return _seam_lib
-
-
 @torch.library.custom_op("mhc_seam::seam", mutates_args=())
 def _mhc_seam(
     x: torch.Tensor,
@@ -135,7 +113,7 @@ def _mhc_seam(
     sinkhorn_repeat: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """residual, post_mix, res_mix, layer_input, next pre_mix."""
-    if residual.shape[0] < _MHC_SEAM_MIN_TOKENS:
+    if residual.shape[0] < _AITER_SEAM_MIN_TOKENS:
         from vllm._aiter_ops import rocm_aiter_ops
 
         res_new = rocm_aiter_ops.mhc_post(x, residual, post_mix, res_mix)
@@ -152,21 +130,23 @@ def _mhc_seam(
             pre_mix,
         )
         return res_new, post, comb, li, pre
-    out = _seam_lib.seam(
-        x.contiguous(),
-        residual.contiguous(),
-        post_mix,
-        res_mix,
-        pre_mix,
+    from aiter.ops.mhc import mhc_fused_post_pre_delayed
+
+    return mhc_fused_post_pre_delayed(
+        residual,
         fn,
         hc_scale,
         hc_base,
         rms_eps,
         hc_eps,
+        hc_eps,
         post_mult,
         sinkhorn_repeat,
+        pre_mix,
+        x,
+        post_mix,
+        res_mix,
     )
-    return out["res_new"], out["post"], out["comb"], out["li"], out["pre"]
 
 
 @_mhc_seam.register_fake
@@ -373,7 +353,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
         if _MHC_SEAM:
-            _mhc_seam_library()
+            logger.info_once(
+                "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",
+                _AITER_SEAM_MIN_TOKENS,
+            )
         # Where aiter's fused seam kernel runs (gfx950), it folds the following
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
