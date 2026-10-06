@@ -1,0 +1,253 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Distributed data-lifetime tests for layer-sharded cache materialization."""
+
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+import torch.multiprocessing as mp
+
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    destroy_model_parallel,
+    get_kvpp_group,
+    get_pcp_group,
+    get_tp_group,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+from vllm.distributed.utils import warmup_process_group
+from vllm.forward_context import acquire_kv_cache, release_kv_cache, set_forward_context
+from vllm.utils.network_utils import get_open_port
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.kv_cache_placement import (
+    KVCacheBundle,
+    KVCachePlacement,
+    build_kv_cache_storage,
+)
+from vllm.v1.worker import kv_cache_placement
+from vllm.v1.worker.kvpp_runtime import KVPPRuntime
+from vllm.v1.worker.utils import allocate_kv_cache
+
+
+@pytest.mark.parametrize(
+    "enforce_eager,mode,cg_mode,inductor_partition,missing_split,allowed",
+    [
+        (True, 0, "NONE", False, None, True),
+        (False, 3, "PIECEWISE", False, None, True),
+        (False, 3, "FULL", False, None, False),
+        (False, 3, "FULL_AND_PIECEWISE", False, None, False),
+        (False, 3, "NONE", False, None, False),
+        (False, 0, "PIECEWISE", False, None, False),
+        (False, 3, "PIECEWISE", True, None, False),
+        (False, 3, "PIECEWISE", False, "unified_mla_kv_cache_update", False),
+        (False, 3, "PIECEWISE", False, "unified_mla_attention_with_output", False),
+    ],
+)
+def test_placement_requires_replay_time_cache_hooks(
+    monkeypatch,
+    enforce_eager,
+    mode,
+    cg_mode,
+    inductor_partition,
+    missing_split,
+    allowed,
+):
+    """Allow the verified piecewise path; reject configurations capturing KV hooks."""
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(enforce_eager=enforce_eager)
+    compilation = config.compilation_config
+    compilation.mode = CompilationMode.VLLM_COMPILE
+    compilation.use_inductor_graph_partition = False
+    compilation.set_splitting_ops_for_v1("naive")
+    compilation.mode = CompilationMode(mode)
+    compilation.cudagraph_mode = CUDAGraphMode[cg_mode]
+    compilation.use_inductor_graph_partition = inductor_partition
+    if missing_split is not None:
+        compilation.splitting_ops.remove(f"vllm::{missing_split}")
+
+    layers = {}
+    for name in ("a", "b"):
+        layer = SimpleNamespace()
+        layer.get_kv_cache_bundle = lambda layer=layer: (layer,)
+        layers[name] = layer
+    monkeypatch.setattr(kv_cache_placement.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        kv_cache_placement, "get_layers_from_vllm_config", lambda *_: layers
+    )
+    monkeypatch.setattr(
+        kv_cache_placement,
+        "get_kvpp_group",
+        lambda: SimpleNamespace(rank_in_group=0, world_size=2),
+    )
+    runner = SimpleNamespace(get_kv_cache_spec=lambda: dict.fromkeys(layers))
+    if allowed:
+        placement = kv_cache_placement.get_kv_cache_placement(config, runner)
+        assert [bundle.owner for bundle in placement.bundles] == [0, 1]
+    else:
+        with pytest.raises(ValueError, match="KVPP requires eager execution"):
+            kv_cache_placement.get_kv_cache_placement(config, runner)
+
+
+def _runtime_worker(rank: int, port: int, tp_size: int, pcp_size: int, pp_size: int):
+    replica_size = pcp_size * tp_size
+    torch.accelerator.set_device_index(rank)
+    init_distributed_environment(
+        world_size=replica_size * pp_size,
+        rank=rank,
+        local_rank=rank,
+        distributed_init_method=f"tcp://127.0.0.1:{port}",
+    )
+    vllm_config = VllmConfig()
+    vllm_config.cache_config.enable_kvpp = True
+    with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(
+            tensor_model_parallel_size=tp_size,
+            prefill_context_model_parallel_size=pcp_size,
+            pipeline_model_parallel_size=pp_size,
+        )
+    try:
+        group = get_kvpp_group()
+        stage_start = rank // replica_size * replica_size
+        assert group.ranks == list(range(stage_start, stage_start + replica_size))
+        assert group.rank_in_group == (
+            get_pcp_group().rank_in_group * tp_size + get_tp_group().rank_in_group
+        )
+        assert group.device_group is not get_pcp_group().device_group
+        assert group.device_group is not get_tp_group().device_group
+        warmup_process_group(group, ["broadcast"])
+        local_rank = group.rank_in_group
+        stage_value = 128 * (rank // replica_size)
+        # Unequal component sizes and >2 nonowner layers exercise both scratch
+        # slots repeatedly. The auxiliary component is acquired before main KV.
+        num_layers = 2 * replica_size + 3
+        owners = [
+            owner
+            for owner in range(replica_size)
+            for _ in range(
+                num_layers // replica_size + (owner < num_layers % replica_size)
+            )
+        ]
+        names = [
+            f"layer{i}.{part}" for i in range(num_layers) for part in ("mla", "index")
+        ]
+        names.append("draft")
+        specs = {
+            name: MLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=31 if name.endswith("mla") else 17,
+                dtype=torch.bfloat16,
+            )
+            for name in names
+        }
+        config = KVCacheConfig(
+            7,
+            [],
+            [KVCacheGroupSpec(names, UniformTypeKVCacheSpecs(16, specs))],
+        )
+        placement = KVCachePlacement(
+            local_rank,
+            replica_size,
+            tuple(
+                KVCacheBundle((f"layer{i}.mla", f"layer{i}.index"), owners[i])
+                for i in range(num_layers)
+            )
+            + (KVCacheBundle(("draft",), None),),
+        )
+        config = build_kv_cache_storage(config, placement, KVCacheLayout.LBNHC)
+        caches = allocate_kv_cache(
+            config, torch.device("cuda", rank), KVCacheLayout.LBNHC
+        )
+        kvpp_runtime = KVPPRuntime(config, caches)
+        caches["draft"].fill_(111 + rank)
+        observations = []
+        for step in range(5):
+            history = np.arange(config.num_blocks) if step else None
+            with set_forward_context(None, vllm_config, kvpp_runtime=kvpp_runtime):
+                kvpp_runtime.prepare_forward(history)
+                for index, bundle in enumerate(placement.bundles[:-1]):
+                    # Delay compute to expose premature scratch reuse.
+                    acquire_kv_cache(bundle.layers[1])
+                    if step == 1 and index == 0:
+                        # Reject reuse without discarding the pending prefetch.
+                        with pytest.raises(AssertionError, match="Previous KVPP"):
+                            kvpp_runtime.prepare_forward(history)
+                    torch.cuda._sleep(100_000)
+                    acquire_kv_cache(bundle.layers[0])
+                    for component, name in enumerate(bundle.layers):
+                        if step:
+                            observations.append(
+                                (
+                                    caches[name].clone(),
+                                    stage_value + 10 * index + component + step - 1,
+                                )
+                            )
+                        caches[name].fill_(stage_value + 10 * index + component + step)
+                    release_kv_cache(bundle.layers[0])
+            # Do not synchronize between steps: next-step broadcasts must also
+            # wait for the previous owner's writes and receiver scratch use.
+        torch.accelerator.synchronize()
+        for observed, expected in observations:
+            assert torch.all(observed == expected), (rank, expected)
+        assert torch.all(caches["draft"] == 111 + rank)
+        for i, owner in enumerate(owners):
+            if owner == local_rank:
+                assert torch.all(caches[f"layer{i}.mla"] == stage_value + 10 * i + 4)
+
+        del kvpp_runtime, group
+        # Reinitializing model parallelism must not retain a stale KVPP group.
+        for enabled in (False, True):
+            destroy_model_parallel()
+            with pytest.raises(AssertionError, match="KVPP group is not initialized"):
+                get_kvpp_group()
+            vllm_config.cache_config.enable_kvpp = enabled
+            with set_current_vllm_config(vllm_config):
+                initialize_model_parallel(
+                    tensor_model_parallel_size=tp_size,
+                    prefill_context_model_parallel_size=pcp_size,
+                    pipeline_model_parallel_size=pp_size,
+                )
+            if enabled:
+                warmup_process_group(get_kvpp_group(), ["broadcast", "all_reduce"])
+                probe = torch.tensor([rank], device="cuda")
+                get_kvpp_group().broadcast(probe)
+                assert probe.item() == stage_start
+            else:
+                with pytest.raises(
+                    AssertionError, match="KVPP group is not initialized"
+                ):
+                    get_kvpp_group()
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize(
+    "tp_size,pcp_size,pp_size", [(2, 1, 1), (2, 1, 2), (1, 2, 2), (2, 2, 1)]
+)
+def test_materialization_preserves_owner_and_scratch_lifetimes(
+    tp_size, pcp_size, pp_size
+):
+    world_size = tp_size * pcp_size * pp_size
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Requires {world_size} CUDA GPUs")
+    mp.spawn(
+        _runtime_worker,
+        args=(get_open_port(), tp_size, pcp_size, pp_size),
+        nprocs=world_size,
+        join=True,
+    )

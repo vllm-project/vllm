@@ -16,7 +16,7 @@ import uuid
 from collections import deque
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from torch.distributed import ProcessGroup, Store, TCPStore
@@ -33,6 +33,9 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import suppress_stdout
 
+if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
+
 logger = init_logger(__name__)
 
 # We prefer to use os.sched_yield as it results in tighter polling loops,
@@ -41,6 +44,29 @@ logger = init_logger(__name__)
 USE_SCHED_YIELD = (sys.version_info[:3] >= (3, 11, 1)) or (
     sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8
 )
+
+
+def warmup_process_group(
+    group: "GroupCoordinator",
+    operations: Sequence[Literal["broadcast", "all_reduce"]],
+) -> None:
+    """Warm up device-group collectives before measuring available memory.
+
+    All ranks in the group must call with the same operations in the same order.
+    """
+    if group.world_size == 1 or not operations:
+        return
+    probe = torch.zeros(1, device=group.device)
+    for operation in operations:
+        if operation == "broadcast":
+            torch.distributed.broadcast(
+                probe, src=group.ranks[0], group=group.device_group
+            )
+        elif operation == "all_reduce":
+            torch.distributed.all_reduce(probe, group=group.device_group)
+        else:
+            raise ValueError(f"Unsupported warmup operation: {operation}")
+    torch.accelerator.synchronize(group.device)
 
 
 def sched_yield():

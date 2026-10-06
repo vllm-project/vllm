@@ -53,6 +53,7 @@ from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.kv_cache_placement import KVCachePlacement
 
 
 # BlockHash represents the hash of a single KV-cache block used for
@@ -2448,6 +2449,7 @@ def generate_scheduler_kv_cache_config(
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
+    cfg.storage_plan = None
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
             # All layers in the UniformTypeKVCacheSpecs have the same type,
@@ -2702,6 +2704,7 @@ def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
     available_memory: list[int],
+    placements: list["KVCachePlacement"] | None = None,
 ) -> list[KVCacheConfig]:
     """Generates the KV cache configurations for a model.
     Since we use a shared centralized controller for all workers, we need the
@@ -2727,6 +2730,7 @@ def get_kv_cache_configs(
         kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
         available_memory: Memory available for KV cache in bytes for each
             worker.
+        placements: Optional worker-local physical cache placement descriptors.
 
     Returns:
         The generated KVCacheConfigs for each worker.
@@ -2771,6 +2775,38 @@ def get_kv_cache_configs(
         _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
         for worker_spec in kv_cache_specs
     ]
+
+    kvpp_staging_size = 0
+    if vllm_config.cache_config.enable_kvpp:
+        from vllm.v1.kv_cache_placement import (
+            get_layer_sharded_capacity,
+            get_transfer_staging_size,
+        )
+
+        assert placements is not None, "KVPP requires worker placement metadata."
+        assert (
+            len(placements) == len(available_memory) == len(projected_groups_per_worker)
+        ), "KVPP placement, budget, and worker counts must match."
+        layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+        kvpp_staging_size = get_transfer_staging_size(available_memory)
+        capacities = [
+            get_layer_sharded_capacity(
+                groups, placement, layout, available - kvpp_staging_size
+            )
+            for groups, placement, available in zip(
+                projected_groups_per_worker, placements, available_memory
+            )
+        ]
+        override = vllm_config.cache_config.num_gpu_blocks_override
+        if override is not None and override > min(capacities):
+            raise ValueError(
+                f"KVPP block override {override} exceeds physical capacity "
+                f"{min(capacities)}."
+            )
+        available_memory = [
+            capacity * _pool_bytes_per_block(groups)
+            for capacity, groups in zip(capacities, projected_groups_per_worker)
+        ]
 
     # If `num_gpu_blocks_override` is set, the cache size that will actually
     # be allocated is decoupled from the profiled `available_memory`:
@@ -2845,11 +2881,29 @@ def get_kv_cache_configs(
             vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
         )
 
+    if vllm_config.cache_config.enable_kvpp:
+        from vllm.v1.kv_cache_placement import (
+            build_kv_cache_storage,
+            set_layer_sharded_offload_block_size,
+        )
+
+        assert placements is not None
+        kv_cache_configs = [
+            build_kv_cache_storage(config, placement, layout, kvpp_staging_size)
+            for config, placement in zip(kv_cache_configs, placements)
+        ]
+        set_layer_sharded_offload_block_size(kv_cache_configs)
+
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
-            kv_cache_config.kv_cache_groups,
-            vllm_config.parallel_config.tensor_parallel_size,
-            vllm_config.parallel_config.decode_context_parallel_size,
+        # KVPP ranks persist different layers, so no two ranks hold identical KV.
+        kv_cache_config.kv_tp_replicas = (
+            1
+            if kv_cache_config.storage_plan is not None
+            else kv_cache_groups_tp_replicas(
+                kv_cache_config.kv_cache_groups,
+                vllm_config.parallel_config.tensor_parallel_size,
+                vllm_config.parallel_config.decode_context_parallel_size,
+            )
         )
 
     return kv_cache_configs

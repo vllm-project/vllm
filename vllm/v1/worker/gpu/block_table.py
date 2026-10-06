@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -34,6 +36,8 @@ class BlockTables:
     ):
         self.block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes
+        # Optional host mirror of logical block IDs (enabled by KVPP).
+        self.cpu_block_ids: list[list[list[int]]] | None = None
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
@@ -126,6 +130,16 @@ class BlockTables:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
             block_ids = new_block_ids[i]
+            if self.cpu_block_ids is not None:
+                row = self.cpu_block_ids[i][req_index]
+                if overwrite:
+                    row.clear()
+                # Mirror what the device table holds, including null redirects.
+                row.extend(
+                    [0] * len(block_ids)
+                    if self.redirect_writes_to_null_block
+                    else block_ids
+                )
             bpk = self.blocks_per_kv_block[i]
             if bpk > 1:
                 block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
@@ -140,6 +154,28 @@ class BlockTables:
                 )
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = end
+
+    def enable_cpu_block_ids(self) -> None:
+        self.cpu_block_ids = [
+            [[] for _ in range(self.max_num_reqs)]
+            for _ in range(self.num_kv_cache_groups)
+        ]
+
+    def get_history_block_ids(
+        self, req_indices: np.ndarray, num_computed_tokens: np.ndarray
+    ) -> np.ndarray:
+        """Unique logical block IDs holding already-computed tokens."""
+        assert self.cpu_block_ids is not None
+        chunks: list[list[int]] = []
+        for i, block_size in enumerate(self.block_sizes):
+            rows = self.cpu_block_ids[i]
+            num_blocks = -(-num_computed_tokens // block_size)
+            chunks.extend(
+                rows[r][:n] for r, n in zip(req_indices.tolist(), num_blocks.tolist())
+            )
+        if not chunks:
+            return np.empty(0, dtype=np.int64)
+        return np.unique(np.fromiter(itertools.chain.from_iterable(chunks), np.int64))
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:

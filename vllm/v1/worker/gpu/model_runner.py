@@ -94,6 +94,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
+    maybe_prepare_kvpp,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
@@ -173,6 +174,10 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     maybe_build_ubatch_runner,
 )
+from vllm.v1.worker.kvpp_runtime import (
+    KVPPRuntime,
+    create_kvpp_runtime,
+)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
@@ -214,6 +219,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
         # zeroing (e.g. hybrid models with fp8 KV cache).
         self.kv_block_zeroer: KVBlockZeroer | None = None
+        self.kvpp_runtime: KVPPRuntime | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
@@ -772,6 +778,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        self.kvpp_runtime = create_kvpp_runtime(self.kv_cache_config, kv_caches_dict)
+        if self.kvpp_runtime is not None:
+            self.block_tables.enable_cpu_block_ids()
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -2016,8 +2025,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
+                kvpp_runtime=self.kvpp_runtime,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
+                maybe_prepare_kvpp(
+                    self.kvpp_runtime,
+                    self.req_states,
+                    batch_req_state,
+                    input_batch,
+                    self.block_tables if self.kvpp_runtime is not None else None,
+                )
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(
@@ -2341,6 +2358,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cudagraph_manager = None
         self.fast_prefill = None
         self.pooling_runner = None
+        self.kvpp_runtime = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):

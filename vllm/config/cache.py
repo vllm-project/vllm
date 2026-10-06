@@ -70,6 +70,16 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
+    enable_kvpp: bool = False
+    """Enable KV layer parallelism within a verified replica group.
+
+    GPU KVPP requires Model Runner V2 and replicated KV across PCP x TP (DCP=1).
+    Execution must be eager or use compiled PIECEWISE CUDA graphs with attention
+    and KV cache updates kept outside the captured graphs.
+    KVPP retains each target layer on one rank and
+    materializes other layers in reusable receive buffers during execution.
+    """
+
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
     Accepts None (meaning "use default"). After construction, always int."""

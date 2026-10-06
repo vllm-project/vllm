@@ -278,6 +278,15 @@ class KVConnectorBase_V1(ABC):
         """
         return self._connector_metadata is not None
 
+    @classmethod
+    def supports_layer_sharded_kv_cache(cls) -> bool:
+        """Support persistent-owner transfers and common distributed capacity.
+
+        Compute-only scratch must be excluded; all owners must finish a
+        distributed load/store before the connector reports completion.
+        """
+        return False
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).

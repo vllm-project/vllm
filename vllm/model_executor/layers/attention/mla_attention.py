@@ -229,7 +229,12 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     is_global_first_rank,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    acquire_kv_cache,
+    get_forward_context,
+    release_kv_cache,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.attention import (
@@ -440,6 +445,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     # Under PCP+DCP only the decode rows carry an LSE; the base forward
     # merges a full-batch LSE, so subclasses opt in with their own forward.
     supports_pcp_dcp: ClassVar[bool] = False
+
+    def get_kv_cache_bundle(self) -> tuple[AttentionLayerBase, ...]:
+        if self.indexer is None:
+            return (self,)
+        return (self, cast(Any, self.indexer).k_cache)
 
     def __init__(
         self,
@@ -1430,6 +1440,7 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
+    acquire_kv_cache(layer_name)
     attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
         layer_name
     )
@@ -1487,6 +1498,7 @@ def unified_mla_attention_with_output(
     # attention forward.
     del kv_cache_dummy_dep
     layer_name = _resolve_layer_name(layer_name)
+    acquire_kv_cache(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     if layer.hisparse_cache is not None:
         layer.hisparse_cache.finish_kv_update()
@@ -1505,6 +1517,7 @@ def unified_mla_attention_with_output(
         quant_tma_aligned=quant_tma_aligned,
         q_dcp_replicated=q_dcp_replicated,
     )
+    release_kv_cache(layer_name)
 
 
 direct_register_custom_op(

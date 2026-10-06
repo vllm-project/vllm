@@ -10,7 +10,11 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import (
+    acquire_kv_cache,
+    get_forward_context,
+    release_kv_cache,
+)
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -375,6 +379,9 @@ class DeepseekV32Attention(MLAAttention):
         else:
             kv_c_out = torch.empty_like(kv_c)
             k_pe_out = torch.empty_like(k_pe)
+        # This fused path writes both caches without the generic MLA update op.
+        if self._vllm_config.cache_config.enable_kvpp:
+            self._acquire_kv_cache()
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -463,7 +470,16 @@ class DeepseekV32Attention(MLAAttention):
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
-    def _sparse_indexer_and_attn(
+    def _acquire_kv_cache(self) -> None:
+        # Runs eagerly on replay so KVPP can order broadcasts per forward.
+        acquire_kv_cache(self.layer_name)
+
+    @eager_break_during_capture
+    def _sparse_indexer_and_attn(self, *args: torch.Tensor | None) -> None:
+        self._sparse_indexer_and_attn_impl(*args)
+        release_kv_cache(self.layer_name)
+
+    def _sparse_indexer_and_attn_impl(
         self,
         positions: torch.Tensor,
         q_c: torch.Tensor,

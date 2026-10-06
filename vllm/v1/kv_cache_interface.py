@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_placement import KVCacheStoragePlan
 
 logger = init_logger(__name__)
 
@@ -1488,6 +1489,16 @@ class KVCacheConfig:
 
     hisparse_shared_host_pool: bool = False
     """Whether local TP ranks share one physical HiSparse host pool."""
+
+    storage_plan: KVCacheStoragePlan | None = None
+    """Optional worker-local placement of persistent and ephemeral layer views."""
+
+    offload_block_size_bytes: int | None = None
+    """Maximum persistent bytes per block across workers, excluding scratch.
+
+    This common budget makes distributed offload block IDs share one capacity
+    even when workers own different numbers of components.
+    """
 
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""

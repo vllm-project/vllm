@@ -8,6 +8,7 @@ that doesn't fire for models running eager (or under a breakable CUDA graph).
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -37,7 +38,10 @@ def fused_allreduce_rms_norm(
     if tp_size == 1:
         return norm(hidden_states, residual)
 
-    if flashinfer_trtllm_fused_allreduce_norm is not None:
+    if (
+        flashinfer_trtllm_fused_allreduce_norm is not None
+        and envs.VLLM_ALLREDUCE_USE_FLASHINFER
+    ):
         ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
         if ok:
             norm_out = torch.empty_like(hidden_states)
