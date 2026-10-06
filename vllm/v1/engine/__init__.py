@@ -177,6 +177,17 @@ class EngineCoreEventType(enum.IntEnum):
     PREEMPTED = 3
 
 
+# Values of EngineCoreEvent.reason for PREEMPTED events.
+PREEMPTION_REASON_KV_FULL = "kv_full"
+PREEMPTION_REASON_PRIORITY = "priority"
+PREEMPTION_REASON_PREFIX_CACHE_RESET = "prefix_cache_reset"
+PREEMPTION_REASONS = (
+    PREEMPTION_REASON_KV_FULL,
+    PREEMPTION_REASON_PRIORITY,
+    PREEMPTION_REASON_PREFIX_CACHE_RESET,
+)
+
+
 class EngineCoreEvent(msgspec.Struct):
     """A timestamped engine core event associated with a request.
 
@@ -187,13 +198,18 @@ class EngineCoreEvent(msgspec.Struct):
 
     type: EngineCoreEventType
     timestamp: float
+    # PREEMPTED events only: one of PREEMPTION_REASONS.
+    reason: str | None = None
 
     @classmethod
     def new_event(
-        cls, event_type: EngineCoreEventType, timestamp: float | None = None
+        cls,
+        event_type: EngineCoreEventType,
+        timestamp: float | None = None,
+        reason: str | None = None,
     ) -> "EngineCoreEvent":
         timestamp = time.monotonic() if timestamp is None else timestamp
-        return cls(event_type, timestamp)
+        return cls(event_type, timestamp, reason)
 
 
 class EngineCoreOutput(
