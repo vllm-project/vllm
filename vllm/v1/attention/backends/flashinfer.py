@@ -544,6 +544,30 @@ class FlashInferBackend(AttentionBackend):
         return super().supports_kv_cache_dtype(kv_cache_dtype)
 
     @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if (
+            kv_cache_dtype is not None
+            and kv_cache_dtype.startswith("nvfp4")
+            and device_capability.major in (8, 12)
+        ):
+            if head_size == 64:
+                return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
+            if has_sink:
+                return "the sink prefill wrapper cannot read an NVFP4 KV cache"
+        return None
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256, 512]
