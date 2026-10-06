@@ -20,6 +20,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    _log_gdn_backend_decision,
+    _resolve_gdn_prefill_backend,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
@@ -83,6 +87,14 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.allow_neg_eigval = getattr(config, "linear_allow_neg_eigval", False)
+
+        # OLMo always runs FLA; the resolver may still pick FlashInfer on CUDA.
+        requested_backend, _ = _resolve_gdn_prefill_backend(vllm_config)
+        if requested_backend == "sycl":
+            raise ValueError(
+                "GDN prefill backend 'sycl' is not supported for OLMo Hybrid."
+            )
+        _log_gdn_backend_decision(vllm_config, requested_backend, "triton")
 
         # Fused QKVG projection: 1 matmul instead of 4
         self.in_proj_qkvg = MergedColumnParallelLinear(
