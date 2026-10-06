@@ -2393,7 +2393,8 @@ class VllmConfig:
                     value,
                 )
         # Log the custom passes that are enabled
-        self.compilation_config.pass_config.log_enabled_passes()
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            self.compilation_config.pass_config.log_enabled_passes()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
