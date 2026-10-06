@@ -472,7 +472,7 @@ def varlen_with_paged_kv(
     scale = head_size**-0.5
     token_num = sum(query_lens)
     dynamic_causal_tensor = (
-        torch.tensor(dynamic_causal, dtype=torch.bool)
+        torch.tensor(dynamic_causal, dtype=torch.int32)
         if dynamic_causal is not None
         else None
     )
