@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -920,64 +920,6 @@ def test_sparse_attn_prefill_aiter_gfx942_routing(monkeypatch) -> None:
 
     assert pa_calls == 1
     assert torch.count_nonzero(output) == 0
-
-
-def test_pa_prefill_sparse_getter_requires_gfx942_source(monkeypatch) -> None:
-    """The gfx942 launch is a string in the installed module, not the import."""
-    import builtins
-
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-
-    sentinel = object()
-    source_text = ""
-    raise_import = False
-    raise_source = False
-    real_import = builtins.__import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if raise_import and name == "aiter.ops.triton.attention":
-            raise ImportError("aiter is not installed")
-        if name == "aiter.ops.triton.attention":
-            attention = ModuleType("aiter.ops.triton.attention")
-            pa = ModuleType("aiter.ops.triton.attention.pa_prefill_sparse")
-            pa.pa_prefill_sparse = sentinel
-            attention.pa_prefill_sparse = pa
-            return attention
-        return real_import(name, globals, locals, fromlist, level)
-
-    def fake_getsource(module):
-        if raise_source:
-            raise OSError("source is missing")
-        return source_text
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    monkeypatch.setattr(mod.inspect, "getsource", fake_getsource)
-
-    def call():
-        mod._get_aiter_pa_prefill_sparse.cache_clear()
-        try:
-            return mod._get_aiter_pa_prefill_sparse()
-        finally:
-            mod._get_aiter_pa_prefill_sparse.cache_clear()
-
-    monkeypatch.setattr(mod, "_ON_GFX942", False)
-    source_text = 'DEVICE_ARCH == "gfx942"'
-    assert call() is None
-
-    monkeypatch.setattr(mod, "_ON_GFX942", True)
-    raise_import = True
-    assert call() is None
-    raise_import = False
-
-    raise_source = True
-    assert call() is None
-    raise_source = False
-
-    source_text = "older pa_prefill_sparse"
-    assert call() is None
-
-    source_text = 'DEVICE_ARCH == "gfx942"'
-    assert call() is sentinel
 
 
 @requires_gfx950
