@@ -243,40 +243,6 @@ def test_constant_substitution_preserves_router_weight_precision(dtype, device):
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like platform"
-)
-def test_constant_substitution_supports_cuda_graph_replay():
-    substitution = _substitution(30, torch.bfloat16).cuda()
-    substitution.values.data.copy_(torch.arange(60, device="cuda").reshape(2, 30) / 8)
-    hidden_states = torch.zeros(3, 32, dtype=torch.bfloat16, device="cuda")
-    topk_ids = torch.tensor([[1, 2], [4, 3], [99, -1]], device="cuda")
-    topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4], [0.5, 0.5]], device="cuda")
-
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        for _ in range(3):
-            substitution.transform_routes(
-                hidden_states, topk_weights.clone(), topk_ids.clone()
-            )
-    torch.cuda.current_stream().wait_stream(stream)
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        output = substitution.transform_routes(
-            hidden_states, topk_weights.clone(), topk_ids.clone()
-        )
-
-    for scale in (1.0, 0.5):
-        topk_weights.mul_(scale)
-        expected = torch.zeros_like(hidden_states)
-        expected[0, :30] = substitution.values[0].float() * topk_weights[0, 0]
-        expected[1, :30] = substitution.values[1].float() * topk_weights[1, 1]
-        graph.replay()
-        torch.testing.assert_close(output, expected)
-
-
 def _bare_substituted_routed_experts(**attrs) -> SubstitutedRoutedExperts:
     layer = SubstitutedRoutedExperts.__new__(SubstitutedRoutedExperts)
     torch.nn.Module.__init__(layer)
@@ -286,25 +252,9 @@ def _bare_substituted_routed_experts(**attrs) -> SubstitutedRoutedExperts:
     return layer
 
 
-def test_substituted_routed_experts_loads_logical_ids_into_compact_rows():
-    layer = _bare_substituted_routed_experts(
-        expert_map_manager=SimpleNamespace(map_global_to_local=lambda i: i)
-    )
-    assert [layer._map_global_expert_id_to_local_expert_id(i) for i in range(5)] == [
-        0,
-        -1,
-        1,
-        -1,
-        2,
-    ]
-
-
 @pytest.mark.parametrize("tp_rank", [0, 1])
-@pytest.mark.parametrize("output_is_reduced", [None, False, True])
 @pytest.mark.parametrize("padded_input", [False, True])
-def test_substituted_routed_experts_adds_constant_once(
-    tp_rank, output_is_reduced, padded_input
-):
+def test_substituted_routed_experts_adds_constant_on_one_tp_rank(tp_rank, padded_input):
     def apply(*, layer, x, topk_weights, topk_ids, **kwargs):
         torch.testing.assert_close(topk_weights, torch.tensor([[0.0, 0.75]]))
         torch.testing.assert_close(topk_ids, torch.tensor([[0, 1]]))
@@ -312,15 +262,7 @@ def test_substituted_routed_experts_adds_constant_once(
 
     layer = _bare_substituted_routed_experts(
         moe_config=SimpleNamespace(tp_rank=tp_rank),
-        quant_method=SimpleNamespace(
-            is_monolithic=False,
-            apply=apply,
-            moe_kernel=(
-                None
-                if output_is_reduced is None
-                else SimpleNamespace(output_is_reduced=lambda: output_is_reduced)
-            ),
-        ),
+        quant_method=SimpleNamespace(is_monolithic=False, apply=apply),
     )
     layer.expert_substitution.values.data.copy_(
         torch.tensor([[10.0, 20.0], [30.0, 40.0]])
@@ -331,7 +273,7 @@ def test_substituted_routed_experts_adds_constant_once(
         torch.tensor([[1, 2]]),
     )
     expected = torch.ones(1, 2)
-    if tp_rank == 0 or output_is_reduced:
+    if tp_rank == 0:
         expected += torch.tensor([[2.5, 5.0]])
     torch.testing.assert_close(actual, expected)
 
@@ -469,7 +411,10 @@ def _tp_substitution_worker(
 def test_constant_substitution_is_added_once_with_tp2():
     vllm_config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=2))
     vllm_config.model_config = _model_config(
-        {"0": [1]}, dtype=torch.bfloat16, is_moe=True
+        {"0": [1]},
+        dtype=torch.bfloat16,
+        is_moe=True,
+        sleep_mode_offload_cudagraph=False,
     )
     vllm_config.compilation_config.static_forward_context = {}
     vllm_config.kernel_config.moe_backend = "triton"

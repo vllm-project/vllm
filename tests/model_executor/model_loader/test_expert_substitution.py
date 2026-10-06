@@ -171,72 +171,43 @@ def test_direct_reload_updates_values_incrementally():
         model.load_weights([(_approx_value(0, 0), torch.ones(2))])
 
 
-@pytest.mark.parametrize("partial", [False, True])
-def test_layerwise_reload_updates_values_and_preserves_routes(partial):
+def test_layerwise_reload_is_rejected_and_keeps_weights():
     from vllm.model_executor.model_loader.reload import (
-        finalize_layerwise_reload,
         initialize_layerwise_reload,
         record_metadata_for_reloading,
     )
 
     model = _cpu_model(local_layers=(0,))
     record_metadata_for_reloading(model)
-    model.load_weights(
-        [(_approx_value(0, 1), torch.zeros(2)), (_approx_value(0, 2), torch.ones(2))]
-    )
+    loaded = [
+        ("weight", torch.tensor([3.0, 4.0])),
+        (_approx_value(0, 1), torch.zeros(2)),
+        (_approx_value(0, 2), torch.ones(2)),
+    ]
+    model.load_weights(loaded)
     model.process_weights_after_loading()
     substitution = model.model.layers[0].mlp.experts
     values = substitution.values
-    routes = substitution.expert_substitution_routes
 
     initialize_layerwise_reload(model)
-    weights = [
-        ("weight", torch.tensor([3.0, 4.0])),
-        (_approx_value(0, 1), torch.tensor([5.0, 6.0])),
-    ]
-    if not partial:
-        weights.append((_approx_value(0, 2), torch.tensor([7.0, 8.0])))
-    model.load_weights(weights)
-    if partial:
-        with pytest.raises(ValueError, match="layerwise reload requires all constant"):
-            finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
-        torch.testing.assert_close(values, torch.tensor([[0.0, 0.0], [1.0, 1.0]]))
-        return
-    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    with pytest.raises(NotImplementedError, match="layerwise weight reload"):
+        model.load_weights([(name, weight + 1) for name, weight in loaded])
 
-    torch.testing.assert_close(model.weight, torch.tensor([3.0, 4.0]))
     assert substitution.values is values
-    torch.testing.assert_close(values, torch.tensor([[5.0, 6.0], [7.0, 8.0]]))
-    assert substitution.expert_substitution_routes is routes
-    assert routes.tolist() == [0, -1, -2]
-
-    initialize_layerwise_reload(model)
-    model.load_weights([(_approx_value(0, 1), torch.zeros(2))])
-    with pytest.raises(ValueError, match="layerwise reload requires all constant"):
-        finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
-    torch.testing.assert_close(values, torch.tensor([[5.0, 6.0], [7.0, 8.0]]))
+    torch.testing.assert_close(values, torch.tensor([[0.0, 0.0], [1.0, 1.0]]))
+    torch.testing.assert_close(model.weight, torch.tensor([3.0, 4.0]))
+    assert substitution.expert_substitution_routes.tolist() == [0, -1, -2]
 
 
-@pytest.mark.parametrize("explicit_names", [False, True])
 @pytest.mark.parametrize("missing_value", [False, True])
-def test_tensorizer_finalizes_local_substitution_values(
-    monkeypatch, explicit_names, missing_value
-):
+def test_tensorizer_finalizes_local_substitution_values(monkeypatch, missing_value):
     """Raw Tensorizer loading must reject an unloaded local constant row."""
     from vllm.model_executor.model_loader import tensorizer_loader
 
-    model = _cpu_model(
-        local_layers=(0,),
-        model_config=EXPLICIT_MODEL_CONFIG if explicit_names else MODEL_CONFIG,
-    )
-    value_names = (
-        ("constants.shared", "constants.layer_0")
-        if explicit_names
-        else (_approx_value(0, 1), _approx_value(0, 2))
-    )
-    weights = [(value_names[0], torch.zeros(2))]
+    model = _cpu_model(local_layers=(0,))
+    weights = [(_approx_value(0, 1), torch.zeros(2))]
     if not missing_value:
-        weights.append((value_names[1], torch.ones(2)))
+        weights.append((_approx_value(0, 2), torch.ones(2)))
     finalize = Mock(wraps=model.process_weights_after_loading)
     monkeypatch.setattr(model, "process_weights_after_loading", finalize)
     monkeypatch.setattr(tensorizer_loader, "initialize_model", lambda **kwargs: model)

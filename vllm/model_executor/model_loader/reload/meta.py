@@ -30,7 +30,6 @@ SKIP_LOAD_TENSORS: set[str] = {
     "expert_global_to_physical",
     "expert_physical_to_global",
     "expert_local_to_global",
-    "expert_substitution_routes",
     "e_score_correction_bias",
 }
 

@@ -80,12 +80,12 @@ neither renormalized nor redistributed to retained experts.
 index in its prefix and, for a match, builds `SubstitutedRoutedExperts`, which:
 
 1. allocates weights only for retained experts, in ascending logical order;
-2. after routing, gathers `w_j(x) v_j` for substituted routes in FP32;
+2. after routing, sums `w_j(x) v_j` over substituted routes in FP32;
 3. rewrites substituted routes as zero-weight routes to physical expert 0 and
    retained routes as compact physical IDs, preserving the `[num_tokens, top_k]`
    contract of every decomposed backend;
-4. adds the constant output on one tensor-parallel rank, or on every rank when
-   the backend already returns a reduced output.
+4. adds the constant output on one tensor-parallel rank, before the partial
+   outputs are all-reduced.
 
 Zero-weight routes may schedule some unnecessary GEMM work; the memory savings
 are unaffected. Monolithic backends route internally and are not selected.
@@ -97,15 +97,16 @@ and placed in their compact row. Substituted IDs map to no local row, the same
 way expert parallelism skips non-local experts.
 
 Constant tensors are consumed at the model's `load_weights` boundary, so
-initial loading and weight reloads share one path. `approx_value` tensors of
+initial loading and direct weight updates share one path. `approx_value` tensors of
 layers that the model does not build (other pipeline stages, MTP layers) are
 passed through to the model's loader, which skips them like any other weight
 it does not own. Explicitly named constants are always consumed, and dropped
 when their layer is built elsewhere. Loading fails if a local substituted
 expert has no constant.
 
-Direct updates may change individual constants. Layerwise reloads must supply
-all constant rows of each updated layer; incomplete updates are rejected.
+Direct `load_weights` updates may change individual constants. Layerwise
+reloads (`reload_weights` in checkpoint format) are rejected, and the model
+keeps its previous weights.
 
 ## Supported configurations
 
@@ -117,3 +118,4 @@ all constant rows of each updated layer; incomplete updates are rejected.
 
 Expert and data parallelism, EPLB, MoE LoRA, fused shared experts, quantized
 experts, and routed input/output transforms are rejected at initialization.
+Deferred MoE finalize and layerwise weight reloads are rejected when used.

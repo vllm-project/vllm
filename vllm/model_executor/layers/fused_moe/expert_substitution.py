@@ -18,31 +18,16 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 APPROX_VALUE_SUFFIX = ".approx_value"
-
-
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def _compute_constant_substitution_output(
-    output: torch.Tensor,
-    values: torch.Tensor,
-    substitution_rows: torch.Tensor,
-    substitution_mask: torch.Tensor,
-    topk_weights: torch.Tensor,
-) -> None:
-    # Explicit compilation fuses these intermediates inside the opaque MoE op.
-    gathered = values[substitution_rows.clamp_min(0)].float()
-    scales = topk_weights.float() * substitution_mask
-    result = torch.sum(gathered * scales.unsqueeze(-1), dim=1)
-    output[..., : values.size(-1)].copy_(result.to(output.dtype))
 
 
 def decoder_layer_index(path: str) -> int | None:
@@ -196,7 +181,6 @@ class ConstantExpertSubstitution(nn.Module):
         for row, expert_id in enumerate(self.substituted_expert_ids):
             routes[expert_id] = -1 - row
         self._routes = tuple(routes)
-        # Listed in the layerwise reload SKIP_LOAD_TENSORS.
         self.register_buffer(
             "expert_substitution_routes",
             torch.tensor(routes, dtype=torch.int32),
@@ -209,7 +193,6 @@ class ConstantExpertSubstitution(nn.Module):
             requires_grad=False,
         )
         self.values.weight_loader = self.weight_loader
-        self._layerwise_load: tuple[nn.Parameter, set[int]] | None = None
 
     @property
     def num_logical_experts(self) -> int:
@@ -235,19 +218,6 @@ class ConstantExpertSubstitution(nn.Module):
                 f"approx_value for expert {expert_id} of layer {self.layer_idx} has "
                 f"shape {tuple(loaded_weight.shape)}, expected {tuple(row.shape)}"
             )
-        # Layerwise loading counts writes on meta, then replays them on fresh storage.
-        if param.is_meta:
-            if self._layerwise_load is None or self._layerwise_load[0] is not param:
-                self._layerwise_load = (param, set())
-            self._layerwise_load[1].add(expert_id)
-        elif self._layerwise_load is not None:
-            missing = set(self.substituted_expert_ids) - self._layerwise_load[1]
-            if missing:
-                raise ValueError(
-                    "layerwise reload requires all constant expert value tensors "
-                    f"for layer {self.layer_idx}; missing expert IDs: {sorted(missing)}"
-                )
-            self._layerwise_load = None
         row.copy_(loaded_weight)
 
     def validate_loaded_values(self, prefix: str) -> None:
@@ -266,18 +236,26 @@ class ConstantExpertSubstitution(nn.Module):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Remap routes in place and return the constant experts' output."""
-        output = torch.zeros_like(hidden_states)
-        if topk_ids.numel() == 0:
-            return output
-
         valid = (topk_ids >= 0) & (topk_ids < self.num_logical_experts)
         routes = self.expert_substitution_routes[
             torch.where(valid, topk_ids, torch.zeros_like(topk_ids)).long()
         ].long()
         substituted = valid & (routes < 0)
-        _compute_constant_substitution_output(
-            output, self.values, -1 - routes, substituted, topk_weights
+
+        # Sum each token's router weights per substituted expert in FP32; other
+        # routes land in a trailing column that is dropped.
+        num_values, value_size = self.values.shape
+        scales = topk_weights.new_zeros(
+            (topk_ids.shape[0], num_values + 1), dtype=torch.float32
         )
+        scales.scatter_add_(
+            1,
+            torch.where(substituted, -1 - routes, num_values),
+            topk_weights.float(),
+        )
+        output = torch.zeros_like(hidden_states)
+        output[..., :value_size] = scales[:, :num_values] @ self.values.float()
+
         topk_weights.masked_fill_(~valid | substituted, 0.0)
         topk_ids.copy_(routes.clamp_min(0).to(topk_ids.dtype))
         return output
@@ -344,7 +322,6 @@ class SubstitutedRoutedExperts(RoutedExperts):
                 ("data parallelism", parallel_config.dp_size > 1),
                 ("prefill context parallelism", parallel_config.pcp_size > 1),
                 ("sequence parallelism", parallel_config.is_sequence_parallel),
-                ("deferred MoE reduction", moe_config.skip_final_all_reduce),
                 ("router weights on expert inputs", self.apply_router_weight_on_input),
             )
             if enabled
@@ -392,11 +369,12 @@ class SubstitutedRoutedExperts(RoutedExperts):
         output = super().forward_modular(
             x, topk_weights, topk_ids, shared_experts, shared_experts_input
         )
-        # The runner all-reduces partial TP outputs unless the kernel already
-        # did, so add the replicated constant output exactly once.
-        kernel = self.quant_method.moe_kernel
-        if self.moe_config.tp_rank == 0 or (
-            kernel is not None and kernel.output_is_reduced()
-        ):
+        if isinstance(output, UnfinalizedMoEOutput):
+            raise NotImplementedError(
+                "expert substitution does not support deferred MoE finalize"
+            )
+        # The constant output is replicated across TP ranks, whose partial
+        # outputs are all-reduced later, so add it on one rank only.
+        if self.moe_config.tp_rank == 0:
             output.add_(constant_output[..., : output.shape[-1]])
         return output
