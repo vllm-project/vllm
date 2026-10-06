@@ -212,6 +212,45 @@ def unsupported_vllm_issue_56556_schema():
     ]
 
 
+# NEW
+@pytest.fixture
+def unsupported_combinator_with_sibling_constraints():
+    """A combinator beside constraint keywords on the same node.
+
+    xgrammar silently drops the sibling keywords, so the schema goes
+    unenforced: https://github.com/mlc-ai/xgrammar/issues/858
+    """
+    return [
+        # xgrammar#858 repro
+        {
+            "type": "object",
+            "properties": {"modifier": {"enum": ["", "dark"]}},
+            "anyOf": [{"required": ["modifier"]}],
+            "additionalProperties": False,
+        },
+        # single-branch allOf wrapping a constraint
+        {
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "required": ["a"],
+            "additionalProperties": False,
+            "allOf": [{"required": ["a"]}],
+        },
+        # oneOf beside type
+        {
+            "type": "object",
+            "oneOf": [{"required": ["a"]}, {"required": ["b"]}],
+        },
+        # non-root: nested in properties
+        {
+            "type": "object",
+            "properties": {
+                "x": {"type": "string", "anyOf": [{"minLength": 1}]},
+            },
+        },
+    ]
+
+
 # ================================================
 # Supported schemas
 # ================================================
@@ -316,6 +355,34 @@ def supported_allof_anyof_and_oneof():
     ]
 
 
+# NEW
+@pytest.fixture
+def supported_combinator_with_annotations_only():
+    """Annotations beside a combinator are safe, so xgrammar keeps these.
+
+    Pydantic emits these shapes for Optional fields, root Unions and
+    discriminated unions.
+    """
+    return [
+        {
+            "title": "MaybeStr",
+            "default": None,
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+        },
+        {
+            "discriminator": {"propertyName": "kind"},
+            "oneOf": [
+                {"type": "object", "properties": {"kind": {"const": "a"}}},
+                {"type": "object", "properties": {"kind": {"const": "b"}}},
+            ],
+        },
+        {
+            "$defs": {"A": {"type": "string"}},
+            "oneOf": [{"$ref": "#/$defs/A"}],
+        },
+    ]
+
+
 # ================================================
 # Test has_xgrammar_unsupported_json_features functionality
 # ================================================
@@ -333,6 +400,8 @@ class TestHasXGrammarUnsupportedJsonFeatures:
             # vLLM issue #56556
             "unsupported_multibranch_allof",
             "unsupported_vllm_issue_56556_schema",
+            # xgrammar#858: combinator beside constraint keywords
+            "unsupported_combinator_with_sibling_constraints",
         ],
     )
     def test_unsupported_json_features(self, schema_type, request):
@@ -351,6 +420,7 @@ class TestHasXGrammarUnsupportedJsonFeatures:
             # Additional test cases implemented during work on
             # vLLM issue #56556
             "supported_allof_anyof_and_oneof",
+            "supported_combinator_with_annotations_only",
         ],
     )
     def test_supported_json_features(self, schema_type, request):

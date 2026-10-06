@@ -245,6 +245,24 @@ STRING_SUPPORTED_FORMATS = {
     "relative-json-pointer",
 }
 
+_COMBINATOR_KEYWORDS = ("anyOf", "oneOf", "allOf")
+
+# Keywords that constrain the instance. xgrammar silently drops these when they
+# sit on the same node as a combinator (mlc-ai/xgrammar#858). Annotations such
+# as title, default, $defs and discriminator are left out on purpose, because
+# pydantic emits them next to anyOf/oneOf and xgrammar can ignore them safely.
+_CONSTRAINT_KEYWORDS = frozenset(
+    {
+        "type", "enum", "const",
+        "properties", "required", "additionalProperties",
+        "patternProperties", "propertyNames", "unevaluatedProperties",
+        "minProperties", "maxProperties",
+        "items", "prefixItems", "minItems", "maxItems", "uniqueItems", "contains",
+        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+        "minLength", "maxLength", "pattern", "format",
+    }
+)
+
 
 def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
     return ("pattern" in schema or "format" in schema) and (
@@ -332,6 +350,11 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             "object" in schema_types
             and isinstance(obj.get("patternProperties"), dict)
             and ("properties" in obj or len(obj["patternProperties"]) > 1)
+        ):
+            return True
+        
+        if any(k in obj for k in _COMBINATOR_KEYWORDS) and any(
+            k in obj for k in _CONSTRAINT_KEYWORDS
         ):
             return True
 
