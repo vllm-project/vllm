@@ -1162,15 +1162,19 @@ def test_single_group_path_unchanged():
     assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
 
 
+class _FakeSpecConfig(SimpleNamespace):
+    """Minimal speculative_config stand-in. Any drafter-capability probe
+    (use_dflash/use_eagle/use_dspark/uses_draft_model/...) defaults to False so
+    VllmConfig.num_lookahead_tokens resolves cleanly as upstream adds methods."""
+
+    def __getattr__(self, name: str):
+        if name.startswith(("use_", "uses_")):
+            return lambda *a, **k: False
+        raise AttributeError(name)
+
+
 def _fake_speculative_config(num_speculative_tokens: int = 1) -> SimpleNamespace:
-    # Minimal stand-in satisfying VllmConfig.num_lookahead_tokens, which probes
-    # the drafter method flags.
-    return SimpleNamespace(
-        num_speculative_tokens=num_speculative_tokens,
-        use_dflash=lambda: False,
-        use_eagle=lambda: False,
-        uses_draft_model=lambda: False,
-    )
+    return _FakeSpecConfig(num_speculative_tokens=num_speculative_tokens)
 
 
 def _spec_vllm_config() -> VllmConfig:
