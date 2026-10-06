@@ -2407,7 +2407,7 @@ class Scheduler(SchedulerInterface):
             if spec_decoding_stats is None and num_verified_draft_tokens > 0:
                 spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
             if spec_decoding_stats is not None:
-                spec_decoding_stats.num_verified_draft_tokens = (
+                spec_decoding_stats.observe_draft_stats_per_batch(
                     num_verified_draft_tokens
                 )
 
@@ -2977,7 +2977,7 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         if num_invalid_spec_tokens:
             num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
-        spec_decoding_stats.observe_draft(
+        spec_decoding_stats.observe_draft_stats_per_req(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )
         return spec_decoding_stats
