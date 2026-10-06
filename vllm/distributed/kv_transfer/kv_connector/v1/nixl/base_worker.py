@@ -3029,6 +3029,9 @@ class NixlBaseConnectorWorker:
         if not expected_rank:
             return _skip(f"no digests from producer rank {self.tp_rank}")
 
+        if envs.VLLM_NIXL_DIGEST_CORRUPT:
+            self._corrupt_first_recved_block(req_id, meta)
+
         # Ensure the NIXL READ writes are visible before reading the bytes.
         torch.accelerator.synchronize()
         mismatches = 0
@@ -3099,6 +3102,35 @@ class NixlBaseConnectorWorker:
             self.xfer_stats.record_failed_transfer()
             return not envs.VLLM_NIXL_DIGEST_FAIL
         return True
+
+    def _corrupt_first_recved_block(self, req_id: str, meta: ReqMeta) -> None:
+        """TEST ONLY (VLLM_NIXL_DIGEST_CORRUPT): flip one byte in the first
+        received destination block to fault-inject a digest mismatch."""
+        for group_idx, local_group in enumerate(meta.local_physical_block_ids):
+            if not local_group:
+                continue
+            region = next(
+                (
+                    r
+                    for r, group_id in enumerate(self.region_group_ids)
+                    if group_id == group_idx
+                ),
+                None,
+            )
+            if region is None:
+                continue
+            pages = self._region_page_view(region)
+            if pages is None:
+                continue
+            pages[local_group[0]][0] ^= 0xFF
+            logger.warning(
+                "VLLM_NIXL_DIGEST_CORRUPT: flipped one byte in block %d "
+                "(group %d) of request %s",
+                local_group[0],
+                group_idx,
+                req_id,
+            )
+            return
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """Get transfers that completed on this specific worker.

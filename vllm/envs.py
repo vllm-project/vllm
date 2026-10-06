@@ -234,6 +234,8 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_NIXL_DIGEST_FAIL: bool = False
+    VLLM_NIXL_DIGEST_CORRUPT: bool = False
+    VLLM_NIXL_DEBUG_RECV_DELAY_MS: int = 0
     VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
@@ -1732,6 +1734,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Route NIXL KV digest mismatches (D side) through transfer-failure
     # handling instead of only logging them.
     "VLLM_NIXL_DIGEST_FAIL": lambda: bool(int(os.getenv("VLLM_NIXL_DIGEST_FAIL", "0"))),
+    # Test-only fault injection: corrupt one byte of a received block before
+    # NIXL KV digest verification.
+    "VLLM_NIXL_DIGEST_CORRUPT": lambda: bool(
+        int(os.getenv("VLLM_NIXL_DIGEST_CORRUPT", "0"))
+    ),
+    # Test-only fault injection: delay the D-side NIXL READ by this many
+    # milliseconds to widen the lease-expiry/reuse race window.
+    "VLLM_NIXL_DEBUG_RECV_DELAY_MS": lambda: int(
+        os.getenv("VLLM_NIXL_DEBUG_RECV_DELAY_MS", "0")
+    ),
     # Address the P2P KV-offload control socket binds to. Defaults to
     # ``localhost`` (loopback only); must be set to the node IP for
     # cross-host P2P so remote peers can reach the socket.

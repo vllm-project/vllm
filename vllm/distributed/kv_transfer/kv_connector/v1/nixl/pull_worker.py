@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
@@ -155,6 +156,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
+        if delay_ms := envs.VLLM_NIXL_DEBUG_RECV_DELAY_MS:
+            # TEST ONLY: widen the window between P's block lease expiry and
+            # this READ so lease/reuse races actually happen.
+            time.sleep(delay_ms / 1000)
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
         # Update last activity from this remote. Mind that cleanup is done on main
