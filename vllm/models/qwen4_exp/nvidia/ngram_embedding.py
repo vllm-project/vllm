@@ -230,12 +230,13 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Return the rows staged for this step, decoded if they are NVFP4."""
         num_tokens = hidden_states.shape[0]
-        if not self._nvfp4:
+        method = self.embedding_method
+        if not isinstance(method, Qwen4ExpPLENvFp4EmbeddingMethod):
             return self._staging[:num_tokens].flatten(-2)
         weight, scale = (self._plane_buffers[n][0] for n in self._planes)
         output = self._output[:num_tokens]
         # Staged rows are compact, so the i-th staged row has id i.
-        self.embedding_method.lookup_rows(
+        method.lookup_rows(
             weight,
             scale,
             self.weight_scale_2,
