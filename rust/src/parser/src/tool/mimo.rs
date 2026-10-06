@@ -65,6 +65,7 @@ mod tests {
             name: "convert".into(),
             description: None,
             strict: None,
+            defer_loading: None,
             parameters: json!({"type": "object", "properties": {
                 "flag": {"type": "boolean"}, "empty": {"type": ["string", "null"]},
                 "text": {"type": "string"}, "literal": {"type": "string"}, "payload": {"type": "object"}
