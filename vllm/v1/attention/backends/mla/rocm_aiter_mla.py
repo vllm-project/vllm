@@ -33,17 +33,19 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.triton_mla import (
-    reserve_triton_mla_decode_workspace,
-    triton_mla_decode_forward,
-)
+from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
+from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
@@ -274,6 +276,45 @@ def _triton_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> boo
     from vllm.platforms.rocm import on_gfx942
 
     return on_gfx942() and dcp_world_size > 1 and cp_interleave == 1
+
+
+# Heads per stage-1 program in the grouped MLA decode kernel (its BLOCK_H).
+_DECODE_HEADS_PER_PROGRAM: Final = 16
+# Tuned on MI325X with microbenchmarks
+_BATCH_OCCUPANCY_MULTIPLIER: Final = 4
+
+
+def _triton_dcp_verify_num_kv_splits(
+    max_seq_len: int, num_rows: int, num_heads: int, sm_count: int
+) -> int:
+    # Split only until the stage-1 grid fills the GPU. Past that, splits add
+    # scratch and combine work, and large batches overflow the kernel's int32
+    # attn_logits offsets.
+    programs_per_split = max(1, num_rows) * cdiv(num_heads, _DECODE_HEADS_PER_PROGRAM)
+    occupancy_splits = triton.next_power_of_2(
+        cdiv(_BATCH_OCCUPANCY_MULTIPLIER * sm_count, programs_per_split)
+    )
+    return min(_compute_num_kv_splits(max_seq_len, sm_count), occupancy_splits)
+
+
+def _reserve_triton_dcp_verify_workspace(
+    max_rows: int,
+    num_heads: int,
+    max_seq_len: int,
+    kv_lora_rank: int,
+    sm_count: int,
+) -> None:
+    """Reserve split-KV scratch before warmup locks the workspace manager."""
+    if not is_workspace_manager_initialized():
+        return
+    # Fewer rows may take more splits, so size for the largest product.
+    max_row_splits = max(
+        rows * _triton_dcp_verify_num_kv_splits(max_seq_len, rows, num_heads, sm_count)
+        for rows in range(1, max_rows + 1)
+    )
+    current_workspace_manager().get_simultaneous(
+        ((max_row_splits, num_heads, kv_lora_rank + 1), torch.float32),
+    )
 
 
 # DCP decode routing
@@ -935,17 +976,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     max_kv_seq_len=dcp_local_max_seq_len,
                 )
         # gfx942 DCP verify launches the generic split-KV kernel, which draws
-        # its partials from the shared workspace. TRITON_MLA reserves this in
-        # its own builder; this process selected AITER, so reserve it here
-        # before warmup locks the pool.
+        # its partials from the shared workspace. Reserve it before warmup
+        # locks the pool.
         if self._supports_triton_dcp_verify and self._mtp_decode_qlen > 1:
-            reserve_triton_mla_decode_workspace(
+            _reserve_triton_dcp_verify_workspace(
                 max_num_reqs * self._mtp_decode_qlen,
                 self._decode_num_heads,
                 dcp_local_max_seq_len,
                 self.mla_dims.kv_lora_rank,
                 current_platform.num_compute_units(),
-                batch_aware_splits=True,
             )
 
     def _init_fp8_prefill_ps_buffers(
@@ -2337,23 +2376,55 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         layer: AttentionLayer,
         out_dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """gfx942 causal verify using the LDS-safe generic split-KV kernel."""
-        return triton_mla_decode_forward(
+        """gfx942 causal verify using the LDS-safe generic split-KV kernel.
+
+        Each verify token is its own row whose causal window is its
+        ``row_lens`` entry. A zero-length row (an empty DCP shard or graph
+        padding) comes back as a NaN output with an LSE of -inf; the DCP
+        combine gives it zero weight and never reads the output.
+        """
+        num_rows, num_heads = q_mla.shape[:2]
+        # Stage 2 stores every output and LSE element, empty rows included.
+        output = torch.empty(
+            num_rows, num_heads, self.kv_lora_rank, dtype=out_dtype, device=q_mla.device
+        )
+        # Matches merge_mla_segments_triton and the fp32 LSE the DCP combine
+        # kernel is warmed up for.
+        lse = torch.empty(num_rows, num_heads, dtype=torch.float32, device=q_mla.device)
+        if envs.VLLM_BATCH_INVARIANT:
+            num_kv_splits = 1
+        else:
+            num_kv_splits = _triton_dcp_verify_num_kv_splits(
+                verify.max_kv_seq_len, num_rows, num_heads, self._sm_count
+            )
+        logits_shape = (num_rows, num_heads, num_kv_splits, self.kv_lora_rank + 1)
+        if is_workspace_manager_initialized():
+            (attn_logits,) = current_workspace_manager().get_simultaneous(
+                (logits_shape, torch.float32),
+            )
+        else:
+            attn_logits = torch.empty(
+                logits_shape, dtype=torch.float32, device=q_mla.device
+            )
+
+        paged_kv = kv_c_and_k_pe_cache.unsqueeze(2)
+        decode_attention_fwd(
             q_mla,
-            kv_c_and_k_pe_cache,
+            paged_kv,
+            paged_kv[..., : self.kv_lora_rank],
+            output,
+            lse,
             verify.block_table,
             verify.row_lens,
-            verify.max_kv_seq_len,
+            attn_logits,
+            num_kv_splits,
             self.scale,
-            self.kv_lora_rank,
-            layer._k_scale,
-            self._sm_count,
-            out_dtype,
-            # Matches merge_mla_segments_triton and the fp32 LSE the DCP
-            # combine kernel is warmed up for.
-            torch.float32,
-            batch_aware_splits=True,
+            paged_kv.size(1),
+            k_scale=layer._k_scale,
+            v_scale=layer._k_scale,
+            is_mla=True,
         )
+        return output, lse
 
     def forward_mqa(
         self,

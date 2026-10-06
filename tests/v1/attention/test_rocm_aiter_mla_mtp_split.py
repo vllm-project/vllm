@@ -14,10 +14,7 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
-from vllm.v1.attention.backends.mla import (  # noqa: E402
-    rocm_aiter_mla,
-    triton_mla,
-)
+from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAHelper,
     AiterMLAImpl,
@@ -658,20 +655,20 @@ def test_triton_verify_empty_local_shard_merges_through_dcp_combine():
         torch.randn(1, block_size, head_dim, dtype=torch.bfloat16, device="cuda")
         for _ in range(num_ranks)
     ]
+    impl = object.__new__(AiterMLAImpl)
+    impl.scale = scale
+    impl.kv_lora_rank = kv_lora_rank
+    impl._sm_count = current_platform.num_compute_units()
+    layer = SimpleNamespace(_k_scale=torch.tensor(1.0, device="cuda"))
     outputs, lses = [], []
     for rank in range(num_ranks):
-        output, lse = triton_mla.triton_mla_decode_forward(
-            q,
-            kv_caches[rank],
-            torch.zeros(num_rows, 1, dtype=torch.int32, device="cuda"),
-            torch.tensor(local_lens[rank], dtype=torch.int32, device="cuda"),
-            max(local_lens[rank]),
-            scale,
-            kv_lora_rank,
-            torch.tensor(1.0, device="cuda"),
-            sm_count=current_platform.num_compute_units(),
-            out_dtype=torch.bfloat16,
-            lse_dtype=torch.float32,
+        verify = SimpleNamespace(
+            block_table=torch.zeros(num_rows, 1, dtype=torch.int32, device="cuda"),
+            row_lens=torch.tensor(local_lens[rank], dtype=torch.int32, device="cuda"),
+            max_kv_seq_len=max(local_lens[rank]),
+        )
+        output, lse = impl._forward_triton_dcp_verify(
+            q, verify, kv_caches[rank], layer, torch.bfloat16
         )
         outputs.append(output)
         lses.append(lse)
@@ -703,28 +700,25 @@ def test_batch_aware_kv_splits_fit_an_int32_safe_reservation(monkeypatch):
     sm_count, heads, local_seq_len, kv_lora_rank = 304, 128, 16384, 512
     max_rows = 4096
     reserved = []
-    monkeypatch.setattr(triton_mla, "is_workspace_manager_initialized", lambda: True)
     monkeypatch.setattr(
-        triton_mla,
+        rocm_aiter_mla, "is_workspace_manager_initialized", lambda: True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
         "current_workspace_manager",
         lambda: SimpleNamespace(get_simultaneous=lambda *specs: reserved.extend(specs)),
     )
-    triton_mla.reserve_triton_mla_decode_workspace(
-        max_rows,
-        heads,
-        local_seq_len,
-        kv_lora_rank,
-        sm_count,
-        batch_aware_splits=True,
+    rocm_aiter_mla._reserve_triton_dcp_verify_workspace(
+        max_rows, heads, local_seq_len, kv_lora_rank, sm_count
     )
     ((shape, _),) = reserved
     # The kernel's attn_logits offsets are int32; seq-only splits overflow them.
-    seq_only = triton_mla._compute_num_kv_splits(local_seq_len, sm_count)
+    seq_only = rocm_aiter_mla._compute_num_kv_splits(local_seq_len, sm_count)
     assert max_rows * heads * seq_only * (kv_lora_rank + 1) >= 2**31
     assert math.prod(shape) < 2**31
 
     counts = [
-        triton_mla._compute_batch_aware_num_kv_splits(
+        rocm_aiter_mla._triton_dcp_verify_num_kv_splits(
             local_seq_len, rows, heads, sm_count
         )
         for rows in range(1, max_rows + 1)
