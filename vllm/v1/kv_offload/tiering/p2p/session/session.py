@@ -434,12 +434,7 @@ class P2PSession:
         # Validation failures here mean an incompatible or malicious peer.
         # Mark the connection dead so the manager reaps the session;
         # don't call add_remote_peer or send connect_ack.
-        if self._send_ready:
-            # We've already received connect_ack, so the handshake is
-            # complete. A second connect from the peer is a protocol
-            # violation — re-registering would corrupt transport state.
-            self._protocol_error("duplicate connect after handshake")
-            return
+        is_reconnect = self._send_ready
         try:
             ConnectMsg.validate(msg)
             if msg[ConnectMsg.BLOCK_LEN] != self._local_block_len:
@@ -474,6 +469,12 @@ class P2PSession:
             if self._conn is not None:
                 self._conn.mark_dead()
             return
+
+        if is_reconnect:
+            logger.info(
+                "P2PSession %s: refreshed peer data-plane registration",
+                self.peer_id,
+            )
 
         if self._conn is not None:
             self._conn.send(

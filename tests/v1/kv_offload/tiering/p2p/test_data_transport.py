@@ -285,6 +285,21 @@ class TestNixlTransportWithMockedAgent:
         transport._agent.release_dlist_handle.assert_called()
         transport._agent.remove_remote_agent.assert_called()
 
+    def test_add_remote_peer_replaces_existing_registration(self):
+        transport = self._make_transport()
+        old_dlist = MagicMock(name="old_dlist")
+        new_dlist = MagicMock(name="new_dlist")
+        transport._agent.add_remote_agent.side_effect = ["old-agent", "new-agent"]
+        transport._agent.prep_xfer_dlist.side_effect = [old_dlist, new_dlist]
+
+        transport.add_remote_peer("peer:1", b"old-meta", 0x1000, 8, 1024)
+        transport.add_remote_peer("peer:1", b"new-meta", 0x2000, 8, 1024)
+
+        transport._agent.release_dlist_handle.assert_called_once_with(old_dlist)
+        transport._agent.remove_remote_agent.assert_called_once_with("old-agent")
+        assert transport._peer_nixl_names["peer:1"] == "new-agent"
+        assert transport._remote_dlists["peer:1"] is new_dlist
+
     def test_close_releases_everything(self):
         """Close releases all handles and clears state."""
         transport = self._make_transport()
