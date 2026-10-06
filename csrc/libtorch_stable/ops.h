@@ -44,6 +44,15 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 double int8_max);
 
 #ifndef USE_ROCM
+namespace vllm::batch_invariant {
+void fused_silu_mul_per_token_group_quant(
+    const torch::stable::Tensor& input, torch::stable::Tensor& output_q,
+    torch::stable::Tensor& output_s, int64_t group_size, double eps,
+    double min_8bit, double max_8bit, double clamp_limit, bool round_scale,
+    bool scale_ue8m0, bool fuse_silu_and_mul,
+    const std::optional<torch::stable::Tensor>& masked_m);
+}  // namespace vllm::batch_invariant
+
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);

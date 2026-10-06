@@ -30,6 +30,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 
 #ifndef USE_ROCM
+  ops.def(
+      "fused_silu_mul_per_token_group_quant(Tensor input, Tensor! output_q, "
+      "Tensor! output_s, int group_size, float eps, float min_8bit, "
+      "float max_8bit, float clamp_limit, bool round_scale, bool scale_ue8m0, "
+      "bool fuse_silu_and_mul, Tensor? masked_m) -> ()");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -753,6 +758,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_int8));
 
 #ifndef USE_ROCM
+  ops.impl(
+      "fused_silu_mul_per_token_group_quant",
+      TORCH_BOX(&vllm::batch_invariant::fused_silu_mul_per_token_group_quant));
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
