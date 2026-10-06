@@ -613,7 +613,7 @@ def _deep_ep_v2_moe_backends(
                     torch.accelerator.synchronize()
                     torch.distributed.barrier(group=pg)
                     graph = torch.cuda.CUDAGraph()
-                    # Capture state must win even with an eager runtime mode.
+                    # Capture after eager dispatch, then return to eager execution.
                     with (
                         set_forward_context(
                             None, vllm_cfg, cudagraph_runtime_mode=CUDAGraphMode.NONE

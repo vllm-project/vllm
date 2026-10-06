@@ -56,14 +56,12 @@ class _FakeBuffer:
 
     def dispatch(self, **kwargs):
         self.calls.append(kwargs)
-        expanded = kwargs["do_expand"]
         num_tokens = self.out.size(0)
         handle = SimpleNamespace(
-            num_recv_tokens_per_expert_list=[num_tokens] + [0] * 7 if expanded else [],
             psum_num_recv_tokens_per_scaleup_rank=torch.tensor([num_tokens]),
         )
-        ids = None if expanded else torch.zeros(num_tokens, 2, dtype=torch.int64)
-        weights = torch.ones(num_tokens) if expanded else torch.ones(num_tokens, 2)
+        ids = torch.zeros(num_tokens, 2, dtype=torch.int64)
+        weights = torch.ones(num_tokens, 2)
         return self.out, ids, weights, handle, _FakeEvent(has_event=False)
 
     def combine(
