@@ -31,6 +31,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one
 from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
+    PassThroughPrepareAndFinalize,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
@@ -185,6 +188,10 @@ def maybe_make_prepare_finalize(
     all2all_manager: Any | None = None,
     input_dtype: torch.dtype | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
+    if moe.moe_parallel_config.use_passthrough_all2all:
+        # The experts dispatch and combine themselves, in every EP topology.
+        return PassThroughPrepareAndFinalize()
+
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None
