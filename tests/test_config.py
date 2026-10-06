@@ -936,6 +936,30 @@ def test_v2_model_runner_supports_extract_hidden_states():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
+@pytest.mark.parametrize("use_heterogeneous_vocab", [False, True])
+def test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1(
+    use_heterogeneous_vocab,
+):
+    """The V2 draft-model speculator exchanges token ids with the target
+    without a vocab mapping, so a heterogeneous-vocab (TLI) draft must stay on
+    V1, where VocabMapping translates them."""
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="draft_model",
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+            use_heterogeneous_vocab=use_heterogeneous_vocab,
+        ),
+    )
+
+    expected = ["heterogeneous-vocabulary draft models"]
+    assert config._get_v2_model_runner_unsupported_features() == (
+        expected if use_heterogeneous_vocab else []
+    )
+
+
 def test_v2_model_runner_supports_custom_logits_processors():
     config = VllmConfig()
     config.model_config = cast(
