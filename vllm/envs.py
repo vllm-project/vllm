@@ -1806,11 +1806,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "0"))
     ),
-    # TokenSpeed MLA decode split-count floor, in [1, 256]. Default 1 preserves
-    # automatic scheduling and compatibility with older tokenspeed-mla versions.
-    # Values >1 require its min_split_kv API. Applies to both target and draft
-    # TokenSpeed MLA backends; set before startup and restart to change graphs.
-    # Larger values require more workspace and may hurt short-context latency.
+    # Minimum KV splits for the TokenSpeed MLA decode kernel.
+    # Default 1 uses automatic scheduling.
     "VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV": lambda: int(
         os.getenv("VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV", "1")
     ),

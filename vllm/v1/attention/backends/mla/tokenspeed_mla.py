@@ -234,8 +234,6 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._min_split_kv = envs.VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV
         self._decode_kwargs: dict[str, int] = {}
         self._max_decode_tokens = 0
-        if not 1 <= self._min_split_kv <= 256:
-            raise ValueError("VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV must be in [1, 256]")
         if self._min_split_kv > 1:
             self._decode_kwargs["min_split_kv"] = self._min_split_kv
             config = get_current_vllm_config()
