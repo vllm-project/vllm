@@ -36,7 +36,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -46,6 +46,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -57,6 +58,8 @@ from .mm_features import (
     placeholder_ranges_from_engine_input,
 )
 from .protocol import (
+    GenerateDerenderChoice,
+    GenerateDerenderResponse,
     GenerateRequest,
     GenerateResponse,
     GenerateTextChoice,
@@ -107,6 +110,7 @@ class ServingTokens(GenerateBaseServing):
         models: OpenAIServingModels,
         online_renderer: OnlineRenderer,
         *,
+        online_derenderer: OnlineDerenderer | None = None,
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
@@ -120,6 +124,7 @@ class ServingTokens(GenerateBaseServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
         self.online_renderer = online_renderer
+        self.online_derenderer = online_derenderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
@@ -217,6 +222,24 @@ class ServingTokens(GenerateBaseServing):
                 "--skip-tokenizer-init). Send the request to a server that "
                 "loads a tokenizer, or use output_mode='tokens'."
             )
+        if request.output_mode == "derender":
+            # TODO(#57442): reject return_token_logprobs once it lands.
+            if request.stream:
+                return self.create_error_response(
+                    "output_mode='derender' does not support stream=true."
+                )
+            if self.online_derenderer is None:
+                return self.create_error_response(
+                    "output_mode='derender' is not available on this server."
+                )
+            if self.online_derenderer.parser is not None and (
+                request.parse_context is None
+            ):
+                return self.create_error_response(
+                    "output_mode='derender' requires parse_context on a server "
+                    "with a tool or reasoning parser. Use the one returned by "
+                    "/render."
+                )
         try:
             msgspec.msgpack.encode(
                 (
@@ -383,7 +406,8 @@ class ServingTokens(GenerateBaseServing):
         created_time = int(time.time())
         final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
-        text_mode = request.output_mode == "text"
+        derender_mode = request.output_mode == "derender"
+        text_mode = request.output_mode == "text" or derender_mode
         tokenizer = self._logprobs_tokenizer(text_mode)
 
         try:
@@ -396,6 +420,7 @@ class ServingTokens(GenerateBaseServing):
 
         tokens_choices: list[GenerateTokensChoice] = []
         text_choices: list[GenerateTextChoice] = []
+        derender_choice_fields: list[dict[str, Any]] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
             self._raise_if_error(output.finish_reason, request_id)
@@ -433,13 +458,37 @@ class ServingTokens(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
             )
-            if text_mode:
+            if derender_mode:
+                derender_choice_fields.append(choice_fields)
+            elif text_mode:
                 text_choices.append(
                     GenerateTextChoice(text=output.text, **choice_fields)
                 )
             else:
                 tokens_choices.append(GenerateTokensChoice(**choice_fields))
             num_generated_tokens += len(output.token_ids)
+
+        derender_choices: list[GenerateDerenderChoice] = []
+        if derender_mode:
+            assert self.online_derenderer is not None
+            parse_context = request.parse_context
+            try:
+                messages = await self.online_derenderer.derender_text_choices(
+                    final_res.outputs, parse_context, final_res.prompt_token_ids
+                )
+            except (ValueError, VLLMValidationError) as e:
+                return self.create_error_response(e)
+            hide_logprobs = (
+                parse_context is not None and not parse_context.include_reasoning
+            )
+            # TODO(#59324): map finish_reason with resolve_finish_reason so
+            # auto tool calls report "tool_calls" like coupled chat.
+            for message, fields in zip(messages, derender_choice_fields, strict=True):
+                if hide_logprobs:
+                    fields["logprobs"] = None
+                derender_choices.append(
+                    GenerateDerenderChoice(message=message, **fields)
+                )
 
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
@@ -486,8 +535,14 @@ class ServingTokens(GenerateBaseServing):
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
-        response: GenerateTokensResponse | GenerateTextResponse
-        if text_mode:
+        response: (
+            GenerateTokensResponse | GenerateTextResponse | GenerateDerenderResponse
+        )
+        if derender_mode:
+            response = GenerateDerenderResponse(
+                choices=derender_choices, **response_fields
+            )
+        elif text_mode:
             response = GenerateTextResponse(choices=text_choices, **response_fields)
         else:
             response = GenerateTokensResponse(choices=tokens_choices, **response_fields)

@@ -22,8 +22,11 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
+    ChatCompletionToolsParam,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
@@ -37,7 +40,26 @@ from vllm.utils import random_uuid
 
 ####### Tokens IN <> Tokens OUT #######
 
-OutputMode: TypeAlias = Literal["tokens", "text"]
+OutputMode: TypeAlias = Literal["tokens", "text", "derender"]
+
+
+class ParseContext(BaseModel):
+    """Chat request context the generate server needs to parse output.
+
+    Built by `/render` from the post-`adjust_request` chat request and read
+    only when `output_mode="derender"`.
+    """
+
+    tools: list[ChatCompletionToolsParam] | None = None
+    tool_choice: (
+        Literal["none", "auto", "required"] | ChatCompletionNamedToolChoiceParam | None
+    ) = "none"
+    parallel_tool_calls: bool | None = True
+    include_reasoning: bool = True
+    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
+    """Template kwargs with the render server's defaults already applied."""
+    history_tool_call_cnt: int = Field(default=0, ge=0)
+    """Tool calls already in the rendered conversation, for sequential IDs."""
 
 
 class PlaceholderRangeInfo(BaseModel):
@@ -246,8 +268,19 @@ class GenerateRequest(BaseModel):
         description=(
             "Response level. 'tokens' returns token IDs only. 'text' also "
             "returns the detokenized text and logprobs with decoded token "
-            "strings. 'text' needs a server that loads a tokenizer and "
-            "sampling_params.detokenize to be true."
+            "strings. 'derender' returns the parsed assistant message and "
+            "needs `parse_context` when the server has a parser. 'text' and "
+            "'derender' need a server that loads a tokenizer and "
+            "sampling_params.detokenize to be true. 'derender' does not "
+            "support `stream`."
+        ),
+    )
+    parse_context: ParseContext | None = Field(
+        default=None,
+        description=(
+            "Chat context from `/render`. Read only when "
+            "output_mode='derender' and ignored at other levels, so a "
+            "rendered request can be sent to a prefill leg unchanged."
         ),
     )
 
@@ -448,6 +481,15 @@ class GenerateTextStreamResponse(GenerateStreamResponseBase):
     choices: list[GenerateTextStreamChoice]
 
 
+class GenerateDerenderChoice(GenerateChoiceBase):
+    message: ChatMessage
+    """Assistant message parsed from the output text."""
+
+    logprobs: ChatCompletionLogProbs | None = None
+    """Logprobs with decoded token strings and `bytes`. None when reasoning
+    is hidden by `include_reasoning=false`."""
+
+
 class GenerateResponseBase(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -488,6 +530,11 @@ class GenerateTextResponse(GenerateResponseBase):
     choices: list[GenerateTextChoice]
 
 
+class GenerateDerenderResponse(GenerateResponseBase):
+    output_mode: Literal["derender"] = "derender"
+    choices: list[GenerateDerenderChoice]
+
+
 def output_mode_or_tokens(value: Any) -> Any:
     """Discriminator for `GenerateResponse` and `GenerateStreamResponse`.
 
@@ -504,7 +551,8 @@ def output_mode_or_tokens(value: Any) -> Any:
 # `Generate<Level>...` classes to construct.
 GenerateResponse: TypeAlias = Annotated[
     Annotated[GenerateTokensResponse, Tag("tokens")]
-    | Annotated[GenerateTextResponse, Tag("text")],
+    | Annotated[GenerateTextResponse, Tag("text")]
+    | Annotated[GenerateDerenderResponse, Tag("derender")],
     Discriminator(output_mode_or_tokens),
 ]
 GenerateStreamResponse: TypeAlias = Annotated[

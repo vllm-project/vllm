@@ -150,6 +150,27 @@ def _reused_prompt_token_ids(
     return ids
 
 
+def resolve_chat_template_kwargs(
+    request: ChatCompletionRequest,
+    chat_template: str | None,
+    chat_template_content_format: ChatTemplateContentFormatOption,
+    default_chat_template_kwargs: dict[str, Any],
+    *,
+    use_harmony: bool,
+) -> dict[str, Any]:
+    """Template kwargs for `request` with the server defaults applied.
+
+    Harmony models don't render through a chat template, so they get none.
+    """
+    if use_harmony:
+        return {}
+    return (
+        request.build_chat_params(chat_template, chat_template_content_format)
+        .with_defaults(default_chat_template_kwargs)
+        .chat_template_kwargs
+    )
+
+
 class OnlineRenderer:
     def __init__(
         self,

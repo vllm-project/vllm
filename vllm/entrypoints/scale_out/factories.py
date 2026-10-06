@@ -54,6 +54,7 @@ def init_scale_out_state(
         engine_client,
         state.openai_serving_models,
         state.online_renderer,
+        online_derenderer=state.online_derenderer,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,

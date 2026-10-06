@@ -12,6 +12,7 @@ The request field `output_mode` selects how much of the postprocessing the serve
 | --- | --- | --- |
 | `tokens` (default) | nothing, token IDs only | nothing |
 | `text` | `text` on every choice and decoded tokens with `bytes` in `logprobs` | a tokenizer |
+| `derender` | the parsed assistant `message` (`content`, `reasoning`, `tool_calls`) on every choice, plus the `text` level's `logprobs` | a tokenizer and the parser flags you'd give `vllm serve` |
 
 `text` returns text and token IDs in a single call, without a separate [derender](derenderer.md) hop per chunk. This suits latency sensitive streaming, where the derender hop lands on every output token.
 
@@ -41,6 +42,17 @@ print(response["choices"][0]["token_ids"])
 - `/derender` only accepts `output_mode: "tokens"` responses and returns a 400 for text responses which are already detokenized.
 - With `stream: true`, each choice's `text` is the delta since the previous chunk. A chunk is sent whenever the engine output carries new text or a `finish_reason`, even with no new token IDs. That covers text held back for stop string matching and the final output after an abort.
 
+### Derender
+
+`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, resolved `chat_template_kwargs` and the history tool call count.
+
+- The parser reads the engine's `text`, so it sees the stop string cut and the post `adjust_request` decode flags. That makes it match coupled chat for parsers whose `adjust_request` changes decoding which `/derender` can't.
+- A server with a tool or reasoning parser needs `parse_context`. Without a parser, `message.content` is the plain text.
+- `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
+- `logprobs` are dropped when `include_reasoning` is false, so they don't expose the hidden reasoning. Coupled chat still returns them until [#59590](https://github.com/vllm-project/vllm/pull/59590) lands.
+- `finish_reason` is the engine's value. Coupled chat reports `tool_calls` when a tool is called which this level doesn't do yet.
+- `stream: true` isn't supported yet.
+
 ### Logprobs
 
 With `output_mode: "tokens"`, logprob entries carry `token_id:N` placeholders. With `output_mode: "text"`, they carry the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`. A server started with `--return-tokens-as-token-ids` always returns the placeholders, as `/v1/completions` does.
@@ -49,8 +61,10 @@ With `output_mode: "tokens"`, logprob entries carry `token_id:N` placeholders. W
 
 The server returns a 400 for:
 
-- `output_mode: "text"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
+- `output_mode: "text"` or `"derender"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
 - `output_mode: "text"` with `sampling_params.detokenize: false`.
+- `output_mode: "derender"` with `stream: true`.
+- `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser.
 - An unsupported `output_mode` value.
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).
