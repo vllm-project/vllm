@@ -140,7 +140,7 @@ def merge_attn_states(
         return headdim % 8 == 0
 
     if (
-        current_platform.is_cuda()
+        current_platform.is_cuda_alike()
         and supported_dtypes(prefix_output)
         and supported_headdim(prefix_output)
     ):
