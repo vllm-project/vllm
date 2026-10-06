@@ -573,6 +573,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 logprobs=over_cap_logprobs if over_cap else base_params.logprobs,
                 max_tokens=1,
                 temperature=base_params.temperature,
+                watermarking=base_params.watermarking,
                 detokenize=False,
                 allowed_token_ids=None if over_cap else allowed_ids,
                 skip_clone=True,

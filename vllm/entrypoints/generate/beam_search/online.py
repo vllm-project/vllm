@@ -477,6 +477,7 @@ class BeamSearchOnlineMixin(ABC):
                 logprobs=over_cap_logprobs if over_cap else logprobs_num,
                 max_tokens=1,
                 temperature=temperature,
+                watermarking=False,
                 detokenize=False,
                 allowed_token_ids=None if over_cap else allowed_ids,
             )
