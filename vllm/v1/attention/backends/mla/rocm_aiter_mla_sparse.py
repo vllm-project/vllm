@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -38,6 +39,8 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
+    rocm_sparse_attn_split_decode,
+    rocm_sparse_decode_num_splits,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -45,6 +48,10 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
+# Which KV caches take split-K decode on the NoPE Triton path: "fp8"
+# (default), "all" (also the model-dtype cache), or "off".
+_SPLIT_DECODE = os.getenv("VLLM_ROCM_SPARSE_SPLIT_DECODE", "fp8").strip().lower()
 
 
 def _use_rocm_sparse_triton(
@@ -903,6 +910,37 @@ class ROCMAiterMLASparseImpl(
                     self.sinks.reshape(1, self.num_heads, 1),
                     q.shape[1],
                 ).reshape(-1)
+            split_kv = (
+                _SPLIT_DECODE in ("fp8", "all")
+                if self.kv_cache_dtype.startswith("fp8")
+                else _SPLIT_DECODE == "all" and kv_c_and_k_pe_cache.dtype == q.dtype
+            )
+            decode_num_splits = (
+                rocm_sparse_decode_num_splits(
+                    num_tokens,
+                    q.shape[1],
+                    min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
+                )
+                if split_kv and attn_metadata.num_decode_tokens == num_tokens
+                else 1
+            )
+            if decode_num_splits > 1:
+                rocm_sparse_attn_split_decode(
+                    q=q,
+                    kv=kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1]),
+                    scale=self.scale,
+                    head_dim=q.shape[-1],
+                    nope_head_dim=self.kv_lora_rank,
+                    rope_head_dim=q.shape[-1] - self.kv_lora_rank,
+                    attn_sink=triton_sinks,
+                    output=output,
+                    ragged_indices=attn_metadata.paged_kv_indices,
+                    ragged_indptr=attn_metadata.paged_kv_indptr,
+                    num_splits=decode_num_splits,
+                    kv_scale=float(layer._k_scale_float),
+                )
+                output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
+                return output, None
             rocm_sparse_attn_prefill(
                 q=q,
                 kv=kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1]),
