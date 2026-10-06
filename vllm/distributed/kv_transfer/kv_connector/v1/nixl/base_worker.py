@@ -2040,11 +2040,8 @@ class NixlBaseConnectorWorker:
             local_block_len = (
                 self._ple_page_len() * self._physical_blocks_per_logical_kv_block
             )
-            if nixl_agent_meta.ple_block_len is None:
-                raise ValueError(
-                    "Remote engine did not advertise its PLE page length; "
-                    "P and D must run the same vLLM version."
-                )
+            # Same NIXL_CONNECTOR_VERSION on both sides, so the field is set.
+            assert nixl_agent_meta.ple_block_len is not None
             remote_block_len = (
                 nixl_agent_meta.ple_block_len * remote_physical_per_logical
             )

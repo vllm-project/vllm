@@ -50,7 +50,7 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #
-NIXL_CONNECTOR_VERSION: int = 13
+NIXL_CONNECTOR_VERSION: int = 14
 
 
 @dataclass
