@@ -159,13 +159,23 @@ def test_late_chunk_mapping_follows_request_ids_and_preserves_request_errors():
     llm.llm_engine.abort_request.assert_not_called()
 
 
-@pytest.mark.parametrize("error", [RuntimeError("step failed"), KeyboardInterrupt()])
-def test_late_chunk_mapping_aborts_on_failure_or_cancellation_and_is_not_reused(error):
+@pytest.mark.parametrize(
+    "error, abort_expected",
+    [
+        pytest.param(RuntimeError("step failed"), True, id="runtime-error"),
+        pytest.param(KeyboardInterrupt(), False, id="keyboard-interrupt"),
+    ],
+)
+def test_late_chunk_mapping_propagates_errors_and_is_not_reused(error, abort_expected):
     llm, requests = _mock_chunk_tiling_engine(error)
     processor = SimpleNamespace(render=lambda x: x)
     with pytest.raises(type(error)):
         llm._run_tiling_engine(processor, lambda: iter(requests), 2, use_tqdm=False)
-    assert set(llm.llm_engine.abort_request.call_args.args[0]) == {"0", "1"}
+    if abort_expected:
+        llm.llm_engine.abort_request.assert_called_once()
+        assert set(llm.llm_engine.abort_request.call_args.args[0]) == {"0", "1"}
+    else:
+        llm.llm_engine.abort_request.assert_not_called()
     for request in requests:
         del request["late_chunking"]
         request["params"] = PoolingParams(task="token_embed")
