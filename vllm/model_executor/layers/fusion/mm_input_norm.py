@@ -18,14 +18,14 @@ where::
 """
 
 import math
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import torch
 from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.custom_op import CustomOp
-from vllm.transformers_utils.processor import cached_get_processor, get_processor_config
+from vllm.transformers_utils.processor import get_processor_config
 from vllm.triton_utils import tl, triton
 
 
@@ -144,33 +144,25 @@ class NormParams(NamedTuple):
 
 def _load_norm_params(model_config: ModelConfig) -> NormParams:
     """Resolve the per-channel affine parameters ``(image_mean, image_std,
-    rescale_factor)`` from the processor config, falling back to the image
-    processor object."""
-    model = model_config.model
-    revision = model_config.revision
+    rescale_factor)`` from the processor config."""
+    config = get_processor_config(model_config.model, revision=model_config.revision)
+    config = config.get("image_processor", config)
+    if not any(
+        key in config
+        for key in ("do_normalize", "do_rescale", "image_mean", "image_std")
+    ):
+        config = model_config.hf_image_processor_config
+    config = config.get("media_proc_cfg", config)
 
-    config = get_processor_config(model, revision=revision)
-    # NOTE: do not use cached_image_processor_from_config here — it merges
-    # mm_processor_kwargs, which mm_device_do_normalize poisons with
-    # do_normalize=False.
-    image_processor = cached_get_processor(
-        model, revision=revision, trust_remote_code=model_config.trust_remote_code
-    ).image_processor
-
-    def resolve(key: str) -> Any:
-        """Processor config value, falling back to the image_processor."""
-        if (value := config.get(key)) is not None:
-            return value
-        return getattr(image_processor, key, None)
-
-    do_rescale = bool(resolve("do_rescale"))
-    do_normalize = bool(resolve("do_normalize"))
+    has_norm_params = "image_mean" in config and "image_std" in config
+    do_normalize = bool(config.get("do_normalize", has_norm_params))
+    do_rescale = bool(config.get("do_rescale", has_norm_params))
 
     # Parameters whose flag is off are unused; default them to no-ops
     # without resolving them.
-    rescale_factor = resolve("rescale_factor") if do_rescale else 1.0
-    image_mean = resolve("image_mean") if do_normalize else [0.0] * 3
-    image_std = resolve("image_std") if do_normalize else [1.0] * 3
+    rescale_factor = config.get("rescale_factor", 1 / 255) if do_rescale else 1.0
+    image_mean = config.get("image_mean") if do_normalize else [0.0] * 3
+    image_std = config.get("image_std") if do_normalize else [1.0] * 3
 
     assert rescale_factor is not None, "rescale_factor is still None after resolution."
     assert image_mean is not None, "image_mean is still None after resolution."
@@ -194,6 +186,10 @@ class IdentityInputNorm(nn.Module):
     pixels travel to the device unprocessed and must be cast to
     ``visual_dtype`` here.
     """
+
+    @property
+    def input_dtype(self) -> torch.dtype | None:
+        return None
 
     def forward(
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
@@ -250,6 +246,14 @@ class FusedMMInputNorm(CustomOp):
         device = torch.get_default_device()
         self.register_buffer("weight", (rescale_factor / std).to(device))
         self.register_buffer("bias", (-mean / std).to(device))
+
+    @classmethod
+    def enabled(cls) -> bool:
+        return True
+
+    @property
+    def input_dtype(self) -> torch.dtype | None:
+        return torch.uint8
 
     # ------------------------------------------------------------------
     # Internal helpers shared by the platform-specific forward_* methods

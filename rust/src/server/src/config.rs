@@ -23,7 +23,7 @@ use vllm_text::backend::hf::HfOverrides;
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How the HTTP server obtains its listening socket.
+/// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
     /// Bind a fresh TCP listener on the given host/port.
@@ -229,6 +229,8 @@ pub struct Config {
     pub served_model_name: Vec<String>,
     /// HTTP listener setup.
     pub listener_mode: HttpListenerMode,
+    /// gRPC listener setup. When `None`, no gRPC server is started.
+    pub grpc_listener_mode: Option<HttpListenerMode>,
     /// Tool-call parser selection.
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -268,13 +270,15 @@ pub struct Config {
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     pub disable_log_stats: bool,
-    /// TCP port for the gRPC Inference service. When `None`, no gRPC server is
-    /// started.
-    pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
+    /// Whether the caller manages the engine process and shuts it down when
+    /// the shutdown token is cancelled. Enables the gRPC `Control.Shutdown` RPC.
+    pub manages_engine: bool,
     /// Maximum idle time on a keep-alive HTTP connection before the server
     /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
     pub keep_alive_timeout: Duration,
