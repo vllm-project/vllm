@@ -3,7 +3,6 @@
 """Draft lm_heads that cover a subset of the target vocabulary."""
 
 import json
-from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING
 
 import torch
@@ -17,7 +16,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     FLOAT4_E2M1_MAX,
     _e2m1_inline,
-    dequantize_to_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
@@ -25,12 +23,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     weight_amax,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -167,73 +163,6 @@ class _Rows(ReplicatedLinear):
         if self.kernel is None:
             return self.quant_method.apply(self, x)
         return self.kernel.apply_weights(self, x)
-
-
-def _listed_rows(
-    head: ParallelLMHead, weights: dict[str, torch.Tensor], ids: torch.Tensor
-) -> ParallelLMHead:
-    """The `ids` rows of a quantized lm_head as their own lm_head.
-
-    Parameters indexed by output row are sliced from `weights`, the tensors
-    `head` loaded before repacking, and the others are copied. The rows then
-    go through the head's quantization method like any other loaded layer.
-    """
-    device = next(head.parameters()).device
-    with set_default_torch_dtype(head.params_dtype), torch.device(device):
-        rows = ParallelLMHead(
-            ids.numel(),
-            head.embedding_dim,
-            params_dtype=head.params_dtype,
-            quant_config=head.quant_config,
-            prefix=head.prefix,
-            disable_tp=head.tp_size == 1,
-        )
-    params = dict(rows.named_parameters())
-    for name, weight in weights.items():
-        param = params.get(name)
-        output_dim = getattr(param, "output_dim", None)
-        if output_dim == 0 and getattr(param, "packed_dim", None) != 0:
-            if weight.shape[0] != head.org_vocab_size:
-                raise ValueError(
-                    f"lm_head.{name} of shape {tuple(weight.shape)} is not "
-                    "indexed by output row."
-                )
-            weight = weight.index_select(0, ids)
-        elif param is None or output_dim is not None:
-            raise ValueError(
-                f"draft_token_map cannot take rows of lm_head.{name} for "
-                f"{type(rows.quant_method).__name__}."
-            )
-        param.weight_loader(param, weight.to(device))  # type: ignore[union-attr]
-    rows.quant_method.process_weights_after_loading(rows)
-    return rows
-
-
-# Weights per E4M3 scale in NVFP4.
-_NVFP4_GROUP = 16
-
-
-def _nvfp4_head(
-    weights: dict[str, torch.Tensor], hidden_size: int
-) -> tuple[torch.Tensor, ...]:
-    """`(packed, block_scales, global_scale)` of a ModelOpt NVFP4 lm_head."""
-    packed = weights.get("weight")
-    scales = weights.get("weight_scale")
-    global_scale = weights.get("weight_scale_2")
-    if (
-        packed is None
-        or scales is None
-        or global_scale is None
-        or packed.dtype != torch.uint8
-        or packed.shape[1] * 2 != hidden_size
-        or scales.dtype != torch.float8_e4m3fn
-        or scales.shape[1] * _NVFP4_GROUP != hidden_size
-    ):
-        raise ValueError(
-            "draft_token_map_dynamic_rows supports quantized lm_heads only in "
-            "the ModelOpt NVFP4 format."
-        )
-    return packed, scales, global_scale.float().reshape(1)
 
 
 @triton.jit
@@ -391,17 +320,10 @@ class DraftVocab:
         vocab_size: Target vocabulary size. A smaller draft vocabulary gets a
             `draft_id_to_target_id` parameter for the model to register and
             load.
-        keep_quantized_head: Keep a quantized lm_head's loaded tensors in
-            `keep_head_weights`, for `speculative_config.draft_token_map`.
 
     """
 
-    def __init__(
-        self,
-        logits_processor: LogitsProcessor,
-        vocab_size: int,
-        keep_quantized_head: bool = False,
-    ):
+    def __init__(self, logits_processor: LogitsProcessor, vocab_size: int):
         self.logits_processor = logits_processor
         self.vocab_size = vocab_size
         self.draft_id_to_target_id: nn.Parameter | None = None
@@ -410,16 +332,12 @@ class DraftVocab:
                 torch.zeros(logits_processor.vocab_size, dtype=torch.long),
                 requires_grad=False,
             )
-        self.keep_quantized_head = keep_quantized_head
-        # Loaded tensors of a quantized lm_head, see keep_head_weights.
-        self.head_weights: dict[str, torch.Tensor] = {}
         # Set by load_token_map.
         self.token_ids: torch.Tensor | None = None
-        self.rows: _Rows | ParallelLMHead | None = None
+        self.rows: _Rows | None = None
         self.tp_size = 1
         self.valid_cols: torch.Tensor | None = None
         self.num_dynamic_rows = 0
-        self.gather_rows: tuple[torch.Tensor, ...] = ()
 
     def compute_logits(
         self, lm_head: VocabParallelEmbedding, hidden_states: torch.Tensor
@@ -468,29 +386,6 @@ class DraftVocab:
             return draft_ids
         return draft_ids + self.draft_id_to_target_id[draft_ids]
 
-    def keep_head_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-        lm_head: nn.Module,
-        prefix: str = "lm_head.",
-    ) -> Iterator[tuple[str, torch.Tensor]]:
-        """Pass `weights` through, keeping a quantized `lm_head`'s tensors.
-
-        Quantized lm_head kernels repack their weights after loading, so
-        `load_token_map` takes the rows from these tensors instead.
-        """
-        keep = (
-            self.keep_quantized_head
-            and isinstance(lm_head, ParallelLMHead)
-            and not isinstance(lm_head.quant_method, _UNQUANTIZED)
-        )
-        for name, weight in weights:
-            if keep and name.startswith(prefix):
-                self.head_weights[name.removeprefix(prefix)] = weight.to(
-                    "cpu", copy=True
-                )
-            yield name, weight
-
     def load_token_map(
         self,
         lm_head: VocabParallelEmbedding,
@@ -502,51 +397,31 @@ class DraftVocab:
         """Restrict drafting to the `token_ids` rows of `lm_head`.
 
         The rows are copied out of `lm_head`, so the drafter keeps sharing it
-        with the target, which verifies with the full vocabulary. A quantized
-        `lm_head` gets its rows from the tensors kept by `keep_head_weights`, in
-        their own quantized format. On a W4A4 head the dynamic rows run with
-        BF16 activations, so only the acceptance length can change.
+        with the target, which verifies with the full vocabulary.
 
         Args:
             lm_head: The drafter's full-vocabulary lm_head.
             token_ids: Sorted, unique target ids of the listed rows.
             dynamic_rows: Rows outside the list picked per draft token.
             dynamic_rank: Rank of the projection that scores those rows.
-            quantization: "fp8" or "nvfp4" for weight-only quantized rows of
-                an unquantized `lm_head`.
+            quantization: "fp8" or "nvfp4" for weight-only quantized rows.
 
         """
         head = getattr(lm_head, "base_layer", lm_head)
         lp = self.logits_processor
-        loaded, self.head_weights = self.head_weights, {}
-        quantized = isinstance(head, VocabParallelEmbedding) and not isinstance(
-            head.quant_method, _UNQUANTIZED
-        )
         if (
             self.draft_id_to_target_id is not None
             or not isinstance(head, VocabParallelEmbedding)
+            or not isinstance(head.quant_method, _UNQUANTIZED)
             or getattr(head, "bias", None) is not None
-            or lp.head_dtype
-            not in (None, head.params_dtype if quantized else head.weight.dtype)
+            or lp.head_dtype not in (None, head.weight.dtype)
             or lp.scale != 1.0
             or lp.soft_cap is not None
         ):
             raise ValueError(
-                "draft_token_map needs a full-vocabulary lm_head without bias, "
-                "logit scaling or soft capping, run in its weight dtype."
-            )
-        if quantized and not (loaded and isinstance(head, ParallelLMHead)):
-            raise ValueError(
-                f"draft_token_map needs the loaded tensors of the quantized "
-                f"lm_head, which {type(head.quant_method).__name__} repacks; the "
-                "drafter must pass its weights through "
-                "DraftVocab.keep_head_weights."
-            )
-        if quantized and quantization is not None:
-            raise ValueError(
-                "draft_token_map_quantization applies to unquantized lm_heads. "
-                "This lm_head is quantized in the checkpoint and its rows keep "
-                "that format."
+                "draft_token_map needs a full-vocabulary, unquantized lm_head "
+                "without bias, logit scaling or soft capping, run in its weight "
+                "dtype."
             )
 
         vocab_size = head.org_vocab_size
@@ -557,83 +432,6 @@ class DraftVocab:
                 f"e.g. {bad[:5].tolist()}."
             )
 
-        device = head.weight.device
-        if quantized:
-            assert isinstance(head, ParallelLMHead)
-            # The rows form their own vocab-parallel head, whose gathered
-            # logits end in padding columns.
-            self.rows = _listed_rows(head, loaded, token_ids)
-            tp_size = self.rows.tp_size
-            if self.rows.num_embeddings_padded > token_ids.numel():
-                self.valid_cols = torch.arange(token_ids.numel(), device=device)
-            assert head.quant_config is not None
-            row_format: str = head.quant_config.get_name()
-        else:
-            tp_size = self._load_unquantized_rows(head, token_ids, quantization)
-            row_format = quantization or str(head.weight.dtype)
-        self.token_ids = token_ids.to(device)
-        self.tp_size = tp_size
-
-        self.num_dynamic_rows = dynamic_rows
-        if dynamic_rows > 0:
-            if tp_size > 1:
-                raise ValueError(
-                    "draft_token_map_dynamic_rows does not support tensor "
-                    "parallelism yet."
-                )
-            # Quantized gather rows hold only the candidates and are indexed
-            # by position.
-            if quantized:
-                packed, scales, global_scale = _nvfp4_head(loaded, head.embedding_dim)
-                dtype = head.params_dtype
-
-                def rows_of(ids: torch.Tensor) -> torch.Tensor:
-                    ids = ids.cpu()
-                    return dequantize_to_dtype(
-                        packed[ids].to(device),
-                        scales[ids].to(device),
-                        global_scale.to(device),
-                        dtype,
-                        _NVFP4_GROUP,
-                        swizzle=False,
-                    )
-
-                self._init_dynamic_rows(rows_of, vocab_size, dynamic_rank, True)
-                ids = self.candidate_ids.cpu()
-                self.gather_rows = (
-                    packed[ids].to(device),
-                    scales[ids].to(device),
-                    global_scale.to(device),
-                )
-            else:
-                weight = head.weight[:vocab_size]
-                self._init_dynamic_rows(
-                    lambda ids: weight[ids],
-                    vocab_size,
-                    dynamic_rank,
-                    quantization is not None,
-                )
-                self.gather_rows = (
-                    (weight,)
-                    if quantization is None
-                    else _quantize_rows(weight, quantization, self.candidate_ids)
-                )
-        logger.info(
-            "Draft vocabulary: %d of %d tokens plus %d dynamic rows per draft "
-            "token, %s rows.",
-            token_ids.numel(),
-            vocab_size,
-            dynamic_rows,
-            row_format,
-        )
-
-    def _load_unquantized_rows(
-        self,
-        head: VocabParallelEmbedding,
-        token_ids: torch.Tensor,
-        quantization: str | None,
-    ) -> int:
-        """Copy the listed rows out of an unquantized head; returns TP size."""
         # Each TP rank keeps the listed rows of its own vocab shard, padded to
         # a common count. The gathered logits drop the padding columns.
         tp_size, tp_rank = head.tp_size, head.tp_rank
@@ -657,30 +455,51 @@ class DraftVocab:
             valid[rank, : ids.numel()] = True
 
         weight = head.weight
-        rows = weight.index_select(0, rank_ids[tp_rank].to(weight.device))
+        device = weight.device
+        rows = weight.index_select(0, rank_ids[tp_rank].to(device))
         pad = rows.new_zeros(rows_per_rank - rows.shape[0], rows.shape[1])
-        self.rows = _Rows(torch.cat([rows, pad]), quantization)
+        rows = torch.cat([rows, pad])
+        self.rows = _Rows(rows, quantization)
+        del rows
+        self.token_ids = token_ids.to(device)
+        self.tp_size = tp_size
         if not valid.all():
-            self.valid_cols = valid.flatten().nonzero()[:, 0].to(weight.device)
-        return tp_size
+            self.valid_cols = valid.flatten().nonzero()[:, 0].to(device)
+
+        self.num_dynamic_rows = dynamic_rows
+        if dynamic_rows > 0:
+            if tp_size > 1:
+                raise ValueError(
+                    "draft_token_map_dynamic_rows does not support tensor "
+                    "parallelism yet."
+                )
+            self._init_dynamic_rows(weight[:vocab_size], dynamic_rank, quantization)
+        logger.info(
+            "Draft vocabulary: %d of %d tokens plus %d dynamic rows per draft "
+            "token, %s rows.",
+            token_ids.numel(),
+            vocab_size,
+            dynamic_rows,
+            quantization or weight.dtype,
+        )
 
     def _init_dynamic_rows(
-        self,
-        rows_of: Callable[[torch.Tensor], torch.Tensor],
-        vocab_size: int,
-        rank: int,
-        quantize_scorer: bool,
+        self, weight: torch.Tensor, rank: int, quantization: str | None
     ) -> None:
         """Score the rows outside the list with a rank-`rank` lm_head factor.
 
         The basis is the top right singular vectors of the lm_head, so
         `(x @ basis) @ (weight[i] @ basis)` approximates the logit of row `i`.
-        The best `num_dynamic_rows` per token then get exact logits. The rows
-        come from `rows_of(ids)` one chunk at a time.
+        The best `num_dynamic_rows` per token then get exact logits.
         """
+        vocab_size, hidden_size = weight.shape
+        if not 0 < rank <= hidden_size:
+            raise ValueError(
+                f"draft_token_map_dynamic_rank must be in [1, {hidden_size}], "
+                f"got {rank}."
+            )
         assert self.token_ids is not None
-        device = self.token_ids.device
-        is_static = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        is_static = torch.zeros(vocab_size, dtype=torch.bool, device=weight.device)
         is_static[self.token_ids] = True
         self.candidate_ids = (~is_static).nonzero()[:, 0]
         if self.num_dynamic_rows > self.candidate_ids.numel():
@@ -689,42 +508,35 @@ class DraftVocab:
                 f"{self.candidate_ids.numel()}, got {self.num_dynamic_rows}."
             )
 
-        gram: torch.Tensor | None = None
-        for ids in torch.arange(vocab_size, device=device).split(_CHUNK):
-            rows = rows_of(ids)
-            dtype = rows.dtype
-            block = rows.float()
-            if gram is None:
-                gram = block.new_zeros(block.shape[1], block.shape[1])
+        chunk = _CHUNK
+        gram = weight.new_zeros(hidden_size, hidden_size, dtype=torch.float32)
+        for start in range(0, vocab_size, chunk):
+            block = weight[start : start + chunk].float()
             gram.addmm_(block.t(), block)
-        assert gram is not None
-        hidden_size = gram.shape[0]
-        if not 0 < rank <= hidden_size:
-            raise ValueError(
-                f"draft_token_map_dynamic_rank must be in [1, {hidden_size}], "
-                f"got {rank}."
-            )
         basis = torch.linalg.eigh(gram).eigenvectors[:, -rank:].flip(-1)
         del gram
-        self.basis = basis.to(dtype).contiguous()
+        self.basis = basis.to(weight.dtype).contiguous()
         scores = torch.cat(
             [
-                (rows_of(ids).float() @ basis).to(dtype)
-                for ids in self.candidate_ids.split(_CHUNK)
+                (weight[ids].float() @ basis).to(weight.dtype)
+                for ids in self.candidate_ids.split(chunk)
             ]
         )
         # The scorer only ranks rows, which FP8 preserves far better than NVFP4.
-        self.scorer = _Rows(scores, "fp8" if quantize_scorer else None)
+        self.scorer = _Rows(scores, None if quantization is None else "fp8")
+        # Quantized copies hold only the candidates and are indexed by position.
+        self.gather_rows = (
+            (weight,)
+            if quantization is None
+            else _quantize_rows(weight, quantization, self.candidate_ids)
+        )
 
     def _token_map_logits(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Logits of the listed rows, then of the dynamic rows with their ids."""
         assert self.rows is not None
-        if isinstance(self.rows, ParallelLMHead):
-            logits = self.rows.quant_method.apply(self.rows, hidden_states)
-        else:
-            logits = self.rows(hidden_states)
+        logits = self.rows(hidden_states)
         if self.tp_size > 1:
             logits = tensor_model_parallel_all_gather(logits)
         if self.valid_cols is not None:
