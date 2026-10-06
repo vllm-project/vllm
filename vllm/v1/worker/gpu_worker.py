@@ -92,6 +92,11 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.gpu.generic_kvp import (
+    generic_kvp_kv_cache_fraction,
+    get_generic_kvp_size,
+    maybe_enter_generic_kvp_mode,
+)
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -484,6 +489,8 @@ class Worker(WorkerBase):
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
+            maybe_enter_generic_kvp_mode(self.vllm_config)
+
             # Initialize the distributed environment BEFORE taking
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure
@@ -598,6 +605,16 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
+        available_memory = self._determine_available_memory()
+        if get_generic_kvp_size() > 1:
+            # Generic KVP's scratch caches come out of the KV cache budget.
+            available_memory = int(
+                available_memory
+                * generic_kvp_kv_cache_fraction(self.get_kv_cache_spec())
+            )
+        return available_memory
+
+    def _determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 

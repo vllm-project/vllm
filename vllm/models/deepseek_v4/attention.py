@@ -67,6 +67,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.gpu.generic_kvp import get_generic_kvp
 
 logger = init_logger(__name__)
 
@@ -321,6 +322,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # MRV1's piecewise capture only tolerates the wide eager region: with
             # the narrow one the attention input preparation stays in the captured
             # graph and MRV1 produces garbage (#51430).
+            self._prepare_and_attn_fn = self._prepare_and_attn_eager
+        if vllm_config.parallel_config.dcp_gather:
+            # The KV cache must be gathered before the KV insertion.
             self._prepare_and_attn_fn = self._prepare_and_attn_eager
 
         self.aux_stream_list = aux_stream_list
@@ -582,6 +586,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         Only the latter runs in the eager break.
         """
         attn_metadata = get_forward_context().attn_metadata
+        if (generic_kvp := get_generic_kvp()) is not None:
+            generic_kvp.acquire(self.prefix)
         indexer = self.indexer
         compressor = self.compressor
         aux_streams = self.aux_stream_list
@@ -643,6 +649,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             positions,
             o_padded,
         )
+        if generic_kvp is not None:
+            generic_kvp.release(self.prefix)
 
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Override point: the ROCm layer preshuffles this weight in place, so

@@ -39,6 +39,7 @@ from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
 )
+from vllm.v1.worker.gpu.generic_kvp import get_generic_kvp
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -222,6 +223,7 @@ class DeepseekV32Attention(MLAAttention):
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
+        self.dcp_gather = vllm_config.parallel_config.dcp_gather
 
         self.skip_topk = False
         enable_short_prefill_scoring_skip = (
@@ -375,6 +377,8 @@ class DeepseekV32Attention(MLAAttention):
         else:
             kv_c_out = torch.empty_like(kv_c)
             k_pe_out = torch.empty_like(k_pe)
+        if self.dcp_gather:
+            self._acquire_kv_cache()
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -463,6 +467,13 @@ class DeepseekV32Attention(MLAAttention):
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
+    def _acquire_kv_cache(self) -> None:
+        """Wait for the gathered KV cache before the fused cache writes. An eager
+        break, so that it also runs on CUDA graph replay."""
+        if (generic_kvp := get_generic_kvp()) is not None:
+            generic_kvp.acquire(self.layer_name)
+
+    @eager_break_during_capture
     def _sparse_indexer_and_attn(
         self,
         positions: torch.Tensor,
@@ -478,6 +489,7 @@ class DeepseekV32Attention(MLAAttention):
         mqa_q: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
+        generic_kvp = get_generic_kvp()
         if self.indexer is not None and not self.skip_topk:
             assert index_q_fp8 is not None
             assert index_weights_out is not None
@@ -550,6 +562,8 @@ class DeepseekV32Attention(MLAAttention):
 
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
         if num_actual == 0:
+            if generic_kvp is not None:
+                generic_kvp.release(self.layer_name)
             output.zero_()
             return
 
@@ -569,6 +583,8 @@ class DeepseekV32Attention(MLAAttention):
                 attn_metadata,
                 output,
             )
+            if generic_kvp is not None:
+                generic_kvp.release(self.layer_name)
             return
 
         if self._fp8_kv_needs_view:
@@ -594,6 +610,8 @@ class DeepseekV32Attention(MLAAttention):
         attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
             mqa_q_arg, kv_cache, attn_metadata, self
         )
+        if generic_kvp is not None:
+            generic_kvp.release(self.layer_name)
 
         if self.impl.dcp_world_size > 1:
             assert lse is not None and self.dcp_manager is not None

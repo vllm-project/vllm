@@ -374,6 +374,10 @@ class ParallelConfig:
     the process world size. Without PCP, DCP reuses TP ranks. With PCP, DCP
     either spans the PCP axis or the full TP x PCP block."""
 
+    dcp_gather: bool = False
+    """Run DCP by gathering each layer's KV shards into a replicated scratch
+    cache, for MLA attention that cannot run DCP natively."""
+
     dcp_kv_cache_interleave_size: int = 1
     """
     Interleave size of kv_cache storage while using DCP.
