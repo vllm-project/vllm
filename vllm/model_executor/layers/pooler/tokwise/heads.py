@@ -22,14 +22,17 @@ def _mean_pool_chunks(data: torch.Tensor, chunk_size: int) -> torch.Tensor:
     chunk_size = min(chunk_size, len(data))
     num_full, remainder = divmod(len(data), chunk_size)
     full_end = num_full * chunk_size
-    means = (
-        data[:full_end]
-        .reshape(num_full, chunk_size, data.shape[-1])
-        .mean(dim=1, dtype=torch.float32)
+    full_chunks = data[:full_end].reshape(num_full, chunk_size, data.shape[-1])
+    if not remainder:
+        return full_chunks.mean(dim=1, dtype=torch.float32)
+
+    # Write both reductions into their final storage instead of concatenating
+    # separate results for the full chunks and the tail.
+    means = torch.empty(
+        (num_full + 1, data.shape[-1]), dtype=torch.float32, device=data.device
     )
-    if remainder:
-        tail = data[full_end:].mean(dim=0, keepdim=True, dtype=torch.float32)
-        means = torch.cat((means, tail), dim=0)
+    torch.mean(full_chunks, dim=1, dtype=torch.float32, out=means[:num_full])
+    torch.mean(data[full_end:], dim=0, dtype=torch.float32, out=means[-1])
     return means
 
 
