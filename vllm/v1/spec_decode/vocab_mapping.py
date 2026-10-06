@@ -137,16 +137,12 @@ class VocabMapping:
 
     def map_target_to_draft_ids(self, target_ids):
         draft_ids = self.target_to_draft_ids[target_ids]  # new tensor; no clone needed
-        missing = draft_ids == -1
-        if missing.any():
-            draft_ids[missing] = self.draft_unk_token_id
+        draft_ids[draft_ids == -1] = self.draft_unk_token_id
         return draft_ids.to(target_ids.dtype)
 
     def map_draft_to_target_ids(self, draft_ids):
         target_ids = self.draft_to_target_ids[draft_ids]  # new tensor; no clone needed
-        missing = target_ids == -1
-        if missing.any():
-            target_ids[missing] = self.target_unk_token_id
+        target_ids[target_ids == -1] = self.target_unk_token_id
         return target_ids.to(draft_ids.dtype)
 
     def constrain_draft_logits(self, logits):

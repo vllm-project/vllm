@@ -93,6 +93,11 @@ def human_readable_int_or_auto(value: str) -> int:
     return human_readable_int(value)
 
 
+def summary_line(description: str | None) -> str:
+    """Return the first paragraph of a config docstring as a single line."""
+    return " ".join((description or "").split("\n\n", 1)[0].split())
+
+
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
@@ -203,7 +208,7 @@ class FlexibleArgumentParser(ArgumentParser):
             for group in self._action_groups:
                 if group.title and group.title.lower() == search_keyword:
                     formatter.start_section(group.title)
-                    formatter.add_text(group.description)
+                    formatter.add_text(summary_line(group.description))
                     formatter.add_arguments(group._group_actions)
                     formatter.end_section()
                     formatter.add_text(self._json_tip)
@@ -242,12 +247,18 @@ class FlexibleArgumentParser(ArgumentParser):
         # positionals, optionals and user-defined groups
         formatter.start_section("Config Groups")
         config_groups = ""
-        for group in self._action_groups:
-            if not group._group_actions:
-                continue
-            title = group.title
-            description = group.description or ""
-            config_groups += f"{title: <24}{description}\n"
+        groups = [g for g in self._action_groups if g._group_actions]
+        titles = [g.title or "" for g in groups]
+        title_width = max((len(title) for title in titles), default=0) + 1
+        width = max(formatter._width - formatter._current_indent, title_width + 20)
+        for title, group in zip(titles, groups):
+            lines = textwrap.wrap(
+                summary_line(group.description),
+                width,
+                initial_indent=f"{title: <{title_width}}",
+                subsequent_indent=" " * title_width,
+            )
+            config_groups += ("\n".join(lines) or title) + "\n"
         formatter.add_text(config_groups)
         formatter.end_section()
 
@@ -508,7 +519,7 @@ class FlexibleArgumentParser(ArgumentParser):
         config_args = self.load_config_file(file_path)
 
         # 0th index might be the sub command {serve,chat,complete,...}
-        # optionally followed by model_tag (only for serve)
+        # optionally followed by model_tag (serve or snapshot create)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
@@ -516,8 +527,11 @@ class FlexibleArgumentParser(ArgumentParser):
         if args[0].startswith("-"):
             # No sub command (e.g., api_server entry point)
             args = config_args + args[0:index] + args[index + 2 :]
-        elif args[0] == "serve":
-            model_in_cli = len(args) > 1 and not args[1].startswith("-")
+        elif args[0] == "serve" or args[:2] == ["snapshot", "create"]:
+            model_index = 1 if args[0] == "serve" else 2
+            model_in_cli = len(args) > model_index and not args[model_index].startswith(
+                "-"
+            )
             model_in_config = any(arg == "--model" for arg in config_args)
 
             if not model_in_cli and not model_in_config:
@@ -529,15 +543,19 @@ class FlexibleArgumentParser(ArgumentParser):
             if model_in_cli:
                 # Model specified as positional arg, keep CLI version
                 args = (
-                    [args[0]]
-                    + [args[1]]
+                    args[: model_index + 1]
                     + config_args
-                    + args[2:index]
+                    + args[model_index + 1 : index]
                     + args[index + 2 :]
                 )
             else:
                 # No model in CLI, use config if available
-                args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
+                args = (
+                    args[:model_index]
+                    + config_args
+                    + args[model_index:index]
+                    + args[index + 2 :]
+                )
         else:
             args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
 

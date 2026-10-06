@@ -49,6 +49,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
+    async_request_profile,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (
@@ -936,22 +937,10 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
+        profile_output = await async_request_profile(
+            base_url + "/start_profile",
+            session,
             extra_headers=extra_headers,
-            extra_body=test_extra_body,
-            chat_messages=test_chat_messages,
-        )
-        profile_output = await request_func(
-            request_func_input=profile_input, session=session
         )
         if profile_output.success:
             print("Profiler started")
@@ -1469,16 +1458,10 @@ async def benchmark(
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(
-            request_func_input=profile_input, session=session
+        profile_output = await async_request_profile(
+            base_url + "/stop_profile",
+            session,
+            extra_headers=extra_headers,
         )
         if profile_output.success:
             print("Profiler stopped")
@@ -1695,7 +1678,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         - "auto" will use the tokenizer from `mistral_common` for Mistral models
         if available, otherwise it will use the "hf" tokenizer.\n
         - "hf" will use the fast tokenizer if available.\n
-        - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
         - Other custom values can be supported via plugins.""",
@@ -2216,6 +2198,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "Sampling parameters are only supported by openai-compatible backends."
             )
+
+        # The Responses API accepts every sampling parameter above except
+        # min_p, which it would silently drop as an unknown field.
+        if args.backend == "openai-responses" and "min_p" in sampling_params:
+            raise ValueError("--min-p is not supported by the Responses API.")
 
         if "temperature" not in sampling_params:
             print(

@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -15,9 +14,8 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
-from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import GenerationConfig, PretrainedConfig
+from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -69,12 +67,6 @@ _DENSE_MODULE_TYPES = {
     "pylate.models.Dense.Dense",
 }
 
-if Version(version("transformers")) < Version("5.0.0"):
-    raise ImportError(
-        "Support for Transformers v4 is deprecated and was removed in vLLM v0.24.0. "
-        "Please upgrade to Transformers v5: pip install --upgrade transformers"
-    )
-
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
@@ -86,7 +78,7 @@ class LazyConfigDict(dict):
         return getattr(configs, value)
 
 
-_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+_CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     axk1="AXK1Config",
     bagel="BagelConfig",
@@ -107,9 +99,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
-    glm5_next="Glm5NextConfig",
-    glm5_next_text="Glm5NextTextConfig",
-    glm5_next_vision="Glm5NextVisionConfig",
     hyperclovax="HyperCLOVAXConfig",
     hy_v3="HYV3Config",
     hy_v4="HYV4Config",
@@ -145,8 +134,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
-    qwen4_exp="Qwen4ExpConfig",
-    qwen4_exp_text="Qwen4ExpTextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
@@ -160,13 +147,20 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
+# Checkpoints whose config.json has no model_type, only remote code in auto_map
+_ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
+    "LongcatFlashForCausalLM": "longcat_flash",
+    "LongcatFlashNgramForCausalLM": "longcat_flash",
+}
+
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
-# Model types whose checkpoints store shared RoPE parameters alongside the
-# per-layer-type dicts (e.g. Laguna's `original_max_position_embeddings`).
-# Since transformers 5.17, `validate_rope` treats every top-level value of such
-# a dict as a layer's parameters and raises on the shared ones.
-_PATCH_HF_NESTED_ROPE_VALIDATION: set[str] = {"laguna"}
+# Model types whose checkpoints carry shared RoPE parameters alongside the
+# per-layer-type dicts. Since transformers 5.17, `validate_rope` treats every
+# top-level value of such a dict as a layer's parameters and raises on the
+# shared ones. `laguna` gets them injected by `convert_rope_params_to_dict`;
+# `gemma4_text` ships them in the checkpoint itself.
+_PATCH_HF_NESTED_ROPE_VALIDATION: set[str] = {"laguna", "gemma4_text"}
 
 # Model types whose checkpoints declare `layer_types` entries that upstream
 # transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
@@ -188,13 +182,13 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
 
 
 def _register_config_class(
-    model_type: str, config_class: type[PretrainedConfig]
+    model_type: str, config_class: type[PreTrainedConfig]
 ) -> None:
     config_class.model_type = model_type
     AutoConfig.register(model_type, config_class, exist_ok=True)
 
 
-def _maybe_register_hf_config(config: PretrainedConfig | None) -> None:
+def _maybe_register_hf_config(config: PreTrainedConfig | None) -> None:
     if config is None:
         return
 
@@ -224,6 +218,35 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
         constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
+def _install_hf_config_validator(
+    name: str, validator: Callable, supersedes: Callable
+) -> None:
+    """Replace a ``PreTrainedConfig`` validator on every ``@strict`` snapshot.
+
+    ``@strict`` snapshots each ``validate_*`` method into ``__class_validators__``
+    at class creation and automatic post-``__init__`` validation dispatches off
+    that frozen list, so assigning the class attribute alone only affects
+    explicit ``config.validate_*()`` calls. Every ``@strict``-decorated config
+    class owns a snapshot, so rewrite them all, matching ``supersedes`` by
+    identity to leave a genuine per-model override in place.
+    """
+    setattr(PreTrainedConfig, name, validator)
+
+    seen: set[int] = set()
+    stack = [PreTrainedConfig]
+    while stack:
+        cls = stack.pop()
+        if id(cls) in seen:
+            continue
+        seen.add(id(cls))
+        validators = cls.__dict__.get("__class_validators__")
+        if isinstance(validators, list) and any(v is supersedes for v in validators):
+            cls.__class_validators__ = [
+                validator if v is supersedes else v for v in validators
+            ]
+        stack.extend(cls.__subclasses__())
+
+
 def _patch_hf_transformers_validate_rope():
     """Transformers v5 moved the ignore_keys option from the method signature of
     validate_rope and replaced it with the ignore_keys_at_rope_validation parameter
@@ -231,10 +254,10 @@ def _patch_hf_transformers_validate_rope():
     validate_rope() with the ignore_keys parameter work with newer versions of
     hf transformers (from v5 onwards)
     """
-    if hasattr(PretrainedConfig.validate_rope, "__vllm_patched__"):
+    if hasattr(PreTrainedConfig.validate_rope, "__vllm_patched__"):
         return
 
-    _original_validate_rope = PretrainedConfig.validate_rope
+    _original_validate_rope = PreTrainedConfig.validate_rope
 
     @wraps(_original_validate_rope)
     def patched_validate_rope(self, *args, **kwargs):
@@ -250,7 +273,9 @@ def _patch_hf_transformers_validate_rope():
         return result
 
     patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
-    PretrainedConfig.validate_rope = patched_validate_rope
+    _install_hf_config_validator(
+        "validate_rope", patched_validate_rope, _original_validate_rope
+    )
 
 
 def _patch_hf_transformers_nested_rope_validation() -> None:
@@ -261,10 +286,10 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
     ``AttributeError``. The per-layer dicts already carry their own defaults by
     the time validation runs, so the shared entries can be dropped.
     """
-    if hasattr(PretrainedConfig.validate_rope, "__vllm_nested_rope_patched__"):
+    if hasattr(PreTrainedConfig.validate_rope, "__vllm_nested_rope_patched__"):
         return
 
-    _original_validate_rope = PretrainedConfig.validate_rope
+    _original_validate_rope = PreTrainedConfig.validate_rope
 
     @wraps(_original_validate_rope)
     def patched_validate_rope(self, *args, **kwargs):
@@ -273,7 +298,7 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
             layer_types = set(rope_parameters) & set(
                 hf_configuration_utils.ALLOWED_LAYER_TYPES
             )
-            if shared_keys := set(rope_parameters) - layer_types:
+            if layer_types and (shared_keys := set(rope_parameters) - layer_types):
                 for key in shared_keys:
                     del rope_parameters[key]
                 logger.warning(
@@ -284,7 +309,9 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
         return _original_validate_rope(self, *args, **kwargs)
 
     patched_validate_rope.__vllm_nested_rope_patched__ = True  # type: ignore[attr-defined]
-    PretrainedConfig.validate_rope = patched_validate_rope
+    _install_hf_config_validator(
+        "validate_rope", patched_validate_rope, _original_validate_rope
+    )
 
 
 def _patch_hf_transformers_allowed_layer_types(
@@ -313,11 +340,11 @@ class HFConfigParser(ConfigParserBase):
         revision: str | None = None,
         code_revision: str | None = None,
         **kwargs,
-    ) -> tuple[dict, PretrainedConfig]:
+    ) -> tuple[dict, PreTrainedConfig]:
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
         trust_remote_code |= kwargs.get("trust_remote_code", False)
         kwargs = without_trust_remote_code(kwargs)
-        config_dict, _ = PretrainedConfig.get_config_dict(
+        config_dict, _ = PreTrainedConfig.get_config_dict(
             model,
             revision=revision,
             code_revision=code_revision,
@@ -331,6 +358,8 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        if model_type is None and (architectures := config_dict.get("architectures")):
+            model_type = _ARCHITECTURE_TO_MODEL_TYPE.get(architectures[0])
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
             if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
@@ -340,7 +369,7 @@ class HFConfigParser(ConfigParserBase):
                 # through and remain unchanged by this elif block
                 dummy_model_type = f"dummy_{model_type}"
                 dummy_kwargs = dict(architectures=[""], model_type=dummy_model_type)
-                dummy_config = PretrainedConfig(**dummy_kwargs)
+                dummy_config = PreTrainedConfig(**dummy_kwargs)
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
 
@@ -353,7 +382,34 @@ class HFConfigParser(ConfigParserBase):
         if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
             _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
-        if model_type in _SPECULATIVE_DECODING_CONFIGS:
+        if model_type == "vlm":
+            # HyperCLOVAX remote code registers this alias in a bare
+            # `try/except` that fails silently since transformers 5.18
+            from transformers import CONFIG_MAPPING, Qwen2_5_VLVisionConfig
+
+            CONFIG_MAPPING.register(
+                "qwen2_5_vl_visual", Qwen2_5_VLVisionConfig, exist_ok=True
+            )
+
+        rope_parameters = config_dict.get("rope_parameters") or {}
+        if model_type == "gemma4_text" and "full_attention" in rope_parameters:
+            from transformers import Gemma4TextConfig
+
+            # Published DSpark configs mix redundant scalar entries with per-layer
+            # RoPE dicts. Remove them before Transformers' constructor validates.
+            config_dict["rope_parameters"] = {
+                k: v
+                for k, v in rope_parameters.items()
+                if k not in ("rope_type", "rope_theta")
+            }
+            kwargs.setdefault("name_or_path", str(model))
+            config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
+        elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
+            from transformers import CONFIG_MAPPING
+
+            kwargs.setdefault("name_or_path", str(model))
+            config = CONFIG_MAPPING[model_type].from_dict(config_dict, **kwargs)
+        elif model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
                 model,
@@ -416,7 +472,7 @@ class MistralConfigParser(ConfigParserBase):
         revision: str | None = None,
         code_revision: str | None = None,
         **kwargs,
-    ) -> tuple[dict, PretrainedConfig]:
+    ) -> tuple[dict, PreTrainedConfig]:
         # This function loads a params.json config which
         # should be used when loading models in mistral format
         config_dict = _download_mistral_config_file(model, revision)
@@ -432,7 +488,7 @@ class MistralConfigParser(ConfigParserBase):
 
         # Get missing fields from HF config if available
         try:
-            hf_config_dict, _ = PretrainedConfig.get_config_dict(
+            hf_config_dict, _ = PreTrainedConfig.get_config_dict(
                 model,
                 revision=revision,
                 code_revision=code_revision,
@@ -506,7 +562,7 @@ def register_config_parser(config_format: str):
          ...         revision: str | None = None,
          ...         code_revision: str | None = None,
          ...         **kwargs,
-         ...     ) -> tuple[dict, PretrainedConfig]:
+         ...     ) -> tuple[dict, PreTrainedConfig]:
          ...         raise NotImplementedError
          >>>
          >>> type(get_config_parser("custom_config_parser"))
@@ -537,7 +593,7 @@ def register_config_parser(config_format: str):
     return _wrapper
 
 
-def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> None:
+def set_default_rope_theta(config: PreTrainedConfig, default_theta: float) -> None:
     """Some models may have no rope_theta in their config but still use RoPE.
     This function sets a default rope_theta if it's missing."""
     if getattr(config, "rope_parameters", None) is None:
@@ -605,7 +661,7 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
         _patch_legacy_rope_type(rope_parameters)
 
 
-def patch_rope_parameters(config: PretrainedConfig) -> None:
+def patch_rope_parameters(config: PreTrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     from vllm.config.utils import getattr_iter
 
@@ -627,19 +683,19 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         config.validate_rope()
 
 
-def _iter_rope_parameters(config: PretrainedConfig) -> Iterator[dict[str, Any]]:
+def iter_rope_parameters(config: PreTrainedConfig) -> Iterator[dict[str, Any]]:
     """Yield a config's rope parameters, one dict per layer type if nested."""
     rope_parameters = getattr(config, "rope_parameters", None)
     if not isinstance(rope_parameters, dict):
         return
 
     if is_rope_parameters_nested(rope_parameters):
-        yield from (p for p in rope_parameters.values() if isinstance(p, dict))
-    else:
+        yield from (p for p in rope_parameters.values() if isinstance(p, dict) and p)
+    elif rope_parameters:
         yield rope_parameters
 
 
-def _mrope_section(config: PretrainedConfig) -> Sequence[int] | None:
+def _mrope_section(config: PreTrainedConfig) -> Sequence[int] | None:
     """Return the M-RoPE section this config declares, if any.
 
     `xdrope_section` is the legacy name HunYuan-VL checkpoints use for the same
@@ -649,7 +705,7 @@ def _mrope_section(config: PretrainedConfig) -> Sequence[int] | None:
 
     names = ("mrope_section", "xdrope_section")
 
-    for params in _iter_rope_parameters(config):
+    for params in iter_rope_parameters(config):
         for i, name in enumerate(names):
             section = params.get(name)
             if isinstance(section, (list, tuple)):
@@ -666,11 +722,11 @@ def _mrope_section(config: PretrainedConfig) -> Sequence[int] | None:
     return section if isinstance(section, (list, tuple)) else None
 
 
-def _uses_mrope(config: PretrainedConfig) -> bool:
+def _uses_mrope(config: PreTrainedConfig) -> bool:
     return _mrope_section(config) is not None
 
 
-def uses_mrope(config: PretrainedConfig) -> bool:
+def uses_mrope(config: PreTrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
     return (
         _uses_mrope(config)
@@ -679,7 +735,7 @@ def uses_mrope(config: PretrainedConfig) -> bool:
     )
 
 
-def thinker_uses_mrope(config: PretrainedConfig) -> bool:
+def thinker_uses_mrope(config: PreTrainedConfig) -> bool:
     """Detect if the model contains a thinker config and it uses M-ROPE."""
     thinker_config = getattr(config, "thinker_config", None)
     if thinker_config is None:
@@ -692,7 +748,7 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
     return uses_mrope(thinker_text_config)
 
 
-def mrope_num_dims(config: PretrainedConfig) -> int:
+def mrope_num_dims(config: PreTrainedConfig) -> int:
     """Number of M-RoPE position channels the model consumes.
 
     Each section entry sizes one channel, so the section length is the channel
@@ -711,10 +767,10 @@ def mrope_num_dims(config: PretrainedConfig) -> int:
     return 3
 
 
-def is_encoder_decoder(config: PretrainedConfig) -> bool:
+def is_encoder_decoder(config: PreTrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
 
-    def _is_encoder_decoder(config: PretrainedConfig) -> bool:
+    def _is_encoder_decoder(config: PreTrainedConfig) -> bool:
         return getattr(config, "is_encoder_decoder", False)
 
     return _is_encoder_decoder(config) or _is_encoder_decoder(config.get_text_config())
@@ -727,7 +783,7 @@ def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     return kwargs
 
 
-def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
+def _maybe_remap_hf_config_attrs(config: PreTrainedConfig) -> PreTrainedConfig:
     """Remap config attributes to match the expected names."""
     for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
         if hasattr(config, old_attr):
@@ -764,7 +820,7 @@ def maybe_override_with_speculators(
 
     """
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    config_dict, _ = PretrainedConfig.get_config_dict(
+    config_dict, _ = PreTrainedConfig.get_config_dict(
         model,
         revision=revision,
         token=hf_token,
@@ -806,9 +862,9 @@ def get_config(
     code_revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
     hf_overrides_kw: dict[str, Any] | None = None,
-    hf_overrides_fn: Callable[[PretrainedConfig], PretrainedConfig] | None = None,
+    hf_overrides_fn: Callable[[PreTrainedConfig], PreTrainedConfig] | None = None,
     **kwargs,
-) -> PretrainedConfig:
+) -> PreTrainedConfig:
     if config_format == "auto":
         try:
             # First check for Mistral to avoid defaulting to
@@ -919,7 +975,7 @@ def get_config(
     # Exhaustively patch RoPE parameters everywhere they might be
     patch_rope_parameters(config)
     patch_rope_parameters(config.get_text_config())
-    SubConfigs: TypeAlias = dict[str, PretrainedConfig]
+    SubConfigs: TypeAlias = dict[str, PreTrainedConfig]
     sub_configs: SubConfigs | None = getattr(config, "sub_configs", None)
     if sub_configs:
         for sub_config in sub_configs:
@@ -1178,7 +1234,7 @@ def get_hf_image_processor_config(
     )
 
 
-def get_hf_text_config(config: PretrainedConfig):
+def get_hf_text_config(config: PreTrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
