@@ -110,24 +110,42 @@ class MistralToolCall(ToolCall):
         return id.isalnum() and len(id) == 9
 
 
-def _is_tool_call_array(parsed: Any) -> bool:
-    """Whether `parsed` is the array of tool-call objects this format expects.
-
-    The pre-v11 format is ``[TOOL_CALLS][{"name": ..., "arguments": ...}]``.
-    Anything else the model happens to emit -- a bare object, an array of
-    scalars, entries without a name -- must not be indexed as if it were.
-    """
-    return isinstance(parsed, list) and all(
-        isinstance(tool_call, dict) and isinstance(tool_call.get("name"), str)
-        for tool_call in parsed
-    )
-
-
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     if is_mistral_tokenizer(model_tokenizer):
         return model_tokenizer.version < 11
     vocab: dict[str, int] = getattr(model_tokenizer, "get_vocab", lambda: {})()
     return _ARGS not in vocab
+
+
+def _pre_v11_function_calls(parsed: Any) -> list[FunctionCall]:
+    """Decode the JSON after a pre-v11 ``[TOOL_CALLS]`` marker.
+
+    Mirrors the streaming path: a bare object is a single call, entries that
+    are not call objects are skipped, a missing or non-string name becomes
+    ``""`` (as in the v11+ path) and string arguments are kept as-is.
+    """
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    function_calls: list[FunctionCall] = []
+    for tool_call in parsed:
+        if not isinstance(tool_call, dict) or not (
+            "name" in tool_call or "arguments" in tool_call
+        ):
+            continue
+        name = tool_call.get("name")
+        arguments = tool_call.get("arguments")
+        if arguments is None:
+            arguments = "{}"
+        elif not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        function_calls.append(
+            FunctionCall(
+                name=name if isinstance(name, str) else "", arguments=arguments
+            )
+        )
+    return function_calls
 
 
 @functools.cache
@@ -314,6 +332,7 @@ class MistralParser(ParserEngine):
         self.starting_new_tool: bool = False
         self.streamed_args_for_tool: list[str] = []
         self._is_pre_v11: bool = _is_pre_v11_tokeniser(tokenizer)
+        self.current_tool_string_arguments: str | None = None
         self.parse_coro = None
         if self._is_pre_v11:
             self.parse_coro = ijson.parse_coro(
@@ -563,26 +582,13 @@ class MistralParser(ParserEngine):
 
         content: str | None = None
         if self.bot_token in model_output:
-            content_and_raw_tool_calls = model_output.split(self.bot_token)
-            content = content_and_raw_tool_calls[0]
-            raw_tool_calls = content_and_raw_tool_calls[1:]
             # pre-v11: content[BOT] [{tool_call1},{tool_call2}]
-            if len(raw_tool_calls) != 1:
-                # More than one marker is malformed *model* output, not a
-                # server fault. `parse()` is called outside any try in
-                # `chat_completion_full_generator`, so raising here surfaces
-                # as a 500; hand the text back as content instead, which is
-                # what the JSON-decode failure below already does.
-                logger.warning(
-                    "Expected exactly one %s marker in the model output, "
-                    "got %d; returning the output as content.",
-                    self.bot_token,
-                    len(raw_tool_calls),
-                )
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
-            stringified_tool_calls = raw_tool_calls[0].strip()
+            # Repeated BOT tokens with nothing between them count as one, and
+            # output after a later BOT token is trailing text, as in streaming.
+            content, *segments = model_output.split(self.bot_token)
+            stringified_tool_calls = next(
+                (segment.strip() for segment in segments if segment.strip()), ""
+            )
         elif tool_choice == "required" or isinstance(
             tool_choice, ChatCompletionNamedToolChoiceParam
         ):
@@ -604,47 +610,24 @@ class MistralParser(ParserEngine):
                 parsed = json.loads(raw_tool_call)
             except (IndexError, json.JSONDecodeError):
                 logger.exception("Error in extracting tool call from response.")
-                return ExtractedToolCallInformation(
-                    tools_called=False,
-                    tool_calls=[],
-                    content=stringified_tool_calls,
+                parsed = None
+
+        function_calls = _pre_v11_function_calls(parsed)
+        if not function_calls:
+            if parsed is not None:
+                logger.warning(
+                    "No tool call found in the JSON after %s; returning it as content.",
+                    self.bot_token,
                 )
-
-        # The JSON parsed, but nothing guarantees it is the array of
-        # `{"name": ..., "arguments": ...}` objects this format expects. A
-        # model can emit a bare object, an array of scalars, or entries with
-        # no name; indexing those blindly raises TypeError/KeyError, which
-        # reaches the client as a 500.
-        if not _is_tool_call_array(parsed):
-            logger.warning(
-                "Model output after %s is not an array of tool calls; "
-                "returning the output as content.",
-                self.bot_token,
-            )
             return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
+                tools_called=False,
+                tool_calls=[],
+                content=stringified_tool_calls,
             )
-
-        tool_calls = [
-            {
-                "name": tool_call["name"],
-                "arguments": json.dumps(
-                    tool_call.get("arguments", {}),
-                    ensure_ascii=False,
-                ),
-            }
-            for tool_call in parsed
-        ]
 
         mistral_tool_calls: list[MistralToolCall] = [
-            MistralToolCall(
-                type="function",
-                function=FunctionCall(
-                    name=tool_call["name"],
-                    arguments=tool_call.get("arguments", "{}"),
-                ),
-            )
-            for tool_call in tool_calls
+            MistralToolCall(type="function", function=function_call)
+            for function_call in function_calls
         ]
 
         return ExtractedToolCallInformation(
@@ -696,8 +679,15 @@ class MistralParser(ParserEngine):
 
     @ijson.coroutine
     def update_stream_state_pre_v11_tokenizer(self):
+        bare_object = False
         while True:
             (prefix, event, value) = yield
+
+            # A bare top-level object is a single call: parse it as an item.
+            if prefix == "" and event == "start_map":
+                bare_object = True
+            if bare_object:
+                prefix = f"item.{prefix}" if prefix else "item"
 
             if prefix == "item" and event == "start_map":
                 self.streaming_state = StreamingState.WAITING_FOR_TOOL_KEY
@@ -713,8 +703,14 @@ class MistralParser(ParserEngine):
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS
             if prefix == "item.arguments" and event == "end_map":
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS_COMPLETED
+            if prefix == "item.arguments" and event == "string":
+                self.current_tool_string_arguments = value
             if prefix == "item" and event == "end_map":
-                self.streaming_state = StreamingState.TOOL_COMPLETE
+                self.streaming_state = (
+                    StreamingState.ALL_TOOLS_COMPLETE
+                    if bare_object
+                    else StreamingState.TOOL_COMPLETE
+                )
             if prefix == "" and event == "end_array":
                 self.streaming_state = StreamingState.ALL_TOOLS_COMPLETE
 
@@ -750,22 +746,27 @@ class MistralParser(ParserEngine):
                     delta_text=delta_text,
                     stop_after_opening_curly_braces=1,
                 )
+            # Every state in which the call object can close stops after "}",
+            # so text following a bare object is never sent to ijson.
             elif self.streaming_state == StreamingState.WAITING_FOR_TOOL_KEY:
                 delta_to_be_parsed, delta_text = self._split_delta(
                     delta_text=delta_text,
                     stop_after_colon=1,
                     stop_after_opening_curly_braces=1,
+                    stop_after_closing_curly_braces=1,
                 )
             elif self.streaming_state == StreamingState.PARSING_NAME:
                 delta_to_be_parsed, delta_text = self._split_delta(
                     delta_text=delta_text,
                     stop_after_comma=1,
                     stop_after_closing_brackets=1,
+                    stop_after_closing_curly_braces=1,
                 )
             elif self.streaming_state == StreamingState.WAITING_FOR_ARGUMENTS_START:
                 delta_to_be_parsed, delta_text = self._split_delta(
                     delta_text=delta_text,
                     stop_after_opening_curly_braces=1,
+                    stop_after_closing_curly_braces=1,
                 )
             elif self.streaming_state == StreamingState.PARSING_ARGUMENTS:
                 delta_to_be_parsed, delta_text = self._split_delta(
@@ -826,6 +827,12 @@ class MistralParser(ParserEngine):
                     self.current_tool_name
                 )
                 self.current_tool_name = None
+            if self.current_tool_string_arguments is not None:
+                current_tool_call_modified = True
+                current_tool_call.function.arguments = (
+                    self.current_tool_string_arguments
+                )
+                self.current_tool_string_arguments = None
             if self.streaming_state == StreamingState.PARSING_NAME_COMPLETED:
                 self.streaming_state = StreamingState.WAITING_FOR_TOOL_KEY
             if self.streaming_state in [
