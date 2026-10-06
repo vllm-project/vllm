@@ -231,6 +231,7 @@ class NgramGPUSpeculator(BaseSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         if dummy_run:
