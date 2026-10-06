@@ -116,8 +116,11 @@ def test_structured_beam_search_does_not_duplicate_terminal_beams(
         return results
 
     monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
+    prompts: list[TokensInput] = [
+        {"type": "token", "prompt_token_ids": [3]} for _ in range(num_prompts)
+    ]
     outputs = llm.beam_search(
-        [{"type": "token", "prompt_token_ids": [3]} for _ in range(num_prompts)],
+        prompts,
         BeamSearchParams(
             beam_width=2,
             max_tokens=max_tokens,
