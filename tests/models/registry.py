@@ -212,6 +212,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BailingMoeV3ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-3.0-flash", trust_remote_code=True
     ),
+    "BerryLMForCausalLM": _HfExamplesInfo(
+        "rwb-ai/BerryLM-OS",
+        is_available_online=False,  # Hub repos follow the PRs
+        trust_remote_code=True,  # HF side: remote code until the transformers PR lands
+    ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
     ),
