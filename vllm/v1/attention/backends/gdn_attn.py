@@ -707,12 +707,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.vllm_config.speculative_config is not None
             and self.vllm_config.speculative_config.enable_adaptive_verification
         ):
-            # Varlen decode graphs are captured with as many one-token dummy
-            # requests as possible. The same graph can replay fewer requests
-            # with multi-token verification rows, so capture the speculative
-            # branch and treat unused one-token rows as padded spec requests.
-            # Python control flow is frozen at capture time and cannot switch
-            # from the ordinary decode branch during replay.
+            # Replay may turn captured one-token requests into fewer multi-token requests,
+            # so adaptive verification must capture the speculative path.
             num_decode_draft_tokens_cpu = torch.full_like(
                 torch.diff(m.query_start_loc_cpu), self.num_spec
             )
