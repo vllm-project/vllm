@@ -2019,6 +2019,16 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if (
+            kv_connector_output
+            and kv_connector_output.kv_connector_worker_meta
+            and self.connector
+        ):
+            # Worker metadata must reach the connector before the per-request
+            # loop below: request_finished() may consume it in this same pass.
+            self.connector.update_worker_meta(
+                kv_connector_output.kv_connector_worker_meta
+            )
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.

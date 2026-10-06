@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    KVConnectorWorkerMetadata,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -195,6 +196,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
+    def update_worker_meta(self, worker_meta: KVConnectorWorkerMetadata) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.update_worker_meta(worker_meta)
+
     def request_finished(
         self,
         request: "Request",
@@ -257,6 +262,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         """Get block IDs that failed to load via NIXL."""
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:

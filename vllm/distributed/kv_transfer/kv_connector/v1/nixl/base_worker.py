@@ -23,6 +23,7 @@ import regex as re
 import torch
 import zmq
 
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
@@ -36,12 +37,19 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorTransferResults,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.digest import (
+    digest_block_pages,
+    merge_digests,
+    serialize_digest,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
     NixlConnectorMetadata,
+    NixlDigestMetadata,
     NixlHandshakePayload,
     ReqId,
     ReqMeta,
@@ -944,6 +952,15 @@ class NixlBaseConnectorWorker:
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
         )
+
+        # KV digest (checksum) prototype: P digests exposed blocks, D
+        # re-digests received blocks after the NIXL READ and compares.
+        self._enable_kv_digest: bool = self.kv_transfer_config.get_from_extra_config(
+            "enable_kv_digest", False
+        )
+        # P side: digests computed this step, drained by
+        # build_connector_worker_meta.
+        self._pending_digests: dict[ReqId, list[list[str]]] = {}
 
     def _validate_remote_parallel_config(
         self, agent_metadata: NixlAgentMetadata
@@ -2897,6 +2914,176 @@ class NixlBaseConnectorWorker:
             for block in blocks:
                 pages[block].zero_()
 
+    def _region_page_view(self, region: int) -> torch.Tensor | None:
+        """uint8 (num_blocks, block_len) view of a region's transfer pages,
+        or None when the layout cannot be viewed that way (caller skips).
+
+        Row i covers exactly the bytes NIXL transfers for block i of the
+        region: block_len bytes at base + i * block_stride. With a host
+        staging buffer (kv_buffer_device=cpu) the region base addresses
+        refer to host memory, so digest the device tensor directly instead;
+        its content is what gets staged through the host buffer.
+        """
+        cache = self.device_kv_caches[self.region_names[region]]
+        if self.use_host_buffer:
+            if not cache.is_contiguous():
+                return None
+            return cache.view(torch.uint8).view(cache.shape[0], -1)
+        storage = cache.untyped_storage()
+        base = self.kv_caches_base_addr[self.engine_id][self.tp_rank][region]
+        return torch.empty(0, dtype=torch.uint8, device=cache.device).set_(
+            storage,
+            base - storage.data_ptr(),
+            (self.region_num_blocks[region], self.block_len_per_layer[region]),
+            (self.block_stride_per_layer[region], 1),
+        )
+
+    def _compute_group_digests(self, group_idx: int, block_ids: list[int]) -> list[str]:
+        """Digest each given block of a transfer group over its region bytes."""
+        parts = []
+        for region, group_id in enumerate(self.region_group_ids):
+            if group_id != group_idx:
+                continue
+            pages = self._region_page_view(region)
+            if pages is None:
+                return []
+            parts.append(digest_block_pages(pages, block_ids))
+        if not parts:
+            return []
+        return [serialize_digest(d) for d in merge_digests(parts)]
+
+    def _compute_block_digests(self, block_ids: BlockIds) -> list[list[str]]:
+        """Digest the given blocks of every transfer group."""
+        return [
+            self._compute_group_digests(group_idx, list(group_block_ids))
+            for group_idx, group_block_ids in enumerate(block_ids)
+        ]
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        """Ship this step's P-side block digests back to the scheduler."""
+        if not self._pending_digests:
+            return None
+        meta = NixlDigestMetadata(self._pending_digests)
+        self._pending_digests = {}
+        return meta
+
+    def _verify_recved_digests(self, req_id: str, meta: ReqMeta) -> bool:
+        """Recompute digests over received blocks and compare with the
+        producer's digests shipped in kv_transfer_params.
+
+        Returns False when a mismatch is found - or verification is skipped
+        - and failure routing is enabled (VLLM_NIXL_DIGEST_FAIL); otherwise
+        mismatches only log an error and skips proceed silently.
+        """
+        assert meta.remote is not None
+        if not self._enable_kv_digest:
+            return True
+
+        def _skip(reason: str) -> bool:
+            # Skipping means proceeding unverified; under fail-closed that
+            # itself is a failure.
+            if envs.VLLM_NIXL_DIGEST_FAIL:
+                logger.error(
+                    "KV digest verification unavailable for request %s (%s); "
+                    "failing under VLLM_NIXL_DIGEST_FAIL=1",
+                    req_id,
+                    reason,
+                )
+                return False
+            logger.debug(
+                "Skipping KV digest verification for request %s: %s",
+                req_id,
+                reason,
+            )
+            return True
+
+        expected = meta.remote.block_digests
+        if expected is None:
+            return _skip("producer shipped no digests")
+        assert self.transfer_topo is not None
+        remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+        supported = (
+            meta.region_blocks_to_zero is None
+            and self._physical_blocks_per_logical_kv_block == 1
+            and remote_info.remote_physical_blocks_per_logical == 1
+            and remote_info.remote_block_size == self.block_size
+            and self.dcp_size == 1
+            and remote_info.remote_dcp_size == 1
+        )
+        if not supported:
+            return _skip("unsupported transfer layout")
+
+        # Ensure the NIXL READ writes are visible before reading the bytes.
+        torch.accelerator.synchronize()
+        mismatches = 0
+        for group_idx, local_group in enumerate(meta.local_physical_block_ids):
+            if not local_group:
+                continue
+            if group_idx >= len(expected):
+                # This rank read the group but the producer shipped no
+                # digests for it; unverified under fail-closed.
+                if envs.VLLM_NIXL_DIGEST_FAIL:
+                    mismatches += 1
+                    logger.error(
+                        "KV digest unavailable for request %s group %d; "
+                        "counting as failed under VLLM_NIXL_DIGEST_FAIL=1",
+                        req_id,
+                        group_idx,
+                    )
+                continue
+            expected_group = expected[group_idx]
+            n = len(local_group)
+            if n > len(expected_group):
+                # More blocks read than digests shipped; the uncovered tail
+                # is unverified under fail-closed.
+                if envs.VLLM_NIXL_DIGEST_FAIL:
+                    mismatches += 1
+                    logger.error(
+                        "KV digest undercovered for request %s group %d: "
+                        "%d local blocks > %d digests; counting as failed",
+                        req_id,
+                        group_idx,
+                        n,
+                        len(expected_group),
+                    )
+                else:
+                    logger.warning(
+                        "KV digest verification skipped for request %s group %d: "
+                        "%d local blocks > %d digests",
+                        req_id,
+                        group_idx,
+                        n,
+                        len(expected_group),
+                    )
+                continue
+            # Prefix-cache hits trim the transferred range to the trailing
+            # blocks of the remote list (see _apply_prefix_caching).
+            expected_tail = expected_group[-n:]
+            actual = self._compute_group_digests(group_idx, list(local_group))
+            for block_id, exp, act in zip(local_group, expected_tail, actual):
+                if exp != act:
+                    mismatches += 1
+                    logger.error(
+                        "KV digest mismatch for request %s: group %d, "
+                        "block %d, expected %s, got %s",
+                        req_id,
+                        group_idx,
+                        block_id,
+                        exp,
+                        act,
+                    )
+        if mismatches:
+            logger.error(
+                "KV digest verification failed for request %s: %d block(s) "
+                "mismatched (fail routing: %s)",
+                req_id,
+                mismatches,
+                envs.VLLM_NIXL_DIGEST_FAIL,
+            )
+            self.xfer_stats.record_failed_transfer()
+            return not envs.VLLM_NIXL_DIGEST_FAIL
+        return True
+
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """Get transfers that completed on this specific worker.
 
@@ -2969,6 +3156,14 @@ class NixlBaseConnectorWorker:
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
+
+            if not self._verify_recved_digests(req_id, meta):
+                # Digest mismatch with failure routing enabled: report the
+                # request as failed so its blocks are recomputed.
+                failed_recv_reqs.add(req_id)
+                if not self._is_hma_required:
+                    self._invalid_block_ids.put(set(meta.local_block_ids[0]))
+                continue
 
             direct_device_recving.add(req_id)
 

@@ -576,6 +576,20 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def update_worker_meta(self, worker_meta: KVConnectorWorkerMetadata) -> None:
+        """Update KVConnector state from aggregated worker-side metadata.
+
+        Called by the scheduler before per-request output processing, so
+        that the metadata is available to ``request_finished`` in the same
+        engine step.
+
+        Args:
+            worker_meta (KVConnectorWorkerMetadata): the aggregated
+                worker-side metadata for this engine step.
+
+        """
+        return
+
     def request_finished(
         self,
         request: "Request",

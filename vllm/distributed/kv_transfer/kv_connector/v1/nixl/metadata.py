@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.logger import init_logger
 
@@ -233,6 +234,9 @@ class RemoteMeta:
     request_id: str
     blocks_expiry_time: float | None = None
     num_tokens: int | None = None
+    # Producer-side digests of block_ids, aligned per (group, block). None
+    # when the KV digest feature is off.
+    block_digests: list[list[str]] | None = None
 
 
 @dataclass
@@ -281,6 +285,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Pull mode (P side): blocks of requests finishing prefill this step,
+        # to be digested by the worker (enable_kv_digest).
+        self.blocks_to_checksum: dict[ReqId, BlockIds] = {}
 
     def _add_new_req(
         self,
@@ -333,5 +340,25 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             port=kv_transfer_params["remote_port"],
             blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
+            block_digests=kv_transfer_params.get("remote_block_digests"),
         )
         self.reqs_to_recv[request_id] = req
+
+
+class NixlDigestMetadata(KVConnectorWorkerMetadata):
+    """Per-request KV block digests sent from a worker to the scheduler.
+
+    digests[req_id][group][block] is the serialized digest of one block,
+    aligned with the producer's remote_block_ids for the request.
+    """
+
+    def __init__(self, digests: dict[ReqId, list[list[str]]]):
+        self.digests = digests
+
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
+        # Prototype limitation: TP>1 ranks digest disjoint shards under the
+        # same req_id keys, so merging keeps only one rank's digests. Correct
+        # for TP1, which is the tested path.
+        assert isinstance(other, NixlDigestMetadata)
+        self.digests.update(other.digests)
+        return self

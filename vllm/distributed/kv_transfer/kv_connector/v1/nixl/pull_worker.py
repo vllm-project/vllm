@@ -48,6 +48,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        # P side: digest the blocks of requests whose prefill completed this
+        # step; the scheduler attaches the digests to kv_transfer_params.
+        if self._enable_kv_digest and metadata.blocks_to_checksum:
+            for req_id, block_ids in metadata.blocks_to_checksum.items():
+                self._pending_digests[req_id] = self._compute_block_digests(block_ids)
+
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block

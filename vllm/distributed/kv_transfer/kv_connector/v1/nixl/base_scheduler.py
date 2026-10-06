@@ -4,7 +4,7 @@
 
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import msgspec
 import zmq
@@ -19,11 +19,13 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     HeartbeatInfo,
     NixlConnectorMetadata,
+    NixlDigestMetadata,
     NixlHandshakePayload,
     ReqId,
 )
@@ -34,6 +36,9 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CrossAttentionSpec,
+    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -47,6 +52,14 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class _ReqDigestState(NamedTuple):
+    """Digest tracking for one P-side producer request."""
+
+    prompt_len: int
+    # Cumulative block ids, all KV cache groups.
+    block_ids: BlockIds
 
 
 class NixlBaseConnectorScheduler:
@@ -185,6 +198,21 @@ class NixlBaseConnectorScheduler:
                 self.kv_recompute_threshold,
                 self.decoder_kv_blocks_ttl,
             )
+
+        # KV digest (checksum) prototype, pull mode only: the P side digests
+        # the blocks it exposes and ships the digests in kv_transfer_params.
+        self._enable_kv_digest: bool = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "enable_kv_digest", False
+            )
+        )
+        # P-side producer (do_remote_decode) requests; scheduler_output does
+        # not carry kv_transfer_params, so this set gates digest tracking.
+        self._req_is_producer: set[ReqId] = set()
+        # Per-request digest tracking, driven purely by scheduler_output.
+        self._req_digest_state: dict[ReqId, _ReqDigestState] = {}
+        # Worker-computed digests awaiting pickup by request_finished.
+        self._pending_digests: dict[ReqId, list[list[str]]] = {}
 
     def shutdown(self):
         self._stop_event.set()
@@ -495,6 +523,9 @@ class NixlBaseConnectorScheduler:
         meta.reqs_in_batch = self._reqs_in_batch
         meta.reqs_not_processed = self._reqs_not_processed
 
+        if self._enable_kv_digest and self._TRANSFER_MODE == "pull":
+            self._update_blocks_to_checksum(meta, scheduler_output)
+
         # Package heartbeats, throttled by heartbeat_interval.
         if self._heartbeat_by_engine:
             now = time.perf_counter()
@@ -514,6 +545,115 @@ class NixlBaseConnectorScheduler:
         """Stop heartbeating for requests whose KV transfer completed."""
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
+
+    def update_worker_meta(self, worker_meta: KVConnectorWorkerMetadata) -> None:
+        """Stash worker-computed block digests for request_finished."""
+        if isinstance(worker_meta, NixlDigestMetadata):
+            self._pending_digests.update(worker_meta.digests)
+
+    def _update_blocks_to_checksum(
+        self,
+        meta: NixlConnectorMetadata,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Attach to *meta* the blocks of P-side producer requests whose
+        prefill completes this step, so workers digest them before the
+        request finishes. Tracking is driven purely by scheduler_output."""
+        computed_tokens = self._track_digest_blocks(scheduler_output)
+        num_scheduled = scheduler_output.num_scheduled_tokens
+        for req_id, state in list(self._req_digest_state.items()):
+            n_scheduled = num_scheduled.get(req_id)
+            if n_scheduled is None:
+                continue
+            if self._prefill_finishes_this_step(
+                computed_tokens[req_id], n_scheduled, state.prompt_len
+            ):
+                meta.blocks_to_checksum[req_id] = self._digest_block_window(
+                    state.prompt_len, state.block_ids
+                )
+                del self._req_digest_state[req_id]
+
+    def _track_digest_blocks(
+        self, scheduler_output: SchedulerOutput
+    ) -> dict[ReqId, int]:
+        """Maintain ``_req_digest_state`` from scheduler_output.
+
+        Returns the pre-step num_computed_tokens of tracked requests
+        scheduled this step.
+        """
+        computed_tokens: dict[ReqId, int] = {}
+        # New requests carry their full cumulative block list and the
+        # prefix-cache-hit count as num_computed_tokens.
+        for req_data in scheduler_output.scheduled_new_reqs:
+            if req_data.req_id not in self._req_is_producer:
+                continue
+            if req_data.prompt_token_ids is None:
+                logger.debug(
+                    "KV digest: not tracking request %s with prompt_embeds",
+                    req_data.req_id,
+                )
+                continue
+            self._req_digest_state[req_data.req_id] = _ReqDigestState(
+                prompt_len=len(req_data.prompt_token_ids),
+                block_ids=req_data.block_ids,
+            )
+            computed_tokens[req_data.req_id] = req_data.num_computed_tokens
+        # Cached requests: running requests contribute only this step's new
+        # blocks; resumed-from-preemption requests carry a full replacement
+        # list. num_computed_tokens is the pre-step value in both cases.
+        cached = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached.req_ids):
+            state = self._req_digest_state.get(req_id)
+            if state is None:
+                continue
+            new_block_ids = cached.new_block_ids[i]
+            block_ids: BlockIds
+            if req_id in cached.resumed_req_ids:
+                block_ids = new_block_ids or ()
+            elif new_block_ids:
+                block_ids = tuple(
+                    list(old) + list(new)
+                    for old, new in zip(state.block_ids, new_block_ids)
+                )
+            else:
+                block_ids = state.block_ids
+            self._req_digest_state[req_id] = state._replace(block_ids=block_ids)
+            computed_tokens[req_id] = cached.num_computed_tokens[i]
+        return computed_tokens
+
+    @staticmethod
+    def _prefill_finishes_this_step(
+        num_computed: int, n_scheduled: int, prompt_len: int
+    ) -> bool:
+        """Whether this step computes the request's last prompt token.
+
+        ``num_computed`` is the pre-step count: build_connector_meta runs
+        before the scheduler advances num_computed_tokens.
+        """
+        return num_computed + n_scheduled >= prompt_len
+
+    def _digest_block_window(
+        self, num_prompt_tokens: int, block_ids: BlockIds
+    ) -> BlockIds:
+        """Returns the blocks the peer will read for this request.
+
+        Keeps the digest list aligned 1:1 with the ``remote_block_ids``
+        that ``request_finished`` advertises: exchange-clip exotic groups
+        (SWA in-window tail, SSM state slot) the same way, then trim
+        attention groups to the blocks covering the prompt. Allocation
+        can run past the prompt (e.g. the generated token's slot); the
+        peer never reads those trailing blocks.
+        """
+        clipped = self.get_exchange_clipped_blocks(block_ids)
+        return tuple(
+            ids[: cdiv(num_prompt_tokens, group.kv_cache_spec.block_size)]
+            if isinstance(group.kv_cache_spec, AttentionSpec)
+            and not isinstance(
+                group.kv_cache_spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)
+            )
+            else ids
+            for group, ids in zip(self.kv_cache_config.transfer_groups, clipped)
+        )
 
     def has_pending_push_work(self) -> bool:
         return False

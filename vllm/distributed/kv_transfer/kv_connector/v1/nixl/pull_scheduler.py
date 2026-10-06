@@ -119,6 +119,11 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         if not params:
             return
 
+        if self._enable_kv_digest and params.get("do_remote_decode"):
+            # P side: mark this producer request for digest tracking; block
+            # data itself is tracked from scheduler_output only.
+            self._req_is_producer.add(request.request_id)
+
         if params.get("do_remote_decode") or (
             params.get("do_remote_prefill") and self.is_bidirectional_kv_xfer_enabled
         ):
@@ -209,6 +214,14 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         if not params:
             return False, None
 
+        self._req_is_producer.discard(request.request_id)
+        self._req_digest_state.pop(request.request_id, None)
+        digests = (
+            self._pending_digests.pop(request.request_id, None)
+            if self._enable_kv_digest
+            else None
+        )
+
         is_p_node = bool(params.get("do_remote_decode"))
         is_d_node = not is_p_node
 
@@ -275,7 +288,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
             remote_num_tokens = request.num_computed_tokens
 
-        return delay_free_blocks, dict(
+        kv_xfer_params: dict[str, Any] = dict(
             do_remote_prefill=is_p_node,
             do_remote_decode=is_d_node,
             remote_block_ids=block_ids,
@@ -290,3 +303,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_blocks_expiry_time=blocks_expiry_time,
             transfer_mode=self._TRANSFER_MODE,
         )
+        if self._enable_kv_digest and delay_free_blocks:
+            if digests is None:
+                logger.warning(
+                    "enable_kv_digest is on but no digests were received for "
+                    "request %s; omitting remote_block_digests",
+                    request.request_id,
+                )
+            else:
+                kv_xfer_params["remote_block_digests"] = digests
+        return delay_free_blocks, kv_xfer_params
