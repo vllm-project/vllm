@@ -242,8 +242,8 @@ class PackDCPTopkCandidatesKernel(
 # only to 2^24 (~16.7M slots): the transport, not the key, is the binding
 # limit. The float-ordering transform, -0.0 unification, and NaN demotion
 # follow the ATOM-ported MiniMax-M3 indexer top-k (#57909).
-_STABLE_KEY_ID_MASK = (1 << 30) - 1
-_STABLE_KEY_VALID = 1 << 62
+_STABLE_KEY_ID_MASK = tl.constexpr((1 << 30) - 1)
+_STABLE_KEY_VALID = tl.constexpr(1 << 62)
 
 
 @triton.jit

@@ -1102,6 +1102,11 @@ def test_stable_topk_triton_key_encoding_orders_like_reference():
         _STABLE_KEY_VALID,
     )
 
+    # tl.constexpr wrappers (Triton requires constexpr globals in jit code);
+    # unwrap for torch arithmetic.
+    key_id_mask = int(_STABLE_KEY_ID_MASK)
+    key_valid = int(_STABLE_KEY_VALID)
+
     scores = torch.tensor(
         [2.5, 2.5, -1.0, 0.0, -0.0, float("inf"), float("-inf"),
          float("nan"), 7.25, 7.25, 1e-30, -1e-30, 3.0],
@@ -1121,9 +1126,9 @@ def test_stable_topk_triton_key_encoding_orders_like_reference():
     is_nan = (bits & 0x7FFFFFFF) > 0x7F800000
     ordered = torch.where(is_nan, torch.zeros_like(ordered), ordered)
     kernel_key = (
-        _STABLE_KEY_VALID
+        key_valid
         | (ordered << 30)
-        | (_STABLE_KEY_ID_MASK - ids.clamp(min=0))
+        | (key_id_mask - ids.clamp(min=0))
     )
     kernel_key = torch.where(valid, kernel_key, torch.zeros_like(kernel_key))
 
