@@ -3930,6 +3930,19 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
+        # `_is_uniform_decode` only compares token counts, so a prefill that
+        # happens to schedule exactly `uniform_decode_query_len` tokens is
+        # indistinguishable from a uniform decode batch. With speculative
+        # decoding and prefix caching this is reachable: a prompt whose
+        # uncached tail is exactly `num_speculative_tokens + 1` tokens long
+        # would be dispatched to the FULL decode cudagraph, which is captured
+        # with decode semantics, and produce corrupted logits. Requests still
+        # holding uncomputed prompt tokens are never a decode batch.
+        if uniform_decode and force_uniform_decode is None and num_reqs > 0:
+            computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            prompt_len = self.input_batch.num_prompt_tokens[:num_reqs]
+            if bool((computed < prompt_len).any()):
+                uniform_decode = False
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (

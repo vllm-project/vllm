@@ -115,9 +115,16 @@ class SingleTypeKVCacheManager(ABC):
         self.max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
+        #
+        # Mamba groups belong here too. Cache groups alias the same bytes -- see
+        # KVCacheTensor: "cache groups overlay each other, which is sound
+        # because a block ID is owned by one group at a time". A block that
+        # attention frees and a Mamba group then allocates is therefore read as
+        # recurrent state while it still holds quantized KV bytes, which yields
+        # NaN/Inf in the state and NaN logits downstream.
         self._record_new_block_ids = (
             needs_kv_cache_zeroing
-            and isinstance(kv_cache_spec, AttentionSpec)
+            and isinstance(kv_cache_spec, (AttentionSpec, MambaSpec))
             and not isinstance(kv_cache_spec, CircularBufferSpec)
         )
         self.new_block_ids: list[int] = []
@@ -1904,6 +1911,13 @@ class MambaManager(SingleTypeKVCacheManager):
                     max_new_blocks += self.num_speculative_blocks
                 assert num_new_blocks <= max_new_blocks
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+                # The `align` branch allocates from the pool directly and never
+                # reaches SingleTypeKVCacheManager.allocate_new_blocks, so
+                # without this the gate in __init__ stays inert for Mamba
+                # groups. Recorded on the raw result so the copy-on-write block
+                # is covered as well.
+                if self._record_new_block_ids:
+                    self.new_block_ids.extend(b.block_id for b in new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
                 if partial_hit is not None:
                     block_idx, source_block = partial_hit

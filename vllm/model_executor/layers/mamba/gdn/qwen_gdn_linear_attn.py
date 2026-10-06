@@ -59,6 +59,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -805,14 +806,35 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return mixed_qkv_out, z_out, b_out, a_out
 
+    def split_mixed_qkv_views(self, mixed_qkv):
+        """Split packed qkv into (1, seq, heads, dim) views without copying."""
+        if mixed_qkv is None:
+            return None, None, None
+        q, k, v = mixed_qkv.split(
+            [
+                self.key_dim // self.tp_size,
+                self.key_dim // self.tp_size,
+                self.value_dim // self.tp_size,
+            ],
+            dim=-1,
+        )
+        return (
+            q.unflatten(-1, (-1, self.head_k_dim)).unsqueeze(0),
+            k.unflatten(-1, (-1, self.head_k_dim)).unsqueeze(0),
+            v.unflatten(-1, (-1, self.head_v_dim)).unsqueeze(0),
+        )
+
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
 
-        The original code used ``rearrange(x, "l (h d) -> 1 l h d", d=...)``
-        followed by ``.contiguous()`` on each tensor.  This version flattens
-        all three splits into a single buffer via ``torch.cat`` so that
-        torch.compile emits one Triton copy kernel instead of three separate
-        contiguous() calls.
+        One Triton kernel writes the fused buffer directly.  This runs inside
+        the ``qwen_gdn_attention_core`` custom op, which torch.compile never
+        traces into, so every eager op here is a real kernel in the captured
+        decode graph and costs ~3.6us of inter-kernel latency.  The previous
+        ``split`` + 3x ``reshape(-1)`` + ``torch.cat`` was 4 kernels and moved
+        the data twice (14.5us/layer); this is 1 kernel (3.1us/layer),
+        bit-identical, measured for T in 4..4096.  Falls back to the eager path
+        when the layout is not the packed contiguous one the kernel assumes.
         """
         if mixed_qkv is None:
             return None, None, None
@@ -822,11 +844,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         k_dim = self.key_dim // self.tp_size
         v_dim = self.value_dim // self.tp_size
 
-        query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
-
-        fused = torch.cat(
-            [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
-        )
+        if (
+            seq_len > 0
+            and mixed_qkv.stride(-1) == 1
+            and mixed_qkv.shape[-1] == q_dim + k_dim + v_dim
+        ):
+            fused = torch.empty(
+                seq_len * (q_dim + k_dim + v_dim),
+                dtype=mixed_qkv.dtype,
+                device=mixed_qkv.device,
+            )
+            _gdn_split_qkv_kernel[(seq_len, 3)](
+                mixed_qkv,
+                fused,
+                mixed_qkv.stride(0),
+                seq_len,
+                QD=q_dim,
+                KD=k_dim,
+                VD=v_dim,
+                BLK=triton.next_power_of_2(max(q_dim, k_dim, v_dim)),
+            )
+        else:
+            query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
+            fused = torch.cat(
+                [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
+            )
 
         q_size = seq_len * q_dim
         k_size = seq_len * k_dim
@@ -846,6 +888,32 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         return self._forward_method(hidden_states)
+
+    def _core_attn_out_dtype(self, activation_dtype: torch.dtype) -> torch.dtype:
+        """Precision for the GDN readout buffer.
+
+        The readout ``o = state @ q`` is an *unnormalized* accumulator: it is
+        only normalized later, by ``RMSNormGated``. With an fp32 SSM state it
+        can exceed fp16's 65504, so storing it into an fp16 buffer overflows to
+        ``inf`` and the norm turns that into ``NaN`` -- the model then emits a
+        single repeated token.
+
+        Upstream PR #54146 widens the readout inside the kernel wrapper, but the
+        value lands in this buffer one line later and is downcast again, so both
+        changes are needed. ``RMSNormGated`` already upcasts with ``x.float()``,
+        so it consumes an fp32 buffer unchanged.
+
+        Only fp16 activations are affected: bf16 shares fp32's exponent range,
+        so bf16 and fp32 activations keep their dtype and stay byte-identical.
+        """
+        if activation_dtype is not torch.float16:
+            return activation_dtype
+        kv_cache = getattr(self, "kv_cache", None)
+        if kv_cache is None or len(kv_cache) < 2:
+            return activation_dtype
+        if getattr(kv_cache[1], "dtype", None) is torch.float32:
+            return torch.float32
+        return activation_dtype
 
     def _output_projection(
         self,
@@ -875,7 +943,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
             core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-                dtype=hidden_states.dtype,
+                dtype=self._core_attn_out_dtype(hidden_states.dtype),
                 device=hidden_states.device,
             )
             z = torch.empty(
@@ -921,7 +989,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if use_fused_gdn_spec_decode:
             core_attn_out = torch.zeros(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-                dtype=hidden_states.dtype,
+                dtype=self._core_attn_out_dtype(hidden_states.dtype),
                 device=hidden_states.device,
             )
             torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
@@ -957,7 +1025,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # see discussions in https://github.com/vllm-project/vllm/pull/28182
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
 
@@ -996,10 +1064,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
-        z = torch.empty_like(core_attn_out)
+        # z is written by the kernels in the activation dtype; only the readout
+        # buffer may be widened, so pin z instead of mirroring core_attn_out.
+        z = torch.empty(
+            core_attn_out.shape,
+            dtype=hidden_states.dtype,
+            device=core_attn_out.device,
+        )
 
         torch.ops.vllm.gdn_attention_core_xpu(
             core_attn_out,
@@ -1043,7 +1117,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_tokens = hidden_states.size(0)
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
 
@@ -1385,7 +1459,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        # The recurrent kernel reads q/k/v straight out of the packed conv
+        # output, so the spec part needs no split kernel.
+        query_spec, key_spec, value_spec = self.split_mixed_qkv_views(mixed_qkv_spec)
+        # With spec decodes only, the kernel writes the readout in place.
+        spec_out = None
+        if (
+            spec_sequence_masks is not None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes == 0
+        ):
+            spec_out = core_attn_out[:num_actual_tokens].unsqueeze(0)
+            o_dtype = (
+                torch.float32 if ssm_state.dtype == torch.float32 else query_spec.dtype
+            )
+            if spec_out.dtype != o_dtype or not spec_out.is_contiguous():
+                spec_out = None
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
@@ -1467,6 +1556,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
+                    out=spec_out,
                 )
             )
         else:
@@ -1530,8 +1620,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
                 # outputs (decode-first order).
+                # The decode kernel may emit the widened readout dtype while the
+                # chunk kernel emits the activation dtype.
                 core_attn_out_non_spec = torch.cat(
-                    [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                    [
+                        core_attn_out_decode.to(core_attn_out.dtype),
+                        core_attn_out_non_spec.to(core_attn_out.dtype),
+                    ],
+                    dim=1,
                 )
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
@@ -1558,12 +1654,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            core_attn_out.index_copy_(0, spec_token_indx, core_attn_out_spec.squeeze(0))
+            # Spec (fused decode kernel) and non-spec (chunk kernel) outputs can
+            # differ in dtype when the readout buffer is widened; index_copy_
+            # does not cast, so copy in the destination buffer's dtype.
             core_attn_out.index_copy_(
-                0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
+                0,
+                spec_token_indx,
+                core_attn_out_spec.squeeze(0).to(core_attn_out.dtype),
+            )
+            core_attn_out.index_copy_(
+                0,
+                non_spec_token_indx,
+                core_attn_out_non_spec.squeeze(0).to(core_attn_out.dtype),
             )
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            if spec_out is None:
+                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
@@ -1966,3 +2072,30 @@ direct_register_custom_op(
     op_func=qwen_gdn_attention_core_fused_norm_packed,
     mutates_args=["core_attn_out"],
 )
+
+
+@triton.jit
+def _gdn_split_qkv_kernel(
+    src,
+    dst,
+    stride_t,
+    T,
+    QD: tl.constexpr,
+    KD: tl.constexpr,
+    VD: tl.constexpr,
+    BLK: tl.constexpr,
+):
+    """Split the packed qkv into the fused buffer in a single kernel.
+
+    One program per (token, segment).  Reproduces exactly the layout the
+    previous 3x ``reshape`` + ``cat`` produced: [q for all tokens | k | v].
+    """
+    t = tl.program_id(0)
+    seg = tl.program_id(1)
+    off_src = tl.where(seg == 0, 0, tl.where(seg == 1, QD, QD + KD))
+    n = tl.where(seg == 0, QD, tl.where(seg == 1, KD, VD))
+    base_dst = tl.where(seg == 0, 0, tl.where(seg == 1, T * QD, T * (QD + KD)))
+    i = tl.arange(0, BLK)
+    m = i < n
+    x = tl.load(src + t * stride_t + off_src + i, mask=m, other=0)
+    tl.store(dst + base_dst + t * n + i, x, mask=m)

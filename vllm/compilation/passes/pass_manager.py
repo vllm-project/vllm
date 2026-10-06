@@ -229,6 +229,13 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
+        if envs.VLLM_JART_AR and envs.VLLM_JART_AR_FUSE:
+            from vllm.distributed.device_communicators.jart_all_reduce import (
+                make_jart_fusion_pass,
+            )
+
+            self.passes += [make_jart_fusion_pass(config)]
+
     def add(self, pass_: InductorPass) -> None:
         assert isinstance(pass_, InductorPass)
         self.passes.append(pass_)

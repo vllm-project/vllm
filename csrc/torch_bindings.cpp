@@ -17,6 +17,88 @@
 // https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
+// RDNA3 HIP kernels stay on the legacy _C extension (they use the full torch
+// API, not the stable ABI). get_cuda_view_from_cpu_tensor and the CUDA/CPU ops
+// migrated to the stable _C fragment in
+// csrc/libtorch_stable/torch_bindings.cpp.
+TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
+  // RDNA3 INT8 per-token-head paged prefill attention (gfx1100).
+  ops.def(
+      "paged_prefill_attn_rdna3_int8(Tensor! out, Tensor q, Tensor k_chunk, "
+      "Tensor v_chunk, Tensor k_cache, Tensor v_cache, "
+      "Tensor k_scale_cache, Tensor v_scale_cache, Tensor block_table, "
+      "Tensor cu_seqlens_q, Tensor seq_lens, int max_query_len, "
+      "float sm_scale, bool causal) -> ()");
+  ops.impl("paged_prefill_attn_rdna3_int8", torch::kCUDA,
+           &paged_prefill_attn_rdna3_int8);
+
+  // RDNA3 INT4 per-token-head paged prefill attention (gfx1100).
+  ops.def(
+      "paged_prefill_attn_rdna3_int4(Tensor! out, Tensor q, "
+      "Tensor k_cache, Tensor v_cache, "
+      "Tensor k_scale_cache, Tensor v_scale_cache, Tensor rht_signs, "
+      "Tensor block_table, "
+      "Tensor cu_seqlens_q, Tensor seq_lens, int max_query_len, "
+      "float sm_scale, bool causal) -> ()");
+  ops.impl("paged_prefill_attn_rdna3_int4", torch::kCUDA,
+           &paged_prefill_attn_rdna3_int4);
+
+  // Fused RHT + INT4 reshape_and_cache for RDNA3.
+  ops.def(
+      "reshape_cache_int4_rdna3(Tensor key, Tensor value, "
+      "Tensor key_cache, Tensor value_cache, "
+      "Tensor k_scale_cache, Tensor v_scale_cache, "
+      "Tensor rht_signs, Tensor slot_mapping) -> ()");
+  ops.impl("reshape_cache_int4_rdna3", torch::kCUDA, &reshape_cache_int4_rdna3);
+
+  // Inplace RHT butterfly for INT4 decode Q rotation / output unrotation.
+  ops.def(
+      "rht_rotate_inplace_rdna3(Tensor! data, Tensor rht_signs, "
+      "bool inverse, float post_scale) -> ()");
+  ops.impl("rht_rotate_inplace_rdna3", torch::kCUDA, &rht_rotate_inplace_rdna3);
+
+  // HIP split-KV decode attention for INT4 per-token-head (RDNA3).
+  ops.def(
+      "pth_decode_int4_rdna3(Tensor! out, Tensor query, "
+      "Tensor key_cache, Tensor value_cache, "
+      "Tensor k_scale_cache, Tensor v_scale_cache, "
+      "Tensor rht_signs, Tensor block_table, "
+      "Tensor q_to_req, Tensor q_to_klen, "
+      "Tensor! mid_o_buf, float sm_scale, int num_kv_splits) -> ()");
+  ops.impl("pth_decode_int4_rdna3", torch::kCUDA, &pth_decode_int4_rdna3);
+
+  // INT8 per-token-head decode for RDNA3.
+  ops.def(
+      "pth_decode_int8_rdna3(Tensor! out, Tensor query, "
+      "Tensor key_cache, Tensor value_cache, "
+      "Tensor k_scale_cache, Tensor v_scale_cache, "
+      "Tensor block_table, "
+      "Tensor q_to_req, Tensor q_to_klen, "
+      "Tensor! mid_o_buf, float sm_scale, int num_kv_splits) -> ()");
+  ops.impl("pth_decode_int8_rdna3", torch::kCUDA, &pth_decode_int8_rdna3);
+
+  // Octave KV cache (ROCm): store, split-KV decode, rotation, prefill.
+  ops.def(
+      "octave_cache_store(Tensor key, Tensor value, Tensor! cache, "
+      "Tensor slot_mapping, Tensor k_signs, Tensor v_signs, int fmt) -> ()");
+  ops.impl("octave_cache_store", torch::kCUDA, &octave_cache_store);
+  ops.def(
+      "octave_decode(Tensor! out, Tensor query, Tensor cache, "
+      "Tensor block_table, Tensor q_to_req, Tensor q_to_klen, "
+      "Tensor! mid_o, Tensor k_signs, Tensor v_signs, float sm_scale, "
+      "int num_kv_splits, int fmt, int query_group, bool use_wmma) -> ()");
+  ops.impl("octave_decode", torch::kCUDA, &octave_decode);
+  ops.def(
+      "octave_rotate(Tensor! x, Tensor signs, bool k_layout, bool inverse) "
+      "-> ()");
+  ops.impl("octave_rotate", torch::kCUDA, &octave_rotate);
+  ops.def(
+      "octave_prefill(Tensor! out, Tensor q, Tensor k, Tensor v, Tensor cache, "
+      "Tensor block_table, Tensor cu_seqlens_q, Tensor seq_lens, "
+      "int max_query_len, float sm_scale, int fmt) -> ()");
+  ops.impl("octave_prefill", torch::kCUDA, &octave_prefill);
+}
+
 #ifdef USE_ROCM
 TORCH_LIBRARY_FRAGMENT(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Quick Reduce all-reduce kernels (ROCm-only; stays on legacy _C).

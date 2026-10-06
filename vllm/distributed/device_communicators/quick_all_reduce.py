@@ -90,7 +90,8 @@ class QuickAllReduce:
         self.disabled = True
         if not self._rocm_arch_available():
             logger.debug(
-                "Custom quick allreduce is only supported on ROCm MI300 series."
+                "Custom quick allreduce is only supported on ROCm MI300 series "
+                "and RDNA3."
             )
             return
 
@@ -294,7 +295,7 @@ class QuickAllReduce:
         try:
             props = torch.cuda.get_device_properties(0)
             gcn_arch = getattr(props, "gcnArchName", "")
-            supported_archs = ["gfx94", "gfx95"]
+            supported_archs = ["gfx94", "gfx95", "gfx11"]
             return any(gfx in gcn_arch for gfx in supported_archs)
         except Exception as e:
             logger.warning("Failed to determine ROCm for quick allreduce: %s", e)

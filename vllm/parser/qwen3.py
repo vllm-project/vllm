@@ -48,10 +48,35 @@ FUNC_END = "</function>"
 PARAM_START = "<parameter="
 PARAM_END = "</parameter>"
 
+# PARCHE INCLOUD 21-ago-2026 — un `<parameter=` sin cerrar se comia lo que venia detras.
+#
+# El cierre de un parametro estaba SOLO en `</parameter>` o en el siguiente `<parameter=`.
+# Consecuencias medidas sobre 64 tool-calls rechazadas del registro del router:
+#
+#   · si el modelo no cierra el parametro, el valor sigue leyendo por encima de `</think>`
+#     y de la apertura de la llamada siguiente. Lo que llegaba al agente:
+#         {"path": "/tmp/probe.py\n</think>\n\n<tool_call>\n<function=edit>"}
+#
+#   · si el ULTIMO parametro se cierra con `</function>` en vez de `</parameter>` —cosa que
+#     el propio ejemplo de la plantilla invita a hacer— ese parametro DESAPARECE, sin error
+#     y sin aviso. La llamada llega con un argumento obligatorio menos.
+#
+# La cura: terminar tambien en las marcas estructurales, que no pueden aparecer dentro de un
+# valor. Van como `lookahead`, asi que NO se consumen y el resto del flujo las sigue viendo.
+#
+# Comprobado contra este mismo parser, cuatro casos, dos que deben cambiar y dos que no:
+#   dos parametros bien cerrados ................. igual
+#   valor que contiene la palabra `rethink` ...... igual   (no casa de mas)
+#   parametro abierto + `</think>` + otra llamada  {} -> {"path": "/tmp/probe.py"}
+#   ultimo cerrado con `</function>` ............. recupera el parametro perdido
 _PARAM_RE = re.compile(
     r"<\s*parameter\s*=\s*([^>]*)>"
     r"(.*?)"
-    r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))",
+    r"(?:<\s*/\s*parameter\s*>"
+    r"|(?=<\s*parameter\s*=)"
+    r"|(?=<\s*/\s*think\s*>)"
+    r"|(?=<\s*/\s*function\s*>)"
+    r"|(?=<\s*/?\s*tool_call\s*>))",
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)

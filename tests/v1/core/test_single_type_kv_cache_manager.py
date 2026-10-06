@@ -110,6 +110,108 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
         manager._relocate_speculative_block([pinned_block], 0)
 
 
+def _mamba_manager_for_zeroing(block_pool, block_size, needs_kv_cache_zeroing):
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((4,), (8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_cache_mode="align",
+    )
+    return MambaManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        needs_kv_cache_zeroing=needs_kv_cache_zeroing,
+    )
+
+
+def test_mamba_blocks_are_reported_for_zeroing():
+    """Mamba groups must report new blocks so the worker can zero them.
+
+    Cache groups alias the same bytes, so a block's tile is reinterpreted by
+    whichever group owns it -- quantized KV under attention, conv + ssm state
+    under Mamba. If Mamba blocks are never reported, a recycled block keeps the
+    KV bytes and the recurrent state starts out reading them as NaN/Inf.
+    """
+    block_size = 4
+    block_pool = BlockPool(
+        num_gpu_blocks=8, enable_caching=False, hash_block_size=block_size
+    )
+    manager = _mamba_manager_for_zeroing(
+        block_pool, block_size, needs_kv_cache_zeroing=True
+    )
+
+    blocks = manager.allocate_new_blocks(
+        "req", num_tokens=block_size, num_tokens_main_model=block_size
+    )
+    assert blocks
+
+    assert manager.records_new_block_ids
+    assert manager.take_new_block_ids() == [b.block_id for b in blocks]
+    assert manager.take_new_block_ids() == []
+
+
+def test_mamba_does_not_report_blocks_when_zeroing_is_disabled():
+    block_size = 4
+    block_pool = BlockPool(
+        num_gpu_blocks=8, enable_caching=False, hash_block_size=block_size
+    )
+    manager = _mamba_manager_for_zeroing(
+        block_pool, block_size, needs_kv_cache_zeroing=False
+    )
+
+    manager.allocate_new_blocks(
+        "req", num_tokens=block_size, num_tokens_main_model=block_size
+    )
+
+    assert not manager.records_new_block_ids
+    assert manager.take_new_block_ids() == []
+
+
+def test_block_freed_by_attention_and_reused_by_mamba_is_reported():
+    """The handover that produces NaN logits in production.
+
+    Attention writes quantized KV into the block, frees it, and a Mamba group
+    picks it up from the shared pool. Unless the block id is reported, those
+    bytes are never cleared and become the initial recurrent state.
+    """
+    block_size = 4
+    block_pool = BlockPool(
+        num_gpu_blocks=4, enable_caching=False, hash_block_size=block_size
+    )
+    attention_manager = FullAttentionManager(
+        FullAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        needs_kv_cache_zeroing=True,
+    )
+    mamba_manager = _mamba_manager_for_zeroing(
+        block_pool, block_size, needs_kv_cache_zeroing=True
+    )
+
+    attention_blocks = attention_manager.allocate_new_blocks(
+        "old", num_tokens=block_size, num_tokens_main_model=block_size
+    )
+    attention_manager.take_new_block_ids()
+    attention_manager.free("old")
+
+    mamba_blocks = mamba_manager.allocate_new_blocks(
+        "new", num_tokens=block_size, num_tokens_main_model=block_size
+    )
+    recycled = {b.block_id for b in attention_blocks} & {
+        b.block_id for b in mamba_blocks
+    }
+    assert recycled, "the freed block must be handed to Mamba for this to test anything"
+
+    assert recycled <= set(mamba_manager.take_new_block_ids())
+
+
 def test_mamba_retirement_crosses_null_gaps():
     spec = MambaSpec(
         block_size=4,

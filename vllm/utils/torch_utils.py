@@ -22,6 +22,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.config.cache import CacheDType
     from vllm.sequence import IntermediateTensors
 else:
     ModelConfig = object
@@ -50,6 +51,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
+    "octave_k3v4": torch.uint8,
+    "octave_k3v3": torch.uint8,
+    "octave_k3v3_compact": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
 }
@@ -78,6 +82,7 @@ PIN_MEMORY = is_pin_memory_available()
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return (
         kv_cache_dtype.startswith("fp8")
+        or kv_cache_dtype.startswith("int8")
         or kv_cache_dtype.endswith("per_token_head")
         or kv_cache_dtype.startswith("nvfp4")
     )
@@ -500,6 +505,19 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     return None
 
 
+def get_kv_cache_scheme_dtype(
+    scheme: dict[str, Any] | None,
+) -> "CacheDType | None":
+    """Map a ``kv_cache_scheme`` dict to a vLLM ``cache_dtype`` string."""
+    if not isinstance(scheme, dict):
+        return None
+    scheme_type = scheme.get("type", "float")
+    num_bits = scheme.get("num_bits")
+    if scheme_type == "float" and num_bits == 8:
+        return "fp8"
+    return None
+
+
 def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> str:
@@ -513,11 +531,15 @@ def resolve_kv_cache_dtype_string(
     if hf_cfg is not None:
         quant_cfg = getattr(hf_cfg, "quantization_config", None)
         if quant_cfg is not None:
-            kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-            if kv_algo_str is not None:
-                return kv_algo_str
+            modelopt_resolved = get_kv_cache_quant_algo_string(quant_cfg)
+            if modelopt_resolved is not None:
+                return modelopt_resolved
+            scheme_resolved = get_kv_cache_scheme_dtype(
+                quant_cfg.get("kv_cache_scheme")
+            )
+            if scheme_resolved is not None:
+                return scheme_resolved
 
-    # Default to auto (will be handled by downstream code)
     return "auto"
 
 

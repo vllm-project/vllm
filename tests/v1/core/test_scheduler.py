@@ -937,6 +937,37 @@ def test_update_from_output_routes_sampling_masks_by_request():
     assert all(out.new_sampling_mask.offsets is None for out in outputs)
 
 
+def test_nan_logits_recompute(monkeypatch: pytest.MonkeyPatch):
+    """With VLLM_NAN_LOGITS_RECOMPUTE, a request whose logits held NaNs gets no
+    tokens from that step, and the next schedule() recomputes every running
+    request from scratch instead of the engine dying."""
+    monkeypatch.setenv("VLLM_NAN_LOGITS_RECOMPUTE", "1")
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=2, max_tokens=10)
+    for req in requests:
+        scheduler.add_request(req)
+    output = scheduler.schedule()
+    bad, good = requests
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[0], [7]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={bad.request_id: 5, good.request_id: 0},
+    )
+    scheduler.update_from_output(output, model_output)
+    assert list(bad.output_token_ids) == []
+    assert list(good.output_token_ids) == [7]
+
+    output = scheduler.schedule()
+    # Both were preempted and rescheduled from token 0.
+    for req in requests:
+        assert output.num_scheduled_tokens[req.request_id] == req.num_tokens
+    assert all(req.num_preemptions == 1 for req in requests)
+
+
 def test_update_from_output_routes_multi_position_sampling_masks():
     scheduler = create_scheduler()
     scheduler.return_sampling_mask = True

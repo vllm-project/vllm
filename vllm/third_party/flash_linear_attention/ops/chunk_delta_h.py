@@ -349,6 +349,48 @@ def chunk_gated_delta_rule_fwd_h(
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
+    # --- GDN prefill OOB diagnostic (RDNA3 chunk_delta_h page-fault hunt) ---
+    # The kernel launches an N*H grid and, for program i_n, reads
+    # chunk_offsets[i_n] (-> boh) and cu_seqlens[i_n:i_n+2] (-> T), then writes
+    # chunks [boh .. boh+cdiv(T,BT)-1] into `h` (NT chunks). An OOB write at a
+    # high address can only happen if cu_seqlens / chunk_offsets / chunk_indices
+    # are mutually INCONSISTENT (e.g. the chunk metadata was built from a
+    # different query_start_loc than the one passed as cu_seqlens), or if the
+    # k/w/u token count T disagrees with cu_seqlens[-1]. These are FREE to check
+    # (shapes/len) and turn the silent GPU fault into a named Python error.
+    if cu_seqlens is not None:
+        if len(chunk_offsets) < N + 1:
+            raise RuntimeError(
+                "GDN chunk_delta_h OOB: len(chunk_offsets)="
+                f"{len(chunk_offsets)} < N+1={N + 1} "
+                f"(N=len(cu_seqlens)-1). NT=len(chunk_indices)={NT}, "
+                f"k.shape={tuple(k.shape)}, u.shape={tuple(u.shape)}, BT={BT}"
+            )
+        if B != 1:
+            raise RuntimeError(
+                f"GDN chunk_delta_h OOB: varlen expects B==1 but k.shape[0]={B}; "
+                f"k.shape={tuple(k.shape)}, cu_seqlens len={len(cu_seqlens)}"
+            )
+        # Value-level OOB check — ALWAYS ON (no env gate). Spawned workers do
+        # not inherit VLLM_GDN_DEBUG_OOB, so a gated check never runs in the
+        # worker that actually executes the kernel. Evaluated on-GPU with a
+        # single scalar sync on the happy path; the full tensor dump only
+        # happens when an inconsistency is detected.
+        _seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        _nt_local = (_seqlens + (BT - 1)) // BT
+        _max_chunk = (chunk_offsets[:N] + _nt_local[:N]).max()
+        _bad = (_max_chunk > NT) | (cu_seqlens[-1] != T) | (_seqlens < 0).any()
+        if bool(_bad.item()):
+            cs = cu_seqlens.detach().to("cpu").tolist()
+            co = chunk_offsets.detach().to("cpu").tolist()
+            raise RuntimeError(
+                "GDN chunk_delta_h OOB (deep): "
+                f"cu_seqlens[-1]={cs[-1]} vs T(k.shape[1])={T}; "
+                f"max_written_chunk={int(_max_chunk.item())} vs NT={NT}; "
+                f"N={N} BT={BT} k.shape={tuple(k.shape)} u.shape={tuple(u.shape)} "
+                f"cu_seqlens={cs} chunk_offsets={co}"
+            )
+
     h = k.new_empty(B, NT, H, V, K)
     final_state = (
         k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None

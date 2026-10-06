@@ -7,6 +7,9 @@ extern "C" {
 
 #if defined(__i386__) || defined(__x86_64__)
   #include <cpuid.h>
+  // Clang's <mwaitxintrin.h> refuses a direct include (#ifndef __X86INTRIN_H);
+  // ROCm bundles clang, so pull MONITORX/MWAITX via the umbrella header. GCC
+  // (CUDA builds) accepts either, so this is safe everywhere.
   #include <x86intrin.h>
 #endif
 

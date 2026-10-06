@@ -65,8 +65,8 @@ from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
-from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
-    FLA_CHUNK_SIZE,
+from vllm.third_party.flash_linear_attention.ops.utils import (
+    FLA_CHUNK_SIZE,  # noqa: E402
 )
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,

@@ -505,6 +505,7 @@ def _get_backend_priorities(
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
+    backends.append(AttentionBackendEnum.ROCM_OCTAVE)
 
     return backends
 
@@ -893,6 +894,19 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         """Query if the set of gpus are fully connected by xgmi (1 hop)."""
+        if "gfx11" in _GCN_ARCH:
+            # RDNA3 dGPUs are never XGMI connected, so fall back to whether
+            # the driver grants peer access between every pair. That is the
+            # property the custom allreduce actually needs to map its IPC
+            # buffers; the link underneath is PCIe.
+            num_devices = len(physical_device_ids)
+            return all(
+                torch.cuda.can_device_access_peer(i, j)
+                for i in range(num_devices)
+                for j in range(num_devices)
+                if i != j
+            )
+
         handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
@@ -1095,8 +1109,19 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        # We only enable custom allreduce for MI300 series
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"])
+        # MI300/MI350 series are XGMI connected. RDNA3 dGPUs have no
+        # inter-GPU XGMI, but the driver does expose P2P over PCIe on some
+        # boards, which is enough for the custom allreduce buffers; see
+        # is_fully_connected() for the capability check.
+        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx11"])
+
+    @classmethod
+    def use_custom_allreduce_graph_registration(cls) -> bool:
+        # Registering the graph's own buffers only yields valid peer pointers
+        # over XGMI. On the PCIe-connected RDNA3 dGPUs the registration
+        # succeeds but the reduction reads garbage, so captured all reduces
+        # have to go through the buffer registered at init instead.
+        return "gfx11" not in _GCN_ARCH
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

@@ -7,6 +7,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+from vllm.v1.worker.gpu.spec_decode.mtp.draft_vocab import maybe_install_draft_vocab
 
 
 class MTPSpeculator(AutoRegressiveSpeculator):
@@ -32,6 +33,11 @@ class MTPSpeculator(AutoRegressiveSpeculator):
             and getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
             and hasattr(draft_model.model, "set_skip_topk")
             and hasattr(draft_model.model, "compact_topk_indices")
+        )
+        maybe_install_draft_vocab(
+            draft_model,
+            self.vocab_size,
+            self.max_num_reqs * (self.num_speculative_steps + 1),
         )
         return draft_model
 

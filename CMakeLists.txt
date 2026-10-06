@@ -371,6 +371,30 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_EXT_SRC
     "csrc/torch_bindings.cpp"
     "csrc/custom_quickreduce.cu")
+  # RDNA3 INT8 per-token-head paged prefill attention (gfx1100)
+  list(APPEND VLLM_EXT_SRC
+    "csrc/attention/paged_prefill_attn_rdna3_v2_int8.cu"
+  )
+  # RDNA3 INT4 per-token-head paged prefill attention (gfx1100)
+  list(APPEND VLLM_EXT_SRC
+    "csrc/attention/paged_prefill_attn_rdna3_v2_int4.cu"
+  )
+  # RDNA3 INT4 fused reshape_and_cache (RHT + quantize + pack, gfx1100)
+  list(APPEND VLLM_EXT_SRC
+    "csrc/attention/reshape_cache_int4_rdna3.cu"
+  )
+  # RDNA3 INT4/INT8 HIP decode attention (split-KV, gfx1100)
+  list(APPEND VLLM_EXT_SRC
+    "csrc/attention/pth_decode_int4_rdna3.cu"
+    "csrc/attention/pth_decode_int8_rdna3.cu"
+    "csrc/attention/pth_decode_int8_rdna3_wmma.cu"
+  )
+  # Octave KV cache (store, decode, rotation, prefill)
+  list(APPEND VLLM_EXT_SRC
+    "csrc/attention/octave_attn.cu"
+    "csrc/attention/octave_decode_wmma_rdna3.cu"
+    "csrc/attention/octave_prefill_rdna3.cu"
+  )
 
   message(STATUS "Enabling C extension.")
   define_extension_target(
@@ -1539,7 +1563,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
-      "csrc/rocm/moe_q_gemm_rdna3.cu")
+      "csrc/rocm/moe_q_gemm_rdna3.cu"
+      "csrc/rocm/jart_ar.cu")
   endif()
 
   define_extension_target(

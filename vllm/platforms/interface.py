@@ -785,7 +785,8 @@ class Platform:
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
             )
             # The backend owns its packing
-            return backend_cls.customize_spec(spec).page_size_bytes
+            with set_current_vllm_config(vllm_config):
+                return backend_cls.customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -945,9 +946,11 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            attn_page_size_1_token = backend_cls.customize_spec(
-                attn_spec
-            ).page_size_bytes
+            # customize_spec may read the model config (e.g. Octave's rotary dim).
+            with set_current_vllm_config(vllm_config):
+                attn_page_size_1_token = backend_cls.customize_spec(
+                    attn_spec
+                ).page_size_bytes
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -1177,6 +1180,14 @@ class Platform:
     def use_custom_allreduce(cls) -> bool:
         """Returns if custom allreduce is supported on the current platform."""
         return False
+
+    @classmethod
+    def use_custom_allreduce_graph_registration(cls) -> bool:
+        """Returns if the buffers a cuda graph captures can be IPC-registered, so
+        that captured all reduces read the input tensor in place instead of
+        copying it into the pre-registered buffer.
+        """
+        return True
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

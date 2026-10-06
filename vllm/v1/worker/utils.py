@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -53,6 +54,10 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
         for req_id, num_nans in num_nans_in_logits.items()
         if num_nans > 0
     }
+    if envs.VLLM_NAN_LOGITS_RECOMPUTE:
+        # The scheduler drops these tokens and recomputes the requests.
+        logger.warning("NaNs detected in logits: %s", corrupted_requests)
+        return
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
 
 

@@ -55,6 +55,10 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
+    # Hadamard-rotated Lloyd-Max codes, packed K+V per slot (ROCm).
+    OCTAVE_K3V4 = 11
+    OCTAVE_K3V3 = 12
+    OCTAVE_K3V3_COMPACT = 13
 
     @property
     def is_per_token_head(self) -> bool:
@@ -69,6 +73,36 @@ class KVQuantMode(IntEnum):
     def is_nvfp4(self) -> bool:
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
+
+    @property
+    def packing_factor(self) -> int:
+        """Number of quantized values stored per cache byte (1 unless packed)."""
+        if self == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            return 2
+        return 1
+
+    def packed_head_size(self, head_size: int) -> int:
+        """Storage head size after packing: ``head_size // packing_factor``."""
+        factor = self.packing_factor
+        assert head_size % factor == 0, (
+            f"head_size={head_size} is not divisible by packing factor "
+            f"{factor} required by {self.name}"
+        )
+        return head_size // factor
+
+    @property
+    def is_octave(self) -> bool:
+        """True for any Octave quantization mode."""
+        return self in (
+            KVQuantMode.OCTAVE_K3V4,
+            KVQuantMode.OCTAVE_K3V3,
+            KVQuantMode.OCTAVE_K3V3_COMPACT,
+        )
+
+    @property
+    def uses_per_query_maps(self) -> bool:
+        """True when kernels take per-query request and causal-length maps."""
+        return self.is_per_token_head or self.is_octave
 
     @property
     def is_turboquant(self) -> bool:
@@ -97,6 +131,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+        return KVQuantMode[kv_cache_dtype.upper()]
+    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("octave_"):
         return KVQuantMode[kv_cache_dtype.upper()]
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR

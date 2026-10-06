@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -203,19 +204,40 @@ class ForwardContext:
 
 
 _forward_context: ForwardContext | None = None
+# Threads that run a forward concurrently with the main one (see
+# use_thread_local_forward_context) keep their context here instead.
+_thread_state = threading.local()
+
+
+def use_thread_local_forward_context() -> None:
+    """Give the calling thread its own forward context.
+
+    For a thread that runs a forward pass while another thread runs one too;
+    threads that never call this keep sharing the module-level context.
+    """
+    _thread_state.ctx = None
+
+
+def has_thread_local_forward_context() -> bool:
+    return "ctx" in _thread_state.__dict__
+
+
+def _current_forward_context() -> ForwardContext | None:
+    return _thread_state.__dict__.get("ctx", _forward_context)
 
 
 def get_forward_context() -> ForwardContext:
     """Get the current forward context."""
-    assert _forward_context is not None, (
+    forward_context = _current_forward_context()
+    assert forward_context is not None, (
         "Forward context is not set. "
         "Please use `set_forward_context` to set the forward context."
     )
-    return _forward_context
+    return forward_context
 
 
 def is_forward_context_available() -> bool:
-    return _forward_context is not None
+    return _current_forward_context() is not None
 
 
 def in_piecewise_cudagraph() -> bool:
@@ -266,6 +288,15 @@ def override_forward_context(forward_context: ForwardContext | None):
     forward pass.
     """
     global _forward_context
+    local = _thread_state.__dict__
+    if "ctx" in local:
+        prev_context = local["ctx"]
+        local["ctx"] = forward_context
+        try:
+            yield
+        finally:
+            local["ctx"] = prev_context
+        return
     prev_context = _forward_context
     _forward_context = forward_context
     try:

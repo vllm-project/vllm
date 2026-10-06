@@ -61,10 +61,11 @@ class AttentionConfig:
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
 
-    tq_max_kv_splits_for_cuda_graph: int = 32
+    tq_max_kv_splits_for_cuda_graph: int = 64
     """TurboQuant max NUM_KV_SPLITS for cuda graph decode.
     Fixes the split count so grid dimensions are constant across captures,
-    and buffers can be pre-allocated to avoid inflating the memory estimate."""
+    and buffers can be pre-allocated to avoid inflating the memory estimate.
+    64 is optimal for the 1-wave scalar v3 kernel (needs high occupancy)."""
 
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend

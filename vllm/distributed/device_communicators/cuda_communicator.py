@@ -194,6 +194,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # an MI300 series.
             self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
+        # VLLM_JART_AR: LL-protocol all-reduce for gfx11 TP4 under graph capture.
+        self.jart_ar_comm = None
+        if current_platform.is_rocm() and unique_name.split(":")[0] == "tp":
+            from .jart_all_reduce import maybe_create_jart_all_reduce
+
+            self.jart_ar_comm = maybe_create_jart_all_reduce(
+                self.cpu_group, self.device, self.world_size
+            )
+
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
 
@@ -358,6 +367,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        jart_ar_comm = getattr(self, "jart_ar_comm", None)
+        if jart_ar_comm is not None and jart_ar_comm.should_use(input_):
+            return jart_ar_comm.all_reduce(input_)
         fi_ar_comm = self.fi_ar_comm
         use_fi_ar = (
             fi_ar_comm is not None

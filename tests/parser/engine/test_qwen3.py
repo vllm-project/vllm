@@ -698,6 +698,92 @@ class TestArgConverter:
         assert result == {"city": "Tokyo", "expr": "x<5"}
 
 
+class TestParamBoundaryTerminators:
+    """A `<parameter=` left unclosed must stop at the surrounding structure.
+
+    Before this, a parameter ended only at `</parameter>` or at the next
+    `<parameter=`. Two things followed from that, both observed in production
+    traffic (64 rejected `edit` tool calls over 34 sessions):
+
+    1. An unclosed parameter swallowed everything after it, including the
+       reasoning terminator and the opening of the next tool call. What reached
+       the agent was
+       ``{"path": "/tmp/probe.py\\n</think>\\n\\n<tool_call>\\n<function=edit>"}``.
+
+    2. When the LAST parameter was closed with `</function>` instead of
+       `</parameter>` -- which the prompt's own example invites, since it ends
+       the list there -- that parameter was dropped silently. The call arrived
+       missing a required argument, with no error anywhere.
+
+    The terminators are lookaheads, so they are not consumed and the rest of the
+    engine still sees them.
+    """
+
+    def test_unclosed_param_stops_at_reasoning_end(self):
+        from vllm.parser.qwen3 import _qwen3_arg_converter
+
+        raw = (
+            "<parameter=path>\n/tmp/probe.py\n"
+            "</think>\n\n<tool_call>\n<function=edit>\n"
+        )
+        result = json.loads(_qwen3_arg_converter(raw, partial=False))
+        assert result == {"path": "/tmp/probe.py"}
+
+    def test_last_param_closed_by_function_end_is_kept(self):
+        from vllm.parser.qwen3 import _qwen3_arg_converter
+
+        raw = (
+            "<parameter=path>\n/tmp/x.py\n</parameter>\n"
+            "<parameter=oldText>\nfoo\nbar\n</function>\n</tool_call>"
+        )
+        result = json.loads(_qwen3_arg_converter(raw, partial=False))
+        assert result == {"path": "/tmp/x.py", "oldText": "foo\nbar"}
+
+    def test_last_param_closed_by_tool_call_end_is_kept(self):
+        from vllm.parser.qwen3 import _qwen3_arg_converter
+
+        raw = (
+            "<parameter=path>\n/tmp/x.py\n</parameter>\n<parameter=b>\nhi\n</tool_call>"
+        )
+        result = json.loads(_qwen3_arg_converter(raw, partial=False))
+        assert result == {"path": "/tmp/x.py", "b": "hi"}
+
+    def test_value_containing_the_word_think_is_untouched(self):
+        """The terminators are tags, not substrings: `rethink` must not match."""
+        from vllm.parser.qwen3 import _qwen3_arg_converter
+
+        raw = "<parameter=path>\n/tmp/rethink_helper.py\n</parameter>\n"
+        result = json.loads(_qwen3_arg_converter(raw, partial=False))
+        assert result == {"path": "/tmp/rethink_helper.py"}
+
+    def test_value_containing_an_unrelated_closing_tag_is_untouched(self):
+        """Only the three structural closers terminate a value."""
+        from vllm.parser.qwen3 import _qwen3_arg_converter
+
+        raw = "<parameter=html>\n<div>x</div>\n</parameter>\n"
+        result = json.loads(_qwen3_arg_converter(raw, partial=False))
+        assert result == {"html": "<div>x</div>"}
+
+    def test_well_formed_call_is_unchanged(self):
+        from vllm.parser.qwen3 import _qwen3_arg_converter
+
+        raw = (
+            "<parameter=a>\n1\n</parameter>\n"
+            "<parameter=b>\n2\n</parameter>\n"
+            "<parameter=c>\n3\n</parameter>\n"
+        )
+        result = json.loads(_qwen3_arg_converter(raw, partial=False))
+        assert result == {"a": "1", "b": "2", "c": "3"}
+
+    def test_streaming_partial_still_captures(self):
+        """The same regex drives streaming; a value still in flight must survive."""
+        from vllm.parser.qwen3 import _qwen3_arg_converter
+
+        raw = "<parameter=path>\n/tmp/half_writ"
+        result = json.loads(_qwen3_arg_converter(raw, partial=True))
+        assert result == {"path": "/tmp/half_writ"}
+
+
 class TestSchemaAwareTypeCoercion:
     """Verify that _fix_arg_types corrects miscoerced values using the
     tool schema."""

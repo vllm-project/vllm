@@ -274,6 +274,29 @@ class CustomAllreduce:
                 "specify disable_custom_all_reduce=True explicitly."
             )
             return
+        # This collective is a pull: every rank reads every peer's buffer.
+        # A PCIe root complex that does not route peer-to-peer reads answers
+        # those loads with zeros instead of an error, so each rank reduces its
+        # own contribution against zero and the model emits garbage with
+        # nothing logged. Writes are unaffected, which is why a DMA bandwidth
+        # test passes on such a box. QuickReduce pushes and works there.
+        # TODO: replace the architecture test with a peer-read probe, so a
+        # gfx11 pair that does sit behind one switch keeps this path.
+        # VLLM_RDNA3_CUSTOM_AR_CAP=<bytes> keeps it on for a box known to route
+        # peer reads, capped: above ~48 KB it loses to NCCL on gfx11.
+        if current_platform.is_rocm() and "gfx11" in getattr(
+            torch.cuda.get_device_properties(0), "gcnArchName", ""
+        ):
+            if envs.VLLM_RDNA3_CUSTOM_AR_CAP <= 0:
+                logger.warning(
+                    "Custom allreduce is disabled on gfx11: this collective "
+                    "reads peer buffers, which a desktop root complex may not "
+                    "route. Set VLLM_RDNA3_CUSTOM_AR_CAP on a box that does."
+                )
+                return
+            max_size = min(max_size, envs.VLLM_RDNA3_CUSTOM_AR_CAP)
+            logger.info("Custom allreduce on gfx11, capped at %d bytes", max_size)
+
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
@@ -334,6 +357,10 @@ class CustomAllreduce:
         self.rank = rank
         self.world_size = world_size
         self.fully_connected = fully_connected
+        self._capture_registered = (
+            self._capture_registered
+            and current_platform.use_custom_allreduce_graph_registration()
+        )
         self._ptr = ops.init_custom_ar(
             self.meta_ptrs, self.rank_data, rank, self.fully_connected
         )
@@ -475,6 +502,11 @@ class CustomAllreduce:
         finally:
             self._IS_CAPTURING = False
             if not self.disabled:
+                # Always required, even when the captured all reduces take the
+                # copy-into-the-init-buffer path: capture records every buffer
+                # the collective saw, and this call is what drains that list
+                # and patches the recorded pointers. Skipping it leaves them
+                # unresolved and the first graph replay faults.
                 self.register_graph_buffers()
 
     def register_graph_buffers(self):

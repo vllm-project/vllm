@@ -62,13 +62,31 @@ __quickreduce_device_inline__ __host__ unsigned long divceil(unsigned long x,
   return ((x + y - 1) / y);
 }
 
+// Word 3 of the buffer resource descriptor. gfx9 encodes DATA_FORMAT and
+// NUM_FORMAT there; RDNA (gfx10 and later) replaced those fields, so the CDNA
+// constant makes every buffer_load return zero on an RDNA part and the
+// collective reduces zeros without reporting an error.
+#if defined(__gfx1010__) || defined(__gfx1011__) || defined(__gfx1012__) || \
+    defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || \
+    defined(__gfx1033__) || defined(__gfx1034__) || defined(__gfx1035__) || \
+    defined(__gfx1036__) || defined(__gfx1100__) || defined(__gfx1101__) || \
+    defined(__gfx1102__) || defined(__gfx1103__) || defined(__gfx1150__) || \
+    defined(__gfx1151__) || defined(__gfx1152__) || defined(__gfx1153__) || \
+    defined(__gfx1200__) || defined(__gfx1201__)
+  #define QR_BUFFER_RESOURCE_CONFIG 0x31014000U
+#else
+  #define QR_BUFFER_RESOURCE_CONFIG 0x00020000U
+#endif
+
 union BufferResource {
   __quickreduce_device_inline__ constexpr BufferResource()
-      : config(0x00020000U) {}
+      : config(QR_BUFFER_RESOURCE_CONFIG) {}
 
   __quickreduce_device_inline__ constexpr BufferResource(void* buffer_address,
                                                          uint32_t buffer_size)
-      : address(buffer_address), range(buffer_size), config(0x00020000U) {}
+      : address(buffer_address),
+        range(buffer_size),
+        config(QR_BUFFER_RESOURCE_CONFIG) {}
 
   int32x4_t descriptor;
   struct {

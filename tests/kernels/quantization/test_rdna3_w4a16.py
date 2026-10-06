@@ -220,6 +220,8 @@ MKNG_SHAPES = [
     (1, 128, 128, 128),  # single group, decode
     (2, 256, 256, 128),  # two groups
     (8, 256, 512, 64),  # M=8 scalar, smaller group
+    (4, 1024, 256, 128),  # fp16 M 1..10 with K/8 a multiple of G -> v_dot2
+    (10, 2048, 512, 32),  # v_dot2, several groups per wave
     (16, 512, 256, 128),  # M=16 -> WMMA path for bf16
     (32, 512, 512, 64),  # larger prefill
 ]

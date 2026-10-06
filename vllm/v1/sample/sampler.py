@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -15,6 +16,8 @@ from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+
+logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 
@@ -233,10 +236,52 @@ class Sampler(nn.Module):
         all_random: bool,
     ) -> torch.Tensor:
         # Use in-place division to avoid creating a new tensor.
-        # Avoid division by zero if there are greedy requests.
-        if not all_random:
-            temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
+        # The zero guard is unconditional. `all_random` only says that no
+        # request in *this* batch is greedy; it does not say the device buffer
+        # is free of zeros. That buffer is persistent and filled by an async
+        # H2D copy from a pinned tensor the scheduler mutates in place, so a
+        # 0.0 written for a greedy request can still be read on a later step.
+        # Dividing by it gives inf, softmax turns that into NaN, and argmax
+        # over a NaN row returns 0 -- token id 0, emitted silently.
+        if all_random:
+            Sampler._count_zero_temperature(temp)
+        temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
         return logits.div_(temp.unsqueeze(dim=1))
+
+    _zero_temp_count: torch.Tensor | None = None
+    _zero_temp_seen: int = 0
+    _zero_temp_calls: int = 0
+
+    @staticmethod
+    def _count_zero_temperature(temp: torch.Tensor) -> None:
+        """Report zero temperatures reaching an all-random batch.
+
+        The guard above makes them harmless, so this is the only way to tell
+        whether the stale-copy path is real. The accumulator lives on device
+        and is read once every 1000 calls to keep the hot path free of syncs.
+        """
+        cls = Sampler
+        if cls._zero_temp_count is None or cls._zero_temp_count.device != temp.device:
+            cls._zero_temp_count = torch.zeros(
+                (), dtype=torch.int64, device=temp.device
+            )
+        cls._zero_temp_count += (temp < _SAMPLING_EPS).sum()
+        cls._zero_temp_calls += 1
+        if cls._zero_temp_calls % 1000:
+            return
+        with gpu_sync_allowed():
+            total = int(cls._zero_temp_count.item())
+        if total > cls._zero_temp_seen:
+            logger.warning(
+                "%d row(s) reached an all-random batch with temperature < eps "
+                "(+%d since the last report, over %d calls). The unconditional "
+                "guard neutralised them; without it they would have produced "
+                "NaN logits and token id 0.",
+                total,
+                total - cls._zero_temp_seen,
+                cls._zero_temp_calls,
+            )
+            cls._zero_temp_seen = total
 
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
