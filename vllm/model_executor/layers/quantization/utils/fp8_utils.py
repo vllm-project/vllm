@@ -142,8 +142,8 @@ def _silu_mul_quant_fp8_packed_kernel(
     input_ptr,
     output_q_ptr,
     output_scale_ptr,
-    expert_ends_ptr,
     expert_ids_ptr,
+    expert_ends_ptr,
     M,
     input_stride_m,
     output_q_stride_m,
@@ -160,8 +160,8 @@ def _silu_mul_quant_fp8_packed_kernel(
     PACKS_PER_CTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
-    EXPERT_ALIGNMENT: tl.constexpr,
     HAS_EXPERT_IDS: tl.constexpr,
+    EXPERT_ALIGNMENT: tl.constexpr,
 ):
     GROUPS_PER_PACK: tl.constexpr = 4
     hidden_size: tl.constexpr = N // 2
@@ -347,8 +347,8 @@ def silu_mul_quant_fp8_packed_triton(
         input,
         output_q,
         output_scale_packed,
-        expert_ends,
         expert_ids,
+        expert_ends,
         M,
         input.stride(0),
         output_q.stride(0),
@@ -365,8 +365,8 @@ def silu_mul_quant_fp8_packed_triton(
         PACKS_PER_CTA=packs_per_cta,
         BLOCK_M=BM,
         HAS_CLAMP=has_clamp,
-        EXPERT_ALIGNMENT=expert_alignment,
         HAS_EXPERT_IDS=expert_ids is not None,
+        EXPERT_ALIGNMENT=expert_alignment,
         num_warps=num_warps,
         num_stages=num_stages,
     )
