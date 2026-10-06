@@ -113,6 +113,18 @@ def test_synthid_native_partial_context_changes_stream():
     )
 
 
+@pytest.mark.parametrize(
+    "constructor",
+    [SynthIDWatermarker, SynthIDWatermarkDetector],
+)
+def test_synthid_warns_for_large_context_width(constructor):
+    with pytest.warns(
+        UserWarning,
+        match="context_width values greater than 16 reduce robustness to edits",
+    ):
+        constructor(42, context_width=17)
+
+
 def test_synthid_sample_uses_watermarked_logits_and_skip_mask():
     watermarker = SynthIDWatermarker(42, context_width=3, depth=5)
     logits = torch.tensor([[0.2, 0.4, -0.1], [0.3, -0.2, 0.5]])
