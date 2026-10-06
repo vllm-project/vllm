@@ -13,6 +13,7 @@ import torch
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointBuilder
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
@@ -26,7 +27,11 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
-from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlockCopy,
+    partial_hash_hits_enabled,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -325,6 +330,42 @@ class AttentionGroup:
     ) -> None:
         metadata = attn_metadata[self.layer_names[0]]
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
+
+
+def initialize_mamba_checkpoint_builders(
+    attn_groups: Iterable[AttentionGroup],
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+) -> None:
+    """Set resolved block sizes on target and draft Mamba checkpoint builders."""
+    checkpoint_builders = []
+    for group in attn_groups:
+        for builder in group.metadata_builders:
+            checkpoint_builder = getattr(builder, "checkpoint_builder", None)
+            if (
+                isinstance(checkpoint_builder, MambaPrefillCheckpointBuilder)
+                and checkpoint_builder.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+            ):
+                checkpoint_builders.append(checkpoint_builder)
+    if not checkpoint_builders:
+        return
+    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    )
+    mamba_ckpt_block_size = (
+        hash_block_size
+        if partial_hash_hits_enabled(
+            kv_cache_config.kv_cache_groups,
+            hash_block_size,
+            vllm_config.parallel_config.decode_context_parallel_size,
+        )
+        else scheduler_block_size
+    )
+    for builder in checkpoint_builders:
+        builder.set_block_sizes(
+            hash_block_size=hash_block_size,
+            mamba_ckpt_block_size=mamba_ckpt_block_size,
+        )
 
 
 def select_common_block_size(

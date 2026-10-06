@@ -268,8 +268,6 @@ def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
     assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
     assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
     config = CacheConfig()
-    config.hash_block_size = 128
-    config.mamba_ckpt_block_size = 7168
     config.effective_attention_block_size = 64
     assert config.compute_hash() == base_hash
 

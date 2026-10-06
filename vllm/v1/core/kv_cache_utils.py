@@ -766,27 +766,6 @@ def eagle_proof_margin(
     return block_size
 
 
-def initialize_prefix_cache_block_sizes(
-    kv_cache_config: KVCacheConfig,
-    vllm_config: VllmConfig,
-) -> None:
-    """Resolve checkpoint sizes before normal or profiling cache initialization."""
-    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
-        kv_cache_config, vllm_config
-    )
-    cache_config = vllm_config.cache_config
-    cache_config.hash_block_size = hash_block_size
-    cache_config.mamba_ckpt_block_size = (
-        hash_block_size
-        if partial_hash_hits_enabled(
-            kv_cache_config.kv_cache_groups,
-            hash_block_size,
-            vllm_config.parallel_config.decode_context_parallel_size,
-        )
-        else scheduler_block_size
-    )
-
-
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,

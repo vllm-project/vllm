@@ -125,10 +125,6 @@ def _make_builder(
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     hash_block_size = hash_block_size or prefix_match_unit or mamba_block_size
-    vllm_config.cache_config.hash_block_size = hash_block_size
-    vllm_config.cache_config.mamba_ckpt_block_size = (
-        mamba_ckpt_block_size or hash_block_size
-    )
     builder = builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=mamba_block_size,
@@ -144,6 +140,10 @@ def _make_builder(
         layer_names=["layer.0"],
         vllm_config=vllm_config,
         device=device,
+    )
+    builder.checkpoint_builder.set_block_sizes(
+        hash_block_size=hash_block_size,
+        mamba_ckpt_block_size=mamba_ckpt_block_size or hash_block_size,
     )
     if use_recoverssm:
         assert isinstance(builder, KimiK3KDAMetadataBuilder)
@@ -204,8 +204,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             mamba_cache_mode="align",
             use_kda_recoverssm=True,
             prefix_match_unit=None,
-            hash_block_size=BLOCK_SIZE,
-            mamba_ckpt_block_size=BLOCK_SIZE,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         speculative_config=SimpleNamespace(
@@ -229,6 +227,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         vllm_config=builder_config,
         device=DEVICE,
     )
+    builder.checkpoint_builder.set_block_sizes(BLOCK_SIZE, BLOCK_SIZE)
 
     # An all-prefill speculative batch used to leave an all-false spec mask
     # alive, then access active_non_spec_mask_cpu before it was initialized.

@@ -73,13 +73,9 @@ def _builder(
     )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
-    vllm_config.cache_config.hash_block_size = prefix_match_unit or block_size
-    vllm_config.cache_config.mamba_ckpt_block_size = (
-        vllm_config.cache_config.hash_block_size
-    )
     if num_spec:
         vllm_config.speculative_config = _StubSpeculativeConfig(num_spec)
-    return KimiK3ROCmKDAMetadataBuilder(
+    builder = KimiK3ROCmKDAMetadataBuilder(
         kv_cache_spec=MambaSpec(
             block_size=block_size,
             shapes=((16, 64),),
@@ -95,6 +91,11 @@ def _builder(
         vllm_config=vllm_config,
         device=torch.device("cuda"),
     )
+    builder.checkpoint_builder.set_block_sizes(
+        hash_block_size=prefix_match_unit or block_size,
+        mamba_ckpt_block_size=prefix_match_unit or block_size,
+    )
+    return builder
 
 
 def _build(batch: BatchSpec, block_size: int = BLOCK_SIZE, **kw):
