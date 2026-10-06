@@ -258,8 +258,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_tokens_meta = None
 
         if recv_topk_idx is None:
-            # do_expand=True (eager mode): build topk_ids from
-            # per-expert token counts.
+            # do_expand=True: build topk_ids from per-expert token counts.
             assert expert_tokens_meta is not None
             total_tokens = sum(recv_expert_num_tokens)
             if total_tokens > 0:
