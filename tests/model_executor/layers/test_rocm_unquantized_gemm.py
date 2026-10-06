@@ -216,10 +216,11 @@ def _patch_rocm_skinny_platform(monkeypatch):
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
 
 
-def _decode_branch_mocks(monkeypatch, capturing: bool):
+def _decode_branch_mocks(monkeypatch, capturing: bool, in_graph_capture=False):
     """Stand-in aiter `tgemm` (no aiter build needed) and wvSplitK mocks."""
     _patch_rocm_skinny_platform(monkeypatch)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+    monkeypatch.setattr(utils, "in_graph_capture", lambda: in_graph_capture)
     monkeypatch.setattr(
         utils.rocm_aiter_ops, "has_tuned_decode_gemm", lambda *args: True
     )
@@ -245,6 +246,21 @@ def test_rocm_unquantized_gemm_aiter_decode_under_capture(monkeypatch):
     wvsplitk_mock.assert_not_called()
     assert tgemm.mm.call_args.args[0].data_ptr() == x.data_ptr()
     torch.testing.assert_close(out, torch.nn.functional.linear(x, weight))
+
+
+def test_rocm_unquantized_gemm_capture_warmup_takes_aiter_path(monkeypatch):
+    # The warmup run before a capture is eager but inside graph_capture(); it
+    # must take the same path as the capture, so aiter JIT-compiles there.
+    x = torch.randn(4, 64, dtype=torch.bfloat16)
+    weight = torch.randn(128, 64, dtype=torch.bfloat16)
+    tgemm, wvsplitk_mock = _decode_branch_mocks(
+        monkeypatch, capturing=False, in_graph_capture=True
+    )
+
+    utils.rocm_unquantized_gemm_impl(x, weight, None)
+
+    tgemm.mm.assert_called_once()
+    wvsplitk_mock.assert_not_called()
 
 
 def test_rocm_unquantized_gemm_eager_keeps_wvsplitk(monkeypatch):

@@ -11,6 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed.parallel_state import in_graph_capture
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
@@ -333,8 +334,10 @@ def rocm_unquantized_gemm_impl(
 
         return gemm_a16w16(x, weight, bias)
 
+    # Graph capture only, warmup included: the warmup run before each capture
+    # takes the same path, so aiter's kernel JIT happens there, not in capture.
     if (
-        torch.cuda.is_current_stream_capturing()
+        (in_graph_capture() or torch.cuda.is_current_stream_capturing())
         and skinny_operands_compatible
         and rocm_aiter_ops.has_tuned_decode_gemm(n, m, k, x.dtype, bias is not None)
     ):
