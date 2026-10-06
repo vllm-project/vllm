@@ -247,18 +247,15 @@ def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
 
 
 def _bf16_gemm_shape_is_tuned(N: int, K: int) -> bool:
-    # get_GEMM_A16W16_config never returns None (it builds a default), so probe
-    # the tuned table directly. Keys: (gfx, cu_num, M, N, K, bias, dtype,
-    # outdtype, scaleAB, bpreshuffle).
+    # get_GEMM_A16W16_config builds a default on a miss; only tuned rows carry
+    # the tuner's "us" field.
     try:
-        from aiter.jit.utils.chip_info import get_cu_num, get_gfx
-        from aiter.tuned_gemm import get_GEMM_A16W16_config_
+        from aiter.tuned_gemm import get_GEMM_A16W16_config
 
-        gfx, cu_num, bf16 = get_gfx(), get_cu_num(), str(torch.bfloat16)
+        bf16 = str(torch.bfloat16)
         return any(
-            key[:2] == (gfx, cu_num)
-            and key[3:] == (N, K, False, bf16, bf16, False, False)
-            for key in get_GEMM_A16W16_config_()
+            "us" in get_GEMM_A16W16_config(M, N, K, False, bf16, bf16)
+            for M in (1, 2, 4, 8, 16, 32, 64, 128, 256)
         )
     except (AttributeError, ImportError, OSError):
         logger.warning_once(
