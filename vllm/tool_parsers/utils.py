@@ -368,15 +368,22 @@ def _get_tool_schema_defs(
 ) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
     for tool in tools:
-        _, params = _extract_tool_info(tool)
+        name, params = _extract_tool_info(tool)
         if params is None:
             continue
         defs = params.pop("$defs", {})
+        if not isinstance(defs, dict):
+            raise VLLMValidationError(
+                f"`$defs` in the parameters of tool '{name}' must be an "
+                f"object, got {type(defs).__name__}.",
+                parameter="tools",
+            )
         for def_name, def_schema in defs.items():
             if def_name in all_defs and all_defs[def_name] != def_schema:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Tool definition '{def_name}' has multiple schemas, "
-                    "which is not supported."
+                    "which is not supported.",
+                    parameter="tools",
                 )
             all_defs[def_name] = def_schema
     return all_defs
