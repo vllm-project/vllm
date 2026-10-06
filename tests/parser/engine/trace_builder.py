@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -39,11 +40,13 @@ from vllm.parser.engine.registered_adapters import (
     GraniteThinkingParser,
     InklingParser,
     KimiK2Parser,
+    MiMoParser,
     MinimaxM2Parser,
     NemotronV3Parser,
     Plamo3Parser,
     Qwen3Parser,
     SeedOssParser,
+    Step3p5Parser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -356,7 +359,12 @@ def _qwen3_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
     ]
 
 
-def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+def _qwen3_segments(
+    scenario: Scenario,
+    tool_segments: Callable[[ToolCallSpec], list[tuple[str, bool]]] = (
+        _qwen3_tool_segments
+    ),
+) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
     if scenario.reasoning is not None:
         segs.append((scenario.reasoning, False))
@@ -369,7 +377,7 @@ def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
         for tc in scenario.tool_calls:
-            segs.extend(_qwen3_tool_segments(tc))
+            segs.extend(tool_segments(tc))
     return segs
 
 
@@ -389,6 +397,9 @@ def _build_qwen3(
     parser_cls: type = Qwen3Parser,
     strip_trailing_ws: bool = False,
     validate: bool = True,
+    tool_segments: Callable[[ToolCallSpec], list[tuple[str, bool]]] = (
+        _qwen3_tool_segments
+    ),
 ) -> Sample:
     expected_reasoning: str | None
     if scenario.reasoning is not None:
@@ -403,7 +414,7 @@ def _build_qwen3(
         sample_id=f"{name}-{scenario.id}",
         description=scenario.description,
         vocab=_QWEN3_VOCAB,
-        segments=_qwen3_segments(scenario),
+        segments=_qwen3_segments(scenario, tool_segments),
         expected_reasoning=expected_reasoning,
         expected_content=_qwen3_expected_content(scenario),
         expected_tool_calls=_expected_tc(scenario),
@@ -412,6 +423,44 @@ def _build_qwen3(
     if validate:
         _validate_sample(sample, parser_cls)
     return sample
+
+
+# ── MiMo (compact Qwen3 XML, no newlines between tags) ───────────────
+
+
+def _mimo_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    parts = [f"<function={tc.name}>"]
+    for key, value in tc.arguments.items():
+        parts.append(f"<parameter={key}>{_qwen3_arg_value(value)}</parameter>")
+    parts.append("</function>")
+    return [
+        ("<tool_call>", True),
+        ("".join(parts), False),
+        ("</tool_call>", True),
+    ]
+
+
+def _build_mimo(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="mimo",
+        parser_cls=MiMoParser,
+        validate=validate,
+        tool_segments=_mimo_tool_segments,
+    )
+
+
+# ── Step-3.5 (Qwen3 XML, trailing reasoning whitespace stripped) ────
+
+
+def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="step3p5",
+        parser_cls=Step3p5Parser,
+        strip_trailing_ws=True,
+        validate=validate,
+    )
 
 
 # ── MiniMax M2 (XML invoke format, starts in REASONING) ──────────────
@@ -1232,6 +1281,8 @@ _BUILDERS: dict[str, Any] = {
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
+    "mimo": _build_mimo,
+    "step3p5": _build_step3p5,
     "inkling": _build_inkling,
     "plamo3": _build_plamo3,
 }

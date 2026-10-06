@@ -2,8 +2,63 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+from typing import Any
 
 from PIL import Image, ImageOps
+
+# Formats accepted by Image.open for untrusted multimodal media.
+#
+# Audited against Pillow's registered open plugins (python -m PIL / Image.OPEN):
+# Allowed: native still-image / raster readers that decode in-process.
+# Denied:
+#   EPS — may invoke Ghostscript on untrusted PostScript
+#   WMF — Windows GDI / stub-handler path
+#   BUFR / GRIB / HDF5 — stub drivers requiring external handlers
+#   MPEG — identify-only; not a decodable still image
+ALLOWED_IMAGE_FORMATS: tuple[str, ...] = (
+    "AVIF",
+    "BLP",
+    "BMP",
+    "CUR",
+    "DCX",
+    "DDS",
+    "DIB",
+    "FITS",
+    "FLI",
+    "FTEX",
+    "GBR",
+    "GIF",
+    "ICNS",
+    "ICO",
+    "IM",
+    "IMT",
+    "IPTC",
+    "JPEG",
+    "JPEG2000",
+    "MCIDAS",
+    "MSP",
+    "PCD",
+    "PCX",
+    "PIXAR",
+    "PNG",
+    "PPM",
+    "PSD",
+    "QOI",
+    "SGI",
+    "SPIDER",
+    "SUN",
+    "TGA",
+    "TIFF",
+    "WEBP",
+    "XBM",
+    "XPM",
+    "XVTHUMB",
+)
+
+
+def open_image(fp: Any) -> Image.Image:
+    """Open image bytes/files with the serving format allowlist."""
+    return Image.open(fp, formats=ALLOWED_IMAGE_FORMATS)
 
 
 def rescale_image_size(

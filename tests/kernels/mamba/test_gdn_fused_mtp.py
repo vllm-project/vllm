@@ -25,6 +25,11 @@ from tests.v1.attention.utils import (  # noqa: E402
     create_common_attn_metadata,
     create_vllm_config,
 )
+from tests.v1.worker.test_mamba_hybrid_model_state import (  # noqa: E402
+    _input_batch,
+    _mamba_hybrid_state,
+    _prepare_attn_metadata,
+)
 from vllm.config import SpeculativeConfig, set_current_vllm_config  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
@@ -44,9 +49,6 @@ from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
-from vllm.v1.worker.gpu.model_states.mamba_hybrid import (  # noqa: E402
-    compute_num_decode_draft_tokens,
-)
 
 NUM_SPEC = 3
 SPEC_TOKENS = NUM_SPEC + 1
@@ -199,7 +201,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
     ba = torch.randn(num_tokens, 2 * HV, dtype=torch.bfloat16, device=device)
     layer = types.SimpleNamespace(
         prefix=PREFIX,
-        enable_fused_gdn_decode=True,
+        enable_fused_gdn_spec_decode=True,
         norm=types.SimpleNamespace(
             weight=torch.empty(V, dtype=torch.bfloat16, device=device)
         ),
@@ -264,6 +266,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
 @torch.inference_mode()
 def test_fused_model_path_matches_reference(
+    monkeypatch: pytest.MonkeyPatch,
     seq_lens: list[int],
     query_lens: list[int],
     draft_tokens: list[int] | None,
@@ -291,13 +294,10 @@ def test_fused_model_path_matches_reference(
     )
     common.block_table_tensor.add_(1)
     if draft_tokens is None:
-        draft_tokens = compute_num_decode_draft_tokens(
-            num_padded_reqs=batch.batch_size,
-            num_scheduled_tokens=torch.tensor(query_lens, dtype=torch.int32).numpy(),
-            num_draft_tokens_per_req=None,
-            is_prefilling=torch.zeros(batch.batch_size, dtype=torch.bool).numpy(),
-            max_decode_query_len=SPEC_TOKENS,
-        ).tolist()
+        state = _mamba_hybrid_state(num_speculative_tokens=NUM_SPEC)
+        input_batch = _input_batch(query_lens, None, [False] * batch.batch_size)
+        mamba_metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+        draft_tokens = mamba_metadata.num_decode_draft_tokens_cpu.tolist()
         assert draft_tokens == [
             0 if length <= SPEC_TOKENS else -1 for length in query_lens
         ]
@@ -418,7 +418,7 @@ def test_fused_model_path_matches_reference(
 def test_zero_draft_decode_uses_the_accepted_recurrent_state(
     state_dtype: torch.dtype,
 ) -> None:
-    """A zero-draft V2 decode must preserve each row's accepted-state offset."""
+    """A zero-draft decode must preserve each row's accepted-state offset."""
     torch.manual_seed(7)
     device = torch.device("cuda")
     vllm_config = _make_vllm_config()
@@ -436,10 +436,7 @@ def test_zero_draft_decode_uses_the_accepted_recurrent_state(
     accepted = torch.tensor([3, 1], dtype=torch.int32, device=device)
     batch = BatchSpec(seq_lens=[65, 65], query_lens=[1, 1])
     common = create_common_attn_metadata(
-        batch,
-        BLOCK_SIZE,
-        device,
-        arange_block_indices=True,
+        batch, BLOCK_SIZE, device, arange_block_indices=True
     )
     common.block_table_tensor.add_(1)
     with set_current_vllm_config(vllm_config):
@@ -454,33 +451,18 @@ def test_zero_draft_decode_uses_the_accepted_recurrent_state(
     assert state_indices is not None
     assert metadata.num_accepted_tokens is not None
     destination = state_indices[:, 0]
-    source = state_indices.gather(
-        1,
-        accepted.sub(1).unsqueeze(1),
-    ).squeeze(1)
+    source = state_indices.gather(1, accepted.sub(1).unsqueeze(1)).squeeze(1)
     pool_size = int(state_indices.max().item()) + 1
     conv_state_shape, temporal_state_shape = (
         MambaStateShapeCalculator.gated_delta_net_state_shape(
-            1,
-            H,
-            HV,
-            K,
-            V,
-            CONV_KERNEL,
-            NUM_SPEC,
+            1, H, HV, K, V, CONV_KERNEL, NUM_SPEC
         )
     )
     conv_state = 0.05 * torch.randn(
-        pool_size,
-        *conv_state_shape,
-        dtype=torch.bfloat16,
-        device=device,
+        pool_size, *conv_state_shape, dtype=torch.bfloat16, device=device
     )
     ssm_state = 0.01 * torch.randn(
-        pool_size,
-        *temporal_state_shape,
-        dtype=state_dtype,
-        device=device,
+        pool_size, *temporal_state_shape, dtype=state_dtype, device=device
     )
     conv_state_reference = conv_state.clone()
     ssm_state_reference = ssm_state.clone()
@@ -496,11 +478,7 @@ def test_zero_draft_decode_uses_the_accepted_recurrent_state(
     for row, num_accepted in enumerate(accepted.tolist()):
         offset = num_accepted - 1
         conv_state_reference_view[destination[row], :, : CONV_KERNEL - 1] = (
-            conv_state_view[
-                destination[row],
-                :,
-                offset : offset + CONV_KERNEL - 1,
-            ]
+            conv_state_view[destination[row], :, offset : offset + CONV_KERNEL - 1]
         )
 
     reference_metadata = dataclasses.replace(
@@ -521,19 +499,10 @@ def test_zero_draft_decode_uses_the_accepted_recurrent_state(
     a_log = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
     dt_bias = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
     conv_weight = 0.1 * torch.randn(
-        CONV_DIM,
-        1,
-        CONV_KERNEL,
-        dtype=torch.bfloat16,
-        device=device,
+        CONV_DIM, 1, CONV_KERNEL, dtype=torch.bfloat16, device=device
     )
     norm_weight = torch.randn(V, dtype=torch.float32, device=device)
-    mixed_qkv = 0.1 * torch.randn(
-        2,
-        CONV_DIM,
-        dtype=torch.bfloat16,
-        device=device,
-    )
+    mixed_qkv = 0.1 * torch.randn(2, CONV_DIM, dtype=torch.bfloat16, device=device)
     b = 0.1 * torch.randn(2, HV, dtype=torch.bfloat16, device=device)
     a = 0.1 * torch.randn_like(b)
     outputs = []
@@ -555,9 +524,7 @@ def test_zero_draft_decode_uses_the_accepted_recurrent_state(
         output = torch.zeros(2, HV, V, dtype=torch.bfloat16, device=device)
         context = types.SimpleNamespace(attn_metadata={PREFIX: current_metadata})
         with patch.object(
-            qwen_gdn_linear_attn,
-            "get_forward_context",
-            return_value=context,
+            qwen_gdn_linear_attn, "get_forward_context", return_value=context
         ):
             layer._forward_core(
                 mixed_qkv=mixed_qkv.clone(),
