@@ -42,12 +42,12 @@ graph is replayed with changed activations and two different routing shifts at
 fixed input addresses, then with restored inputs; each output is checked against
 its reference outside capture. Measured iterations replay this same graph, and
 the final output is checked again. Reports include `cuda_graph` and the replay
-correctness checks. Stage debug synchronization is incompatible with capture.
+correctness checks.
 
 ```bash
 .venv/bin/python -m torch.distributed.run --standalone --nproc-per-node=2 \
   benchmarks/kernels/benchmark_deepep_v2_layout.py \
-  --expert-kernel grouped-fp8 --cuda-graph \
+  --cuda-graph \
   --case expanded-nosync --tokens-per-rank 8192,8192 \
   --output /tmp/expanded-nosync-graph.json
 ```
@@ -59,17 +59,15 @@ interpreting small differences. A worker that hangs or fails is a correctness
 failure, not a timing result. Record GPU topology, immutable runtime identity,
 source hash and all rank reports.
 
-The measurement includes allocation, dispatch, GPU metadata, a synthetic expert
-operation, combine, and per-step CUDA completion synchronization. The reported
+The measurement includes allocation, dispatch, GPU metadata, grouped FP8
+GEMM, combine, and per-step CUDA completion synchronization. The reported
 latency is the median of per-step maximum rank wall times. Memory reports are
 PyTorch allocator peaks, not total device footprints. Warmup/compilation is
 excluded. Graph capture and correctness replays are also excluded from timing.
 Per-step synchronization changes execution cadence, so these numbers
 are neither serving latency nor steady-state asynchronous throughput.
 
-The default `scalar` expert has no GEMM and cannot establish preparation savings.
-Select `--expert-kernel grouped-fp8` for the first direct grouped-GEMM prototype.
-That mode dispatches FP8 tokens and block scales, and runs one grouped DeepGEMM
+The benchmark dispatches FP8 tokens and block scales, and runs one grouped DeepGEMM
 with expert-dependent diagonal weights. Inputs and weights are exactly
 representable in FP8, so the same scalar reference checks the actual GEMM path.
 

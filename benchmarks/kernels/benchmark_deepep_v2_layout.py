@@ -3,9 +3,8 @@
 """Separate DeepEP layout and CPU-count synchronization costs.
 
 Run each case in a fresh process with torchrun --nproc-per-node=2. This measures
-fresh dispatch, GPU metadata, a synthetic expert operation, and combine. It
-defaults to a synthetic scalar expert. Select --expert-kernel grouped-fp8 to
-compare the existing input permutation with direct grouped FP8 GEMM inputs.
+fresh dispatch, GPU metadata, grouped FP8 GEMM, and combine. Expanded dispatch
+feeds GEMM directly; non-expanded dispatch uses vLLM permutation helpers.
 """
 
 import argparse
@@ -14,6 +13,7 @@ import os
 import statistics
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -26,12 +26,16 @@ CASES = {
 }
 
 
-def debug_stage(name: str, **metadata):
-    if os.environ.get("DEEPEP_LAYOUT_DEBUG") == "1":
-        torch.accelerator.synchronize()
-        print(
-            json.dumps({"rank": dist.get_rank(), "stage": name, **metadata}), flush=True
-        )
+class StepResult(NamedTuple):
+    output: torch.Tensor
+    receive_rows: int
+    counts: torch.Tensor | None
+    handle: object
+
+
+def reference_output(x, ids, weights):
+    factors = (((ids % 4).float() + 1) / 4 * weights).sum(dim=1)
+    return (x.float() * factors[:, None]).bfloat16()
 
 
 def expanded_metadata(
@@ -57,37 +61,6 @@ def expanded_metadata(
     valid = (experts < prefix.numel()) & (rows < prefix[safe_experts])
     ids = torch.where(valid, experts + expert_offset, -1).to(torch.int64)
     return ids, counts
-
-
-def synthetic_experts(recv_x, recv_ids, recv_weights, handle, expanded, offset):
-    """Apply an expert-dependent scalar so dispatch/combine has a reference."""
-    if expanded:
-        ids, counts = expanded_metadata(
-            handle.psum_num_recv_tokens_per_expert,
-            recv_x.shape[0],
-            handle.expert_alignment,
-            offset,
-        )
-        weights = recv_weights
-    else:
-        rows = torch.arange(recv_x.shape[0], device=recv_x.device)
-        valid_rows = rows < handle.psum_num_recv_tokens_per_scaleup_rank[-1]
-        valid = valid_rows[:, None] & (recv_ids >= 0)
-        ids = torch.where(valid, recv_ids + offset, -1)
-        weights = recv_weights
-        counts = None
-    # Mask weights before arithmetic: unused receive rows are uninitialized.
-    weights = torch.where(ids >= 0, weights, 0)
-    factors = ((ids.clamp_min(0) % 4).float() + 1) / 4
-    factors = factors * weights
-    if not expanded:
-        factors = factors.sum(dim=1)
-    safe_x = (
-        torch.where((ids >= 0).any(dim=1)[:, None], recv_x, 0)
-        if (not expanded)
-        else torch.where((ids >= 0)[:, None], recv_x, 0)
-    )
-    return (safe_x.float() * factors[:, None]).to(recv_x.dtype), counts
 
 
 class GroupedFp8Experts:
@@ -151,12 +124,6 @@ class GroupedFp8Experts:
                     expert_tokens_meta=None,
                 )
             )
-        debug_stage(
-            "metadata",
-            input_shape=list(gemm_input.shape),
-            scales_stride=list(gemm_scales.stride()),
-            alignment=alignment,
-        )
         mm = torch.zeros(
             gemm_input.shape[0], hidden, dtype=torch.bfloat16, device=aq.device
         )
@@ -167,7 +134,6 @@ class GroupedFp8Experts:
                 mm,
                 m_indices,
             )
-        debug_stage("gemm")
         weights = torch.where(ids >= 0, recv_weights, 0)
         if expanded:
             safe_mm = torch.where((ids >= 0)[:, None], mm, 0)
@@ -184,17 +150,67 @@ class GroupedFp8Experts:
         return out, counts
 
 
-def main():
+def validate_counts(result, alignment, cpu_sync):
+    if result.counts is None:
+        return
+    assert torch.all(result.counts >= 0).item()
+    if cpu_sync:
+        aligned_counts = (result.counts.cpu() + alignment - 1) // alignment * alignment
+        torch.testing.assert_close(
+            aligned_counts,
+            torch.tensor(result.handle.num_recv_tokens_per_expert_list),
+            check_dtype=False,
+        )
+
+
+def capture_and_check(step, activation, x, ids, weights, num_experts):
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = step()
+
+    def replay():
+        graph.replay()
+        return captured
+
+    original_x, original_ids = x.clone(), ids.clone()
+    checks = []
+    # Static addresses, different values: routing must be recomputed on replay.
+    for shift in (1, 3, 0):
+        replay_x = -original_x if shift else original_x
+        ids.copy_((original_ids + shift) % num_experts)
+        activation.copy_(replay_x.to(activation.dtype))
+        expected = reference_output(replay_x, ids, weights)
+        torch.testing.assert_close(replay().output, expected, atol=0.01, rtol=0.03)
+        checks.append(
+            f"changed_activations_routing_shift_{shift}" if shift else "restored_inputs"
+        )
+    dist.barrier()
+    torch.accelerator.synchronize()
+    return replay, checks
+
+
+def measure(run, iterations, reference):
+    torch.accelerator.reset_peak_memory_stats()
+    samples = []
+    for iteration in range(iterations):
+        start = time.perf_counter()
+        result = run()
+        torch.accelerator.synchronize()
+        samples.append((time.perf_counter() - start) * 1000)
+        receive_rows = result.receive_rows
+        if iteration == iterations - 1:
+            torch.testing.assert_close(result.output, reference, atol=0.01, rtol=0.03)
+        del result
+    return samples, receive_rows
+
+
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=CASES, required=True)
     parser.add_argument("--tokens-per-rank", default="8192,8192")
     parser.add_argument("--hidden-size", type=int, default=2048)
-    parser.add_argument(
-        "--expert-kernel", choices=["scalar", "grouped-fp8"], default="scalar"
-    )
     parser.add_argument("--local-experts", type=int, default=16)
     parser.add_argument("--topk", type=int, default=4)
-    parser.add_argument("--expert-alignment", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--cuda-graph", action="store_true")
@@ -202,14 +218,18 @@ def main():
     args = parser.parse_args()
     if args.cuda_graph and CASES[args.case][1]:
         parser.error("CUDA graph capture requires do_cpu_sync=False")
-    if args.cuda_graph and os.environ.get("DEEPEP_LAYOUT_DEBUG") == "1":
-        parser.error("Stage synchronization cannot run inside CUDA graph capture")
     if args.iterations < 1 or args.warmup < 1:
         parser.error("Warmup and measured iteration counts must be positive")
-    if min(args.local_experts, args.hidden_size, args.topk, args.expert_alignment) < 1:
+    if min(args.local_experts, args.hidden_size, args.topk) < 1:
         parser.error("Dimensions and expert alignment must be positive")
     if args.hidden_size % 256:
         parser.error("BF16 hidden size must be a multiple of 256")
+
+    return args
+
+
+def main():
+    args = parse_args()
 
     import deep_ep
 
@@ -245,31 +265,22 @@ def main():
     ids = torch.rand(tokens, num_experts, device="cuda").argsort(dim=1)
     ids = ids[:, : args.topk].contiguous().to(torch.int64)
     weights = torch.full((tokens, args.topk), 1 / args.topk, device="cuda")
-    factor = (((ids % 4).float() + 1) / 4 * weights).sum(dim=1)
-    reference = (x.float() * factor[:, None]).bfloat16()
+    reference = reference_output(x, ids, weights)
     capacity = 1 << max(max(token_counts) - 1, 0).bit_length()
     expanded, cpu_sync = CASES[args.case]
-    grouped = (
-        GroupedFp8Experts(
-            args.local_experts, args.hidden_size, rank * args.local_experts
-        )
-        if args.expert_kernel == "grouped-fp8"
-        else None
+    grouped = GroupedFp8Experts(
+        args.local_experts, args.hidden_size, rank * args.local_experts
     )
-    if grouped is not None:
-        args.expert_alignment = grouped.alignment
-        dispatch_input = (
-            x.to(torch.float8_e4m3fn),
-            torch.ones(tokens, args.hidden_size // 128, device="cuda"),
-        )
-    else:
-        dispatch_input = x
+    dispatch_input = (
+        x.to(torch.float8_e4m3fn),
+        torch.ones(tokens, args.hidden_size // 128, device="cuda"),
+    )
     buffer = deep_ep.ElasticBuffer(
         group=dist.group.WORLD,
         num_max_tokens_per_rank=capacity,
         hidden=args.hidden_size,
         num_topk=args.topk,
-        use_fp8_dispatch=grouped is not None,
+        use_fp8_dispatch=True,
         allow_hybrid_mode=False,
         explicitly_destroy=True,
     )
@@ -287,93 +298,34 @@ def main():
             topk_weights=weights,
             num_experts=num_experts,
             num_max_tokens_per_rank=capacity,
-            expert_alignment=args.expert_alignment,
+            expert_alignment=grouped.alignment,
             do_expand=expanded,
             do_cpu_sync=cpu_sync,
             async_with_compute_stream=False,
         )
-        debug_stage("dispatch")
-        if grouped is not None:
-            y, counts = grouped(recv_x, recv_ids, recv_weights, handle, expanded)
-            received_rows = recv_x[0].shape[0]
-        else:
-            y, counts = synthetic_experts(
-                recv_x,
-                recv_ids,
-                recv_weights,
-                handle,
-                expanded,
-                rank * args.local_experts,
-            )
-            received_rows = recv_x.shape[0]
-        debug_stage("experts")
+        y, counts = grouped(recv_x, recv_ids, recv_weights, handle, expanded)
+        received_rows = recv_x[0].shape[0]
         # Expert outputs are already weighted; combine only reverses routing.
         out, _, _ = buffer.combine(x=y, handle=handle, async_with_compute_stream=False)
-        debug_stage("combine")
-        return out, received_rows, counts, handle
+        return StepResult(out, received_rows, counts, handle)
 
     try:
         for _ in range(args.warmup):
-            out, received_capacity, counts, handle = step()
-        torch.testing.assert_close(out, reference, atol=0.01, rtol=0.03)
-        if counts is not None:
-            assert torch.all(counts >= 0).item()
-            if cpu_sync:
-                torch.testing.assert_close(
-                    (
-                        (counts.cpu() + args.expert_alignment - 1)
-                        // args.expert_alignment
-                        * args.expert_alignment
-                    ),
-                    torch.tensor(handle.num_recv_tokens_per_expert_list),
-                    check_dtype=False,
-                )
-        del out, counts, handle
+            warmup = step()
+        torch.testing.assert_close(warmup.output, reference, atol=0.01, rtol=0.03)
+        validate_counts(warmup, grouped.alignment, cpu_sync)
+        del warmup
         dist.barrier()
         torch.accelerator.synchronize()
-        graph = None
+
+        run = step
         replay_checks = []
         if args.cuda_graph:
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                out, received_capacity, counts, handle = step()
-            # Change both activations and routing in-place at static addresses.
-            # Reusing one captured graph must rebuild dispatch metadata on GPU.
-            original_x, original_ids = x.clone(), ids.clone()
-            activation = dispatch_input[0] if grouped is not None else dispatch_input
-            for shift in (1, 3):
-                ids.copy_((original_ids + shift) % num_experts)
-                activation.copy_((-original_x).to(activation.dtype))
-                replay_factor = (((ids % 4).float() + 1) / 4 * weights).sum(dim=1)
-                replay_reference = (
-                    -original_x.float() * replay_factor[:, None]
-                ).bfloat16()
-                graph.replay()
-                torch.testing.assert_close(out, replay_reference, atol=0.01, rtol=0.03)
-                replay_checks.append(f"changed_activations_routing_shift_{shift}")
-            ids.copy_(original_ids)
-            activation.copy_(original_x.to(activation.dtype))
-            graph.replay()
-            torch.testing.assert_close(out, reference, atol=0.01, rtol=0.03)
-            replay_checks.append("restored_inputs")
-            del original_x, original_ids, replay_reference, replay_factor
-            dist.barrier()
-            torch.accelerator.synchronize()
-        torch.accelerator.reset_peak_memory_stats()
-        samples = []
-        for _ in range(args.iterations):
-            start = time.perf_counter()
-            if graph is None:
-                out, received_capacity, counts, handle = step()
-            else:
-                graph.replay()
-            # Deliberately includes host waits and per-step completion overhead.
-            torch.accelerator.synchronize()
-            samples.append((time.perf_counter() - start) * 1000)
-            if graph is None:
-                del out, counts, handle
-        if graph is not None:
-            torch.testing.assert_close(out, reference, atol=0.01, rtol=0.03)
+            activation = dispatch_input[0]
+            run, replay_checks = capture_and_check(
+                step, activation, x, ids, weights, num_experts
+            )
+        samples, received_capacity = measure(run, args.iterations, reference)
         report = {
             "rank": rank,
             "gpu": torch.cuda.get_device_name(),
@@ -382,9 +334,7 @@ def main():
             "do_cpu_sync": cpu_sync,
             "cuda_graph": args.cuda_graph,
             "replay_correctness_checks": replay_checks,
-            "gemm_input_permutation": ("skipped" if expanded else "performed")
-            if grouped is not None
-            else "not_applicable",
+            "gemm_input_permutation": ("skipped" if expanded else "performed"),
             "input_tokens": tokens,
             "receive_capacity_rows": received_capacity,
             "wall_ms_per_step": statistics.mean(samples),
