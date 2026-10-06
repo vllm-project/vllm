@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from types import SimpleNamespace
+from prometheus_client import CollectorRegistry
 
-from prometheus_client import CollectorRegistry, Counter
-
+from vllm.config import SpeculativeConfig
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
@@ -19,21 +18,22 @@ from vllm.v1.spec_decode.metrics import SpecDecodingProm, SpecDecodingStats
 from vllm.v1.utils import compute_iteration_details
 
 
-def test_adaptive_verified_budget_counter_differs_from_proposals(monkeypatch):
+def test_adaptive_verified_budget_counter_differs_from_proposals():
     registry = CollectorRegistry()
-    monkeypatch.setattr(
-        SpecDecodingProm,
-        "_counter_cls",
-        staticmethod(lambda **kwargs: Counter(registry=registry, **kwargs)),
-    )
-    config = SimpleNamespace(
+    config = SpeculativeConfig(
+        method="ngram",  # no weights needed
         enable_adaptive_verification=True,
         num_speculative_tokens=5,
     )
-    prom = SpecDecodingProm(config, ["engine"], {0: ["0"]})
-    stats = SpecDecodingStats.new(5)
-    stats.observe_draft(num_draft_tokens=5, num_accepted_tokens=2)
-    stats.num_verified_draft_tokens = 3
+    prom = SpecDecodingProm(
+        speculative_config=config,
+        registry=registry,
+        labelnames=["engine"],  # any string
+        per_engine_labelvalues={0: ["0"]},  # any string
+    )
+    stats = SpecDecodingStats.new(num_spec_tokens=5)
+    stats.observe_draft_stats_per_req(num_draft_tokens=5, num_accepted_tokens=2)
+    stats.observe_draft_stats_per_batch(num_verified_draft_tokens=3)
     prom.observe(stats)
 
     samples = {
