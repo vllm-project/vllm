@@ -1812,7 +1812,7 @@ class MambaManager(SingleTypeKVCacheManager):
             if num_new_blocks > 0:
                 blocks_allocated = request_id in self._allocated_block_reqs
                 physical_block_cap = 1 + int(has_partial_hit) + checkpoint_block
-                if not blocks_allocated or checkpoint_block:
+                if not blocks_allocated:
                     physical_block_cap += self.num_speculative_blocks
                 num_new_blocks = min(num_new_blocks, physical_block_cap)
 
@@ -1885,12 +1885,14 @@ class MambaManager(SingleTypeKVCacheManager):
                         [self._null_block for _ in range(prev_block_len, null_end)]
                     )
 
-                if blocks_allocated and not checkpoint_block:
-                    # Relocate exclusively owned speculative scratch blocks.
+                if blocks_allocated:
+                    # Relocate exclusively owned scratch blocks this step leaves
+                    # behind. In a checkpoint step, one at the checkpoint index
+                    # stays: the worker exports the checkpoint into that column.
                     for block_idx in range(
                         prev_block_len - self.num_speculative_blocks, prev_block_len
                     ):
-                        if block_idx < num_skipped_blocks:
+                        if block_idx < num_skipped_blocks - checkpoint_block:
                             self._relocate_speculative_block(req_blocks, block_idx)
                         else:
                             break
@@ -1898,7 +1900,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 if has_partial_hit:
                     num_new_blocks = max(num_new_blocks, 0) + 1
                 max_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
-                if not blocks_allocated or checkpoint_block:
+                if not blocks_allocated:
                     max_new_blocks += self.num_speculative_blocks
                 assert num_new_blocks <= max_new_blocks
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
