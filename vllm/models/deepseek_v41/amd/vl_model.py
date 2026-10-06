@@ -110,6 +110,19 @@ def _make_deepseek_v4_vl_weights_mapper(
     )
 
 
+def _language_model_first(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Stream "language_model." weights, then the few others, sorted."""
+    deferred: list[tuple[str, torch.Tensor]] = []
+    for name, weight in weights:
+        if name.startswith("language_model."):
+            yield name, weight
+        else:
+            deferred.append((name, weight))
+    yield from sorted(deferred, key=lambda x: x[0])
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     DeepseekV4VLMultiModalProcessor,
     info=DeepseekV4VLProcessingInfo,
@@ -330,12 +343,12 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Map HF names into this wrapper's namespace up front and sort, so
-        # the "language_model." group reaches the child loader as one
-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
-        # and the child's load_weights finalizes fused expert weights, which
-        # must not run on a partially loaded model).
-        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
+        # Map HF names into this wrapper's namespace up front, and hand the
+        # "language_model." group to the child loader as one contiguous block
+        # (AutoWeightsLoader delegates per contiguous group, and the child's
+        # load_weights finalizes fused expert weights, which must not run on a
+        # partially loaded model).
+        mapped = _language_model_first(self.hf_to_vllm_mapper.apply(weights))
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(mapped)
         # The child's load_weights already ran its post-load finalization.
