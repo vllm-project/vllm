@@ -19,6 +19,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
 )
 from vllm.v1.hisparse.types import (
+    ACTIVE_TAIL_PAGES,
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
     SparseKVRowMirror,
@@ -31,10 +32,6 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-# Sealed pages this many positions behind the block-table tail stay pinned so
-# a page written by an in-flight step is never handed out under it.
-_ACTIVE_TAIL_PAGES = 2
 
 
 @dataclass
@@ -99,9 +96,12 @@ class HiSparseCoordinator:
         kv_cache_config: KVCacheConfig,
         managers: tuple[SingleTypeKVCacheManager, ...],
         max_model_len: int,
+        *,
+        num_reprefillable_tokens: int,
     ) -> None:
         self.managers = managers
         self.max_model_len = max_model_len
+        self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
         resident_managers: list[HiSparseResidentManager] = []
@@ -264,6 +264,7 @@ class HiSparseCoordinator:
                 if manager.adopt_resident_page(request_id, host_idx, block):
                     manager.block_pool.touch([block])
                     state.pinned_clean.add(host_idx)
+                    self.block_table_updates.add(request_id)
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
@@ -339,7 +340,7 @@ class HiSparseCoordinator:
             req_blocks = manager.req_to_blocks.get(request_id)
             if (
                 req_blocks is None
-                or page_idx >= len(req_blocks) - _ACTIVE_TAIL_PAGES
+                or page_idx >= len(req_blocks) - ACTIVE_TAIL_PAGES
                 or req_blocks[page_idx].is_null
             ):
                 return None
@@ -431,6 +432,22 @@ class HiSparseCoordinator:
     # Host publication and spills
     # ------------------------------------------------------------------
 
+    def advance_scheduled(self, requests: Iterable[tuple[str, int]]) -> None:
+        """Run the per-step residency work for each scheduled request.
+
+        ``requests`` pairs a request id with the number of tokens computed
+        once the step completes. As in ``KVCacheCoordinator.cache_blocks``, the
+        last ``num_reprefillable_tokens`` are not final yet and are not written
+        back.
+        """
+        if not self.resident_managers:
+            return
+        for request_id, num_tokens in requests:
+            self.plan_prefix_materialization(
+                request_id, max(0, num_tokens - self.num_reprefillable_tokens)
+            )
+            self.update_residency(request_id)
+
     def plan_prefix_materialization(
         self, request_id: str, num_computed_tokens: int
     ) -> None:
@@ -445,9 +462,8 @@ class HiSparseCoordinator:
         )
         state = self._get_request_state(request_id)
         budget = max(self.max_spill_pages - len(self.spills_to_send), 0)
-        for page_idx in range(num_pages):
-            if page_idx < importing_pages:
-                continue
+        first_page = max(state.ready_prefix_pages, importing_pages)
+        for page_idx in range(first_page, num_pages):
             if budget == 0:
                 break
             if page_idx in state.pending_pages:
@@ -852,7 +868,10 @@ def get_hisparse_coordinator(
             assert isinstance(coordinator, HiSparseCoordinator)
             return coordinator
     coordinator = HiSparseCoordinator(
-        kv_cache_manager.kv_cache_config, managers, kv_cache_manager.max_model_len
+        kv_cache_manager.kv_cache_config,
+        managers,
+        kv_cache_manager.max_model_len,
+        num_reprefillable_tokens=kv_cache_manager.coordinator.num_reprefillable_tokens,
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
