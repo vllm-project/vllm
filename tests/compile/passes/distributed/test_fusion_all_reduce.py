@@ -123,6 +123,46 @@ def test_fused_ar_workspace_hidden_dim_spec_without_draft():
     assert _fused_ar_workspace_hidden_dim(config) == 2048
 
 
+@pytest.mark.parametrize("use_flydsl", [True, False])
+def test_rocm_aiter_all_reduce_fusion_warns_with_flydsl_quick_reduce(
+    monkeypatch: pytest.MonkeyPatch, use_flydsl: bool
+):
+    import vllm.compilation.passes.fusion.allreduce_rms_fusion as ar_fusion
+
+    if use_flydsl:
+        monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL", "1")
+    else:
+        monkeypatch.delenv("VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL", raising=False)
+    monkeypatch.setattr(ar_fusion, "get_tensor_model_parallel_world_size", lambda: 8)
+    # A hidden size the stub does not support makes __init__ return right after
+    # the FlyDSL check, before any pattern is registered.
+    ca_comm = SimpleNamespace(
+        supports_dynamic_hidden_dim=False, effective_max_size=lambda: 64 * 1024**2
+    )
+    monkeypatch.setattr(rocm_aiter_ops, "get_aiter_allreduce", lambda: ca_comm)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        ar_fusion.logger,
+        "warning_once",
+        lambda msg, *args, **kwargs: warnings.append(msg % args if args else msg),
+    )
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16, get_hidden_size=lambda: 8192
+        ),
+        device_config=None,
+    )
+
+    fusion_pass = RocmAiterAllReduceFusionPass(config)
+
+    assert fusion_pass.disabled
+    flydsl_warnings = [w for w in warnings if "VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL" in w]
+    assert len(flydsl_warnings) == int(use_flydsl)
+    if use_flydsl:
+        assert "fuse_allreduce_rms=false" in flydsl_warnings[0]
+
+
 class TestAllReduceRMSNormModel(torch.nn.Module):
     def __init__(
         self,
