@@ -8,9 +8,18 @@ import torch
 # import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
+
+logger = init_logger(__name__)
+
+# gfx942 ASM seam. The op's own cutoff is 40 tokens; below 64 the folded
+# post GEMM already in this file is faster, so vLLM does not call it there.
+_AITER_SEAM_MIN_TOKENS = 64
+_AITER_SEAM_HC_MULT = 4
+_AITER_SEAM_HIDDEN = 5120
 
 
 def _has_tilelang_mhc() -> bool:
@@ -67,6 +76,24 @@ def _has_aiter_mhc_fused_post_pre_delayed_rms_norm() -> bool:
     # The fused delayed seam kernel is only validated on gfx950.
     return on_gfx950()
 
+
+def _load_aiter_mhc_fused_post_pre_delayed():
+    if not HAS_AITER_MHC or not current_platform.is_rocm():
+        return None
+    from vllm.platforms.rocm import on_gfx942
+
+    if not on_gfx942():
+        return None
+    try:
+        from aiter.ops.mhc import mhc_fused_post_pre_delayed
+    except Exception:
+        return None
+    if not callable(mhc_fused_post_pre_delayed):
+        return None
+    return mhc_fused_post_pre_delayed
+
+
+_MHC_FUSED_POST_PRE_DELAYED = _load_aiter_mhc_fused_post_pre_delayed()
 
 HAS_AITER_MHC_FUSED = _has_aiter_mhc_fused()
 HAS_AITER_MHC_PRE_NORM = _aiter_mhc_op_accepts_norm("mhc_pre")
@@ -400,6 +427,40 @@ class MHCPreDelayedOp(CustomOp):
         post_layer_mix: torch.Tensor | None = None,
         comb_res_mix: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # gfx942 ASM seam. It does not fold RMSNorm, so a norm_weight stays on
+        # the branches below. Shorter steps stay there too: under 64 tokens the
+        # folded post GEMM is faster than this kernel.
+        if (
+            _MHC_FUSED_POST_PRE_DELAYED is not None
+            and sublayer_out is not None
+            and post_layer_mix is not None
+            and comb_res_mix is not None
+            and norm_weight is None
+            and x is None
+            and residual.dim() == 3
+            and residual.shape[-2] == _AITER_SEAM_HC_MULT
+            and residual.shape[-1] == _AITER_SEAM_HIDDEN
+            and residual.shape[0] >= _AITER_SEAM_MIN_TOKENS
+        ):
+            logger.info_once(
+                "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",
+                _AITER_SEAM_MIN_TOKENS,
+            )
+            return _MHC_FUSED_POST_PRE_DELAYED(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                sublayer_out,
+                post_layer_mix,
+                comb_res_mix,
+            )
         # aiter's fused delayed seam: post-mix, gate projection, and the
         # collapse with the carried pre-mix and its RMSNorm. It always applies
         # the norm and projects `residual` itself.
