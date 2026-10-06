@@ -464,7 +464,7 @@ driver-side credentials from worker-side processes within the same Ray
 cluster.
 
 This assumption is consistent with
-[Ray's own security model](https://docs.ray.io/en/latest/ray-core/security.html),
+[Ray's own security model](https://docs.ray.io/en/latest/ray-security/index.html),
 which states that any user who can connect to a Ray cluster can run arbitrary
 code on any node in that cluster. In other words, Ray cluster access already
 implies full code execution on worker nodes, so restricting environment
