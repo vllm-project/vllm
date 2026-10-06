@@ -1098,7 +1098,6 @@ def test_flashinfer_mla_dspark_dcp_supports_target_and_draft(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("cp_interleave_size", [1, 16, 896])
-@pytest.mark.parametrize("min_split_kv", [1, 8])
 def test_tokenspeed_mla_decode_contract(
     monkeypatch,
     causal,
@@ -1106,7 +1105,6 @@ def test_tokenspeed_mla_decode_contract(
     dcp_world_size,
     dcp_rank,
     cp_interleave_size,
-    min_split_kv,
 ):
     decode_call = None
     num_decodes = 2
@@ -1151,12 +1149,6 @@ def test_tokenspeed_mla_decode_contract(
     impl.softmax_scale = 1.0
     impl.output_scale = 1.0
     impl._workspace_buffer = torch.empty(1, dtype=torch.int8)
-    impl._min_split_kv = min_split_kv
-    impl._max_decode_tokens = num_decode_tokens
-    impl._decode_kwargs = {"min_split_kv": min_split_kv} if min_split_kv > 1 else {}
-    monkeypatch.setattr(
-        tokenspeed_mla_module, "_get_workspace", lambda *args: impl._workspace_buffer
-    )
 
     metadata = SimpleNamespace(
         num_decodes=num_decodes,
@@ -1210,11 +1202,6 @@ def test_tokenspeed_mla_decode_contract(
     assert decode_call["cp_world"] == dcp_world_size
     assert decode_call["cp_rank"] == dcp_rank
     assert decode_call.get("cp_interleave_size", 1) == cp_interleave_size
-    if min_split_kv > 1:
-        assert decode_call["min_split_kv"] == min_split_kv
-    else:
-        # Older TokenSpeed releases remain usable when the override is disabled.
-        assert "min_split_kv" not in decode_call
 
 
 @pytest.mark.skipif(
@@ -1315,9 +1302,6 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(cp_interleave_size, seq_len
         impl.softmax_scale = None
         impl.output_scale = None
         impl._workspace_buffer = workspace
-        impl._min_split_kv = 1
-        impl._max_decode_tokens = 0
-        impl._decode_kwargs = {}
         metadata = SimpleNamespace(
             num_decodes=1,
             num_decode_tokens=query.shape[1],
@@ -1353,134 +1337,6 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(cp_interleave_size, seq_len
     ).unsqueeze(0)
     # FP8 attention rounds differently when KV is partitioned across DCP ranks.
     torch.testing.assert_close(merged, reference.float(), atol=1e-2, rtol=1e-2)
-
-
-@pytest.mark.parametrize("floor,max_tokens", [(1, 512), (8, 512), (8, 128), (8, 8192)])
-def test_tokenspeed_workspace_warmup_and_lock(monkeypatch, floor, max_tokens):
-    from vllm.v1.worker.workspace import WorkspaceManager
-
-    monkeypatch.setitem(
-        sys.modules, "tokenspeed_mla", SimpleNamespace(get_num_sm=lambda _: 148)
-    )
-    monkeypatch.setattr(tokenspeed_mla_module, "_g_workspace", {})
-    manager = WorkspaceManager(torch.device("meta"))
-    monkeypatch.setattr(
-        tokenspeed_mla_module, "current_workspace_manager", lambda: manager
-    )
-    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
-    allocations = []
-
-    # Avoid allocating hundreds of MB in a workspace-planning unit test.
-    original_empty = torch.empty
-
-    def allocate(size, **kwargs):
-        allocations.append(size[0] if isinstance(size, tuple) else size)
-        return original_empty(size, dtype=torch.int8, device="meta")
-
-    monkeypatch.setattr(tokenspeed_mla_module.torch, "empty", allocate)
-    device = torch.device("cpu")
-    # A small first batch must reserve room for uncaptured eager batches too.
-    workspace = tokenspeed_mla_module._get_workspace(
-        device, 96, 512, floor, 1, max_tokens
-    )
-    automatic = 148 * 96 * 8 * 513 * 4
-    expected = (
-        automatic
-        if floor == 1
-        else max(automatic, min(max_tokens * 96 * floor * 513 * 4, (1 << 31) - 256))
-    )
-    # The manager rounds allocations to 256 bytes.
-    expected_allocation = (expected + 255) // 256 * 256 if floor > 1 else expected
-    assert allocations == [expected_allocation]
-    manager.lock()
-    # Even a configured maximum beyond the kernel's offset limit must not
-    # prevent legal smaller launches. Validate an actual batch of at most 512.
-    reused = tokenspeed_mla_module._get_workspace(
-        device, 96, 512, floor, min(max_tokens, 512), max_tokens
-    )
-    assert reused.untyped_storage() is workspace.untyped_storage()
-    smaller = tokenspeed_mla_module._get_workspace(
-        device, 96, 512, floor, 1, max_tokens
-    )
-    assert smaller.untyped_storage() is workspace.untyped_storage()
-    assert allocations == [expected_allocation]
-    if floor > 1 and max_tokens < 8192:
-        with pytest.raises(AssertionError, match="Workspace is locked"):
-            tokenspeed_mla_module._get_workspace(
-                device, 96, 512, floor, 768, max_tokens
-            )
-    with pytest.raises(ValueError, match=">=2 GiB"):
-        tokenspeed_mla_module._get_workspace(device, 96, 512, 256, 8192, 8192)
-    assert allocations == [expected_allocation]
-
-
-@pytest.mark.parametrize(
-    "floor,supports_floor,error",
-    [
-        (1, False, None),
-        (8, True, None),
-        (0, True, "must be in"),
-        (257, True, "must be in"),
-        (8, False, "Upgrade tokenspeed-mla"),
-    ],
-)
-def test_tokenspeed_min_split_startup(monkeypatch, floor, supports_floor, error):
-    def base_init(self, *args, **kwargs):
-        self.kv_cache_dtype = "fp8"
-        self.qk_nope_head_dim = 128
-        self.qk_rope_head_dim = 64
-        self.v_head_dim = 128
-
-    def old_decode():
-        pass
-
-    def new_decode(*, min_split_kv):
-        pass
-
-    monkeypatch.setattr(tokenspeed_mla_module.MLACommonImpl, "__init__", base_init)
-    monkeypatch.setenv("VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV", str(floor))
-    monkeypatch.setattr(
-        tokenspeed_mla_module,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(
-            speculative_config=SimpleNamespace(num_speculative_tokens=4),
-            scheduler_config=SimpleNamespace(
-                max_num_batched_tokens=8192, max_num_seqs=32
-            ),
-            compilation_config=SimpleNamespace(max_cudagraph_capture_size=512),
-            parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
-        ),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "tokenspeed_mla",
-        SimpleNamespace(
-            tokenspeed_mla_decode=new_decode if supports_floor else old_decode,
-            warmup_compile_prefill=lambda **kwargs: None,
-        ),
-    )
-
-    def construct():
-        return tokenspeed_mla_module.TokenspeedMLAImpl(
-            96,
-            576,
-            1.0,
-            1,
-            None,
-            None,
-            "fp8",
-            None,
-            tokenspeed_mla_module.AttentionType.DECODER,
-            None,
-        )
-
-    if error:
-        with pytest.raises(ValueError, match=error):
-            construct()
-    else:
-        impl = construct()
-        assert impl._decode_kwargs == ({"min_split_kv": floor} if floor > 1 else {})
-        assert impl._max_decode_tokens == (512 if floor > 1 else 0)
 
 
 @pytest.mark.parametrize("is_fp8_kvcache", [False, True], ids=["bf16", "fp8"])
