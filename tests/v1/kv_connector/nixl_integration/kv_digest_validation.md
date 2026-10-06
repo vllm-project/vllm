@@ -19,6 +19,7 @@ the scenario that exercises it:
 | kv read after re-assign | The freed block is reallocated and overwritten by another request before D reads | E | `kv_digest_race.sh` | Covered (5/12 victims on 2026-10-05) |
 | Partial read via D prefix cache | D holds the prompt prefix locally and reads only the suffix; digest alignment must follow | F | `kv_digest_edge_paths.sh` stage 1 | Covered |
 | Chunked prefill | Multi-step prefill must digest once, after the last chunk, over the full block list | G | `kv_digest_edge_paths.sh` stage 2 | Covered |
+| TP4 -> TP4 | Per-rank KV shards need per-rank digests (aggregate clobbering misfires) | H | `kv_digest_smoke.sh` with TP env vars | Covered (clean 0/0; corruption caught per-rank) |
 | kv transfer while RDMA failed mid-transfer | NIC/link failure mid-transfer leaves partially written blocks on D | - | - | Pending: needs cross-node (P/D on different hosts over IB; same-node transfers use NVLink P2P). Reported transport errors already route through `_handle_failed_transfer`; the digest covers the silent partial-write case |
 
 ## Prerequisites
@@ -137,6 +138,40 @@ full accumulated block list.
 
 Expected: 200 with coherent output, digests present, 0 mismatches; p.log
 shows the request's `num_computed_tokens` advancing in 32-token steps.
+
+## Scenario H: TP4 -> TP4 (homogeneous tensor parallel)
+
+`PREFILLER_TP_SIZE=4 DECODER_TP_SIZE=4 PREFILLER_GPUS=0,1,2,3
+DECODER_GPUS=4,5,6,7 bash kv_digest_smoke.sh` — same stages at TP4.
+
+Each P rank digests only its own KV shard; digests ship per producer rank
+(`remote_block_digests[tp_rank][group][block]`), and D rank r verifies its
+received shard against entry r. Hetero TP (P_TP != D_TP) is out of scope and
+skipped by the `supported` guard.
+
+Expected: clean path 0 mismatches AND 0 skips; with `DIGEST_CORRUPT=1` each
+rank catches its own shard (one mismatch per rank, e.g. 4 at TP4). History:
+before the per-rank fix, TP4 misfired because `NixlDigestMetadata.aggregate`
+clobbered per-rank digests (only one rank's survived).
+
+## Scenario I: MLA path (replicated latent KV)
+
+MLA models (e.g. DeepSeek) store a compressed latent KV that is REPLICATED
+across TP ranks (every rank holds identical bytes; NIXL reads a whole block
+from any single rank - see `_is_region_replicated` in nixl/base_worker.py).
+Digest mechanics need no special-casing: every P rank digests identical
+bytes, so the per-rank wire entries are identical for MLA groups, and any D
+rank verifies against any entry.
+
+How to test: run `kv_digest_smoke.sh` with an MLA model
+(`MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat`; download into the shared model
+cache, not ~). Verify in logs: (a) clean pass with 0 mismatches on the MLA
+groups; (b) with DIGEST_CORRUPT, mismatch fires on the MLA group too;
+(c) for a TP-mix run (e.g. P_TP=2, D_TP=1) the MLA groups should still
+verify - that is the hetero-TP-easy case. Note MiniMax-M3 (production) is a
+hybrid SSM MoE - SSM groups with scratch slots are excluded from transfer
+(`get_exchange_clipped_blocks`) and thus from digests; only its
+full-attention groups are covered.
 
 ## Gotchas
 

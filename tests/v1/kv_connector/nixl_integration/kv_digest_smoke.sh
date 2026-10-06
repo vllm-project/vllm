@@ -1,10 +1,20 @@
 #!/bin/bash
-# KV digest smoke validation: clean path, byte-corruption injection, and the
-# nixl_integration accuracy regression, on one node with 2 GPUs + toy proxy.
-# Logs land in ~/pd1p1d/{p,d,proxy}.log.
+# KV digest smoke validation: clean path, byte-corruption injection, fail
+# routing, and the nixl_integration accuracy regression, on one node + toy
+# proxy. Logs land in ~/pd1p1d/{p,d,proxy}.log.
+#
+# TP variants: PREFILLER_TP_SIZE / DECODER_TP_SIZE with matching
+# PREFILLER_GPUS / DECODER_GPUS lists, e.g. TP4:
+#   PREFILLER_TP_SIZE=4 DECODER_TP_SIZE=4 \
+#   PREFILLER_GPUS=0,1,2,3 DECODER_GPUS=4,5,6,7 bash kv_digest_smoke.sh
 set -u
 export PATH=$HOME/vllm/.venv/bin:$HOME/.local/bin:$PATH
 cd ~
+
+P_TP=${PREFILLER_TP_SIZE:-1}
+D_TP=${DECODER_TP_SIZE:-1}
+P_GPUS=${PREFILLER_GPUS:-0}
+D_GPUS=${DECODER_GPUS:-1}
 
 # enable_kv_digest=true on BOTH sides: P computes digests, D verifies them.
 KT='{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"enable_kv_digest":true}}'
@@ -19,13 +29,15 @@ wait_health() {  # $1=port
 }
 
 launch_p() {
-  CUDA_VISIBLE_DEVICES=0 UCX_NET_DEVICES=all VLLM_NIXL_SIDE_CHANNEL_PORT=5559 VLLM_LOGGING_LEVEL=DEBUG \
-    setsid ~/vllm/.venv/bin/vllm serve Qwen/Qwen3-0.6B --port 8100 --gpu-memory-utilization 0.2 \
+  CUDA_VISIBLE_DEVICES="$P_GPUS" UCX_NET_DEVICES=all VLLM_NIXL_SIDE_CHANNEL_PORT=5559 VLLM_LOGGING_LEVEL=DEBUG \
+    setsid ~/vllm/.venv/bin/vllm serve Qwen/Qwen3-0.6B --port 8100 --tensor-parallel-size "$P_TP" \
+    --gpu-memory-utilization 0.2 \
     --enforce-eager --kv-transfer-config "$KT" < /dev/null > ~/pd1p1d/p.log 2>&1 &
 }
 launch_d() {  # $@=extra env assignments (e.g. VLLM_NIXL_DIGEST_CORRUPT=1)
-  env CUDA_VISIBLE_DEVICES=1 UCX_NET_DEVICES=all VLLM_NIXL_SIDE_CHANNEL_PORT=5659 VLLM_LOGGING_LEVEL=DEBUG "$@" \
-    setsid ~/vllm/.venv/bin/vllm serve Qwen/Qwen3-0.6B --port 8200 --gpu-memory-utilization 0.2 \
+  env CUDA_VISIBLE_DEVICES="$D_GPUS" UCX_NET_DEVICES=all VLLM_NIXL_SIDE_CHANNEL_PORT=5659 VLLM_LOGGING_LEVEL=DEBUG "$@" \
+    setsid ~/vllm/.venv/bin/vllm serve Qwen/Qwen3-0.6B --port 8200 --tensor-parallel-size "$D_TP" \
+    --gpu-memory-utilization 0.2 \
     --enforce-eager --kv-transfer-config "$KD" < /dev/null > ~/pd1p1d/d.log 2>&1 &
 }
 launch_proxy() {
