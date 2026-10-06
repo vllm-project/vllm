@@ -63,9 +63,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
-# MLAPlan still has a 16384-work limit in FlashInfer 0.7.0.post1. Budget
-# 8192 query tiles, leaving room for split-KV work:
-# https://github.com/flashinfer-ai/flashinfer/pull/5170.
+# MLAPlan caps works at 16384 in FlashInfer 0.7.0.post1; budget 8192 tiles.
+# https://github.com/flashinfer-ai/flashinfer/pull/5170
 _MAX_PLAN_QUERY_TILES = 8192
 # TODO: FlashInfer bakes per-row kv_len into the plan on the host, which
 # forces a D2H sync under async scheduling. The plan-info layout constants
@@ -90,8 +89,7 @@ _PLAN_SLACK = 32
 
 
 def _max_plan_chunk_rows(num_heads: int) -> int:
-    # One query per row; the smallest planner query tile spans 64 heads.
-    # Use that size even when the planner selects a two-CTA (128-head) tile.
+    # Smallest planner query tile is 64 heads; keep that for 128-head tiles too.
     return _MAX_PLAN_QUERY_TILES // triton.cdiv(num_heads, 64)
 
 
