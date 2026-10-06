@@ -473,8 +473,8 @@ class SpeculativeConfig:
     cuts its cost per draft token; the target still verifies with the full
     vocabulary, so outputs follow the usual speculative decoding guarantees.
     Accepts SGLang's `--speculative-token-map` file (`.pt`) or a JSON list.
-    EOS ids are always included. Requires an MTP drafter that shares the
-    target's unquantized lm_head, and Model Runner V2."""
+    EOS ids are always included. Requires an MTP drafter with an unquantized
+    full-vocabulary lm_head, and Model Runner V2."""
 
     draft_token_map_dynamic_rows: int = Field(default=0, ge=0)
     """Extra draft tokens picked per draft token on top of `draft_token_map`.
@@ -485,6 +485,12 @@ class SpeculativeConfig:
 
     draft_token_map_dynamic_rank: int = Field(default=256, ge=1)
     """Rank of the lm_head projection that scores the dynamic draft rows."""
+
+    draft_token_map_quantization: Literal["fp8", "nvfp4"] | None = None
+    """Weight-only quantization of the draft vocabulary's lm_head rows, both
+    the listed and the dynamic ones: "fp8" keeps one scale per row, "nvfp4" one
+    E4M3 scale per 16 weights. The dynamic rows' scorer is then stored in fp8.
+    Only the acceptance length can change. Requires `draft_token_map`."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -1876,8 +1882,14 @@ class SpeculativeConfig:
                 "omit it."
             )
 
-        if self.draft_token_map_dynamic_rows > 0 and self.draft_token_map is None:
-            raise ValueError("draft_token_map_dynamic_rows requires draft_token_map.")
+        if self.draft_token_map is None and (
+            self.draft_token_map_dynamic_rows > 0
+            or self.draft_token_map_quantization is not None
+        ):
+            raise ValueError(
+                "draft_token_map_dynamic_rows and draft_token_map_quantization "
+                "require draft_token_map."
+            )
 
         if self.draft_token_map is not None and self.method != "mtp":
             raise ValueError(

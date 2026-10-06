@@ -90,7 +90,8 @@ vllm serve <mtp-model> \
   stays exact.
 - The file is SGLang's `--speculative-token-map` format (a `.pt` list of ids)
   or a JSON list. EOS ids are always added.
-- The shared lm_head must be unquantized.
+- The drafter's lm_head must be unquantized. Drafters whose model code builds
+  a `DraftVocab` support it (Qwen3.5 and Qwen4Exp MTP); others raise an error.
 - Acceptance drops when the list misses tokens your traffic uses, so build it
   from representative text, ideally the model's own outputs, and include all
   special tokens. [`build_draft_token_map.py`](../../../examples/features/speculative_decoding/build_draft_token_map.py)
@@ -114,6 +115,11 @@ vllm serve <mtp-model> \
 It costs more per draft token than the list alone, and that cost grows with
 batch size, so measure decode speed at your concurrency. Tensor parallel size 1
 only.
+
+`draft_token_map_quantization` (`"fp8"` or `"nvfp4"`) stores the listed and
+dynamic rows weight-only quantized, which cuts the bytes read per draft token
+further; the dynamic rows' scorer is then stored in FP8. Only the acceptance
+length can change.
 
 ## Notes
 
