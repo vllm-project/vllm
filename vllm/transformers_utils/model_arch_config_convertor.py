@@ -18,6 +18,7 @@ from vllm.transformers_utils.config import (
     get_safetensors_params_metadata,
 )
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
+from vllm.transformers_utils.configs.granite_switch import SWITCH_CACHE_LAYERS
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
@@ -811,6 +812,32 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return max_position_embeddings, "language_config.max_position_embeddings"
 
 
+class GraniteSwitchModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        num_layers = super().get_num_hidden_layers()
+        if getattr(self.hf_text_config, "num_adapters", 0) > 0:
+            # A Granite Switch config's num_hidden_layers is inflated by
+            # SWITCH_CACHE_LAYERS: the switch's counting and memory heads are
+            # real paged-KV attention layers, and the count has to include them
+            # for a Transformers DynamicCache to size correctly. vLLM finds
+            # those Attention modules by itself for KV allocation, so what this
+            # number has to report is the count of PHYSICAL DECODER layers -
+            # that is what pipeline-parallel slicing partitions.
+            return max(0, num_layers - SWITCH_CACHE_LAYERS)
+        return num_layers
+
+    def get_head_size(self) -> int:
+        # Granite Switch names the attention head size projection_head_dim, so
+        # the base class's head_dim lookup would miss it and fall back to
+        # hidden_size // num_attention_heads. Token exchange rewrites token ids
+        # and does not widen the head, so this is just the base model's head
+        # size.
+        return (
+            getattr(self.hf_text_config, "projection_head_dim", None)
+            or super().get_head_size()
+        )
+
+
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
@@ -829,6 +856,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4_unified": Gemma4ModelArchConfigConvertor,
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "granite_switch": GraniteSwitchModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "longcat_flash": LongCatFlashModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
