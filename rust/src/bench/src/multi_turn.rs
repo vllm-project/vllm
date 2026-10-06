@@ -170,11 +170,6 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
                 "Random-MM multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
             ));
         }
-        DatasetName::Sonnet => {
-            return Err(BenchError::Config(
-                "Sonnet multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
-            ));
-        }
         DatasetName::SpeedBench => {
             return Err(BenchError::Config(
                 "SPEED-Bench multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
