@@ -183,6 +183,7 @@ class OnlineRenderer:
             tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
+            tokenizer=renderer.tokenizer,
         )
 
         self.chat_template = chat_template
@@ -206,6 +207,18 @@ class OnlineRenderer:
                 chat_template_content_format=self.chat_template_content_format,
                 chat_template_kwargs=self.default_chat_template_kwargs,
             )
+        )
+
+    def effective_chat_template_kwargs(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> dict[str, Any]:
+        return (
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.default_chat_template_kwargs)
+            .chat_template_kwargs
         )
 
     async def render_chat(
@@ -355,14 +368,7 @@ class OnlineRenderer:
                 else None
             ),
         )
-        chat_template_kwargs = (
-            request.build_chat_params(
-                self.chat_template,
-                self.chat_template_content_format,
-            )
-            .with_defaults(self.default_chat_template_kwargs)
-            .chat_template_kwargs
-        )
+        chat_template_kwargs = self.effective_chat_template_kwargs(request)
         _, engine_inputs = await self.preprocess_chat(
             request,
             messages,
@@ -825,7 +831,8 @@ class OnlineRenderer:
                 and tokenizer.supports_grammar
             )
             should_adjust_request = (
-                parser.reasoning_parser_cls is not None
+                parser.always_adjust_request
+                or parser.reasoning_parser_cls is not None
                 or tool_choice != "none"
                 or is_mistral_grammar_eligible
             )

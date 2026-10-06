@@ -87,6 +87,8 @@ def get_missing_precompiled_rust_extension_modules() -> list[str]:
 
 
 def has_precompiled_rust_extensions() -> bool:
+    if not rust_build.rust_py_extension_module_names():
+        return False
     return not get_missing_precompiled_rust_extension_modules()
 
 
@@ -1338,6 +1340,11 @@ def get_requirements() -> list[str]:
             if "vllm-flash-attn" in req and cuda_major != "12":
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
+                continue
+            if "flashinfer-cubin" in req or "flashinfer-jit-cache" in req:
+                # Not on PyPI (only https://flashinfer.ai/whl), so they
+                # cannot be wheel dependencies; flashinfer handles the
+                # absence of pre-compiled cubins/jit-cache at runtime.
                 continue
             if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
                 # [cu13] extra is the default; strip it on CUDA 12 builds.
