@@ -46,6 +46,10 @@ def test_custom_histogram_buckets_accepts_zero_bound():
             "must be finite and non-negative",
         ),
         ({"request_latency": [float("nan")]}, "must be finite and non-negative"),
+        (
+            {"request_num_preemptions": [0.0]},
+            "must include a bound greater than 0",
+        ),
         ({"request_latency": [1.0, 1.0]}, "must be strictly increasing"),
         ({"request_latency": [2.0, 1.0]}, "must be strictly increasing"),
         ({"request_latency": [True, 2.0]}, "must be a number, not a boolean"),

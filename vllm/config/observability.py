@@ -211,6 +211,11 @@ class ObservabilityConfig:
                     f"custom_histogram_buckets[{family!r}]: bounds {buckets} "
                     "must be strictly increasing"
                 )
+            if buckets[-1] <= 0:
+                raise ValueError(
+                    f"custom_histogram_buckets[{family!r}]: bounds {buckets} "
+                    "must include a bound greater than 0"
+                )
         return value
 
     @model_validator(mode="after")

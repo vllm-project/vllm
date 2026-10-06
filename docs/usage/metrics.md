@@ -112,7 +112,8 @@ enabled.
 
 A leading `0` bound lets a count family such as `request_num_preemptions`
 separate zero from one. Ray metrics do not support a `0` boundary, so it is
-dropped when metrics are exported through Ray.
+dropped when metrics are exported through Ray; a list must therefore include
+at least one bound greater than 0.
 
 !!! warning "Bucket cardinality"
     Every bucket boundary creates one extra time series per metric and per
