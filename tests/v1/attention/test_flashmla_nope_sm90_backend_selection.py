@@ -7,9 +7,9 @@ v_head_dim=256, kv_lora_rank=512 -> head_size 512. These tests pin the
 selection contract only (no GPU required):
 
 * ``get_supported_head_sizes`` advertises 512 so the backend is a candidate;
-* ``supports_combination`` admits exactly two shapes for 512 -- a quantized
-  DS-MLA cache format (zero-padded 576/656B envelope) and a rope-free bf16
-  cache on SM90 -- and rejects everything else;
+* ``supports_combination`` admits 512 only for rope-free models on SM90, with
+  a bf16 cache or an fp8_ds_mla cache (zero RoPE slot), and rejects
+  everything else;
 * adding 512 must NOT reorder the SM100 priority list for bf16, which is why
   the bf16 arm is restricted to SM90.
 """
@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
@@ -29,7 +30,7 @@ SM90 = DeviceCapability(major=9, minor=0)
 SM100 = DeviceCapability(major=10, minor=0)
 
 BF16_CACHE_DTYPES = (None, "auto", "bfloat16", "float16")
-QUANTIZED_CACHE_DTYPES = ("fp8_ds_mla", "nvfp4_ds_mla")
+NOPE_SM90_CACHE_DTYPES = (*BF16_CACHE_DTYPES, "fp8_ds_mla")
 
 
 def _supports_combination(head_size, kv_cache_dtype, capability):
@@ -86,34 +87,26 @@ def test_quantized_ds_mla_formats_are_the_envelope_set():
     assert frozenset({"fp8_ds_mla", "nvfp4_ds_mla"}) == QUANTIZED_DS_MLA_CACHE_FORMATS
 
 
-@pytest.mark.parametrize("kv_cache_dtype", QUANTIZED_CACHE_DTYPES)
-def test_nope_512_quantized_rejected_here(kv_cache_dtype):
-    # Quantized DS-MLA NoPE-512 is served by the zero-padded 576/656B
-    # envelope, wired up in a separate change; this backend must reject it.
-    reason = _supports_combination(512, kv_cache_dtype, SM90)
-    assert reason is not None
-
-
-@pytest.mark.parametrize("kv_cache_dtype", BF16_CACHE_DTYPES)
-def test_nope_512_bf16_sm90_rope_free_accepted(kv_cache_dtype, rope_free_model):
+@pytest.mark.parametrize("kv_cache_dtype", NOPE_SM90_CACHE_DTYPES)
+def test_nope_512_sm90_rope_free_accepted(kv_cache_dtype, rope_free_model):
     assert _supports_combination(512, kv_cache_dtype, SM90) is None
 
 
-@pytest.mark.parametrize("kv_cache_dtype", BF16_CACHE_DTYPES)
-def test_nope_512_bf16_sm90_rope_carrying_rejected(kv_cache_dtype, rope_carrying_model):
+@pytest.mark.parametrize("kv_cache_dtype", NOPE_SM90_CACHE_DTYPES)
+def test_nope_512_sm90_rope_carrying_rejected(kv_cache_dtype, rope_carrying_model):
     reason = _supports_combination(512, kv_cache_dtype, SM90)
     assert reason is not None and "rope-free" in reason
 
 
-@pytest.mark.parametrize("kv_cache_dtype", BF16_CACHE_DTYPES)
-def test_nope_512_bf16_sm100_rejected(kv_cache_dtype, rope_free_model):
+@pytest.mark.parametrize("kv_cache_dtype", NOPE_SM90_CACHE_DTYPES)
+def test_nope_512_sm100_rejected(kv_cache_dtype, rope_free_model):
     # The SM90 restriction is what keeps the SM100 priority order unchanged.
     reason = _supports_combination(512, kv_cache_dtype, SM100)
     assert reason is not None
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ("fp8", "fp8_e4m3"))
-def test_nope_512_plain_fp8_rejected(kv_cache_dtype, rope_free_model):
+@pytest.mark.parametrize("kv_cache_dtype", ("fp8", "fp8_e4m3", "nvfp4_ds_mla"))
+def test_nope_512_other_quantized_rejected(kv_cache_dtype, rope_free_model):
     reason = _supports_combination(512, kv_cache_dtype, SM90)
     assert reason is not None
 
@@ -174,3 +167,15 @@ def test_sm100_bf16_512_priority_unchanged(num_heads):
 def test_sm100_576_priority_unchanged():
     order = _sparse_order("auto", 576, num_heads=32)
     assert order[0] == "FLASHMLA_SPARSE", order
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA backends")
+def test_sm90_nope_fp8_ds_mla_resolves_to_flashmla():
+    """The sparse backends ranked ahead of FLASHMLA_SPARSE for SM90 NoPE-512
+    reject fp8_ds_mla, so the auto-selector lands on FlashMLA."""
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    order = _sparse_order("fp8_ds_mla", 512, num_heads=64, capability=SM90)
+    for name in order[: order.index("FLASHMLA_SPARSE")]:
+        backend_cls = AttentionBackendEnum[name].get_class()
+        assert not backend_cls.supports_kv_cache_dtype("fp8_ds_mla"), name
