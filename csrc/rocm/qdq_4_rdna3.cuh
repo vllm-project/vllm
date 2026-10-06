@@ -52,61 +52,75 @@ __forceinline__ __device__ void shuffle_4bit_8(uint32_t* q) {
 }
 
 // ---------------------------------------------------------------------------
-// fp16 path
+// fp16 path: exact factored form.
+// ---------------------------------------------------------------------------
+// The pre-#54706-v2 kernels baked the zero/scale bias into every weight,
+// which forced z = scale * (-1024 - zero) to be *stored* as fp16. At
+// scale ~0.02 that costs ~0.008 abs per (group, column) constant and the
+// error then accumulates along the K/groups axis (measured max abs
+// error ~1.0 vs an FP32 dequantized reference at K=4096). Computing the
+// product in fp32 does not help: the error is in the fp16 *representation*
+// of z, not in the multiply.
+//
+// Instead use the identity, exact for any grouping:
+//
+//     sum_k a_k * w_k  =  y * sum_k a_k * (1024 + q_k)  +  z * sum_k a_k
+//
+// with one (y, z) pair per nibble slot (the high pairs carry a factor of
+// 16): y_lo = s, z_lo = s*(-1024 - zero), y_hi = s/16, z_hi = s*(-64 -
+// zero). The y/z constants live in fp32 and are never narrowed; the magic
+// values (1024 + q) / (1024 + 16q) stay in fp16 where they are exact. The
+// z * sum_a correction is applied once per 32-K round in the kernel (z is
+// constant within a group, so per-round applications sum to the per-group
+// application). sum_k a_k does not depend on the output column, so the
+// extra v_dot2 against half2(1,1) is shared by all four columns a thread
+// owns. This is the same structure the bf16 branches of q_gemm_rdna3.cu
+// already use; fp16 needs two (y, z) pairs and two activation sums because
+// its magic values carry the upper-nibble *16 trick.
 // ---------------------------------------------------------------------------
 
-// Precompute scale-baked constants for a single zero/scale pair.
-//   z1z16[0] = scale * (-1024 - zero)            (used for "low" pairs)
-//   z1z16[1] = scale * (-64   - zero)            (used for "high" pairs)
-//   y1y16[0] = scale * 1                          (low pairs are q + 1024)
-//   y1y16[1] = scale * (1/16)                     (high pairs are q*16 + 1024)
-__forceinline__ __device__ void prep_zero_scale_fp16(uint32_t zero, half scale,
-                                                     half2 (&z1z16)[2],
-                                                     half2 (&y1y16)[2]) {
-  // half(-1024 - zero) via the exllamav2 bit-trick:
-  //   half bits 0xE400 == -1024.0 ; ORing the zero into mantissa subtracts it.
-  union {
-    uint16_t u;
-    half h;
-  } z1u;
-  z1u.u = (uint16_t)(0xE400 | zero);
-  half z1 = z1u.h;
-  half z16 = __hsub(__int2half_rn(-64), __int2half_rn((int)zero));
-
-  half2 scale2 = __half2half2(scale);
-  z1z16[0] = __hmul2(scale2, __half2half2(z1));
-  z1z16[1] = __hmul2(scale2, __half2half2(z16));
-
-  half y1 = __float2half_rn(1.0f);
-  half y16 = __float2half_rn(1.0f / 16.0f);
-  y1y16[0] = __hmul2(scale2, __half2half2(y1));
-  y1y16[1] = __hmul2(scale2, __half2half2(y16));
+// fp32 (y, z) pairs for the exact factored form above.
+__forceinline__ __device__ void prep_zero_scale_fp16_f32(uint32_t zero,
+                                                         half scale,
+                                                         float (&y)[2],
+                                                         float (&z)[2]) {
+  const float s = __half2float(scale);
+  const float zf = (float)(int)zero;
+  y[0] = s;  // low pairs:  (1024 + q) * s
+  z[0] = s * (-1024.0f - zf);
+  y[1] = s * (1.0f / 16.0f);  // high pairs: (1024 + 16q) * s/16
+  z[1] = s * (-64.0f - zf);
 }
 
-// Dequantize one int32 (8 shuffled 4-bit weights) into 4 half2 pairs:
-//   dq[0] = (q[0], q[1]) * scale - zero*scale
-//   dq[1] = (q[2], q[3]) * scale - zero*scale
-//   dq[2] = (q[4], q[5]) * scale - zero*scale
-//   dq[3] = (q[6], q[7]) * scale - zero*scale
-__forceinline__ __device__ void dequant_4bit_8_fp16(uint32_t qa, half2 (&dq)[4],
-                                                    half2 (&z1z16)[2],
-                                                    half2 (&y1y16)[2]) {
+// Magic values only, with no y/z folded in: low pairs land in [0] and [2],
+// high pairs in [1] and [3]. The lane mapping assumes the host-side
+// gptq_shuffle interleave (see shuffle_4bit_8 above): even elements sit in
+// the low nibbles, odd elements in the high nibbles.
+__forceinline__ __device__ void magic_4bit_8_fp16(uint32_t qa, half2 (&qm)[4]) {
   const uint32_t c0 = 0x64006400;
-
   union {
     uint32_t u;
     half2 h2;
-  } q0, q1, q2, q3;
-  q0.u = (qa & 0x000F000F) | c0;  // half2(q[0]+1024, q[1]+1024)
-  q1.u = (qa & 0x00F000F0) | c0;  // half2(q[2]*16+1024, q[3]*16+1024)
-  uint32_t qa_hi = qa >> 8;
-  q2.u = (qa_hi & 0x000F000F) | c0;  // half2(q[4]+1024, q[5]+1024)
-  q3.u = (qa_hi & 0x00F000F0) | c0;  // half2(q[6]*16+1024, q[7]*16+1024)
+  } t;
+  t.u = (qa & 0x000F000F) | c0;  // half2(1024 + q[0], 1024 + q[1])
+  qm[0] = t.h2;
+  t.u = (qa & 0x00F000F0) | c0;  // half2(1024 + q[2]*16, 1024 + q[3]*16)
+  qm[1] = t.h2;
+  const uint32_t qa_hi = qa >> 8;
+  t.u = (qa_hi & 0x000F000F) | c0;  // half2(1024 + q[4], 1024 + q[5])
+  qm[2] = t.h2;
+  t.u = (qa_hi & 0x00F000F0) | c0;  // half2(1024 + q[6]*16, 1024 + q[7]*16)
+  qm[3] = t.h2;
+}
 
-  dq[0] = __hfma2(q0.h2, y1y16[0], z1z16[0]);
-  dq[1] = __hfma2(q1.h2, y1y16[1], z1z16[1]);
-  dq[2] = __hfma2(q2.h2, y1y16[0], z1z16[0]);
-  dq[3] = __hfma2(q3.h2, y1y16[1], z1z16[1]);
+// half2(1.0, 1.0) for the activation-sum v_dot2 in the exact factored form.
+__forceinline__ __device__ half2 ones_half2_fp16() {
+  union {
+    uint32_t u;
+    half2 h2;
+  } t;
+  t.u = 0x3C003C00u;
+  return t.h2;
 }
 
 // ---------------------------------------------------------------------------

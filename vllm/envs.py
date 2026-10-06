@@ -23,8 +23,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
-    VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
+    VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -165,9 +165,6 @@ if TYPE_CHECKING:
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
-    Q_SCALE_CONSTANT: int = 200
-    K_SCALE_CONSTANT: int = 200
-    V_SCALE_CONSTANT: int = 100
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
@@ -225,6 +222,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -803,14 +801,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
     # used to control the visible devices in the distributed setting
     "CUDA_VISIBLE_DEVICES": lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
-    # timeout for each iteration in the engine
-    "VLLM_ENGINE_ITERATION_TIMEOUT_S": lambda: int(
-        os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")
-    ),
     # Timeout in seconds for waiting for engine cores to become ready
     # during startup. Default is 600 seconds (10 minutes).
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
+    ),
+    # Maximum wall-clock seconds allowed for a single chat template render.
+    # Set to 0 to disable the timeout.
+    "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
+        os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
@@ -906,7 +905,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
         int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
     ),
-    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ.
+    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and
+    # on Zen CPUs whether to serve int4 checkpoints as DA8W4 rather than W4A16.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
@@ -1798,6 +1798,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
     ),
+    # Transmit MoE all-to-all combine (expert-output) payloads in FP8 instead
+    # of BF16, halving NVLink traffic on the combine leg. Only takes effect
+    # when the installed FlashInfer MoeAlltoAll kernel supports it.
+    "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "0"))
+    ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
     # the blockscale tensor of activations NVFP4 Quantization.
@@ -2361,7 +2367,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
-        "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",

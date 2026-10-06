@@ -138,6 +138,8 @@ ENV TARGETARCH=${TARGETARCH}
 ######################### COMMON BASE IMAGE + PYTHON DEPS #########################
 FROM base-common AS base-common-pydeps
 
+ENV UV_COMPILE_BYTECODE=1
+
 # PyTorch provides its own indexes for standard and nightly builds.
 # PYTORCH_NIGHTLY=1 builds the CPU image against torch nightly (parity with the
 # GPU torch-nightly lane); default 0 keeps the pinned release CPU build.
@@ -439,6 +441,11 @@ ADD ./cmake/ ./cmake/
 # (e.g. tests/tools/test_check_test_tethering.py imports
 # tools.pre_commit.check_test_tethering).
 ADD ./tools/ ./tools/
+# tests/test_zentorch_version_pin.py string-matches the zentorch extra in
+# setup.py against the torch pin in requirements/cpu.txt. The wheel does not
+# ship either file, and this stage does not inherit the vllm-src tree.
+ADD ./setup.py ./setup.py
+ADD ./requirements/cpu.txt ./requirements/cpu.txt
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
