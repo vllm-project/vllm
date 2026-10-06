@@ -745,7 +745,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 is_quantized_kv_cache(vllm_config.cache_config.cache_dtype),
             )
         )
-        self._supports_triton_dcp_verify = (
+        self._use_triton_dcp_verify = (
             supports_triton_dcp_verify and not self._supports_segmented_dcp_verify
         )
         self._mla_max_split_per_batch = 0
@@ -777,7 +777,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # TILE subpages of them.
         self._dcp_verify_page_size = (
             kv_cache_spec.block_size
-            if self._supports_triton_dcp_verify
+            if self._use_triton_dcp_verify
             else _segmented_mla_page_size(kv_cache_spec.block_size)
         )
         # A DCP rank's shard of the longest sequence bounds every verify row.
@@ -951,7 +951,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
 
             if (
-                self._supports_segmented_dcp_verify or self._supports_triton_dcp_verify
+                self._supports_segmented_dcp_verify or self._use_triton_dcp_verify
             ) and self._mtp_decode_qlen > 1:
                 # Allocate even when CPRR is the preferred route: a later
                 # replay can fall below _MIN_CPRR_QLEN and needs these
@@ -978,7 +978,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # gfx942 DCP verify launches the generic split-KV kernel, which draws
         # its partials from the shared workspace. Reserve it before warmup
         # locks the pool.
-        if self._supports_triton_dcp_verify and self._mtp_decode_qlen > 1:
+        if self._use_triton_dcp_verify and self._mtp_decode_qlen > 1:
             _reserve_triton_dcp_verify_workspace(
                 max_num_reqs * self._mtp_decode_qlen,
                 self._decode_num_heads,
@@ -1457,7 +1457,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if self.dcp_world_size > 1:
             dcp_route = _select_dcp_decode_route(
                 supports_segmented=self._supports_segmented_dcp_verify,
-                supports_triton=self._supports_triton_dcp_verify,
+                supports_triton=self._use_triton_dcp_verify,
                 causal=causal,
                 max_qo_len=int(max_qo_len),
                 asm_selected=self._asm_dcp_verify,
