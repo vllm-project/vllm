@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import partial
 from typing import Any
 
 import torch
@@ -329,15 +330,22 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
         self.on_prefill_end(num_reqs)
 
+        num_draft_steps = num_speculative_tokens
         confidence_stop = None
-        if self.confidence_stop is not None and not (dummy_run or is_profile):
+        stop = self.confidence_stop
+        if stop is not None and not (dummy_run or is_profile):
             if input_batch.has_structured_output_reqs:
                 # Grammar masks cover every scheduled draft, so draft them all.
-                self.confidence_stop.full_round(input_batch.idx_mapping_np)
+                stop.fixed_round(input_batch.idx_mapping_np, num_draft_steps)
+            elif num_reqs > 1:
+                # The batch drafts while any request is confident, and each
+                # step waits on the GPU, so past one request use a fixed depth.
+                num_draft_steps = stop.fallback_depth
+                stop.fixed_round(input_batch.idx_mapping_np, num_draft_steps)
             else:
-                confidence_stop = self.confidence_stop
-                confidence_stop.begin_round(input_batch.idx_mapping_np)
-                confidence_stop.step_launched()
+                confidence_stop = stop
+                stop.begin_round(input_batch.idx_mapping_np)
+                stop.step_launched()
 
         if num_speculative_tokens <= 1:
             if num_speculative_tokens == 0:
@@ -380,7 +388,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
         if self.decode_cudagraph_manager is not None:
             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
-                decode_batch_desc, num_speculative_tokens
+                decode_batch_desc, num_draft_steps
             )
         num_tokens_across_dp = (
             decode_batch_sync.num_tokens_across_dp
@@ -393,27 +401,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         decode_fn = (
             self._fused_multi_step_decode
             if self.use_fused_multi_step_decode
-            else self._multi_step_decode
+            else partial(self._multi_step_decode, confidence_stop=confidence_stop)
         )
-        if confidence_stop is not None:
-            self._multi_step_decode(
-                num_reqs,
-                False,
-                decode_batch_desc,
-                num_tokens_across_dp,
-                input_batch.seq_lens_cpu_upper_bound,
-                num_speculative_tokens,
-                confidence_stop,
-            )
-        else:
-            decode_fn(
-                num_reqs,
-                dummy_run and skip_attn_for_dummy_run,
-                decode_batch_desc,
-                num_tokens_across_dp,
-                input_batch.seq_lens_cpu_upper_bound,
-                num_speculative_tokens,
-            )
+        decode_fn(
+            num_reqs,
+            dummy_run and skip_attn_for_dummy_run,
+            decode_batch_desc,
+            num_tokens_across_dp,
+            input_batch.seq_lens_cpu_upper_bound,
+            num_draft_steps,
+        )
         self.on_multi_step_decode_end(num_reqs)
 
         return self.draft_tokens[:num_reqs]

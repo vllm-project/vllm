@@ -12,6 +12,7 @@ from vllm.v1.worker.gpu.spec_decode.confidence_stop import DraftConfidenceStop
 
 VOCAB = 20000  # Spans several kernel blocks.
 NUM_STEPS = 4
+FALLBACK = 2
 THRESHOLD = 0.6
 
 requires_cuda = pytest.mark.skipif(
@@ -42,7 +43,7 @@ def _run_step(stop, top_probs, idx_mapping, step):
 
 @requires_cuda
 def test_chain_state_follows_top_probabilities():
-    stop = DraftConfidenceStop(THRESHOLD, 8, NUM_STEPS, torch.device("cuda"))
+    stop = DraftConfidenceStop(THRESHOLD, FALLBACK, 8, NUM_STEPS, torch.device("cuda"))
     # Row 2 is cudagraph padding and must never keep the batch drafting.
     idx_mapping = [3, 1, -1]
     stop.begin_round(np.array([3, 1]))
@@ -76,7 +77,7 @@ def test_chain_state_follows_top_probabilities():
     ],
 )
 def test_stop_after_first_draft_keeps_it(first_prob, expected):
-    stop = DraftConfidenceStop(THRESHOLD, 4, NUM_STEPS, torch.device("cuda"))
+    stop = DraftConfidenceStop(THRESHOLD, FALLBACK, 4, NUM_STEPS, torch.device("cuda"))
     stop.begin_round(np.array([0]))
     _run_step(stop, [first_prob], [0], 0)
     if first_prob >= THRESHOLD:
@@ -89,7 +90,7 @@ def test_stop_after_first_draft_keeps_it(first_prob, expected):
 @requires_cuda
 @pytest.mark.parametrize(("last_prob", "expected"), [(0.9, 4), (0.1, 3)])
 def test_full_round_resolves_last_step_lazily(last_prob, expected):
-    stop = DraftConfidenceStop(THRESHOLD, 4, NUM_STEPS, torch.device("cuda"))
+    stop = DraftConfidenceStop(THRESHOLD, FALLBACK, 4, NUM_STEPS, torch.device("cuda"))
     stop.begin_round(np.array([2]))
     for step in range(NUM_STEPS - 1):
         _run_step(stop, [0.9], [2], step)
@@ -99,24 +100,45 @@ def test_full_round_resolves_last_step_lazily(last_prob, expected):
     assert stop.num_verifiable_drafts(np.array([2])).tolist() == [expected]
 
 
+@requires_cuda
+def test_fixed_round_verifies_its_depth():
+    """Multi-request rounds draft the fallback depth and skip the stop."""
+    stop = DraftConfidenceStop(THRESHOLD, FALLBACK, 8, NUM_STEPS, torch.device("cuda"))
+    stop.fixed_round(np.array([4, 6]), FALLBACK)
+    assert stop.num_verifiable_drafts(np.array([4, 6])).tolist() == [FALLBACK] * 2
+    # A later single-request round only updates its own slot.
+    stop.begin_round(np.array([4]))
+    _run_step(stop, [0.1], [4], 0)
+    assert not stop.should_continue()
+    assert stop.num_verifiable_drafts(np.array([4, 6])).tolist() == [1, FALLBACK]
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("is_cuda", "is_sm12x", "ok"),
-    [(True, True, True), (True, False, False), (False, False, False)],
+    ("is_cuda", "capability", "fallback", "error"),
+    [
+        (True, 121, FALLBACK, None),
+        (True, 120, FALLBACK, "SM121"),
+        (True, 100, FALLBACK, "SM121"),
+        (False, None, FALLBACK, "SM121"),
+        (True, 121, None, "fallback_depth"),
+        (True, 121, NUM_STEPS, "fallback_depth"),
+    ],
 )
-def test_confidence_stop_requires_sm12x(monkeypatch, is_cuda, is_sm12x, ok):
-    """Elsewhere the per-step readback stalls the GPU, so the key is rejected."""
+def test_confidence_stop_config(monkeypatch, is_cuda, capability, fallback, error):
+    """SM121 only (the per-step readback stalls faster GPUs), and a fallback
+    depth below num_speculative_tokens is required."""
     from vllm.config import VllmConfig
 
     monkeypatch.setattr(
         "vllm.platforms.current_platform",
         SimpleNamespace(
-            is_cuda=lambda: is_cuda,
-            is_device_capability_family=lambda cap: is_sm12x and cap == 120,
+            is_cuda=lambda: is_cuda, is_device_capability=lambda cap: cap == capability
         ),
     )
     spec = SimpleNamespace(
         draft_confidence_threshold=THRESHOLD,
+        draft_confidence_fallback_depth=fallback,
         method="mtp",
         num_speculative_tokens=NUM_STEPS,
         use_multi_module_mtp=lambda: False,
@@ -131,8 +153,8 @@ def test_confidence_stop_requires_sm12x(monkeypatch, is_cuda, is_sm12x, ok):
         use_v2_model_runner=True,
         parallel_config=SimpleNamespace(data_parallel_size=1),
     )
-    if ok:
+    if error is None:
         VllmConfig._verify_draft_confidence_threshold(config)
     else:
-        with pytest.raises(ValueError, match="SM12x"):
+        with pytest.raises(ValueError, match=error):
             VllmConfig._verify_draft_confidence_threshold(config)

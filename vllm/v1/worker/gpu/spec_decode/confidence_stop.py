@@ -62,22 +62,22 @@ def _draft_confidence_kernel(
 
 
 class DraftConfidenceStop:
-    """Ends a draft round once no request's chain is confident enough to go on.
+    """Ends a draft round once no chain is confident enough to go on.
 
-    A chain continues while every draft so far has a drafter top-1 probability
-    of at least the threshold; its first draft is always kept. The CPU reads the
-    number of live chains after each step to decide whether to launch the next.
-    All rows run every launched step, so every request in a round ends with the
-    same number of drafts: j (at least 1) if no chain survived step j, else all.
+    A chain lives while each of its drafts has a top-1 probability of at least
+    the threshold. The CPU reads the live count after each step; a round ends
+    with j drafts (at least 1) if nothing survived step j, else all of them.
     """
 
     def __init__(
         self,
         threshold: float,
+        fallback_depth: int,
         max_num_reqs: int,
         num_steps: int,
         device: torch.device,
     ):
+        self.fallback_depth = fallback_depth
         self.threshold = torch.tensor([threshold], dtype=torch.float32, device=device)
         self.num_steps = num_steps
         self.alive = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
@@ -114,10 +114,10 @@ class DraftConfidenceStop:
         self._round_slots = idx_mapping_np
         self._steps_launched = 0
 
-    def full_round(self, idx_mapping_np: np.ndarray) -> None:
-        """Record a round that drafts every step without checking confidence."""
+    def fixed_round(self, idx_mapping_np: np.ndarray, num_drafts: int) -> None:
+        """Record a round that drafts a fixed depth without checking confidence."""
         self._resolve_pending()
-        self._num_drafts_np[idx_mapping_np] = self.num_steps
+        self._num_drafts_np[idx_mapping_np] = num_drafts
         self._round_slots = None
 
     def step_launched(self) -> None:

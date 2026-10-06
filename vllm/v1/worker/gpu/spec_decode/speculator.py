@@ -213,8 +213,14 @@ class DraftModelSpeculator(BaseSpeculator):
 
         threshold = self.speculative_config.draft_confidence_threshold
         if threshold is not None:
+            fallback_depth = self.speculative_config.draft_confidence_fallback_depth
+            assert fallback_depth is not None
             self.confidence_stop = DraftConfidenceStop(
-                threshold, self.max_num_reqs, self.num_speculative_steps, device
+                threshold,
+                fallback_depth,
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                device,
             )
 
     @abstractmethod

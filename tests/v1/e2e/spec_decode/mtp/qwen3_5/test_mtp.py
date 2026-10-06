@@ -58,9 +58,10 @@ def test_mtp_draft_confidence_stop(
     vllm_runner,
 ):
     """The stop only shortens drafting: greedy outputs match fixed-depth MTP,
-    and a deeper capped chain keeps at least 90% of the fixed chain's AL."""
+    and a deeper capped chain keeps at least 90% of the fixed chain's AL.
+    One request at a time, so the stop rather than the fallback is used."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    prompts = get_test_prompts(mm_enabled=False)
+    prompts = get_test_prompts(mm_enabled=False, num_prompts=32)
     results = {}
     for num_spec, threshold in ((3, None), (4, 0.6)):
         with vllm_runner(
@@ -68,11 +69,13 @@ def test_mtp_draft_confidence_stop(
             block_size=None,
             enable_chunked_prefill=None,
             max_model_len=2048,
+            max_num_seqs=1,
             limit_mm_per_prompt={"image": 0, "video": 0},
             speculative_config={
                 "method": "mtp",
                 "num_speculative_tokens": num_spec,
                 "draft_confidence_threshold": threshold,
+                "draft_confidence_fallback_depth": 3 if threshold else None,
             },
             disable_log_stats=False,
         ) as runner:

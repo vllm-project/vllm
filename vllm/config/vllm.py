@@ -1119,7 +1119,11 @@ class VllmConfig:
 
     def _verify_draft_confidence_threshold(self) -> None:
         spec = self.speculative_config
-        if spec is None or spec.draft_confidence_threshold is None:
+        if spec is None:
+            return
+        if spec.draft_confidence_threshold is None:
+            if spec.draft_confidence_fallback_depth is not None:
+                raise ValueError("draft_confidence_fallback_depth needs a threshold.")
             return
         from vllm.platforms import current_platform
 
@@ -1130,8 +1134,12 @@ class VllmConfig:
             reject(f"requires method 'mtp', 'eagle' or 'eagle3', got {spec.method!r}")
         if spec.use_multi_module_mtp() or spec.use_gemma4_mtp():
             reject("does not support multi-module or Gemma 4 MTP drafters")
-        if spec.num_speculative_tokens < 2:
-            reject("needs num_speculative_tokens >= 2")
+        fallback = spec.draft_confidence_fallback_depth
+        if fallback is None or not 1 <= fallback < spec.num_speculative_tokens:
+            reject(
+                "needs draft_confidence_fallback_depth between 1 and "
+                "num_speculative_tokens - 1"
+            )
         if not self.use_v2_model_runner:
             reject("requires Model Runner V2")
         if self.parallel_config.data_parallel_size > 1:
@@ -1147,13 +1155,12 @@ class VllmConfig:
             if enabled:
                 reject(f"is not compatible with {name}")
         # The stop reads the number of live chains back to the CPU after every
-        # draft step. That pays off only where a draft step is long (SM12x);
-        # on GB200 it made decode 25% slower.
+        # draft step. That pays off only where a draft step is long: measured on
+        # SM121 (DGX Spark); on GB200 it made decode 25% slower.
         if not (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability_family(120)
+            current_platform.is_cuda() and current_platform.is_device_capability(121)
         ):
-            reject("is only supported on SM12x GPUs")
+            reject("is only supported on SM121 GPUs")
 
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
