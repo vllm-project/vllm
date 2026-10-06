@@ -52,7 +52,7 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
             and current_platform.is_device_capability_family(100)
         ):
             cache_config.cache_dtype = "fp8_e4m3"
-            logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM100")
+            logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
             # MTP shares the target's KV cache layout; a separate draft model
             # must not inherit a default it was never validated with.
             spec_config = vllm_config.speculative_config
