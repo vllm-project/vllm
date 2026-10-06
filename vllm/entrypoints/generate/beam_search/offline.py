@@ -254,6 +254,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                                 break
 
             if not active_indices:
+                for instance in instances_batch:
+                    instance.beams = []
                 return True
 
             active_beams = [all_beams[i] for i in active_indices]
