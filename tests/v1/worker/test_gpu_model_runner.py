@@ -2465,6 +2465,97 @@ class TestReloadDraftWeights:
         assert draft_model.model.rotary_emb is target_model.rotary_emb
         assert draft_model.model.embed_tokens is target_model.embed_tokens
 
+    def test_disk_reload_detaches_shared_modules_with_persistent_buffers(self):
+        """A shared module carrying a persistent buffer (direct or nested) is
+        loadable via AutoWeightsLoader, so it must be detached during the draft
+        load -- leaving it attached would let the draft checkpoint write into
+        the target's buffer. A shared module with only a non-persistent buffer
+        is checkpoint-free and stays attached (the rotary case).
+        """
+
+        class _DirectBuf(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("stat", torch.ones(4), persistent=True)
+
+        class _NestedBuf(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.leaf = _DirectBuf()
+
+        class _NonPersBuf(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("tmp", torch.zeros(4), persistent=False)
+
+        class _Target(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.direct = _DirectBuf()
+                self.nested = _NestedBuf()
+                self.nonpers = _NonPersBuf()
+
+            def load_weights(self, weights):
+                return set()
+
+        class _Inner(nn.Module):
+            def __init__(self, target: nn.Module):
+                super().__init__()
+                self.direct = target.direct
+                self.nested = target.nested
+                self.nonpers = target.nonpers
+                self.seen: list[tuple[nn.Module, nn.Module, nn.Module]] = []
+
+            def load_weights(self, weights):
+                for _ in weights:
+                    pass
+                self.seen.append(
+                    (self.direct, self.nested, self.nonpers)
+                )
+                return set()
+
+        class _Draft(nn.Module):
+            def __init__(self, target: nn.Module):
+                super().__init__()
+                self.model = _Inner(target)
+
+            def load_weights(self, weights):
+                return self.model.load_weights(weights)
+
+        target_model = _Target()
+        draft_model = _Draft(target_model)
+        assert draft_model.model.direct is target_model.direct
+        assert draft_model.model.nested is target_model.nested
+        assert draft_model.model.nonpers is target_model.nonpers
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        model_loader = Mock()
+        model_loader.get_all_weights.side_effect = lambda _config, _model: iter([])
+
+        with (
+            patch.object(
+                gpu_model_runner_module,
+                "get_model_loader",
+                return_value=model_loader,
+            ),
+            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        direct_during, nested_during, nonpers_during = draft_model.model.seen[0]
+        # Direct + nested persistent-buffer modules are detached (placeholder).
+        assert direct_during is not target_model.direct
+        assert nested_during is not target_model.nested
+        # Non-persistent-buffer-only module is checkpoint-free: stays attached.
+        assert nonpers_during is target_model.nonpers
+        # Afterwards all aliases are restored.
+        assert draft_model.model.direct is target_model.direct
+        assert draft_model.model.nested is target_model.nested
+        assert draft_model.model.nonpers is target_model.nonpers
+
     def test_disk_reload_detaches_repeated_lm_head_aliases(self):
         """MTP shares one target lm_head at draft.lm_head and each shared_head."""
 
