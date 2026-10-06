@@ -70,22 +70,9 @@ def _unpack_mxfp8_scale(
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
-    Selects the dispatch layout from the current stream's capture state.
-
-    **During CUDA graph capture:**
-      - do_expand=False, do_cpu_sync=False
-      - Tokens returned in original order with recv_topk_idx (global IDs)
-      - Worst-case tensor allocation; padding rows zeroed via
-        handle.psum_num_recv_tokens_per_scaleup_rank
-      - Fully cudagraph-capturable
-      - Expert kernel sorts internally (expert_tokens_meta carries no counts)
-
-    **Outside CUDA graph capture:**
-      - do_expand=True, do_cpu_sync=True
-      - Per-expert-contiguous layout; exact memory allocation
-      - Saves GPU memory (no worst-case allocation)
-      - Not cudagraph-capturable (CPU polling)
-      - Provides expert_tokens_meta for efficient batched expert kernels
+    Uses non-expanded dispatch without CPU synchronization in every forward.
+    The receive capacity is bounded by the DP-wide padded token count. Expert
+    kernels consume routing IDs and GPU-side receive counts.
 
     Dispatch always uses async_with_compute_stream=False. finalize_async
     issues the combine with async_with_compute_stream=True (except under
@@ -174,8 +161,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if has_scales:
             token_data = (tokens, token_scales)
 
-        do_expand = not torch.cuda.is_current_stream_capturing()
-        do_cpu_sync = do_expand
+        do_expand = False
+        do_cpu_sync = False
 
         # In do_expand=False mode, the recv buffer is the worst case
         # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
@@ -191,19 +178,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # cached) while staying small for decode (e.g. 1 token -> 1) and capped
         # at the buffer's init capacity for prefill. With sequence parallelism,
         # each EP rank holds a ceil(n / sp_size) shard of its DP rank's batch.
-        num_max_tokens_per_rank = None
-        if not do_expand:
-            dp_meta = (
-                get_forward_context().dp_metadata
-                if is_forward_context_available()
-                else None
-            )
-            if dp_meta is not None:
-                n = int(dp_meta.num_tokens_across_dp_cpu.max())
-                n = cdiv(n, self.sp_size)
-            else:
-                n = tokens.shape[0]
-            num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+        dp_meta = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_meta is not None:
+            n = int(dp_meta.num_tokens_across_dp_cpu.max())
+            n = cdiv(n, self.sp_size)
+        else:
+            n = tokens.shape[0]
+        num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
 
         (
             recv_x,

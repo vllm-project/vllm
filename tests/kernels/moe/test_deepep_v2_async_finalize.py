@@ -102,8 +102,8 @@ def _run(pf, output: torch.Tensor, do_async: bool):
 
 
 @requires_deep_ep_v2
-def test_prepare_switches_layout_and_preserves_deferred_receiver_mode(monkeypatch):
-    """Capture state controls dispatch even when the runtime mode disagrees."""
+def test_prepare_keeps_nonexpanded_layout_across_capture_transitions(monkeypatch):
+    """Capture transitions preserve routing shape and GPU-side receive counts."""
     context = None
     capturing = False
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
@@ -140,24 +140,19 @@ def test_prepare_switches_layout_and_preserves_deferred_receiver_mode(monkeypatc
             FusedMoEQuantConfig.make(None),
             defer_input_quant=True,
         )
-        expanded = not capturing
         call = pf.buffer.calls[-1]
-        assert call["do_expand"] is expanded
-        assert call["do_cpu_sync"] is expanded
-        assert call["num_max_tokens_per_rank"] == (None if expanded else 4)
+        assert call["do_expand"] is False
+        assert call["do_cpu_sync"] is False
+        assert call["num_max_tokens_per_rank"] == 4
 
         # The receiver may run after capture and the forward context change.
         capturing = not capturing
-        context = SimpleNamespace(
-            cudagraph_runtime_mode=CUDAGraphMode.FULL
-            if expanded
-            else CUDAGraphMode.NONE
-        )
+        context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
         _, _, meta, ids, _ = recv()
         assert meta is not None
-        assert ids.shape == (3, 1 if expanded else 2)
-        assert (meta.expert_num_tokens is not None) is expanded
-        assert (meta.psum_recv_per_rank is None) is expanded
+        assert ids.shape == (3, 2)
+        assert meta.expert_num_tokens is None
+        assert meta.psum_recv_per_rank is not None
 
 
 @requires_deep_ep_v2
