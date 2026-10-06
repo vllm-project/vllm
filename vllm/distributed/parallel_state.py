@@ -889,7 +889,9 @@ class GroupCoordinator:
         )
 
         # Serialize object to tensor and get the size as well
-        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        object_tensor = torch.frombuffer(
+            bytearray(pickle.dumps(obj)), dtype=torch.uint8
+        )
 
         size_tensor = torch.tensor(
             [object_tensor.numel()], dtype=torch.long, device="cpu"
@@ -951,7 +953,9 @@ class GroupCoordinator:
             "as the current rank."
         )
 
-        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        object_tensor = torch.frombuffer(
+            bytearray(pickle.dumps(obj)), dtype=torch.uint8
+        )
         size_tensor = torch.tensor(
             [object_tensor.numel()], dtype=torch.long, device="cpu"
         )
