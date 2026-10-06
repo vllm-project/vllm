@@ -3,6 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
+from functools import partial
 
 import numpy as np
 import prometheus_client
@@ -39,7 +40,9 @@ class SpecDecodingStats:
             num_draft_tokens_per_pos=[0] * num_spec_tokens,
         )
 
-    def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
+    def observe_draft_stats_per_req(
+        self, num_draft_tokens: int, num_accepted_tokens: int
+    ):
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
@@ -48,6 +51,9 @@ class SpecDecodingStats:
             self.num_accepted_tokens_per_pos[i] += 1
         for i in range(num_draft_tokens):
             self.num_draft_tokens_per_pos[i] += 1
+
+    def observe_draft_stats_per_batch(self, num_verified_draft_tokens: int):
+        self.num_verified_draft_tokens += num_verified_draft_tokens
 
 
 class SpecDecodingLogging:
@@ -215,6 +221,7 @@ class SpecDecodingProm:
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
         is_diffusion: bool = False,
+        registry: prometheus_client.CollectorRegistry | None = None,
     ):
         # Diffusion (dLLM) models reuse the spec-decode counters but expose them
         # under diffusion-native names; the per-position acceptance vector does
@@ -223,6 +230,9 @@ class SpecDecodingProm:
         self.spec_decoding_enabled = speculative_config is not None or is_diffusion
         if not self.spec_decoding_enabled:
             return
+
+        if registry is not None:
+            self._counter_cls = partial(self._counter_cls, registry=registry)
 
         if is_diffusion:
             counter_specs = [
