@@ -6,7 +6,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -690,14 +690,23 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
 
 
 def _pausable_engine_core_proc() -> EngineCoreProc:
-    """A bare EngineCoreProc holding just the state pause_scheduler touches."""
+    """A bare EngineCoreProc holding just the state pause_scheduler and
+    reload_weights touch."""
     core = object.__new__(EngineCoreProc)
+    core.vllm_config = MagicMock()
+    core.vllm_config.parallel_config.data_parallel_size = 1
     core.model_executor = MagicMock()
+    core.model_executor.is_sleeping = False
     core.scheduler = MagicMock()
     core.scheduler.has_requests.return_value = False
+    core.scheduler.has_unfinished_requests.return_value = False
+    core.scheduler.get_request_counts.return_value = (0, 0)
+    core.scheduler.get_kv_connector.return_value = None
+    core.scheduler.get_ec_connector.return_value = None
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
+    core._weights_reload_failed = False
     return core
 
 
@@ -744,3 +753,114 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+def test_reload_weights_orders_effects_and_preserves_pause_state():
+    """A successful reload must drain leftover batches, synchronize the
+    device, reload workers, then reset caches, without touching pause state."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.PAUSED_ALL
+    # Plain finished-request housekeeping must not block reload.
+    core.scheduler.has_requests.return_value = True
+    core.batch_queue = deque(["stale-batch"])
+    effects = MagicMock()
+    core.model_executor.collective_rpc = effects.rpc
+    core._reset_caches = effects.reset_caches
+    core.step_with_batch_queue = effects.drain
+    effects.drain.side_effect = lambda: core.batch_queue.pop()
+
+    core.reload_weights(weights_path="/tmp/model-b")
+
+    assert effects.mock_calls == [
+        call.drain(),
+        call.rpc("synchronize_device"),
+        call.rpc("reload_weights", kwargs={"weights_path": "/tmp/model-b"}),
+        call.reset_caches(),
+    ]
+    core.scheduler.set_pause_state.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "request_counts,kv_connector,ec_connector,has_requests",
+    [
+        pytest.param((1, 0), None, None, False, id="running-hidden-by-pause"),
+        pytest.param((0, 2), None, None, False, id="waiting-hidden-by-pause"),
+        pytest.param((0, 0), object(), None, True, id="kv-connector-work"),
+        pytest.param((0, 0), None, object(), True, id="ec-connector-work"),
+    ],
+)
+def test_reload_weights_rejects_inflight_work(
+    request_counts, kv_connector, ec_connector, has_requests
+):
+    """Reload must reject before any effect while unfinished requests hidden
+    by a pause or connector cleanup work remain."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.PAUSED_ALL
+    core.scheduler.get_request_counts.return_value = request_counts
+    core.scheduler.get_kv_connector.return_value = kv_connector
+    core.scheduler.get_ec_connector.return_value = ec_connector
+    core.scheduler.has_requests.return_value = has_requests
+
+    with pytest.raises(RuntimeError, match="requests are in flight"):
+        core.reload_weights(weights_path="/tmp/model-b")
+
+    core.model_executor.collective_rpc.assert_not_called()
+
+
+def test_reload_weights_rejects_sleeping_executor():
+    """Weight memory is not resident while sleeping: reload must reject
+    before any effect."""
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = True
+
+    with pytest.raises(RuntimeError, match="sleeping"):
+        core.reload_weights(weights_path="/tmp/model-b")
+
+    core.model_executor.collective_rpc.assert_not_called()
+
+
+def test_reload_weights_rejects_data_parallel():
+    """The engine-level reload supports one data-parallel rank only."""
+    core = _pausable_engine_core_proc()
+    core.vllm_config.parallel_config.data_parallel_size = 2
+
+    with pytest.raises(RuntimeError, match="data-parallel"):
+        core.reload_weights(weights_path="/tmp/model-b")
+
+    core.model_executor.collective_rpc.assert_not_called()
+
+
+@pytest.mark.parametrize("exc_type", [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize(
+    "stage", ["synchronize", "worker-reload", "cache-reset", "drain"]
+)
+def test_reload_weights_failure_poisons_engine(stage, exc_type):
+    """Any execution-stage failure must surface the original error, pause
+    the engine, and reject resume, retry, and new requests until rebuild."""
+    core = _pausable_engine_core_proc()
+    error = exc_type(f"{stage} boom")
+    if stage == "synchronize":
+        core.model_executor.collective_rpc.side_effect = [error]
+    elif stage == "worker-reload":
+        core.model_executor.collective_rpc.side_effect = [None, error]
+    elif stage == "cache-reset":
+        core._reset_caches = MagicMock(side_effect=error)
+    else:  # drain
+        core.batch_queue = deque(["stale-batch"])
+        core.step_with_batch_queue = MagicMock(side_effect=error)
+
+    with pytest.raises(exc_type) as exc_info:
+        core.reload_weights(weights_path="/tmp/model-b")
+    assert exc_info.value is error
+    core.scheduler.set_pause_state.assert_called_once_with(PauseState.PAUSED_ALL)
+
+    rpc_count = core.model_executor.collective_rpc.call_count
+    with pytest.raises(RuntimeError, match="Rebuild the engine"):
+        core.resume_scheduler()
+    with pytest.raises(RuntimeError, match="Rebuild the engine"):
+        core.reload_weights(weights_path="/tmp/model-b")
+    with pytest.raises(RuntimeError, match="Rebuild the engine"):
+        core.add_request(object())
+    # The rejections happened before any further side effects.
+    assert core.model_executor.collective_rpc.call_count == rpc_count
+    assert core.scheduler.set_pause_state.call_count == 1

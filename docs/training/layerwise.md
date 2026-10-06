@@ -60,6 +60,25 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
 
 The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) run layerwise reloading automatically inside their `start_weight_update`/`finish_weight_update` lifecycle.
 
+### Engine Level `reload_weights` API
+
+For offline checkpoint-format reloads on a live engine, prefer `LLM.reload_weights` over the raw
+worker RPC below. The checkpoint must share the model architecture, config, and tokenizer. The
+engine-level entry rejects in-flight requests, sleeping engines, and multi-rank data-parallel
+deployments before any effect, synchronizes the device, reloads the workers, and invalidates the
+prefix KV and encoder/multi-modal caches computed with the old weights. An execution-stage
+failure during the reload pauses the engine until it is rebuilt.
+
+```python
+from vllm import LLM
+
+llm = LLM("Qwen/Qwen3-0.6B", enable_prefix_caching=True)
+prompt = "The capital of France is"
+llm.generate(prompt)  # warms the prefix cache under the old weights
+llm.reload_weights(weights_path="inference-optimization/Qwen3-0.6B-debug-multiply")
+llm.generate(prompt)  # recomputed under the new weights; the stale prefix cache was invalidated
+```
+
 ### Mid Level `reload_weights` API
 
 Layerwise reloading is also exposed via the `reload_weights` API. This interface can be called using the following code:

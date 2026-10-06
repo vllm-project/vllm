@@ -254,6 +254,9 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    def reload_weights(self, weights_path: str | None = None) -> None:
+        raise NotImplementedError
+
     def dp_engines_running(self) -> bool:
         """Returns True if data parallel engines are collectively in a
         running state."""
@@ -457,6 +460,9 @@ class InprocClient(EngineCoreClient):
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
+
+    def reload_weights(self, weights_path: str | None = None) -> None:
+        self.engine_core.reload_weights(weights_path)
 
     def dp_engines_running(self) -> bool:
         return False
@@ -1076,6 +1082,9 @@ class SyncMPClient(MPClient):
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.call_utility("collective_rpc", method, timeout, args, kwargs)
+
+    def reload_weights(self, weights_path: str | None = None) -> None:
+        self.call_utility("reload_weights", weights_path)
 
     def save_sharded_state(
         self, path: str, pattern: str | None = None, max_size: int | None = None
