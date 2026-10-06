@@ -83,6 +83,33 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         with self._skip_tool_parsing():
             return self._parser_engine.extract_reasoning(model_output, request)
 
+    def extract_reasoning_with_token_ids(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        model_output_token_ids: Sequence[int],
+    ) -> tuple[str | None, str | None, bool]:
+        """Extract reasoning, resolving special-token markers by token ID.
+
+        Matches streaming, where a marker the model spelled out with
+        ordinary tokens is content rather than structure.
+
+        Returns:
+            A tuple of (reasoning, content, used_token_ids). The flag is
+            False when the engine returned without parsing the output.
+
+        """
+        engine = self._parser_engine
+        engine.pending_output_token_ids = model_output_token_ids
+        try:
+            reasoning, content = self.extract_reasoning(model_output, request)
+            used_token_ids = bool(model_output_token_ids) and not (
+                engine.pending_output_token_ids
+            )
+        finally:
+            engine.pending_output_token_ids = ()
+        return reasoning, content, used_token_ids
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
