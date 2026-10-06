@@ -58,9 +58,11 @@ For non-expanded inputs it invokes the existing `deepgemm_moe_permute` and
 `deepgemm_unpermute_and_reduce`. For expanded inputs it uses DeepEP's received
 activation tensor directly, builds GPU expert IDs, and weights output rows
 before combine. It skips both input permutation and output unpermutation.
-DeepEP expert alignment is set to the grouped GEMM alignment. Scale conversion
-inside DeepGEMM may still be required; direct activations do not imply all scale
-preparation disappears. GPU-prefix reconstruction uses Torch as a correctness
+DeepEP expert alignment is set to the grouped GEMM alignment. DeepEP leaves
+padding scales uninitialized, while DeepGEMM's FP32-to-UE8M0 conversion reads
+them and requires nonnegative exponent-only values. The prototype replaces
+invalid-row scales with `1` before conversion. Direct activations therefore
+still require scale preparation. GPU-prefix reconstruction uses Torch as a correctness
 prototype; tune/fuse it only after validation. No production threshold or
 rank-local automatic policy is introduced.
 

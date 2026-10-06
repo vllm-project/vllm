@@ -131,7 +131,9 @@ class GroupedFp8Experts:
             )
             m_indices = torch.where(ids >= 0, ids - self.offset, -1).int()
             # DeepEP has already duplicated and grouped the activation rows.
-            gemm_input, gemm_scales = aq, scales
+            gemm_input = aq
+            # Scale conversion reads padding even when GEMM skips those rows.
+            gemm_scales = torch.where((ids >= 0)[:, None], scales, 1)
             alignment = self.alignment
         else:
             valid_rows = (
