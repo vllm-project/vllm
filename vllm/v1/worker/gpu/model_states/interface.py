@@ -17,7 +17,8 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.states import RequestState
@@ -124,6 +125,16 @@ class ModelState(ABC):
         return None
 
     def apply_staged_writes(self) -> None:
+        return None
+
+    def capture_inner_cudagraphs(
+        self,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        """Capture the CUDA graphs this state runs inside the model's forward."""
         return None
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
