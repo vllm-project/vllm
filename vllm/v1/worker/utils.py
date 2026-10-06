@@ -743,9 +743,7 @@ def bind_kv_cache_to_layers(
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
         if replayssm_caches is not None and layer_name in replayssm_caches:
-            forward_context[layer_name].bind_replayssm_cache(
-                replayssm_caches[layer_name]
-            )
+            forward_context[layer_name].replayssm_cache = replayssm_caches[layer_name]
 
     ordered_layer_names = sorted(
         kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)

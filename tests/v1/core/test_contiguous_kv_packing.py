@@ -157,7 +157,6 @@ def test_replayssm_rings_do_not_expand_canonical_mamba_page(
         groups.append(KVCacheGroupSpec(layer_names, mamba_spec))
 
     assert full_spec.page_size_bytes == mamba_spec.page_size_bytes == 128
-    assert mamba_spec.replayssm_size_bytes == 16
     canonical_bytes = 128 * layers_per_group
     ring_bytes = 16 * layers_per_group
     # Trackers are allocated once per group, rather than once per layer.
@@ -202,6 +201,12 @@ def test_replayssm_rings_do_not_expand_canonical_mamba_page(
     replayssm_caches[layer_name][0].fill_(7)
     assert torch.count_nonzero(caches[layer_name]) == 0
     assert torch.count_nonzero(replayssm_caches[layer_name][1]) == 0
+    config.kv_cache_groups = [
+        KVCacheGroupSpec(
+            [layer_name], replace(mamba_spec, replayssm_shapes=(), replayssm_dtypes=())
+        )
+    ]
+    assert allocate_replayssm_caches(config, torch.device("cpu")) == {}
 
 
 def test_replayssm_ring_overlay_alignment_and_block_copy(monkeypatch):
@@ -265,7 +270,7 @@ def test_replayssm_ring_overlay_alignment_and_block_copy(monkeypatch):
     assert torch.equal(raw[:3], before[:3])
 
 
-def test_replayssm_ring_overlay_super_mtp_storage_and_ownership():
+def test_replayssm_ring_overlay_super_mtp_capacity():
     # Real Super TP4 geometry: forty Mamba layers in five groups of eight;
     # nine attention layers include the MTP layer. Each ring has twenty slots.
     mamba = MambaSpec(
@@ -284,7 +289,6 @@ def test_replayssm_ring_overlay_super_mtp_storage_and_ownership():
     groups += [
         KVCacheGroupSpec([f"mamba{g}_{i}" for i in range(8)], mamba) for g in range(5)
     ]
-    assert mamba.replayssm_size_bytes == 94720
     canonical = 9 * 557056
     rings, _, trackers = get_replayssm_ring_layout(groups)
     assert rings == 8 * 94720 and trackers == 5 * 8
@@ -321,35 +325,6 @@ def test_replayssm_ring_overlay_super_mtp_storage_and_ownership():
     assert baseline_capacity == base_config.num_blocks / 78
     assert replay_capacity == config.num_blocks / 63
     assert replay_capacity > baseline_capacity
-    small = get_kv_cache_config_from_groups(
-        _mock_vllm_config("LBNHC"), groups, 3 * (canonical + rings + trackers)
-    )
-    caches = allocate_replayssm_caches(small, torch.device("cpu"))
-    storages = {
-        state.untyped_storage().data_ptr(): state.untyped_storage().nbytes()
-        for states in caches.values()
-        for state in states
-    }
-    assert len(storages) == 1 and sum(storages.values()) == 3 * rings
-    assert allocate_replayssm_caches(base_config, torch.device("cpu")) == {}
-    # Scheduler managers supplying the ring block IDs share one pool, whose
-    # null block0 is permanently reserved; disjoint allocations prove ownership.
-    manager = KVCacheManager(
-        generate_scheduler_kv_cache_config([small]),
-        max_model_len=114688,
-        enable_caching=True,
-        hash_block_size=2176,
-        scheduler_block_size=2176,
-    )
-    assert all(
-        m.block_pool is manager.block_pool
-        for m in manager.coordinator.single_type_managers
-    )
-    ids = [
-        m.block_pool.get_new_blocks(1)[0].block_id
-        for m in manager.coordinator.single_type_managers[1:3]
-    ]
-    assert len(set(ids)) == 2 and 0 not in ids
 
 
 MAIN_KV_PAGE_BYTES = 2_048

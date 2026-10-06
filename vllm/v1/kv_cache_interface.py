@@ -1062,13 +1062,6 @@ class MambaSpec(KVCacheSpec):
         )
 
     @property
-    def replayssm_size_bytes(self) -> int:
-        return sum(
-            prod(shape) * get_dtype_size(dtype)
-            for (shape, dtype) in zip(self.replayssm_shapes, self.replayssm_dtypes)
-        )
-
-    @property
     def real_page_size_bytes(self) -> int:
         return self.state_content_size_bytes
 

@@ -43,9 +43,6 @@ class MambaBase(AttentionLayerBase):
             offset += nbytes
         self.kv_cache = tuple(states)
 
-    def bind_replayssm_cache(self, cache: tuple[torch.Tensor, ...]) -> None:
-        self.replayssm_cache = cache
-
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:
         """Defines the shape of the state.

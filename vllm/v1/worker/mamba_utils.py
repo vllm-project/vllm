@@ -1009,10 +1009,15 @@ class MambaSpecDecodeGPUContext:
         block_tables: list[torch.Tensor],
     ) -> None:
         idx = 0
+        assert len(block_tables) == self.num_groups, (
+            f"expected {self.num_groups} block tables, got {len(block_tables)}"
+        )
+        replayssm_groups: list[tuple[list[Any], MambaSpec, torch.Tensor]] = []
         has_replayssm_layer = False
         has_baseline_layer = False
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+            mixers: list[Any] = []
             layer_names = kv_cache_group.layer_names
             for layer_name in layer_names:
                 mamba_spec = _get_mamba_spec_for_layer(kv_cache_group, layer_name)
@@ -1025,6 +1030,8 @@ class MambaSpecDecodeGPUContext:
                 )
                 has_replayssm_layer |= bool(is_flashinfer_replayssm)
                 has_baseline_layer |= not is_flashinfer_replayssm
+                if is_flashinfer_replayssm:
+                    mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
                     raise ValueError(
                         f"Expected at least {len(state_copy_funcs)} Mamba state "
@@ -1110,6 +1117,15 @@ class MambaSpecDecodeGPUContext:
                     self.state_group_indices[idx] = group_local_idx
                     idx += 1
 
+            if mixers:
+                spec = kv_cache_group.kv_cache_spec
+                if not isinstance(spec, MambaSpec):
+                    raise TypeError(
+                        "FlashInfer ReplaySSM layers require a Mamba cache spec; "
+                        f"got {type(spec).__name__}"
+                    )
+                replayssm_groups.append((mixers, spec, block_tables[group_local_idx]))
+
         assert idx == self.num_states
         if has_replayssm_layer and has_baseline_layer:
             raise ValueError(
@@ -1120,9 +1136,6 @@ class MambaSpecDecodeGPUContext:
         # `block_tables[i]` is the persistent 2D int32 block-table tensor for
         # `mamba_group_ids[i]`; `data_ptr()` / `stride(0)` are stable for the
         # engine's lifetime, so we capture them once here.
-        assert len(block_tables) == self.num_groups, (
-            f"expected {self.num_groups} block tables, got {len(block_tables)}"
-        )
         strides = {bt.stride(0) for bt in block_tables}
         assert len(strides) == 1, (
             f"all mamba block tables must share stride(0), got {strides}"
@@ -1133,17 +1146,9 @@ class MambaSpecDecodeGPUContext:
 
         if self.has_flashinfer_replayssm:
             self.replayssm = ReplaySSMModelContext.create(
-                kv_cache_config,
-                self.mamba_group_ids,
-                forward_context,
-                block_tables,
+                replayssm_groups,
                 self.num_accepted_tokens_snapshot.numel(),
             )
-            if self.replayssm is None:
-                raise RuntimeError(
-                    "FlashInfer ReplaySSM state was discovered but its model-wide "
-                    "materialization context could not be initialized"
-                )
 
         self.is_initialized = True
 

@@ -1318,7 +1318,11 @@ def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("layers_only", [False, True])
-def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
+def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layers_only):
+    monkeypatch.setattr(
+        "vllm.v1.worker.utils.async_tensor_h2d",
+        lambda array, *, device, **_: torch.from_numpy(array).to(device),
+    )
     mixers = [_TestReplaySSMMixer() for _ in range(3)]
     layer_names = [f"layers.{i}.mixer" for i in range(3)]
     ctx = dict(zip(layer_names, mixers))
@@ -1333,21 +1337,22 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
         SimpleNamespace(layer_names=[layer_names[1]]),
     ]
     replayssm_caches = {
-        name: [
+        name: tuple(
             torch.zeros((4, *shape), dtype=torch.float32)
             for shape in mixer.get_replayssm_state_shape()
-        ]
+        )
         for name, mixer in ctx.items()
     }
 
     bind = bind_kv_cache_to_layers if layers_only else bind_kv_cache
-    args: tuple[Any, ...] = (kv_cache, ctx) if layers_only else (kv_cache, ctx, [])
+    runner_kv_caches = list(kv_cache.values()) if layers_only else []
+    args: tuple[Any, ...] = (kv_cache, ctx)
+    if not layers_only:
+        args += (runner_kv_caches,)
     bind(
         *args,
         kv_cache_groups=kv_cache_groups,
-        replayssm_caches={
-            name: tuple(cache) for name, cache in replayssm_caches.items()
-        },
+        replayssm_caches=replayssm_caches,
     )
 
     assert all(len(mixer.kv_cache) == 2 for mixer in mixers)
@@ -1363,36 +1368,6 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
         assert group_tracker.data_ptr() != getattr(mixers[1], tracker_name).data_ptr()
         assert group_tracker.shape == (4,)
         assert torch.count_nonzero(group_tracker) == 0
-
-
-def test_replayssm_block_copy_includes_rings_and_group_trackers(monkeypatch):
-    monkeypatch.setattr(
-        "vllm.v1.worker.utils.async_tensor_h2d",
-        lambda array, *, device, **_: torch.from_numpy(array).to(device),
-    )
-    mixers = [_TestReplaySSMMixer() for _ in range(3)]
-    layer_names = [f"layers.{i}.mixer" for i in range(3)]
-    ctx = dict(zip(layer_names, mixers))
-    kv_cache = {name: _packed_replayssm_cache(4) for name in layer_names}
-    kv_cache_groups = [
-        SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
-        SimpleNamespace(layer_names=[layer_names[1]]),
-    ]
-    replayssm_caches = {
-        name: tuple(
-            torch.zeros((4, *shape), dtype=torch.float32)
-            for shape in mixer.get_replayssm_state_shape()
-        )
-        for name, mixer in ctx.items()
-    }
-    runner_kv_caches: list[torch.Tensor] = []
-    bind_kv_cache(
-        kv_cache,
-        ctx,
-        runner_kv_caches,
-        kv_cache_groups=kv_cache_groups,
-        replayssm_caches=replayssm_caches,
-    )
 
     src, dst = 1, 2
     for layer_idx, mixer in enumerate(mixers):

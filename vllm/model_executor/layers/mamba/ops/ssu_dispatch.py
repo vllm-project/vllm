@@ -9,7 +9,7 @@ the backend defaults to 'cpu'.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, NamedTuple
@@ -492,52 +492,21 @@ class ReplaySSMModelContext:
     @classmethod
     def create(
         cls,
-        kv_cache_config: KVCacheConfig,
-        mamba_group_ids: Sequence[int],
-        forward_context: Mapping[str, Any],
-        block_tables: Sequence[torch.Tensor],
+        grouped: Sequence[tuple[list[Any], MambaSpec, torch.Tensor]],
         max_num_reqs: int,
-    ) -> "ReplaySSMModelContext | None":
-        grouped = _flashinfer_replayssm_mixers_by_group(
-            kv_cache_config, mamba_group_ids, forward_context
-        )
-        if not grouped:
-            return None
-        if len(block_tables) != len(mamba_group_ids):
-            raise ValueError(
-                f"expected {len(mamba_group_ids)} Mamba block tables, "
-                f"got {len(block_tables)}"
-            )
-
-        block_table_by_gid = dict(zip(mamba_group_ids, block_tables))
-        modes = set()
-        group_args = []
-        for gid, mixers in grouped:
-            spec = kv_cache_config.kv_cache_groups[gid].kv_cache_spec
-            if not isinstance(spec, MambaSpec):
-                raise TypeError(
-                    "FlashInfer ReplaySSM layers require a Mamba cache spec; "
-                    f"got {type(spec).__name__}"
-                )
-            modes.add(spec.mamba_cache_mode)
-            group_args.append(
-                (
+    ) -> "ReplaySSMModelContext":
+        return cls(
+            groups=[
+                _ReplaySSMGroupContext.create(
                     mixers,
-                    block_table_by_gid[gid],
+                    block_table,
                     spec.mamba_cache_mode,
                     spec.block_size,
+                    max_num_reqs,
                 )
-            )
-        if len(modes) != 1:
-            raise ValueError(
-                "model-wide ReplaySSM requires one Mamba cache mode; "
-                f"got {sorted(modes)}"
-            )
-
-        groups = [
-            _ReplaySSMGroupContext.create(*args, max_num_reqs) for args in group_args
-        ]
-        return cls(groups=groups)
+                for mixers, spec, block_table in grouped
+            ]
+        )
 
     def reset_new_slots(self, **kwargs: Any) -> None:
         for group in self.groups:
@@ -907,30 +876,6 @@ def _cuda_i64_slot_strides(tensors: list[torch.Tensor]) -> torch.Tensor:
         dtype=torch.int64,
         device=tensors[0].device,
     )
-
-
-def _flashinfer_replayssm_mixers_by_group(
-    kv_cache_config: KVCacheConfig,
-    mamba_group_ids: Sequence[int],
-    forward_context: Mapping[str, Any],
-) -> list[tuple[int, list[Any]]]:
-    grouped: list[tuple[int, list[Any]]] = []
-    for gid in mamba_group_ids:
-        mixers: list[Any] = []
-        for layer_name in kv_cache_config.kv_cache_groups[gid].layer_names:
-            layer = forward_context.get(layer_name)
-            if layer is None:
-                continue
-            mamba_config = getattr(layer, "mamba_config", None)
-            backend = getattr(mamba_config, "backend", None)
-            if (
-                getattr(layer, "use_replayssm", False)
-                and backend == MambaBackendEnum.FLASHINFER
-            ):
-                mixers.append(layer)
-        if mixers:
-            grouped.append((gid, mixers))
-    return grouped
 
 
 @cache
