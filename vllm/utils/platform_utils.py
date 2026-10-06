@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import multiprocessing
+import os
+import shutil
 from collections.abc import Sequence
 from concurrent.futures.process import ProcessPoolExecutor
 from functools import cache
@@ -23,6 +25,21 @@ def xpu_is_initialized() -> bool:
     if not torch.xpu._is_compiled():
         return False
     return torch.xpu.is_initialized()
+
+
+_DEFAULT_CUDA_HOME = "/usr/local/cuda"
+
+
+def find_nvcc() -> str | None:
+    """Return the nvcc that JIT compilers such as FlashInfer and DeepGEMM run,
+    from CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda, or None if missing."""
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if not cuda_home:
+        nvcc = shutil.which("nvcc")
+        cuda_home = (
+            os.path.dirname(os.path.dirname(nvcc)) if nvcc else _DEFAULT_CUDA_HOME
+        )
+    return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
 
 
 def cuda_get_device_properties(
