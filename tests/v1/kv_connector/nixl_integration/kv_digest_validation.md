@@ -173,6 +173,24 @@ hybrid SSM MoE - SSM groups with scratch slots are excluded from transfer
 (`get_exchange_clipped_blocks`) and thus from digests; only its
 full-attention groups are covered.
 
+## Scenario J: RDMA failure mid-transfer (cross-node)
+
+`kv_digest_xnode_driver.sh` + `kv_digest_xnode_killer.py`: P and D on
+different nodes, one ~25k-token request (~2.9GB KV, ~100ms window), the
+killer on the P host is TCP-tripped the instant D posts its NIXL READ.
+Nonce-prefixed prompts defeat D's prefix cache.
+
+Expected (observed on GB200, host-staged and GPUDirect paths): UCX reports
+the dead peer (~37s endpoint timeout), NIXL raises
+`NIXL_ERR_REMOTE_DISCONNECT`, and the request fails via
+`kv_load_failure_policy` - NO silent partial data, so the digest never fires
+(this scenario belongs to the transport-reported class). D stays healthy; a
+restarted P serves new requests normally.
+
+Watch-outs: log-poll-then-kill cannot hit a single ~70ms transfer - use 8
+concurrent big requests to widen the aggregate window; keep the killer's
+pkill port-scoped (`pkill -f -- "--port N"`) so unrelated servers survive.
+
 ## Gotchas
 
 - Never `pkill -f "vllm serve"` from a shell whose own command line contains
