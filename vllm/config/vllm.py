@@ -1155,8 +1155,7 @@ class VllmConfig:
             if enabled:
                 reject(f"is not compatible with {name}")
         # The stop reads the number of live chains back to the CPU after every
-        # draft step. That pays off only where a draft step is long: measured on
-        # SM121 (DGX Spark); on GB200 it made decode 25% slower.
+        # draft step, which only pays off where a draft step is long.
         if not (
             current_platform.is_cuda() and current_platform.is_device_capability(121)
         ):

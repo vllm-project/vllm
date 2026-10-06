@@ -47,10 +47,8 @@ def test_mtp_correctness(
 
 @single_gpu_only
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
-    ),
-    reason="draft_confidence_threshold is SM12x only",
+    not (current_platform.is_cuda() and current_platform.is_device_capability(121)),
+    reason="draft_confidence_threshold is SM121 only",
 )
 def test_mtp_draft_confidence_stop(
     monkeypatch: pytest.MonkeyPatch,
