@@ -7,6 +7,7 @@ import json
 import sys
 import textwrap
 from argparse import (
+    Action,
     ArgumentDefaultsHelpFormatter,
     ArgumentParser,
     ArgumentTypeError,
@@ -130,6 +131,8 @@ class FlexibleArgumentParser(ArgumentParser):
     _search_keyword: str | None = None
 
     def __init__(self, *args, **kwargs):
+        # Must exist before super().__init__(), which already adds arguments.
+        self._deprecated: set[Action] = set()
         # Set the default "formatter_class" to SortedHelpFormatter
         if "formatter_class" not in kwargs:
             kwargs["formatter_class"] = SortedHelpFormatter
@@ -158,10 +161,9 @@ class FlexibleArgumentParser(ArgumentParser):
 
         def parse_known_args(self, args=None, namespace=None):
             namespace, args = super().parse_known_args(args, namespace)
-            for action in self._actions:
+            for action in self._deprecated:
                 if (
-                    getattr(action, "deprecated", False)
-                    and hasattr(namespace, dest := action.dest)
+                    hasattr(namespace, dest := action.dest)
                     and getattr(namespace, dest) != action.default
                 ):
                     logger.warning_once("argument '%s' is deprecated", dest)
@@ -170,14 +172,20 @@ class FlexibleArgumentParser(ArgumentParser):
         def add_argument(self, *args, **kwargs):
             deprecated = kwargs.pop("deprecated", False)
             action = super().add_argument(*args, **kwargs)
-            action.deprecated = deprecated  # type: ignore[attr-defined]
+            if deprecated:
+                self._deprecated.add(action)
             return action
 
         class _FlexibleArgumentGroup(_ArgumentGroup):
+            def __init__(self, container, *args, **kwargs):
+                super().__init__(container, *args, **kwargs)
+                self._deprecated: set[Action] = container._deprecated
+
             def add_argument(self, *args, **kwargs):
                 deprecated = kwargs.pop("deprecated", False)
                 action = super().add_argument(*args, **kwargs)
-                action.deprecated = deprecated  # type: ignore[attr-defined]
+                if deprecated:
+                    self._deprecated.add(action)
                 return action
 
         def add_argument_group(self, *args, **kwargs):
