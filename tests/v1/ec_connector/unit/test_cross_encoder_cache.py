@@ -21,6 +21,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.config import MooncakeEC
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakeConnectorMetadata,
     ECMooncakePushSpec,
+    ECMooncakeWorkerMetadata,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector import (
     ECMooncakeConnector,
@@ -303,8 +304,8 @@ def make_worker(backend):
     worker._failed_loads = set()
     worker._failed_saves = set()
     worker._push_ready = threading.Event()
-    worker._flush_pending_pushes = MagicMock()
-    worker._bind_push_source = MagicMock()
+    worker._flush_pending_pushes = MagicMock()  # type: ignore[method-assign]
+    worker._bind_push_source = MagicMock()  # type: ignore[method-assign]
     connector = object.__new__(ECMooncakeConnector)
     connector._worker = worker
     connector._role = ECConnectorRole.WORKER
@@ -423,6 +424,8 @@ def test_reuse_pipeline(backend, mode):
         assert runner.prepare_mm_inputs({"req": [0, 1, 2]})[0] == missing
         ModelState.execute_mm_encoder(state, {"req": [0, 1, 2]})
     assert runner.execute_mm_encoder.call_count == bool(missing)
+    assert output is not None
+    assert isinstance(output.ec_connector_worker_meta, ECMooncakeWorkerMetadata)
     assert output.ec_connector_worker_meta.pending_saves is False
     assert all(
         torch.equal(

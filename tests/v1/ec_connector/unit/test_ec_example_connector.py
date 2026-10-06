@@ -344,6 +344,7 @@ class TestStateManagement:
 
         # Build again should return empty metadata
         metadata2 = connector.build_connector_meta(scheduler_output)
+        assert isinstance(metadata2, ECExampleConnectorMetadata)
         assert len(metadata2.mm_datas) == 0
 
 

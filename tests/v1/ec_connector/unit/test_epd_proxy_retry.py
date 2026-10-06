@@ -19,6 +19,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+
 PROXY_REL = "examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py"
 
 
@@ -586,7 +588,12 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
     # Collector indices describe two processed features from one video item.
     video_metadata = collect_ec_item_metadata(
         [
-            SimpleNamespace(identifier=key, modality=key, data=None)
+            MultiModalFeatureSpec(
+                data=None,
+                modality=key,
+                identifier=key,
+                mm_position=PlaceholderRange(offset=0, length=1),
+            )
             for key in ("video", "audio")
         ],
         SimpleNamespace(fields_for=lambda _: set()),

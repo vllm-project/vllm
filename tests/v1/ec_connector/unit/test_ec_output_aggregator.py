@@ -26,7 +26,8 @@ class FakeWorkerMeta(ECConnectorWorkerMetadata):
     def __init__(self, saves: list[str]):
         self.saves = saves
 
-    def aggregate(self, other: "FakeWorkerMeta") -> "FakeWorkerMeta":
+    def aggregate(self, other: ECConnectorWorkerMetadata) -> ECConnectorWorkerMetadata:
+        assert isinstance(other, FakeWorkerMeta)
         return FakeWorkerMeta(self.saves + other.saves)
 
 
@@ -36,7 +37,8 @@ class FakeConnectorStats(ECConnectorStats):
     def __init__(self, saves: list[str]):
         self.saves = saves
 
-    def aggregate(self, other: "FakeConnectorStats") -> "FakeConnectorStats":
+    def aggregate(self, other: ECConnectorStats) -> ECConnectorStats:
+        assert isinstance(other, FakeConnectorStats)
         return FakeConnectorStats(self.saves + other.saves)
 
 
@@ -72,10 +74,15 @@ def test_aggregate_folds_every_rank_onto_output_rank():
     result = ECOutputAggregator().aggregate(outputs, output_rank=2)
 
     assert result is outputs[2]
+    assert result.ec_connector_output is not None
     assert result.ec_connector_output.finished_sending == {"mm0"}
     assert result.ec_connector_output.finished_recving == {"mm1"}
-    assert result.ec_connector_output.ec_connector_stats.saves == ["mm0", "mm2"]
-    assert result.ec_connector_output.ec_connector_worker_meta.saves == ["mm0", "mm2"]
+    stats = result.ec_connector_output.ec_connector_stats
+    assert isinstance(stats, FakeConnectorStats)
+    assert stats.saves == ["mm0", "mm2"]
+    meta = result.ec_connector_output.ec_connector_worker_meta
+    assert isinstance(meta, FakeWorkerMeta)
+    assert meta.saves == ["mm0", "mm2"]
 
 
 def test_aggregate_leaves_no_ec_output_when_no_worker_reported():
@@ -105,8 +112,12 @@ def test_aggregate_does_not_write_through_the_shared_empty_output():
     result = ECOutputAggregator().aggregate(outputs, output_rank=1)
 
     assert EMPTY_MODEL_RUNNER_OUTPUT.ec_connector_output is None
+    assert result is not None
     assert result is not EMPTY_MODEL_RUNNER_OUTPUT
-    assert result.ec_connector_output.ec_connector_worker_meta.saves == ["mm0"]
+    assert result.ec_connector_output is not None
+    meta = result.ec_connector_output.ec_connector_worker_meta
+    assert isinstance(meta, FakeWorkerMeta)
+    assert meta.saves == ["mm0"]
 
 
 def test_chaining_with_kv_aggregator_preserves_both_outputs():
@@ -127,5 +138,7 @@ def test_chaining_with_kv_aggregator_preserves_both_outputs():
         result = aggregator.aggregate(outputs, output_rank=1)
 
     assert result is outputs[1]
+    assert result.kv_connector_output is not None
     assert result.kv_connector_output.invalid_block_ids == {7}
+    assert result.ec_connector_output is not None
     assert result.ec_connector_output.finished_sending == {"mm0"}

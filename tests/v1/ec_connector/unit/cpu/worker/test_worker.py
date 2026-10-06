@@ -860,7 +860,7 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
     worker._inflight_loads = deque()
     worker._stream_pool = []
     worker._event_pool = []
-    worker._shutdown_transfer_backend = MagicMock()
+    worker._shutdown_transfer_backend = MagicMock()  # type: ignore[method-assign]
 
     worker.shutdown()
     worker._shutdown_transfer_backend.assert_called_once()

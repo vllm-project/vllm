@@ -117,6 +117,7 @@ def test_producer_session_grant_pins_ready_entry_and_returns_blocks():
 
     assert ack.status == XferStatus.OK
     entry = cache.get("h1")
+    assert entry is not None
     assert not entry.evictable  # pinned by the grant
     assert list(ack.src_block_indices) == list(entry.block_ids)
 
@@ -153,6 +154,7 @@ def test_producer_session_grant_nacks_version_mismatch():
 
     assert ack.status == XferStatus.NACK_VERSION
     entry = cache.get("h1")
+    assert entry is not None
     assert entry.evictable  # nothing was pinned
 
 
@@ -167,6 +169,7 @@ def test_producer_session_grant_nacks_compat_hash_mismatch():
 
     assert ack.status == XferStatus.NACK_INCOMPAT
     entry = cache.get("h1")
+    assert entry is not None
     assert entry.evictable  # nothing was pinned
 
 
@@ -177,8 +180,10 @@ def test_producer_session_notif_unpins_via_cache():
     s = _make_producer_session(cache)
     s._grant_or_nack(_xfer_req(mm_hash="h1", session_id="sess-1"))
     entry = cache.get("h1")
+    assert entry is not None
     assert not entry.evictable  # pinned
 
+    assert isinstance(s._data, MagicMock)
     s._data.get_new_notifs.return_value = {"agent": [b"sess-1:h1"]}
     s._drain_notifs()
 
@@ -197,7 +202,9 @@ def test_producer_session_sweep_timeouts_unpins_via_cache():
 
     s._sweep_timeouts()
 
-    assert cache.get("h1").evictable
+    entry = cache.get("h1")
+    assert entry is not None
+    assert entry.evictable
     assert s._active_xfers == {}
 
 
