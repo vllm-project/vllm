@@ -31,6 +31,7 @@ def capture_lookup(weight, scales, ids, out, block_rows, max_grid):
             weight,
             scales,
             id_batches[i],
+            id_batches[i],
             out_batches[i],
             0,
             weight.shape[0],
@@ -44,6 +45,7 @@ def capture_lookup(weight, scales, ids, out, block_rows, max_grid):
             QUANT_BLOCK=32,
             BLOCK_R=block_rows,
             GRID=grid,
+            SORTED=False,
         )
 
     launch(0)
