@@ -1460,16 +1460,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         device=query.device,
                     )
                     max_logits = torch.empty_like(exp_sums)
-                    k_qscale = (
-                        layer._k_scale
-                        if attn_metadata.k_scale is None
-                        else attn_metadata.k_scale
-                    )
-                    v_qscale = (
-                        layer._v_scale
-                        if attn_metadata.v_scale is None
-                        else attn_metadata.v_scale
-                    )
+                    # asm indexes this layer's dense scale buffer from build();
+                    # the HIP kernel reads the per-tensor scale directly.
+                    k_qscale_asm = v_qscale_asm = None
+                    if attn_metadata.k_scale is not None:
+                        assert attn_metadata.v_scale is not None
+                        k_qscale_asm = attn_metadata.k_scale[layer.layer_name]
+                        v_qscale_asm = attn_metadata.v_scale[layer.layer_name]
                     rocm_aiter_ops.paged_attention_common(
                         Q=query[:num_decode_tokens],
                         K=new_key_cache,
@@ -1484,10 +1481,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             :num_decodes
                         ].stride(0),
                         scale=self.scale,
-                        K_QScale_hip=k_qscale,
-                        V_QScale_hip=v_qscale,
-                        K_QScale_asm=k_qscale,
-                        V_QScale_asm=v_qscale,
+                        K_QScale_hip=layer._k_scale,
+                        V_QScale_hip=layer._v_scale,
+                        K_QScale_asm=k_qscale_asm,
+                        V_QScale_asm=v_qscale_asm,
                         out_=output[:num_decode_tokens],
                         kv_cache_dtype=self.kv_cache_dtype,
                     )

@@ -966,11 +966,11 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         with the RoPE ops and the KV cache update for implementations that support it.
         """
         return False
-    
+
     def fused_qk_norm_mrope_kvcache_supported(self):
         """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
         return False
-     
+
     def set_interleaved_v_cache(self):
         """Opt this implementation into the interleaved V-cache layout for all of
         its cache writers and readers. QkNormRopeKvCacheFusionPass calls this
@@ -980,7 +980,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         read an interleaved V-cache under this fusion (e.g. ROCM_ATTN) override.
         """
         return False
-      
+
     def fused_rope_kvcache_supported(self):
         """Does this attention implementation support RoPE+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops

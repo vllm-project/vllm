@@ -951,7 +951,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             # layer registers all shape/style variants for the model.
             if _USE_LAYERNAME:
                 break
-            
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
