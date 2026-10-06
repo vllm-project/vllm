@@ -446,7 +446,9 @@ class ServingTokens(GenerateBaseServing):
             token_logprobs = None
             if request.return_token_logprobs:
                 if output.sampled_logprobs is not None:
-                    token_logprobs = [max(x, -9999.0) for x in output.sampled_logprobs]
+                    token_logprobs = [
+                        _clamp_logprob(x) for x in output.sampled_logprobs
+                    ]
                 else:
                     assert isinstance(out_logprobs, FlatLogprobs), (
                         "Did not output logprobs"
@@ -769,12 +771,11 @@ class ServingTokens(GenerateBaseServing):
         The sampler stores the sampled token first at every position, so its
         logprob is the entry at each position's start index. Every position
         carries at least that entry whenever ``logprobs`` is requested. Values
-        are clamped exactly as the OpenAI-style path clamps them
-        (``max(logprob, -9999.0)``), so ``-inf`` stays JSON-representable and
-        the two representations never disagree.
+        go through ``_clamp_logprob`` (``-inf`` and NaN become ``-9999.0``), so
+        they stay JSON-representable.
         """
         logprobs = flat.logprobs
-        return [max(logprobs[start], -9999.0) for start in flat.start_indices]
+        return [_clamp_logprob(logprobs[start]) for start in flat.start_indices]
 
     def _create_text_logprobs(
         self,

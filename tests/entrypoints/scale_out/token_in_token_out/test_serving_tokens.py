@@ -470,6 +470,22 @@ def test_sampled_token_logprobs_clamps_like_object_path():
     assert ServingTokens._sampled_token_logprobs(flat) == [-0.25, -9999.0, -9999.0]
 
 
+def test_sampled_token_logprobs_clamp_nan():
+    """NaN is clamped too (Python's max(nan, x) is nan), so it stays valid JSON."""
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+    from vllm.logprobs import FlatLogprobs
+
+    flat = FlatLogprobs(
+        start_indices=[0, 1],
+        end_indices=[1, 2],
+        token_ids=[5, 9],
+        logprobs=[float("nan"), -0.5],
+        ranks=[0, 1],
+        decoded_tokens=[None] * 2,
+    )
+    assert ServingTokens._sampled_token_logprobs(flat) == [-9999.0, -0.5]
+
+
 @pytest.mark.asyncio
 async def test_generate_omits_token_logprobs_unless_requested(client):
     """Callers that did not ask for the field must not see it (schema stays)."""
