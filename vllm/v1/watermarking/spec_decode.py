@@ -12,7 +12,10 @@ from vllm.v1.watermarking.watermarker import (
     SupportsSpeculativeDecoding,
     Watermarker,
 )
-from vllm.v1.worker.gpu.sample.watermark import draft_watermarking_mask
+from vllm.v1.worker.gpu.sample.watermark import (
+    draft_philox_gumbel_sample,
+    draft_watermarking_mask,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 
@@ -165,6 +168,35 @@ class DraftWatermarker:
         """
         assert logits_cache_col is not None
         num_steps = self.num_speculative_steps
+        if (
+            isinstance(self.watermarker, GumbelWatermarker)
+            and type(self.watermarker.prf) is PhiloxPRF
+            and logits.is_cuda
+        ):
+            assert apply_temperature
+            assert is_drafting
+            assert logits_cache is not None
+            return draft_philox_gumbel_sample(
+                logits,
+                self.contexts,
+                self.watermarker.prf.key,
+                num_steps=num_steps,
+                expanded_idx_mapping=idx_mapping,
+                temperatures=temperature,
+                seeds=seed,
+                positions=pos,
+                enabled=self.enabled,
+                logits_cache=logits_cache,
+                logits_cache_col=logits_cache_col,
+                use_fp64=use_fp64,
+                prior_contexts=self.prior_contexts,
+                all_token_ids=self.all_token_ids,
+                prompt_lens=self.prompt_lens,
+                total_lens=self.total_lens,
+                deduplicate=self.deduplicate_contexts != "none",
+                max_history=self.deduplicate_contexts_max_history,
+                include_prompt=self.deduplicate_contexts == "all",
+            )
         num_reqs = logits.shape[0] // num_steps
 
         def by_step(tensor: torch.Tensor) -> torch.Tensor:
