@@ -22,9 +22,5 @@ def batch_invariant_kernel() -> None:
         require_batch_invariant_quant_kernel,
     )
 
-    try:
-        require_batch_invariant_quant_kernel()
-    except RuntimeError as error:
-        pytest.skip(str(error))
-    if not hasattr(torch.ops._C, "deterministic_top_k_per_row_prefill"):
-        pytest.skip("deterministic sparse top-k kernel is not available")
+    require_batch_invariant_quant_kernel()
+    assert hasattr(torch.ops._C, "deterministic_top_k_per_row_prefill")
