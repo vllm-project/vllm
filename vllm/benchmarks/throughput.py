@@ -178,6 +178,7 @@ def _run_vllm_requests(
                 beam_width=n,
                 max_tokens=output_len,
                 ignore_eos=True,
+                watermarking=False,
             ),
         )
         if do_profile:
@@ -195,8 +196,7 @@ def run_vllm_chat(
     warmup_requests: list[SampleRequest] | None = None,
     prequeue_requests: bool = False,
 ) -> tuple[float, list[RequestOutput]]:
-    """
-    Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
+    """Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
     multimodal models as it properly handles multimodal inputs and chat
     formatting. For non-multimodal models, use run_vllm() instead.
     """
@@ -536,6 +536,7 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     Returns:
         A namespace satisfying get_samples's attribute reads.
+
     """
     d = vars(args).copy()
     # random_*: prefer --random-* over legacy --input/output/prefix-len.
@@ -627,10 +628,7 @@ def assign_loras(requests, args):
 
 
 def validate_args(args):
-    """
-    Validate command-line arguments.
-    """
-
+    """Validate command-line arguments."""
     # === Deprecation and Defaulting ===
     if args.dataset is not None:
         warnings.warn(
@@ -1144,6 +1142,7 @@ def main(args: argparse.Namespace):
     # Output JSON results if specified
     if args.output_json:
         results = {
+            "model_id": args.model,
             "elapsed_time": elapsed_time,
             "num_requests": len(requests),
             "total_num_tokens": total_num_tokens,

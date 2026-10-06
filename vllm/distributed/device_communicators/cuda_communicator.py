@@ -7,6 +7,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.device_communicators.all_reduce_utils import (
     NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
     should_nccl_symm_mem_ag_rs,
@@ -68,8 +69,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC
                 and not envs.VLLM_BATCH_INVARIANT
             )
-            use_aiter_allreduce = use_custom_allreduce and bool(
-                rocm_aiter_ops.is_custom_all_reduce_enabled()
+            # Neither AITER nor QuickReduce all-reduce has a fixed reduction order.
+            use_aiter_allreduce = (
+                use_custom_allreduce
+                and not envs.VLLM_BATCH_INVARIANT
+                and bool(rocm_aiter_ops.is_custom_all_reduce_enabled())
             )
 
         self.use_custom_allreduce = use_custom_allreduce
@@ -111,6 +115,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
 
+        # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
+        config = get_current_vllm_config_or_none()
+        register = config is None or not config.use_cumem_cudagraph_pool
+
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
@@ -148,6 +156,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 symm_mem_enabled=(
                     self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
                 ),
+                register_graph_buffers=register,
             )
 
         # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
@@ -166,7 +175,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 self.use_aiter_ag_rs = True
 
-        if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
+        if (
+            use_custom_allreduce
+            and self.world_size > 1
+            and current_platform.is_rocm()
+            and not envs.VLLM_BATCH_INVARIANT
+        ):
             # Initialize a custom quick all-reduce implementation for AMD.
             # Quick reduce is designed as a complement to custom allreduce
             # (vLLM's or AITER's), so it is initialized for either backend.
@@ -214,6 +228,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     tcp_store_group,
                     device_group=self.device_group,
                 )
+            elif self.all2all_backend == "moonep":
+                from .all2all import MoonEPAll2AllManager
+
+                self.all2all_manager = MoonEPAll2AllManager(
+                    self.cpu_group,
+                    tcp_store_group,
+                    device_group=self.device_group,
+                )
             elif self.all2all_backend == "nixl_ep":
                 from .all2all import NixlEPAll2AllManager
 
@@ -239,6 +261,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import FlashInferNVLinkOneSidedManager
 
                 self.all2all_manager = FlashInferNVLinkOneSidedManager(self.cpu_group)
+            elif self.all2all_backend == "passthrough":
+                from .all2all import PassThroughAll2AllManager
+
+                self.all2all_manager = PassThroughAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 
@@ -611,7 +639,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return symm_output
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
-        """Sends a tensor to the destination rank in a blocking way"""
+        """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
@@ -851,11 +879,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and router logits to the appropriate device.
+        """Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
-
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
             hidden_states,
@@ -875,8 +901,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        """Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
@@ -891,8 +916,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Combine the hidden states and router logits from the appropriate device.
+        """Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None

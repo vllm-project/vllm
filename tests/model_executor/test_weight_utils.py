@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from unittest.mock import Mock
 
 import huggingface_hub.constants
 import pytest
@@ -9,6 +10,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
+    drop_checkpoint_cache,
     maybe_remap_kv_scale_name,
 )
 
@@ -72,28 +74,28 @@ class TestMaybeRemapKvScaleName:
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
     def test_modelopt_k_proj_k_scale(self):
-        """ModelOpt format: k_proj.k_scale -> attn.k_scale"""
+        """ModelOpt format: k_proj.k_scale -> attn.k_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_proj.k_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.k_scale"
 
     def test_modelopt_v_proj_v_scale(self):
-        """ModelOpt format: v_proj.v_scale -> attn.v_scale"""
+        """ModelOpt format: v_proj.v_scale -> attn.v_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.v_proj.v_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
     def test_deprecated_kv_scale(self):
-        """Old format: kv_scale -> attn.k_scale (deprecated)"""
+        """Old format: kv_scale -> attn.k_scale (deprecated)."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.kv_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.k_scale"
 
     def test_default_bare_k_scale(self):
-        """Default format: .k_scale -> .attn.k_scale"""
+        """Default format: .k_scale -> .attn.k_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_scale", self.PARAMS_DICT
         )
@@ -290,6 +292,19 @@ class TestKvCacheScaleMapper:
             combined._map_name("model.layers.0.self_attn.k_scale")
             == "model.layers.0.self_attn.attn.k_scale"
         )
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_drop_checkpoint_cache_releases_local_weight_files(
+    tmp_path, monkeypatch, fails
+):
+    """Evict only weights; cache eviction errors must not prevent loading."""
+    for name in ("weights.safetensors", "config.json"):
+        (tmp_path / name).touch()
+    fadvise = Mock(side_effect=OSError("cache eviction failed") if fails else None)
+    monkeypatch.setattr("os.posix_fadvise", fadvise)
+    drop_checkpoint_cache(str(tmp_path))
+    fadvise.assert_called_once()
 
 
 if __name__ == "__main__":

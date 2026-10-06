@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Warmup kernels used during model execution.
+"""Warmup kernels used during model execution.
 This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
@@ -137,16 +136,17 @@ def _warmup_bf16x3_router_gemm(
     logger.info_once("Warmed up BF16x3 router GEMM configs: %s.", configs)
 
 
-def _warmup_kimi_k3_gemm_rs_ar() -> None:
-    # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
-    # enabled and initializes its singleton before kernel_warmup runs. Avoid
-    # importing it here so other models do not compile the RS/AR variants.
-    module = sys.modules.get("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar")
+def _warmup_gemm_rs_ar() -> None:
+    # Model construction (Kimi-K3, DeepSeek-V4.1) imports this module only
+    # when GEMM-RS/AR is enabled and initializes its singleton before
+    # kernel_warmup runs. Avoid importing it here so other models do not
+    # compile the RS/AR variants.
+    module = sys.modules.get("vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar")
     if module is None:
         return
     compiled = module.warmup_gemm_rs_ar()
     if compiled:
-        logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
+        logger.info_once("Warmed up %d GEMM-RS/AR variants.", compiled)
 
 
 def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
@@ -209,7 +209,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
 
-    _warmup_kimi_k3_gemm_rs_ar()
+    _warmup_gemm_rs_ar()
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
@@ -219,6 +219,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     if process_local_only:
         return
+
+    if current_platform.is_rocm():
+        from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
+            rocm_segmented_attn_autotune_warmup,
+        )
+
+        rocm_segmented_attn_autotune_warmup(worker)
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
@@ -331,13 +338,16 @@ def _flashinfer_deferred_moe_token_counts(
     return tuple(dict.fromkeys(token_counts))
 
 
-def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
+def _flashinfer_autotune_token_counts(
+    runner: "GPUModelRunner", *, include_bf16: bool = True
+) -> tuple[int, ...]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     # Tune the widest bucket set first so bounded passes reuse its configs.
     token_counts = [max_tokens]
     linear_backend = runner.vllm_config.kernel_config.linear_backend
     if (
-        linear_backend == "flashinfer_cutedsl"
+        include_bf16
+        and linear_backend == "flashinfer_cutedsl"
         and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
     ):
         token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
@@ -351,7 +361,7 @@ def _run_flashinfer_autotune_dummy_runs(
     import vllm.utils.flashinfer as fi_utils
 
     dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
-    for num_tokens in _flashinfer_autotune_token_counts(runner):
+    for num_tokens in _flashinfer_autotune_token_counts(runner, include_bf16=False):
         tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
         logger.info(
             "Running FlashInfer autotune with %d tokens and token buckets %s.",
@@ -368,9 +378,38 @@ def _run_flashinfer_autotune_dummy_runs(
             )
 
 
+def _run_flashinfer_bf16_autotune_dummy_run(
+    runner: "GPUModelRunner",
+    *,
+    skip_ops: set[str] | None = None,
+    skip_attn: bool = False,
+) -> None:
+    import vllm.utils.flashinfer as fi_utils
+
+    if (
+        runner.vllm_config.kernel_config.linear_backend != "flashinfer_cutedsl"
+        or runner.scheduler_config.max_num_batched_tokens
+        <= _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    ):
+        return
+
+    num_tokens = _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
+    logger.info("Running FlashInfer BF16-only autotune with %d tokens.", num_tokens)
+    # Other ops execute from their existing cache or fallback, without the
+    # BF16 bucket cap. No full-model autotune context may enclose this pass.
+    with fi_utils.autotune_bf16_only(tuning_buckets, skip_ops=skip_ops):
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            randomize_inputs=True,
+            **({"skip_attn": True} if skip_attn else {}),
+        )
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
-    """
-    Autotune FlashInfer operations.
+    """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
     the results. The results are cached transparently and
@@ -378,17 +417,24 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
 
-    Every rank profiles the same tactics. When distributed, per-tactic
-    timings are averaged over the world CPU group so all ranks select the
-    same tactic.
+    With PP > 1, stages run different layers and may profile different ops,
+    so each stage's TP group tunes separately with its own cache file;
+    otherwise the world group tunes together. Per-tactic timings are
+    averaged over the tuning group so all its ranks select the same tactic.
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
     import vllm.utils.flashinfer as fi_utils
-    from vllm.distributed.parallel_state import get_world_group
+    from vllm.distributed.parallel_state import (
+        get_pp_group,
+        get_tp_group,
+        get_world_group,
+    )
 
     world = get_world_group()
-    is_leader = world.rank_in_group == 0
+    pp_size = get_pp_group().world_size
+    tune_group = get_tp_group() if pp_size > 1 else world
+    is_leader = tune_group.rank_in_group == 0
     tuner = AutoTuner.get()
 
     autotune_kwargs: dict = {}
@@ -401,6 +447,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         autotune_kwargs["skip_ops"] = skip_ops
 
     cache_path = resolve_flashinfer_autotune_file(runner)
+    if pp_size > 1:
+        ranks = "-".join(str(rank) for rank in tune_group.ranks)
+        cache_path = cache_path.with_name(
+            f"{cache_path.stem}_tp_{ranks}{cache_path.suffix}"
+        )
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
@@ -409,18 +460,18 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    # Read cached autotune results and broadcast to all ranks.
+    # Read cached autotune results and broadcast within the tuning group.
     cached_results: bytes | None = None
     if is_leader and cache_path.exists():
         with open(cache_path, "rb") as f:
             cached_results = f.read()
-    cached_results = world.broadcast_object(cached_results, src=0)
+    cached_results = tune_group.broadcast_object(cached_results, src=0)
     if cached_results is not None:
         write_flashinfer_autotune_cache(cache_path, cached_results)
-        world.barrier()
+        tune_group.barrier()
         tuner.load_configs(str(cache_path))
 
-    group = world.cpu_group if world.world_size > 1 else None
+    group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)
     try:
         with (
@@ -437,6 +488,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             _run_flashinfer_autotune_dummy_runs(runner, skip_attn=hisparse_enabled)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
+        with torch.inference_mode():
+            _run_flashinfer_bf16_autotune_dummy_run(
+                runner, skip_ops=skip_ops, skip_attn=hisparse_enabled
+            )
     finally:
         set_autotune_process_group(None)
 
