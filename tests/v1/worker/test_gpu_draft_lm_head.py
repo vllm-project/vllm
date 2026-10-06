@@ -5,20 +5,18 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.online.lm_head import (
     quantized_lm_head_copy,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="Marlin needs CUDA"
-)
-
 # Not a multiple of the vocab padding, so the head has padded rows.
 VOCAB, HIDDEN = 4000, 512
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Marlin needs CUDA")
 @pytest.mark.parametrize(
     ("quantization", "max_rel_err", "min_top1"),
     [("fp8", 0.05, 0.9), ("nvfp4", 0.15, 0.75)],
@@ -55,9 +53,17 @@ def test_tracks_bf16_head_through_logits_processor(
     assert top1 > min_top1
 
 
-def test_rejects_biased_head(default_vllm_config):
-    head = ParallelLMHead(VOCAB, HIDDEN, bias=True, disable_tp=True).to(
-        "cuda", torch.bfloat16
+@pytest.mark.parametrize(
+    ("sleep_mode", "weight_transfer", "match"),
+    [(True, None, "sleep mode"), (False, object(), "weight transfer")],
+)
+def test_rejects_features_that_replace_weights(sleep_mode, weight_transfer, match):
+    """The copy is derived once at load; sleep and weight transfer would leave
+    it stale, so they are rejected up front."""
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(draft_lm_head_quantization="nvfp4"),
+        model_config=SimpleNamespace(enable_sleep_mode=sleep_mode),
+        weight_transfer_config=weight_transfer,
     )
-    with pytest.raises(ValueError, match="without bias"):
-        quantized_lm_head_copy(head, "fp8")
+    with pytest.raises(ValueError, match=match):
+        VllmConfig._check_draft_lm_head_quantization(config)

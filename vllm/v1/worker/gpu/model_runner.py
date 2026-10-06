@@ -549,6 +549,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return speculator.model
 
     def reload_weights(self, *args, **kwargs) -> None:
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.draft_lm_head_quantization is not None
+        ):
+            raise RuntimeError(
+                "Weight reload is not supported with draft_lm_head_quantization."
+            )
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
