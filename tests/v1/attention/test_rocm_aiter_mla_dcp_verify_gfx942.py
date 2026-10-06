@@ -10,10 +10,11 @@ Reproduces the attention shape of
 
 96 gathered heads, bf16 KV, qlen 6 and the 768-token blocks the hybrid KDA
 layers impose. Segmented MLA tiles those blocks at 128 tokens and needs 128 KiB
-of LDS (gfx942 has 64 KiB), so the builder must route this shape to the generic
-Triton split-KV kernel. DeepSeek-V3 with MTP and an fp8 KV cache at DCP 8 hits
-the same limit through its 128 gathered heads. Shapes segmented MLA fits stay
-on it.
+of LDS (gfx942 has 64 KiB). DeepSeek-V3 with MTP and an fp8 KV cache at DCP 8
+hits the same limit through its 128 gathered heads. By default every gfx942
+verify shape runs on AITER's single-token asm decode. With
+VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY=triton, shapes segmented MLA fits stay on
+it and the rest take the generic Triton split-KV kernel.
 
 The real metadata builder and ``forward_mqa`` run on one GPU with the DCP ranks
 simulated one after another. That is sound because this path has no
@@ -43,6 +44,7 @@ DCP = 8
 # Each rank holds ~800 tokens per request, so its shard spans several blocks.
 NUM_REQS, CTX = 4, 6400
 FP8_KV_SCALE = 0.05
+FP8_Q_SCALE = 0.02
 
 
 def _on_gfx942() -> bool:
@@ -139,7 +141,7 @@ def _impl(dcp_rank: int, heads_per_rank: int, fp8_kv: bool):
     return impl
 
 
-def _run_rank(config, spec, layer_name, group, rank, q, kv_cache_src, k_scale):
+def _run_rank(config, spec, layer_name, group, rank, q, q_scale, kv_cache_src, k_scale):
     """Shard the KV round-robin onto ``rank`` and run its verify step."""
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAMetadataBuilder
@@ -187,7 +189,7 @@ def _run_rank(config, spec, layer_name, group, rank, q, kv_cache_src, k_scale):
     builder = AiterMLAMetadataBuilder(spec, [layer_name], config, device)
     metadata = builder.build(0, common)
     layer = SimpleNamespace(
-        _q_scale=torch.tensor(1.0, device=device),
+        _q_scale=torch.tensor(q_scale, device=device),
         _k_scale=torch.tensor(k_scale, device=device),
     )
     impl = _impl(rank, heads, kv_cache_src.dtype != torch.bfloat16)
@@ -198,16 +200,32 @@ def _run_rank(config, spec, layer_name, group, rank, q, kv_cache_src, k_scale):
 @pytest.mark.parametrize(
     "heads_per_rank, qlen, block_size, fp8_kv, route",
     [
+        (12, 6, 768, False, "ASM_ROWS"),
         (12, 6, 768, False, "TRITON"),
+        (12, 6, 64, False, "ASM_ROWS"),
         (12, 6, 64, False, "SEGMENTED"),
+        (8, 4, 16, False, "ASM_ROWS"),
+        (16, 2, 16, True, "ASM_ROWS"),
         (16, 2, 16, True, "TRITON"),
     ],
-    ids=["kimi-k3-hybrid-kda-blocks", "segmented-fits", "deepseek-v3-mtp-fp8-kv"],
+    ids=[
+        "kimi-k3-hybrid-kda-blocks-asm",
+        "kimi-k3-hybrid-kda-blocks-triton",
+        "segmented-fits-asm",
+        "segmented-fits-triton",
+        "64-heads-bf16-padded-asm",
+        "deepseek-v3-mtp-fp8-kv-asm",
+        "deepseek-v3-mtp-fp8-kv-triton",
+    ],
 )
 @torch.inference_mode()
 def test_dcp_verify_matches_attention(
-    fake_dcp_groups, heads_per_rank, qlen, block_size, fp8_kv, route
+    fake_dcp_groups, monkeypatch, heads_per_rank, qlen, block_size, fp8_kv, route
 ):
+    monkeypatch.setenv(
+        "VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY",
+        "asm" if route == "ASM_ROWS" else "triton",
+    )
     from vllm.config import set_current_vllm_config
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.worker.workspace import (
@@ -230,11 +248,14 @@ def test_dcp_verify_matches_attention(
     )
     kv = torch.randn(NUM_REQS, seq_len, HEAD_SIZE, device=device).clamp_(-4, 4)
     if fp8_kv:
-        k_scale = FP8_KV_SCALE
+        # MLAAttention hands this backend an fp8 query whenever the KV cache is.
+        q_scale, k_scale = FP8_Q_SCALE, FP8_KV_SCALE
+        q = (q.clamp(-4, 4) / q_scale).to(current_platform.fp8_dtype())
         kv_cache_src = (kv / k_scale).to(current_platform.fp8_dtype())
     else:
-        k_scale = 1.0
+        q_scale = k_scale = 1.0
         kv_cache_src = kv.to(torch.bfloat16)
+    q_ref = q.float() * q_scale
     kv_ref = kv_cache_src.float() * k_scale
 
     config = _vllm_config(heads_per_rank, qlen, fp8_kv)
@@ -257,6 +278,7 @@ def test_dcp_verify_matches_attention(
                 fake_dcp_groups,
                 rank,
                 q,
+                q_scale,
                 kv_cache_src,
                 k_scale,
             )
@@ -271,7 +293,7 @@ def test_dcp_verify_matches_attention(
     ).sum(dim=0) / weights.sum(dim=0).unsqueeze(-1)
 
     # Query token t of a request sees the context plus verify tokens 0..t.
-    scores = torch.einsum("rthd,rld->rthl", q.float(), kv_ref) * SCALE
+    scores = torch.einsum("rthd,rld->rthl", q_ref, kv_ref) * SCALE
     visible = torch.arange(seq_len, device=device) <= CTX + torch.arange(
         qlen, device=device
     ).view(-1, 1)
@@ -282,6 +304,20 @@ def test_dcp_verify_matches_attention(
     torch.testing.assert_close(
         merged.view_as(reference), reference, rtol=2e-2, atol=2e-2
     )
+
+
+def test_asm_rows_split_count():
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import _asm_rows_num_kv_splits
+
+    mi325x_cus = 304
+    # One request verifying 2 tokens: KV is the only parallelism, so split past
+    # the 16 AITER's own heuristic stops at.
+    assert _asm_rows_num_kv_splits(2, 16384, mi325x_cus) == 64
+    # Short rows keep at least 128 tokens per split.
+    assert _asm_rows_num_kv_splits(2, 1024, mi325x_cus) == 8
+    # Rows alone fill the GPU, but one split would skip the LSE reducer.
+    assert _asm_rows_num_kv_splits(192, 16384, mi325x_cus) == 2
+    assert _asm_rows_num_kv_splits(2, 16, mi325x_cus) == 2
 
 
 @pytest.mark.parametrize(
