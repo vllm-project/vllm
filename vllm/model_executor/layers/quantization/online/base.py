@@ -156,6 +156,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
         self.args = args
         self.ignored_layers: list[str] = args.ignore
         self.quantized_layers: dict[str, tuple[str, str, str | None]] = {}
+        self.online_quantization_time = 0.0
 
     @property
     def quantized_layer_summaries(self) -> list[str]:
