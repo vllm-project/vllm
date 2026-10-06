@@ -559,7 +559,8 @@ class KVConnectorBase_V1(ABC):
     ) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
-        Fields in scheduler_output must remain unchanged, with one exception:
+        This function should NOT modify fields in the scheduler_output.
+        FIXME: one exception:
         synchronous READ connectors may remove attention blocks they fully
         overwrite this step from new_block_ids_to_zero. They must complete
         those loads before the blocks are used and fail the step if a load fails.
