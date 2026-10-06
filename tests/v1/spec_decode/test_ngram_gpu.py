@@ -67,6 +67,7 @@ def _make_vllm_config(
 
 
 def _make_request_state(cfg: VllmConfig) -> RequestState:
+    assert cfg.speculative_config is not None
     return RequestState(
         max_num_reqs=cfg.scheduler_config.max_num_seqs,
         max_model_len=cfg.model_config.max_model_len,
