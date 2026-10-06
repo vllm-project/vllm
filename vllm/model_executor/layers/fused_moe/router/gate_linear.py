@@ -196,7 +196,10 @@ class GateLinear(ReplicatedLinear):
 
         # AITER tuned GEMM eligibility
         self.allow_aiter_router_gemm = (
-            can_use_aiter_tuned_gemm and self.weight.dtype == torch.bfloat16
+            self.is_unquantized
+            and can_use_aiter_tuned_gemm
+            and self.weight.dtype == torch.bfloat16
+            and rocm_aiter_ops.is_bf16_gemm_tuned(output_size, input_size)
         )
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:

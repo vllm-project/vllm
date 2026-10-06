@@ -246,6 +246,27 @@ def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
     return get_gemm_config(config_name, M_TUNE_PROBE, N, K)[1]
 
 
+def _bf16_gemm_shape_is_tuned(N: int, K: int) -> bool:
+    # get_GEMM_A16W16_config never returns None (it builds a default), so probe
+    # the tuned table directly. Keys: (gfx, cu_num, M, N, K, bias, dtype,
+    # outdtype, scaleAB, bpreshuffle).
+    try:
+        from aiter.jit.utils.chip_info import get_cu_num, get_gfx
+        from aiter.tuned_gemm import get_GEMM_A16W16_config_
+
+        gfx, cu_num, bf16 = get_gfx(), get_cu_num(), str(torch.bfloat16)
+        return any(
+            key[:2] == (gfx, cu_num)
+            and key[3:] == (N, K, False, bf16, bf16, False, False)
+            for key in get_GEMM_A16W16_config_()
+        )
+    except (AttributeError, ImportError, OSError):
+        logger.warning_once(
+            "Could not read aiter bf16 GEMM configs; treating all shapes as untuned."
+        )
+        return False
+
+
 def _ck_gemm_shape_is_tuned(
     N: int, K: int, q_dtype_w: torch.dtype, csv_attr: str
 ) -> bool:
@@ -3970,6 +3991,11 @@ class rocm_aiter_ops:
             )
         except (AssertionError, ImportError):
             return False
+
+    @staticmethod
+    @functools.cache
+    def is_bf16_gemm_tuned(N: int, K: int) -> bool:
+        return _bf16_gemm_shape_is_tuned(N, K)
 
     @staticmethod
     @functools.cache
