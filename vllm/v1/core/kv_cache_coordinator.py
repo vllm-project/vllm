@@ -174,6 +174,7 @@ class KVCacheCoordinator(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         """Get the number of device blocks needed to be allocated for the request.
 
@@ -195,12 +196,19 @@ class KVCacheCoordinator(ABC):
                 per-request admission cap (SWA / chunked-local). Set only by
                 the full-sequence admission gate; per-step allocation must
                 leave it False so the predictor matches `allocate_new_blocks`.
+            prefill_end: The token index the request's prefill ends at, the
+                same value the scheduler splits chunks against. Under sparse
+                retention Mamba reserves a prefill checkpoint only on the chunk
+                reaching it; under dense retention every chunk publishes a
+                state, so it is ignored (0).
 
         Returns:
             The number of blocks to allocate.
 
         """
         num_blocks_to_allocate = 0
+        if self.retention_interval != 0:
+            prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
@@ -223,6 +231,7 @@ class KVCacheCoordinator(ABC):
                     num_local_computed_tokens,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
+                    prefill_end=prefill_end,
                 )
         return num_blocks_to_allocate
 
@@ -232,6 +241,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> None:
         """Add the new computed blocks to the request. Optionally allocate new
             blocks for external computed tokens (if any).
@@ -242,6 +252,8 @@ class KVCacheCoordinator(ABC):
                 prefix cache.
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
+            skip_zeroing_group_ids: Groups whose external-token blocks are
+                written by an async load and must not be zeroed.
 
         """
         # A running request is already tracked in num_cached_block and won't
@@ -265,11 +277,12 @@ class KVCacheCoordinator(ABC):
                 num_external_computed_tokens,
             )
         if num_external_computed_tokens > 0:
-            for manager in self.single_type_managers:
+            for i, manager in enumerate(self.single_type_managers):
                 manager.allocate_external_computed_blocks(
                     request_id,
                     num_local_computed_tokens,
                     num_external_computed_tokens,
+                    record_for_zeroing=i not in skip_zeroing_group_ids,
                 )
 
     def allocate_new_blocks(
@@ -328,6 +341,14 @@ class KVCacheCoordinator(ABC):
         extension = request.num_prompt_tokens // block * block
         return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
 
+    def get_num_cacheable_tokens(
+        self, num_computed_tokens: int, kv_cache_group_id: int
+    ) -> int:
+        """Return the prefix eligible for hashing in this group."""
+        # Only cache tokens with finalized KV. The last num_reprefillable_tokens
+        # tokens can be re-prefilled during multi-module MTP.
+        return max(0, num_computed_tokens - self.num_reprefillable_tokens)
+
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request.
 
@@ -339,17 +360,12 @@ class KVCacheCoordinator(ABC):
 
         """
         boundaries = self.get_replay_boundaries(request)
-        for manager in self.single_type_managers:
+        for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue
-            # Only cache tokens with finalized KV. The last num_reprefillable_tokens
-            # tokens can be re-prefilled during multi-module MTP.
-            num_tokens_to_cache = max(
-                0, num_computed_tokens - self.num_reprefillable_tokens
-            )
             manager.cache_blocks(
                 request,
-                num_tokens_to_cache,
+                self.get_num_cacheable_tokens(num_computed_tokens, group_id),
                 retention_interval=self.retention_interval,
                 replay_boundaries=boundaries,
             )
@@ -796,39 +812,22 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             return num_tokens
         return round_down(num_tokens, self.scheduler_block_size)
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def get_num_cacheable_tokens(
+        self, num_computed_tokens: int, kv_cache_group_id: int
+    ) -> int:
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
-        boundaries = self.get_replay_boundaries(request)
-        for manager in self.single_type_managers:
-            if not manager.enable_caching:
-                continue
-            num_tokens_to_cache = cached_num_computed_tokens
-            # EAGLE groups match one block past each aligned boundary and drop
-            # it, so make that lookahead block eligible to be cached.
-            if manager.use_eagle and cached_num_computed_tokens > 0:
-                # Only cache tokens with finalized KV. The last
-                # num_reprefillable_tokens tokens can be re-prefilled during
-                # multi-module MTP.
-                num_finalized_computed_tokens = max(
-                    0, num_computed_tokens - self.num_reprefillable_tokens
-                )
-                cached_num_finalized_computed_tokens = self._align_cacheable(
-                    num_finalized_computed_tokens
-                )
-                num_tokens_to_cache = min(
-                    num_finalized_computed_tokens,
-                    cached_num_finalized_computed_tokens + manager.block_size,
-                )
-            # The manager already knows the fine hit granularity
-            # (``scheduler_block_size``); retention is passed separately so it
-            # can keep both the coarse segment tails and the fine replay
-            # boundary (which needs the fine value).
-            manager.cache_blocks(
-                request,
-                num_tokens_to_cache,
-                retention_interval=self.retention_interval,
-                replay_boundaries=boundaries,
+        manager = self.single_type_managers[kv_cache_group_id]
+        # EAGLE matches one block past the aligned boundary, then drops it.
+        if manager.use_eagle and cached_num_computed_tokens > 0:
+            num_finalized_computed_tokens = max(
+                0, num_computed_tokens - self.num_reprefillable_tokens
             )
+            return min(
+                num_finalized_computed_tokens,
+                self._align_cacheable(num_finalized_computed_tokens)
+                + manager.block_size,
+            )
+        return cached_num_computed_tokens
 
     def find_longest_cache_hit(
         self,

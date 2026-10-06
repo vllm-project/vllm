@@ -22,6 +22,34 @@ ProtonHook = Literal["triton"]
 ProtonOutputFormat = Literal["hatchet", "hatchet_msgpack", "chrome_trace"]
 
 
+def validate_profile_prefix(prefix: str | None) -> str | None:
+    """Validate a trace filename prefix supplied for one profiling session."""
+    if prefix is None:
+        return None
+    if (
+        not 1 <= len(prefix) <= 128
+        or not prefix.isascii()
+        or not prefix[0].isalnum()
+        or any(not (char.isalnum() or char in "._-") for char in prefix[1:])
+    ):
+        raise ValueError(
+            "profile_prefix must be 1-128 ASCII characters, start with a letter "
+            "or number, and contain only letters, numbers, '.', '_', or '-'"
+        )
+    return prefix
+
+
+def validate_profile_iteration_bounds(
+    delay_iterations: int | None,
+    max_iterations: int | None,
+) -> None:
+    """Validate iteration bounds supplied for one profiling session."""
+    if delay_iterations is not None and delay_iterations < 0:
+        raise ValueError("delay_iterations must be greater than or equal to 0")
+    if max_iterations is not None and max_iterations < 0:
+        raise ValueError("max_iterations must be greater than or equal to 0")
+
+
 def _is_uri_path(path: str) -> bool:
     """Check if path is a URI (scheme://...), excluding Windows drive letters.
 
@@ -136,6 +164,16 @@ class ProfilerConfig:
     Defaults to 0, meaning no limit.
     """
 
+    @property
+    def should_profile_frontend(self) -> bool:
+        """Whether the frontend CPU profiler should be enabled."""
+        activities = self.torch_profiler_activities
+        return (
+            self.profiler == "torch"
+            and not self.ignore_frontend
+            and (activities is None or "CPU" in activities)
+        )
+
     warmup_iterations: int = Field(default=0, ge=0)
     """Number of warmup iterations for PyTorch profiler schedule.
     During warmup, the profiler runs but data is discarded. This helps reduce
@@ -188,13 +226,7 @@ class ProfilerConfig:
                 raise ValueError(
                     "torch_profiler_activities must not contain duplicates"
                 )
-        records_cpu_activity = activities is None or "CPU" in activities
-        if (
-            self.profiler == "torch"
-            and has_delay_or_limit
-            and not self.ignore_frontend
-            and records_cpu_activity
-        ):
+        if has_delay_or_limit and self.should_profile_frontend:
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."
