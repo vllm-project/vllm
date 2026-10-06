@@ -15,6 +15,12 @@ V is the full 512-dim key, so one dequantized tile feeds both GEMMs.
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices, WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -216,10 +222,12 @@ _SHORT_KEYS_MAX_TOKENS = 16
 _LONG_KEYS_MAX_TOKENS = 12
 
 
+def _max_supported_tokens(max_keys: int) -> int:
+    return _SHORT_KEYS_MAX_TOKENS if max_keys <= _SHORT_KEYS else _LONG_KEYS_MAX_TOKENS
+
+
 def small_head_decode_supported(num_tokens: int, max_keys: int) -> bool:
-    if max_keys <= _SHORT_KEYS:
-        return num_tokens <= _SHORT_KEYS_MAX_TOKENS
-    return num_tokens <= _LONG_KEYS_MAX_TOKENS
+    return num_tokens <= _max_supported_tokens(max_keys)
 
 
 def _pick_config(num_tokens: int, max_keys: int) -> tuple[int, int, int, int]:
@@ -229,6 +237,160 @@ def _pick_config(num_tokens: int, max_keys: int) -> tuple[int, int, int, int]:
         if num_tokens <= 7:
             return 16, 32, 8, 2
     return 8, 32, 8, 2
+
+
+_HEAD_BLOCK = 16
+_PADDED_HEADS = 64
+_PAGE_ALIGNMENT = 576
+# Every ``num_splits`` ``_pick_config`` can return.
+_SPLIT_CHOICES = (8, 16, 32)
+
+
+def _page_stride(page_size: int) -> int:
+    return (page_size * 584 + _PAGE_ALIGNMENT - 1) // _PAGE_ALIGNMENT * _PAGE_ALIGNMENT
+
+
+def _decode_warmup_inputs(
+    *,
+    num_heads: int,
+    has_extra: bool,
+    swa_width: int,
+    topk: int,
+    swa_page_size: int,
+    extra_page_size: int,
+):
+    int32 = TritonWarmupTensor(torch.int32)
+    swa_cache = TritonWarmupTensor(
+        torch.uint8,
+        shape=(1, swa_page_size, 584),
+        strides=(_page_stride(swa_page_size), 584, 1),
+    )
+    swa_indices = TritonWarmupTensor(torch.int32, shape=(1, swa_width))
+    extra_cache = (
+        TritonWarmupTensor(
+            torch.uint8,
+            shape=(1, extra_page_size, 584),
+            strides=(_page_stride(extra_page_size), 584, 1),
+        )
+        if has_extra
+        else swa_cache
+    )
+    extra_indices = (
+        TritonWarmupTensor(torch.int32, shape=(1, topk)) if has_extra else swa_indices
+    )
+    return dict(
+        q=TritonWarmupTensor(torch.bfloat16, shape=(1, _PADDED_HEADS, 512)),
+        swa_cache=swa_cache,
+        swa_indices=swa_indices,
+        swa_lens=int32,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        extra_lens=int32,
+        part_o=TritonWarmupTensor(torch.float32),
+        part_lse=TritonWarmupTensor(torch.float32),
+        num_heads=num_heads,
+        sm_scale=1.0,
+        has_extra=has_extra,
+        num_tokens=WarmupIntRange(
+            1, _max_supported_tokens(swa_width + topk * has_extra) + 1
+        ),
+        max_keys=swa_width + topk * has_extra,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_small_head_sparse_decode_kernel,
+    warmup_inputs=_decode_warmup_inputs,
+)
+def _launch_partial_decode(
+    q: torch.Tensor,
+    swa_cache: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lens: torch.Tensor,
+    extra_cache: torch.Tensor,
+    extra_indices: torch.Tensor,
+    extra_lens: torch.Tensor,
+    part_o: torch.Tensor,
+    part_lse: torch.Tensor,
+    num_heads: int,
+    sm_scale: float,
+    has_extra: bool,
+    num_tokens: int,
+    max_keys: int,
+) -> DispatchSpec:
+    num_splits, block_n, num_warps, num_stages = _pick_config(num_tokens, max_keys)
+    return (num_tokens, num_splits), dict(
+        q_stride_t=q.stride(0),
+        q_stride_h=q.stride(1),
+        swa_page_stride=swa_cache.stride(0),
+        swa_page_size=swa_cache.shape[1],
+        swa_indices_stride=swa_indices.stride(0),
+        extra_page_stride=extra_cache.stride(0),
+        extra_page_size=extra_cache.shape[1],
+        extra_indices_stride=extra_indices.stride(0),
+        HAS_EXTRA=has_extra,
+        BLOCK_H=_HEAD_BLOCK,
+        BLOCK_N=block_n,
+        NUM_SPLITS=num_splits,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+
+
+def _merge_warmup_inputs():
+    return dict(
+        part_o=TritonWarmupTensor(torch.float32),
+        part_lse=TritonWarmupTensor(torch.float32),
+        sink=TritonWarmupTensor(torch.float32),
+        out=TritonWarmupTensor(torch.bfloat16, shape=(1, _PADDED_HEADS, 512)),
+        num_tokens=1,
+        num_heads=1,
+        num_splits=WarmupChoices(*_SPLIT_CHOICES),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_merge_splits_kernel,
+    warmup_inputs=_merge_warmup_inputs,
+)
+def _launch_merge_splits(
+    part_o: torch.Tensor,
+    part_lse: torch.Tensor,
+    sink: torch.Tensor,
+    out: torch.Tensor,
+    num_tokens: int,
+    num_heads: int,
+    num_splits: int,
+) -> DispatchSpec:
+    return (num_tokens, num_heads), dict(
+        out_stride_t=out.stride(0),
+        out_stride_h=out.stride(1),
+        BLOCK_H=_HEAD_BLOCK,
+        NUM_SPLITS=num_splits,
+        num_warps=4,
+    )
+
+
+def register_small_head_decode_warmup(
+    *,
+    num_heads: int,
+    has_extra: bool,
+    swa_widths: tuple[int, ...],
+    topk: int,
+    swa_page_size: int,
+    extra_page_size: int,
+) -> None:
+    """Compile every kernel variant ``small_head_sparse_decode`` can dispatch."""
+    for swa_width in swa_widths:
+        _launch_partial_decode.register_warmup(
+            num_heads=num_heads,
+            has_extra=has_extra,
+            swa_width=swa_width,
+            topk=topk,
+            swa_page_size=swa_page_size,
+            extra_page_size=extra_page_size,
+        )
+    _launch_merge_splits.register_warmup()
 
 
 def small_head_sparse_decode(
@@ -269,16 +431,17 @@ def small_head_sparse_decode(
     num_tokens = q.shape[0]
     if num_tokens == 0:
         return
-    block_h = 16
     max_keys = swa_indices.shape[-1]
     if extra_indices is not None:
         max_keys += extra_indices.shape[-1]
-    num_splits, block_n, num_warps, num_stages = _pick_config(num_tokens, max_keys)
+    num_splits = _pick_config(num_tokens, max_keys)[0]
     part_o = torch.empty(
-        (num_tokens, num_splits, block_h, 512), dtype=torch.float32, device=q.device
+        (num_tokens, num_splits, _HEAD_BLOCK, 512),
+        dtype=torch.float32,
+        device=q.device,
     )
     part_lse = torch.empty(
-        (num_tokens, num_splits, block_h), dtype=torch.float32, device=q.device
+        (num_tokens, num_splits, _HEAD_BLOCK), dtype=torch.float32, device=q.device
     )
     has_extra = extra_cache is not None
     if not has_extra:
@@ -292,41 +455,22 @@ def small_head_sparse_decode(
     # Byte-addressed: scales must be read as raw bytes, not fp8 values.
     swa_cache = swa_cache.view(torch.uint8)
     extra_cache = extra_cache.view(torch.uint8)
-    _small_head_sparse_decode_kernel[(num_tokens, num_splits)](
+    _launch_partial_decode(
         q,
-        q.stride(0),
-        q.stride(1),
         swa_cache,
-        swa_cache.stride(0),
-        swa_cache.shape[1],
         swa_indices,
-        swa_indices.stride(0),
         swa_lens,
         extra_cache,
-        extra_cache.stride(0),
-        extra_cache.shape[1],
         extra_indices,
-        extra_indices.stride(0),
         extra_lens,
         part_o,
         part_lse,
         num_heads,
         sm_scale,
-        HAS_EXTRA=has_extra,
-        BLOCK_H=block_h,
-        BLOCK_N=block_n,
-        NUM_SPLITS=num_splits,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        has_extra,
+        num_tokens,
+        max_keys,
     )
-    _merge_splits_kernel[(num_tokens, num_heads)](
-        part_o,
-        part_lse,
-        attn_sink,
-        out,
-        out.stride(0),
-        out.stride(1),
-        BLOCK_H=block_h,
-        NUM_SPLITS=num_splits,
-        num_warps=4,
+    _launch_merge_splits(
+        part_o, part_lse, attn_sink, out, num_tokens, num_heads, num_splits
     )
