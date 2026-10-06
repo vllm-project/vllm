@@ -31,6 +31,8 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicOutputConfig,
     AnthropicStreamEvent,
     AnthropicThinkingConfig,
+    AnthropicTool,
+    AnthropicToolChangeDefinition,
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -611,6 +613,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
             ec_transfer_params=anthropic_request.ec_transfer_params,
@@ -711,17 +714,63 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
     @classmethod
+    def _resolve_tools(
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    ) -> list[AnthropicTool] | None:
+        """Apply tool_addition/tool_removal blocks in ``messages`` to ``tools``.
+
+        Chat templates see a single tool list, so this resolves the tools in
+        effect at the end of the conversation: a tool added by reference is no
+        longer deferred, a tool added by value is declared, and a removed tool
+        is dropped.
+        """
+        changes = [
+            block
+            for msg in anthropic_request.messages
+            if not isinstance(msg.content, str)
+            for block in msg.content
+            if block.type in ("tool_addition", "tool_removal")
+        ]
+        if not changes:
+            return anthropic_request.tools
+
+        tools = {tool.name: tool for tool in anthropic_request.tools or []}
+        removed: set[str] = set()
+        for block in changes:
+            change = block.tool
+            assert change is not None
+            if isinstance(change, AnthropicToolChangeDefinition):
+                name = change.definition.name
+                tools[name] = change.definition
+            else:
+                name = change.name
+                if name not in tools:
+                    raise ValueError(
+                        f"{block.type} references tool {name!r}, "
+                        "which is not declared in tools"
+                    )
+                if block.type == "tool_addition":
+                    tools[name] = tools[name].model_copy(update={"defer_loading": None})
+            if block.type == "tool_removal":
+                removed.add(name)
+            else:
+                removed.discard(name)
+        return [tool for name, tool in tools.items() if name not in removed]
+
+    @classmethod
     def _convert_tools(
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
         """Convert Anthropic tools to OpenAI format."""
-        if anthropic_request.tools is None:
+        anthropic_tools = cls._resolve_tools(anthropic_request)
+        if anthropic_tools is None:
             return
 
         tools = []
-        for tool in anthropic_request.tools:
+        for tool in anthropic_tools:
             tools.append(
                 ChatCompletionToolsParam.model_validate(
                     {
