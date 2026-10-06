@@ -165,6 +165,9 @@ class GlmMonoDecode:
         md = ctx.attn_metadata[self._layer_name]
         slots = ctx.slot_mapping[self._layer_name][:n]
         indptr = md.paged_kv_indptr[: n + 1]
+        # CUDA-graph pad rows carry unwritten attention output out of the dense
+        # layers; the fused kernel needs finite values on every row.
+        state = state.masked_fill(slots[:, None] < 0, 0)
         kernel_positions = positions
         if n == 1:
             state = torch.cat([state, torch.zeros_like(state)])
@@ -177,6 +180,11 @@ class GlmMonoDecode:
         req_ids = md.req_id_per_token[:n]
         if n == 1:
             req_ids = torch.cat([req_ids, req_ids])
+        first = model.layers[self._num_dense]
+        if not _computes_indices(first):
+            # The dense layers convert their top-k into the indexer layers'
+            # metadata; the shared-index layers read another buffer.
+            self._convert_indices(first.self_attn, md)
         for layer, op in zip(model.layers[self._num_dense :], ops):
             attn = layer.self_attn
             cache = attn.kv_cache.view(fp8).view(-1, attn.kv_cache.shape[-1])
@@ -223,6 +231,10 @@ class GlmMonoDecode:
     ) -> None:
         attn = layer.self_attn
         attn.refresh_sparse_indices(positions, layer.input_layernorm(state))
+        GlmMonoDecode._convert_indices(attn, md)
+
+    @staticmethod
+    def _convert_indices(attn, md) -> None:
         tokens = md.num_actual_tokens
         triton_convert_req_index_to_global_index(
             md.req_id_per_token,
