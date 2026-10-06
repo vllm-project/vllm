@@ -378,14 +378,18 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         # FIXME (varun): We should be able to dispatch only from the leader
         # DP ranks in the case of TP > 1. At the moment, all the Ranks
         # end up sending their tokens. This needs to be fixed.
-        assert self.max_num_tokens is not None
         assert self.num_dispatchers is not None
-        batch_tokens = self._batched_workspace_tokens(M)
-        scratch_tokens = batch_tokens
+        assert self.max_num_tokens is not None
         num_experts = local_num_experts
+        # M is the full padded cross-dispatcher row count; don't hide a mismatch.
+        batch_tokens = self.max_num_tokens * self.num_dispatchers
+        assert batch_tokens == M, (
+            f"Batched workspace rows ({M}) do not match the dispatched layout "
+            f"({batch_tokens})"
+        )
         activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace13 = (num_experts, scratch_tokens, max(K, N))
-        workspace2 = (num_experts, scratch_tokens, activation_out_dim)
+        workspace13 = (num_experts, batch_tokens, max(K, N))
+        workspace2 = (num_experts, batch_tokens, activation_out_dim)
         output = (num_experts, batch_tokens, K)
         return (workspace13, workspace2, output)
 

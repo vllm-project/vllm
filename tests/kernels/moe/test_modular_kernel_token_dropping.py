@@ -229,10 +229,11 @@ def test_dispatch_support_controls_batched_physical_capacity(supports_dropping):
     dispatcher.supports_token_dropping = supports_dropping
     experts = BatchedTritonExperts(config, FusedMoEQuantConfig.make(None), 128, 1)
     mk.FusedMoEKernel(dispatcher, experts)
+    rows = experts.max_num_tokens
+    assert rows is not None
     scratch13, scratch2, output = experts.workspace_shapes(
-        16, 256, 128, 2, 2, 2, None, config.activation
+        rows, 256, 128, 2, 2, 2, None, config.activation
     )
-    rows = 16 if supports_dropping else 128
     assert scratch13 == (2, rows, 256)
     assert scratch2 == (2, rows, 128)
     assert output == (2, rows, 128)
@@ -343,7 +344,7 @@ def test_dropping_triton_matches_retained_expert_contributions(
 
 @pytest.mark.parametrize("expert_name", ["naive", "triton", "deep_gemm", "marlin"])
 @pytest.mark.parametrize("capacity", [None, 7])
-@pytest.mark.parametrize("dispatched_tokens", [1, 32, 64, 513])
+@pytest.mark.parametrize("dispatched_tokens", [4, 32, 64, 512])
 def test_batched_workspaces_follow_dispatch_layout(
     expert_name, capacity, dispatched_tokens
 ):
@@ -367,7 +368,7 @@ def test_batched_workspaces_follow_dispatch_layout(
         "marlin": BatchedMarlinExperts,
     }[expert_name]
     experts = object.__new__(cls)
-    experts.max_num_tokens = 128
+    experts.max_num_tokens = dispatched_tokens // 4
     experts.num_dispatchers = 4
     experts.expert_capacity = capacity
     workspace13, workspace2, output = experts.workspace_shapes(
@@ -380,7 +381,7 @@ def test_batched_workspaces_follow_dispatch_layout(
         None,
         MoEActivation.SILU,
     )
-    rows = max(512, dispatched_tokens)
+    rows = dispatched_tokens
     scratch_rows = rows
     assert output == (4, rows, 32)
     if expert_name == "naive":
@@ -392,6 +393,29 @@ def test_batched_workspaces_follow_dispatch_layout(
     else:
         assert workspace13 == (4, scratch_rows, 64)
         assert workspace2 == (4, scratch_rows, 32)
+
+
+@pytest.mark.parametrize("dispatched_tokens", [1, 513])
+def test_batched_workspaces_reject_dispatch_layout_mismatch(dispatched_tokens):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        BatchedTritonExperts,
+    )
+
+    experts = object.__new__(BatchedTritonExperts)
+    experts.max_num_tokens = 128
+    experts.num_dispatchers = 4
+    with pytest.raises(AssertionError, match="dispatched layout"):
+        experts.workspace_shapes(
+            dispatched_tokens,
+            64,
+            32,
+            2,
+            4,
+            4,
+            None,
+            MoEActivation.SILU,
+        )
 
 
 @pytest.mark.parametrize("capacity", [None, 7])

@@ -659,12 +659,6 @@ class FusedMoEExperts(ABC):
         self.num_dispatchers = num_dispatchers
         self.expert_capacity: int | None = None
 
-    def _batched_workspace_tokens(self, dispatched_tokens: int) -> int:
-        """Return the rows required by the batched dispatch layout."""
-        assert self.max_num_tokens is not None
-        assert self.num_dispatchers is not None
-        return max(dispatched_tokens, self.max_num_tokens * self.num_dispatchers)
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
@@ -1007,11 +1001,12 @@ class FusedMoEExpertsModular(FusedMoEExperts):
                               format.
 
         For batched activations, M is the physical per-expert batch size after
-        dispatcher compaction and max_num_tokens is the physical per-dispatcher
-        row capacity. Workspace shapes should use those values rather than
-        expert_capacity, which only controls routing. Standard layouts use the
-        dispatched M directly unless the dispatcher removes rows whose
-        assignments were all dropped.
+        dispatcher compaction and must equal max_num_tokens times the number of
+        dispatchers. Compaction updates max_num_tokens before experts run, so a
+        mismatch indicates an invalid dispatcher/expert layout. Workspace shapes
+        should use those values rather than expert_capacity, which only controls
+        routing. Standard layouts use the dispatched M directly unless the
+        dispatcher removes rows whose assignments were all dropped.
 
         Returns a tuple of:
         - workspace13 shape tuple: must be large enough to hold the

@@ -482,7 +482,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if self.is_batched():
             assert self.max_num_tokens is not None
             assert self.num_dispatchers is not None
-            batch_tokens = self._batched_workspace_tokens(M)
+            # Humming buffer metadata accepts either the per-dispatcher token
+            # limit or an already-expanded cross-dispatcher row count. Reserve
+            # the full dispatched layout in both cases.
+            batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
             real_shape_m = num_experts * batch_tokens
             input_shape_m = real_shape_m
             output_shape = (num_experts, batch_tokens, K)

@@ -932,13 +932,17 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        assert self.max_num_tokens is not None
         assert self.num_dispatchers is not None
-        batch_tokens = self._batched_workspace_tokens(M)
-        scratch_tokens = batch_tokens
+        assert self.max_num_tokens is not None
+        # M is the full padded cross-dispatcher row count; don't hide a mismatch.
+        batch_tokens = self.max_num_tokens * self.num_dispatchers
+        assert batch_tokens == M, (
+            f"Batched workspace rows ({M}) do not match the dispatched layout "
+            f"({batch_tokens})"
+        )
         num_experts = local_num_experts
-        workspace13 = (num_experts * scratch_tokens, max(K, N * 2))
-        workspace2 = (num_experts * scratch_tokens, N)
+        workspace13 = (num_experts * batch_tokens, max(K, N * 2))
+        workspace2 = (num_experts * batch_tokens, N)
         output = (num_experts, batch_tokens, K)
         return (workspace13, workspace2, output)
 
