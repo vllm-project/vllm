@@ -18,12 +18,11 @@ import regex as re
 import torch
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -167,13 +166,12 @@ class TensorizerConfig(MutableMapping):
     s3_access_key_id: str | None = None
     s3_secret_access_key: str | None = None
     s3_endpoint: str | None = None
-    lora_dir: str | None = None
     stream_kwargs: dict[str, Any] | None = None
     serialization_kwargs: dict[str, Any] | None = None
     deserialization_kwargs: dict[str, Any] | None = None
     _extra_serialization_attrs: dict[str, Any] | None = field(init=False, default=None)
     model_class: type[torch.nn.Module] | None = field(init=False, default=None)
-    hf_config: PretrainedConfig | None = field(init=False, default=None)
+    hf_config: PreTrainedConfig | None = field(init=False, default=None)
     dtype: str | torch.dtype | None = field(init=False, default=None)
     _is_sharded: bool = field(init=False, default=False)
     _fields: ClassVar[tuple[str, ...]]
@@ -185,11 +183,8 @@ class TensorizerConfig(MutableMapping):
     
     Attributes:
         tensorizer_uri: Path to serialized model tensors. Can be a local file 
-            path or a S3 URI. This is a required field unless lora_dir is 
-            provided and the config is meant to be used for the
-            `tensorize_lora_adapter` function. Unless a `tensorizer_dir` or 
-            `lora_dir` is passed to this object's initializer, this is 
-            a required argument.
+            path or a S3 URI. Unless a `tensorizer_dir` is passed to this
+            object's initializer, this is a required argument.
         tensorizer_dir: Path to a directory containing serialized model tensors,
             and all other potential model artifacts to load the model, such as 
             configs and tokenizer files. Can be passed instead of 
@@ -219,10 +214,6 @@ class TensorizerConfig(MutableMapping):
             be set via the S3_SECRET_ACCESS_KEY environment variable.
         s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
             S3_ENDPOINT_URL environment variable.
-        lora_dir: Path to a directory containing LoRA adapter artifacts for 
-            serialization or deserialization. When serializing LoRA adapters 
-            this is the only necessary parameter to pass to this object's 
-            initializer.
     """
 
     def __post_init__(self):
@@ -232,12 +223,6 @@ class TensorizerConfig(MutableMapping):
             and re.search(r"%0\dd", self.tensorizer_uri) is not None
         )
 
-        if self.tensorizer_dir and self.lora_dir:
-            raise ValueError(
-                "Only one of tensorizer_dir or lora_dir may be specified. "
-                "Use lora_dir exclusively when serializing LoRA adapters, "
-                "and tensorizer_dir or tensorizer_uri otherwise."
-            )
         if self.tensorizer_dir and self.tensorizer_uri:
             logger.warning_once(
                 "Provided both tensorizer_dir and tensorizer_uri. "
@@ -246,17 +231,12 @@ class TensorizerConfig(MutableMapping):
             )
             self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
         if not self.tensorizer_uri:
-            if self.lora_dir:
-                self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
-            elif self.tensorizer_dir:
+            if self.tensorizer_dir:
                 self.tensorizer_uri = f"{self.tensorizer_dir}/model.tensors"
             else:
                 raise ValueError(
                     "Unable to resolve tensorizer_uri. "
-                    "A valid tensorizer_uri or tensorizer_dir "
-                    "must be provided for deserialization, and a "
-                    "valid tensorizer_uri, tensorizer_uri, or "
-                    "lora_dir for serialization."
+                    "A valid tensorizer_uri or tensorizer_dir must be provided."
                 )
         else:
             self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
@@ -286,9 +266,6 @@ class TensorizerConfig(MutableMapping):
         blacklisted = []
 
         if "tensorizer_uri" in raw_tc_dict and "tensorizer_dir" in raw_tc_dict:
-            blacklisted.append("tensorizer_dir")
-
-        if "tensorizer_dir" in raw_tc_dict and "lora_dir" in raw_tc_dict:
             blacklisted.append("tensorizer_dir")
 
         tc_dict = {}
@@ -495,25 +472,6 @@ def _check_tensors_on_meta_device(model: nn.Module) -> None:
             )
 
 
-def _resize_lora_embeddings(model: nn.Module):
-    """Modify LoRA embedding layers to use bigger tensors
-    to allow for adapter added tokens."""
-    for child in model.modules():
-        if (
-            isinstance(child, VocabParallelEmbedding)
-            and child.weight.shape[0] < child.num_embeddings_per_partition
-        ):
-            new_weight = torch.empty(
-                child.num_embeddings_per_partition,
-                child.embedding_dim,
-                dtype=child.weight.dtype,
-                device=child.weight.device,
-            )
-            new_weight[: child.weight.shape[0]].copy_(child.weight.data)
-            new_weight[child.weight.shape[0] :].fill_(0)
-            child.weight.data = new_weight
-
-
 def init_tensorizer_model(
     tensorizer_config: TensorizerConfig, vllm_config: VllmConfig
 ) -> nn.Module:
@@ -567,7 +525,6 @@ def deserialize_tensorizer_model(
     logger.info("Memory usage after: %s", after_mem)
 
     _check_tensors_on_meta_device(model)
-    _resize_lora_embeddings(model)
     del model.vllm_tensorized_marker
 
 
@@ -769,60 +726,3 @@ def tensorize_vllm_model(
 
     if error is not None:
         raise error
-
-
-def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
-    """Uses tensorizer to serialize a LoRA adapter. Assumes that the files
-    needed to load a LoRA adapter are a safetensors-format file called
-    adapter_model.safetensors and a json config file called adapter_config.json.
-
-    Serializes the files in the tensorizer_config.tensorizer_dir
-    """
-    import safetensors
-
-    from vllm.lora.utils import get_adapter_absolute_path
-
-    lora_dir = get_adapter_absolute_path(lora_path)
-
-    tensor_path = config_path = ""
-
-    for file in os.listdir(lora_dir):
-        if file.startswith("adapter_model"):
-            tensor_path = lora_dir + "/" + file
-        if file.startswith("adapter_config"):
-            config_path = lora_dir + "/" + file
-        if tensor_path and config_path:
-            break
-
-    if tensor_path.endswith(".safetensors"):
-        tensors = safetensors.torch.load_file(tensor_path)
-    elif tensor_path.endswith(".bin"):
-        tensors = torch.load(tensor_path, weights_only=True)
-    else:
-        raise ValueError(
-            f"Unsupported adapter model file: {tensor_path}. "
-            f"Must be a .safetensors or .bin file."
-        )
-
-    with open(config_path) as f:
-        config = json.load(f)
-
-    tensorizer_args = tensorizer_config._construct_tensorizer_args()
-
-    with open_stream(
-        f"{tensorizer_config.tensorizer_dir}/adapter_config.json",
-        mode="wb+",
-        **tensorizer_args.stream_kwargs,
-    ) as f:
-        f.write(json.dumps(config).encode("utf-8"))
-
-    lora_uri = f"{tensorizer_config.tensorizer_dir}/adapter_model.tensors"
-    with open_stream(lora_uri, mode="wb+", **tensorizer_args.stream_kwargs) as f:
-        serializer = TensorSerializer(f)
-        serializer.write_state_dict(tensors)
-        serializer.close()
-
-    logger.info(
-        "Successfully serialized LoRA files to %s",
-        str(tensorizer_config.tensorizer_dir),
-    )
