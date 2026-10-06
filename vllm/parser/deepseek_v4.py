@@ -21,7 +21,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 
@@ -32,7 +32,6 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.tool_parsers.utils import find_tool_properties
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -112,21 +111,14 @@ def _dsml_arg_converter(
     return json.dumps(params, ensure_ascii=False)
 
 
-def _unwrap_wrapper_args(
-    args_json: str,
-    tools: list[Tool] | None,
-    func_name: str | None,
-) -> str:
-    if not tools or not func_name:
+def _unwrap_wrapper_args(args_json: str, properties: dict[str, Any]) -> str:
+    if not properties:
         return args_json
     try:
         args = json.loads(args_json)
     except (json.JSONDecodeError, ValueError):
         return args_json
     if not isinstance(args, dict):
-        return args_json
-    properties = find_tool_properties(tools, func_name)
-    if not properties:
         return args_json
     allowed = set(properties.keys())
     for wrapper in ("arguments", "input"):
@@ -274,4 +266,6 @@ class DeepSeekV4Parser(ParserEngine):
         if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
-        return _unwrap_wrapper_args(result, self._tools, func_name)
+        if not func_name:
+            return result
+        return _unwrap_wrapper_args(result, self._tool_properties(func_name))

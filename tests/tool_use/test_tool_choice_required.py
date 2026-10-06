@@ -505,6 +505,44 @@ class TestMalformedToolSchemaDefs:
         assert isinstance(schema, dict)
 
 
+class TestToolSchemaDefsHoisting:
+    """Both definition namespaces are hoisted to the required-call grammar root."""
+
+    @pytest.mark.parametrize("defs_key", ["$defs", "definitions"])
+    def test_defs_hoisted_once_and_grammar_compiles(self, defs_key):
+        xgr = pytest.importorskip("xgrammar")
+        defs = {"D": {"type": "object", "properties": {"n": {"type": "integer"}}}}
+        tools = [
+            TestMalformedToolSchemaDefs._tool(
+                {
+                    "type": "object",
+                    "properties": {"a": {"$ref": f"#/{defs_key}/D"}},
+                    defs_key: defs,
+                }
+            )
+        ]
+
+        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert isinstance(schema, dict)
+        assert schema[defs_key] == defs
+        tool_params = schema["items"]["anyOf"][0]["properties"]["parameters"]
+        assert defs_key not in tool_params
+        request_params = tools[0].function.parameters
+        assert request_params is not None and request_params[defs_key] == defs
+        xgr.Grammar.from_json_schema(json.dumps(schema))
+
+    def test_malformed_definitions_is_a_client_error(self):
+        tools = [
+            TestMalformedToolSchemaDefs._tool(
+                {"type": "object", "properties": {}, "definitions": None}
+            )
+        ]
+
+        with pytest.raises(VLLMValidationError, match="`definitions`"):
+            get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+
 class TestParallelToolCallsConstraint:
     """`parallel_tool_calls=false` must be enforced by the decoding grammar.
 

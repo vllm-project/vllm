@@ -13,6 +13,8 @@ from vllm.tool_parsers.utils import (
     escape_ctrl_chars_in_strings,
     escape_nested_quotes_in_strings,
     extract_types_from_schema,
+    find_tool_properties,
+    get_json_schema_from_tools,
     get_parameter_value,
     handle_single_tool,
     make_valid_python,
@@ -764,3 +766,178 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+def _tool(params: dict):
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionToolsParam,
+    )
+
+    return ChatCompletionToolsParam.model_validate(
+        {"type": "function", "function": {"name": "fn", "parameters": params}}
+    )
+
+
+INNER = {"type": "object", "properties": {"n": {"type": "integer"}}}
+
+
+class TestFindToolPropertiesRefs:
+    """``$ref`` must be inlined so nested arguments aren't double-encoded (#46924)."""
+
+    @pytest.mark.parametrize("defs_key", ["$defs", "definitions"])
+    @pytest.mark.parametrize(
+        "arg_schema",
+        [
+            pytest.param({"$ref": "#/{d}/Inner"}, id="direct"),
+            pytest.param(
+                {"anyOf": [{"$ref": "#/{d}/Inner"}, {"type": "null"}]},
+                id="anyOf",
+            ),
+            pytest.param(
+                {"type": "array", "items": {"$ref": "#/{d}/Inner"}}, id="items"
+            ),
+            pytest.param(
+                {"type": "array", "prefixItems": [{"$ref": "#/{d}/Inner"}]},
+                id="prefixItems",
+            ),
+            pytest.param(
+                {"type": "object", "additionalProperties": {"$ref": "#/{d}/Inner"}},
+                id="additionalProperties",
+            ),
+        ],
+    )
+    def test_no_ref_survives(self, defs_key, arg_schema):
+        arg_schema = json.loads(json.dumps(arg_schema).replace("{d}", defs_key))
+        tools = [_tool({defs_key: {"Inner": INNER}, "properties": {"arg": arg_schema}})]
+        props = find_tool_properties(tools, "fn")
+        assert "$ref" not in json.dumps(props)
+
+    def test_direct_ref_coerces_nested_object(self):
+        tools = [
+            _tool(
+                {
+                    "$defs": {"Inner": INNER},
+                    "properties": {"arg": {"$ref": "#/$defs/Inner"}},
+                }
+            )
+        ]
+        props = find_tool_properties(tools, "fn")
+        types = extract_types_from_schema(props["arg"])
+        assert coerce_to_schema_type('{"n": 1}', types) == {"n": 1}
+
+    def test_pointer_into_definition(self):
+        tools = [
+            _tool(
+                {
+                    "$defs": {"Inner": INNER},
+                    "properties": {"n": {"$ref": "#/$defs/Inner/properties/n"}},
+                }
+            )
+        ]
+        assert find_tool_properties(tools, "fn")["n"] == {"type": "integer"}
+
+    def test_escaped_and_unescaped_slash_in_name(self):
+        tools = [
+            _tool(
+                {
+                    "$defs": {"v1/Inner": INNER},
+                    "properties": {
+                        "a": {"$ref": "#/$defs/v1~1Inner"},
+                        "b": {"$ref": "#/$defs/v1/Inner"},
+                    },
+                }
+            )
+        ]
+        props = find_tool_properties(tools, "fn")
+        assert props["a"] == INNER
+        assert props["b"] == INNER
+
+    @pytest.mark.parametrize("name", ["default", "enum", "const", "examples"])
+    def test_parameter_named_like_data_keyword(self, name):
+        inner = {"type": "object", "properties": {name: {"$ref": "#/$defs/Inner"}}}
+        tools = [
+            _tool(
+                {
+                    "$defs": {"Inner": INNER, "Outer": inner},
+                    "properties": {
+                        name: {"$ref": "#/$defs/Inner"},
+                        "outer": {"$ref": "#/$defs/Outer"},
+                    },
+                }
+            )
+        ]
+        props = find_tool_properties(tools, "fn")
+        assert props[name] == INNER
+        assert props["outer"]["properties"][name] == INNER
+
+    def test_exact_pointer_preferred_over_key_with_slash(self):
+        tools = [
+            _tool(
+                {
+                    "$defs": {
+                        "a/b": {"type": "string"},
+                        "a": {"b": {"type": "integer"}},
+                    },
+                    "properties": {"x": {"$ref": "#/$defs/a/b"}},
+                }
+            )
+        ]
+        assert find_tool_properties(tools, "fn")["x"] == {"type": "integer"}
+
+    def test_ref_site_keywords_win(self):
+        tools = [
+            _tool(
+                {
+                    "$defs": {"Inner": {**INNER, "description": "def"}},
+                    "properties": {
+                        "arg": {"$ref": "#/$defs/Inner", "description": "site"}
+                    },
+                }
+            )
+        ]
+        assert find_tool_properties(tools, "fn")["arg"]["description"] == "site"
+
+    def test_sibling_keywords_kept(self):
+        tools = [
+            _tool(
+                {
+                    "$defs": {"Inner": INNER},
+                    "properties": {
+                        "arg": {"$ref": "#/$defs/Inner", "description": "d"}
+                    },
+                }
+            )
+        ]
+        assert find_tool_properties(tools, "fn")["arg"] == {**INNER, "description": "d"}
+
+    def test_recursive_ref_is_bounded(self):
+        node = {"type": "object", "properties": {"child": {"$ref": "#/$defs/Node"}}}
+        tools = [
+            _tool(
+                {
+                    "$defs": {"Node": node},
+                    "properties": {"root": {"$ref": "#/$defs/Node"}},
+                }
+            )
+        ]
+        root = find_tool_properties(tools, "fn")["root"]
+        assert root["type"] == "object"
+        assert root["properties"]["child"] == {"$ref": "#/$defs/Node"}
+
+    def test_unresolvable_ref_left_alone(self):
+        tools = [_tool({"properties": {"arg": {"$ref": "#/$defs/Missing"}}})]
+        assert find_tool_properties(tools, "fn")["arg"] == {"$ref": "#/$defs/Missing"}
+
+    def test_required_schema_generation_keeps_defs(self):
+        """Hoisting ``$defs`` into the grammar must not strip them from the tools."""
+        tools = [
+            _tool(
+                {
+                    "$defs": {"Inner": INNER},
+                    "properties": {"arg": {"$ref": "#/$defs/Inner"}},
+                }
+            )
+        ]
+        schema = get_json_schema_from_tools("required", tools)
+        assert schema["$defs"] == {"Inner": INNER}
+        assert find_tool_properties(tools, "fn")["arg"] == INNER

@@ -299,24 +299,104 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+# Keywords whose value is data rather than a subschema.
+_SCHEMA_DATA_KEYWORDS = frozenset({"enum", "const", "default", "examples"})
+# Keywords whose value maps arbitrary names to subschemas.
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "dependentSchemas", "$defs", "definitions"}
+)
+_SCHEMA_DEFS_KEYWORDS = ("$defs", "definitions")
+
+
+def _walk_json_pointer(node: Any, tokens: list[str], join_keys: bool) -> Any:
+    i = 0
+    while i < len(tokens):
+        if isinstance(node, dict):
+            ends = range(len(tokens), i, -1) if join_keys else (i + 1,)
+            for j in ends:
+                key = "/".join(tokens[i:j])
+                if key in node:
+                    node, i = node[key], j
+                    break
+            else:
+                return None
+        elif (
+            isinstance(node, list)
+            and tokens[i].isdigit()
+            and int(tokens[i]) < len(node)
+        ):
+            node, i = node[int(tokens[i])], i + 1
+        else:
+            return None
+    return node
+
+
+def _resolve_json_pointer(root: Any, pointer: str) -> Any:
+    """Resolve a local ``#/...`` pointer, falling back to keys containing ``/``."""
+    tokens = [t.replace("~1", "/").replace("~0", "~") for t in pointer[2:].split("/")]
+    node = _walk_json_pointer(root, tokens, join_keys=False)
+    if node is None:
+        node = _walk_json_pointer(root, tokens, join_keys=True)
+    return node
+
+
+def _inline_local_refs(
+    schema: Any, root: dict[str, Any], seen: frozenset[str] = frozenset()
+) -> Any:
+    """Inline local ``$ref`` pointers from *root*, leaving recursive ones as-is."""
+    if isinstance(schema, list):
+        return [_inline_local_refs(item, root, seen) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/") and ref not in seen:
+        target = _resolve_json_pointer(root, ref)
+        if isinstance(target, dict):
+            site = {k: v for k, v in schema.items() if k != "$ref"}
+            return _inline_local_refs({**target, **site}, root, seen | {ref})
+    resolved: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key in _SCHEMA_DATA_KEYWORDS:
+            resolved[key] = value
+        elif key in _SCHEMA_MAP_KEYWORDS:
+            resolved[key] = _inline_schema_map(value, root, seen)
+        else:
+            resolved[key] = _inline_local_refs(value, root, seen)
+    return resolved
+
+
+def _inline_schema_map(
+    schemas: Any, root: dict[str, Any], seen: frozenset[str] = frozenset()
+) -> Any:
+    if not isinstance(schemas, dict):
+        return schemas
+    return {name: _inline_local_refs(s, root, seen) for name, s in schemas.items()}
+
+
+def _resolved_tool_properties(params: dict[str, Any] | None) -> dict[str, Any]:
+    if not params:
+        return {}
+    return _inline_schema_map(params.get("properties", {}), params)
+
+
 def find_tool_properties(
     tools: list[Tool] | None,
     tool_name: str,
 ) -> dict[str, Any]:
-    """Find a tool by name and return its properties dict, or {}."""
+    """Find a tool by name and return its ref-resolved properties, or {}."""
     if not tools:
         return {}
     for tool in tools:
         if isinstance(tool, (FunctionTool, NamespaceTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
-                    return (params or {}).get("properties", {})
+                    return _resolved_tool_properties(params)
             continue
         if not _is_function_tool(tool):
             continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
-            return (params or {}).get("properties", {})
+            return _resolved_tool_properties(params)
     return {}
 
 
@@ -358,43 +438,45 @@ def _get_tool_schema_from_name_and_params(
     }
 
 
-def _get_tool_schema_from_tool(tool: Tool) -> dict:
-    name, params = _extract_tool_info(tool)
-    return _get_tool_schema_from_name_and_params(name, params)
-
-
-def _get_tool_schema_defs(
-    tools: list[Tool],
-) -> dict:
-    all_defs: dict[str, dict[str, Any]] = {}
-    for tool in tools:
-        name, params = _extract_tool_info(tool)
-        if params is None:
+def _hoist_tool_schema_defs(
+    name: str,
+    params: dict[str, Any] | None,
+    all_defs: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Merge *params*' definitions into *all_defs*; return *params* without them."""
+    if not params:
+        return params
+    for key in _SCHEMA_DEFS_KEYWORDS:
+        if key not in params:
             continue
-        defs = params.pop("$defs", {})
+        defs = params[key]
         if not isinstance(defs, dict):
             raise VLLMValidationError(
-                f"`$defs` in the parameters of tool '{name}' must be an "
+                f"`{key}` in the parameters of tool '{name}' must be an "
                 f"object, got {type(defs).__name__}.",
                 parameter="tools",
             )
+        merged = all_defs.setdefault(key, {})
         for def_name, def_schema in defs.items():
-            if def_name in all_defs and all_defs[def_name] != def_schema:
+            if merged.setdefault(def_name, def_schema) != def_schema:
                 raise VLLMValidationError(
                     f"Tool definition '{def_name}' has multiple schemas, "
                     "which is not supported.",
                     parameter="tools",
                 )
-            all_defs[def_name] = def_schema
-    return all_defs
+    return {k: v for k, v in params.items() if k not in _SCHEMA_DEFS_KEYWORDS}
 
 
 def _get_json_schema_from_tools(
     tools: list[Tool],
     parallel_tool_calls: bool | None = None,
 ) -> dict:
-    fn_tools: list[Tool] = list(require_function_tools(tools))
-    fn_tool_schemas = [_get_tool_schema_from_tool(tool) for tool in fn_tools]
+    all_defs: dict[str, dict[str, Any]] = {}
+    fn_tool_schemas: list[dict[str, Any]] = []
+    for tool in require_function_tools(tools):
+        name, params = _extract_tool_info(tool)
+        params = _hoist_tool_schema_defs(name, params, all_defs)
+        fn_tool_schemas.append(_get_tool_schema_from_name_and_params(name, params))
     json_schema: dict[str, Any] = {
         "type": "array",
         "minItems": 1,
@@ -407,9 +489,7 @@ def _get_json_schema_from_tools(
     # field was never set and the default (true) applies.
     if parallel_tool_calls is False:
         json_schema["maxItems"] = 1
-    json_schema_defs = _get_tool_schema_defs(fn_tools)
-    if json_schema_defs:
-        json_schema["$defs"] = json_schema_defs
+    json_schema.update(all_defs)
     return json_schema
 
 

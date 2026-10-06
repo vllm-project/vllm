@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 
@@ -94,6 +94,8 @@ class ParserEngine(Parser):
     ) -> None:
         self.model_tokenizer = tokenizer
         self._tools = tools
+        self._properties_tools: list[Tool] | None = None
+        self._properties_cache: dict[str, dict[str, Any]] = {}
         self._stream_state = StreamState(
             tool_call_id_type=(
                 get_tool_call_id_type(model_config)
@@ -395,7 +397,7 @@ class ParserEngine(Parser):
         if not isinstance(args, dict):
             return args_json
 
-        properties = find_tool_properties(self._tools, func_name)
+        properties = self._tool_properties(func_name)
         if not properties:
             return args_json
 
@@ -404,6 +406,17 @@ class ParserEngine(Parser):
         if changed:
             return json.dumps(args, ensure_ascii=False)
         return args_json
+
+    def _tool_properties(self, name: str) -> dict[str, Any]:
+        """Return *name*'s ref-resolved properties, cached per tool list."""
+        if self._properties_tools is not self._tools:
+            self._properties_tools = self._tools
+            self._properties_cache = {}
+        properties = self._properties_cache.get(name)
+        if properties is None:
+            properties = find_tool_properties(self._tools, name)
+            self._properties_cache[name] = properties
+        return properties
 
     def _is_valid_tool_name(self, name: str) -> bool:
         if not self.parser_engine_config.validate_tool_names:
@@ -889,9 +902,7 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
         slot.name = name
         slot.name_sent = True
-        slot.string_keys = self._streamable_string_keys(
-            find_tool_properties(self._tools, name)
-        )
+        slot.string_keys = self._streamable_string_keys(self._tool_properties(name))
         self._ensure_tool_id(slot, name)
         deltas.append(
             DeltaToolCall(
@@ -948,7 +959,7 @@ class ParserEngine(Parser):
                 slot.name = name
                 slot.name_sent = True
                 slot.string_keys = self._streamable_string_keys(
-                    find_tool_properties(self._tools, name)
+                    self._tool_properties(name)
                 )
                 self._ensure_tool_id(slot, name)
                 deltas.append(
