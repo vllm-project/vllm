@@ -101,6 +101,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_key = None
         structured_output_bitmask = None
         structured_output_trie: ChoiceTrie | None = None
+        over_cap_logprobs = 0
         if params.structured_outputs is not None:
             (
                 structured_output_backend,
@@ -109,6 +110,11 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 structured_output_trie,
             ) = self._init_beam_search_structured_output(
                 params.structured_outputs, tokenizer
+            )
+            over_cap_logprobs = resolve_over_cap_logprobs(
+                self.model_config.max_logprobs,
+                self.model_config.get_vocab_size(),
+                2 * beam_width,
             )
 
         # generate 2 * beam_width candidates at each step
@@ -121,11 +127,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             watermarking=False,
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
-        )
-        over_cap_logprobs = resolve_over_cap_logprobs(
-            self.model_config.max_logprobs,
-            self.model_config.get_vocab_size(),
-            2 * beam_width,
         )
         instances: list[BeamSearchInstance] = []
 

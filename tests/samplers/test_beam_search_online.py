@@ -11,6 +11,7 @@ import torch
 from vllm import CompletionOutput, PromptType, RequestOutput, SamplingParams
 from vllm import logger as vllm_logger
 from vllm.config import VllmConfig
+from vllm.entrypoints.generate.beam_search.choice_trie import ChoiceTrie
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.generate.beam_search.utils import (
@@ -118,6 +119,7 @@ class _OfflineServing(BeamSearchOfflineMixin):
         self,
         instances_batch: list[BeamSearchInstance],
         base_sampling_params: SamplingParams,
+        over_cap_logprobs: int,
         eos_token_id: int | None,
         ignore_eos: bool,
         beam_width: int,
@@ -125,6 +127,7 @@ class _OfflineServing(BeamSearchOfflineMixin):
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple[Any, ...] | None,
         structured_output_bitmask: torch.Tensor | None,
+        structured_output_trie: ChoiceTrie | None,
     ) -> bool:
         assert base_sampling_params.watermarking is False
         return True
@@ -310,6 +313,7 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     entries = serving._build_beam_sampling_params(
         [beam],
         base_params,
+        2,
         backend,
         ("regex", ".*"),
         torch.zeros((1, 1), dtype=torch.int32),
