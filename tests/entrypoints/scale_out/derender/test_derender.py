@@ -27,6 +27,11 @@ async def client(server):
         yield http_client
 
 
+@pytest.fixture(scope="module")
+def tokenizer():
+    return get_tokenizer(MODEL_NAME)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -372,6 +377,58 @@ async def test_derender_chat_model_omitted_resolves_served_name(client):
     assert response.json()["model"] == MODEL_NAME
 
 
+@pytest.mark.asyncio
+async def test_derender_chat_leading_space_seeded_from_prompt(client, tokenizer):
+    """prompt_token_ids keeps the first token's leading space on this
+    Metaspace tokenizer, matching the coupled path."""
+    gen_req = await _render_chat(client)
+    prompt_token_ids = gen_req["token_ids"]
+    output_ids = tokenizer.encode("Hello there, output", add_special_tokens=False)
+
+    unseeded = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(output_ids),
+        },
+    )
+    seeded = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(output_ids),
+            "prompt_token_ids": prompt_token_ids,
+        },
+    )
+    assert unseeded.status_code == 200
+    assert seeded.status_code == 200
+    unseeded_content = unseeded.json()["choices"][0]["message"]["content"]
+    seeded_content = seeded.json()["choices"][0]["message"]["content"]
+
+    assert not unseeded_content.startswith(" ")
+    assert seeded_content.startswith(" ")
+    assert seeded_content.lstrip(" ") == unseeded_content
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_oversized_prompt_token_ids_rejected(client):
+    """prompt_token_ids longer than max_model_len returns 400."""
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+    oversized_prompt_ids = [42] * 1_000_000
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(synthetic_ids),
+            "prompt_token_ids": oversized_prompt_ids,
+        },
+    )
+    assert response.status_code == 400
+    assert "max_model_len" in response.json()["error"]["message"]
+
+
 # ---------------------------------------------------------------------------
 # Completion derender tests
 # ---------------------------------------------------------------------------
@@ -484,6 +541,84 @@ async def test_derender_completion_prompt_tokens_length_mismatch(client):
         },
     )
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_prompt_token_ids_length_mismatch(client):
+    """len(prompt_token_ids) != len(generate_responses) returns 400, the
+    same as the existing prompt_tokens length check."""
+    gr1 = await _render_completion(client, "Hello")
+    ids1 = gr1["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(ids1, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [[1, 2], [3, 4]],
+        },
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_leading_space_seeded_from_prompt(client, tokenizer):
+    """Completions counterpart of
+    test_derender_chat_leading_space_seeded_from_prompt."""
+    gr1 = await _render_completion(client, "Hello world")
+    prompt_token_ids = gr1["token_ids"]
+    output_ids = tokenizer.encode("Hello there, output", add_special_tokens=False)
+
+    unseeded = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(output_ids, gr1["request_id"]),
+            ],
+        },
+    )
+    seeded = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(output_ids, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [prompt_token_ids],
+        },
+    )
+    assert unseeded.status_code == 200
+    assert seeded.status_code == 200
+    unseeded_text = unseeded.json()["choices"][0]["text"]
+    seeded_text = seeded.json()["choices"][0]["text"]
+
+    assert not unseeded_text.startswith(" ")
+    assert seeded_text.startswith(" ")
+    assert seeded_text.lstrip(" ") == unseeded_text
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_oversized_prompt_token_ids_rejected(client):
+    """A prompt_token_ids entry longer than max_model_len returns 400."""
+    gr1 = await _render_completion(client, "Hello")
+    ids1 = gr1["token_ids"][:3]
+    oversized_prompt_ids = [42] * 1_000_000
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(ids1, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [oversized_prompt_ids],
+        },
+    )
+    assert response.status_code == 400
+    assert "max_model_len" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -1161,6 +1296,72 @@ async def test_e2e_harmony_plain_roundtrip(harmony_client, harmony_tokenizer):
     content = resp.json()["choices"][0]["message"]["content"]
     assert content is not None and len(content) > 0
     assert "Four" in content
+
+
+@pytest.fixture(scope="module")
+def harmony_default_server():
+    """gpt-oss render server with NO parser flags.
+
+    Regression fixture: the model-default reasoning parser
+    ("openai_gptoss", applied by verify_and_update_config) must be
+    resolved by the render server without any --reasoning-parser flag,
+    otherwise harmony markup leaks unparsed into derender output.
+    """
+    _ensure_harmony_vocab()
+    with RemoteLaunchRenderServer(
+        HARMONY_MODEL, ["--trust-remote-code"]
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def harmony_default_client(harmony_default_server):
+    async with httpx.AsyncClient(
+        base_url=harmony_default_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_harmony_reasoning_default_parser(
+    harmony_default_client, harmony_tokenizer
+):
+    """GPT-OSS reasoning parses on a bare launch (no parser flags)."""
+    messages = [{"role": "user", "content": "Add 2 and 3."}]
+    gen_req = await _e2e_render_chat(harmony_default_client, HARMONY_MODEL, messages)
+
+    reasoning_text = "The user wants 2 plus 3."
+    answer_text = "The answer is 5."
+    assistant_msg = {
+        "role": "assistant",
+        "thinking": reasoning_text,
+        "content": answer_text,
+    }
+    output_ids = _harmony_extract_assistant_ids(harmony_tokenizer, assistant_msg)
+
+    decoded = harmony_tokenizer.decode(output_ids)
+    if reasoning_text not in decoded:
+        pytest.skip("Harmony template did not render thinking")
+
+    resp = await harmony_default_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HARMONY_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": HARMONY_MODEL,
+                "messages": messages,
+                "include_reasoning": True,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    msg = resp.json()["choices"][0]["message"]
+    assert msg["reasoning"] is not None
+    assert reasoning_text in msg["reasoning"]
+    assert answer_text in (msg["content"] or "")
+    assert "<|channel|>" not in (msg["content"] or "")
 
 
 @pytest.mark.asyncio

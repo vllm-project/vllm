@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MLAAttentionImpl,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
@@ -34,11 +35,10 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
-    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -83,7 +83,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [32, 64]
 
     @staticmethod
@@ -172,7 +172,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         return "FLASHINFER_MLA_SPARSE_SM120"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64, 256]
 
     @staticmethod
@@ -273,8 +273,16 @@ class FlashInferMLASparseMetadataBuilder(
 class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilder):
     """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-    hisparse_supports_multi_token_decode: ClassVar[bool] = True
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode uses device request boundaries; prefill metadata is not graph-safe.
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
@@ -300,12 +308,6 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
                     vllm_config.scheduler_config.max_num_batched_tokens,
                 ),
             )
-
-    def _build_req_id_per_token(
-        self,
-        common_attn_metadata: "CommonAttentionMetadata",
-    ) -> torch.Tensor:
-        return common_attn_metadata.token_to_req_indices(self.req_id_per_token_buffer)
 
 
 # Global workspace buffer (lazily initialized)
@@ -509,10 +511,11 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             decode_lse: torch.Tensor | None = None
             if num_decode_tokens > 0:
                 physical_topk, valid_counts = (
-                    index_group.convert_decode_logical_to_physical_topk(
+                    index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
+                        block_stride_rows=None,
                         return_valid_counts=True,
                     )
                 )

@@ -40,9 +40,8 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_text_config
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -66,7 +65,9 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             device=current_platform.device_type,
         )
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config,
+            prefix=prefix,
+            defer_lm_head=True,
         )
         # MTP layers sit past the base model's hidden layers; parse the index
         # from the prefix (e.g. "...layers.32") so the decoder builds an MLA
@@ -113,7 +114,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
 class Glm5NextMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = torch.nn.ModuleDict(
@@ -210,7 +211,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
@@ -312,7 +313,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
         # ``kv_a_proj_with_mqa``; the FP8-to-BF16 path pads them for the model.
         kv_a_pad_size = 0
-        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
+        if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
