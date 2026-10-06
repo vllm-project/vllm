@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import final
+from typing import Any, final
 
 import torch
 
@@ -519,6 +519,11 @@ class FusedMoEExperts(ABC):
     def is_monolithic() -> bool:
         raise NotImplementedError("Implemented by subclasses.")
 
+    @staticmethod
+    def _supports_hash_routing() -> bool:
+        """Whether a monolithic kernel implements hash routing."""
+        return False
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         """Whether or not the PrepareFinalize should defer input quantization
@@ -567,7 +572,11 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
             )
-        elif moe_config.has_hash_routing and cls.is_monolithic():
+        elif (
+            moe_config.has_hash_routing
+            and cls.is_monolithic()
+            and not cls._supports_hash_routing()
+        ):
             return False, _make_reason("hash routing")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
@@ -1558,11 +1567,20 @@ class FusedMoEKernelMonolithicImpl:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
+        # Only experts with _supports_hash_routing() accept these.
+        hash_kwargs: dict[str, Any] = {}
+        if hash_indices_table is not None:
+            hash_kwargs = {
+                "input_ids": input_ids,
+                "hash_indices_table": hash_indices_table,
+            }
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
@@ -1595,6 +1613,7 @@ class FusedMoEKernelMonolithicImpl:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_replay_out=routing_replay_out,
+            **hash_kwargs,
         )
         if routing_sink is not None:
             routing_sink.capture_fn(routing_replay_out)
@@ -1707,6 +1726,8 @@ class FusedMoEKernel:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1723,6 +1744,8 @@ class FusedMoEKernel:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_sink=routing_sink,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )
 
     def apply(
