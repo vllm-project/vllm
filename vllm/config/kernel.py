@@ -278,6 +278,9 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    enable_rocm_segmented_attn_autotune: bool = False
+    """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
+
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
@@ -406,6 +409,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "enable_rocm_segmented_attn_autotune",
             "ir_op_priority",  # handled separately below
         }
         if self.linear_backend_per_quant is None:
