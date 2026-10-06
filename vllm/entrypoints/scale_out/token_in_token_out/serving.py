@@ -3,6 +3,7 @@
 
 
 import asyncio
+import math
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
@@ -75,6 +76,15 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
+def _clamp_logprob(logprob: float) -> float:
+    """The OpenAI shapes' floor for a logprob: ``-inf`` and NaN become ``-9999.0``.
+
+    ``max(nan, -9999.0)`` is NaN in Python, so NaN needs its own check; NaN
+    would otherwise fail ``JSONResponse`` or reach the client as ``null``.
+    """
+    return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
+
+
 def _logprob_token(
     token_id: int, logprob: Logprob | None, tokenizer: TokenizerLike | None
 ) -> tuple[str, list[int] | None]:
@@ -97,7 +107,7 @@ def _top_logprob(
 ) -> ChatCompletionLogProb:
     token, token_bytes = _logprob_token(token_id, logprob, tokenizer)
     return ChatCompletionLogProb(
-        token=token, logprob=max(logprob.logprob, -9999.0), bytes=token_bytes
+        token=token, logprob=_clamp_logprob(logprob.logprob), bytes=token_bytes
     )
 
 
@@ -733,7 +743,7 @@ class ServingTokens(GenerateBaseServing):
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=token,
-                        logprob=max(step_token.logprob, -9999.0),
+                        logprob=_clamp_logprob(step_token.logprob),
                         bytes=token_bytes,
                         top_logprobs=[
                             _top_logprob(top_id, logprob, tokenizer)
@@ -778,12 +788,12 @@ class ServingTokens(GenerateBaseServing):
                 logprobs_content.append(
                     GenerateLogProbsContent(
                         token_id=token_id,
-                        logprob=max(step_token.logprob, -9999.0),
+                        logprob=_clamp_logprob(step_token.logprob),
                         rank=step_token.rank or None,
                         top_logprobs=[
                             GenerateLogProb(
                                 token_id=top_token_id,
-                                logprob=max(top_logprob.logprob, -9999.0),
+                                logprob=_clamp_logprob(top_logprob.logprob),
                                 rank=top_logprob.rank or None,
                             )
                             for rank_index, (top_token_id, top_logprob) in enumerate(

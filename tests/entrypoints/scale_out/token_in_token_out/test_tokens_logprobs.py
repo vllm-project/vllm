@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -164,3 +165,21 @@ def test_rank_zero_from_a_nan_logprob_is_none():
     entry = result.content[0]
     assert entry.rank is None
     assert entry.top_logprobs[0].rank is None
+    # Clamped like the Rust frontend (max(nan, x) is nan in Python).
+    assert entry.logprob == -9999.0
+    assert entry.top_logprobs[0].logprob == -9999.0
+    json.dumps(result.model_dump(), allow_nan=False)
+
+
+def test_text_logprobs_clamp_a_nan_logprob():
+    result = ServingTokens._create_text_logprobs(
+        None,
+        token_ids=[7],
+        top_logprobs=[{7: Logprob(float("nan"), rank=0, decoded_token="a")}],
+        num_output_top_logprobs=1,
+        tokenizer=MagicMock(),
+    )
+    entry = result.content[0]
+    assert entry.logprob == -9999.0
+    assert entry.top_logprobs[0].logprob == -9999.0
+    json.dumps(result.model_dump(), allow_nan=False)
