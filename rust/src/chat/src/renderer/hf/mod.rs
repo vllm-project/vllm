@@ -26,6 +26,7 @@ use crate::{
 mod error;
 mod format;
 mod generation;
+mod media;
 mod template;
 mod tojson;
 
@@ -198,7 +199,12 @@ impl HfChatRenderer {
             .messages
             .iter()
             .any(|message| matches!(message, ChatMessage::Developer { .. }));
+        let mut media_order = None;
         if has_developer_messages && !effective_template.supports_developer_role() {
+            media_order = Some(media::consolidated_media_order(
+                &request.messages,
+                &messages,
+            ));
             messages = consolidate_system_messages(messages);
         }
 
@@ -255,7 +261,7 @@ impl HfChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
-            media_order: None,
+            media_order,
             effective_template_kwargs,
         })
     }

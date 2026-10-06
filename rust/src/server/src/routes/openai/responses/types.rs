@@ -107,9 +107,9 @@ pub enum ResponseToolChoice {
 /// `validate.rs`/`convert.rs` rather than at deserialization time so errors
 /// can carry the reporting `param`.
 ///
-/// TODO: `background`, `store=true` retention, `previous_response_id`, and
-/// `max_tool_calls` require a server-side response store, which the Rust
-/// frontend does not have yet; see `validate.rs` for the enforced behavior.
+/// `background`, `store=true` retention, and `previous_response_id` require
+/// server-side state. `max_tool_calls` requires server-side tool execution.
+/// Neither is provided by this stateless frontend; see `validate.rs`.
 /// Output presentation controls such as `include`, `reasoning.summary`, and
 /// `text.verbosity` are accepted for compatibility. They do not add output
 /// fields that this frontend cannot produce.
@@ -473,8 +473,7 @@ pub struct InputTokensDetails {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputTokensDetails {
-    /// TODO: count reasoning tokens from the parser for non-streaming
-    /// parity with the Python frontend. Currently always 0.
+    /// Reasoning tokens reported by the shared chat output processor.
     pub reasoning_tokens: usize,
     pub tool_output_tokens: usize,
     /// vLLM extension: per-turn token counts, populated only by multi-turn

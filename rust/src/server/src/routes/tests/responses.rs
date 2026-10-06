@@ -52,6 +52,37 @@ async fn responses_call(app: &axum::Router, body: serde_json::Value) -> axum::re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn responses_empty_model_uses_served_model() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = responses_call(&app, json!({"model": "", "input": "hello"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["model"], "Qwen/Qwen1.5-0.5B-Chat");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_empty_history_is_client_error() {
+    let (app, _engine_task) = test_app_with_engine_handle().await;
+    for input in [
+        json!([]),
+        json!([
+            {"role": "user", "content": "hello"},
+            {"type": "reasoning", "status": "incomplete", "content": [], "summary": []}
+        ]),
+    ] {
+        let response = responses_call(&app, json!({"input": input})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"]["param"], "input");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn responses_non_streaming_text_input_returns_response_object() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = responses_call(
@@ -414,6 +445,9 @@ async fn responses_streaming_error_includes_failed_response_error() {
         "The model failed to generate a response."
     );
     assert_eq!(failed["response"]["output"][0]["content"][0]["text"], "h");
+    assert_eq!(failed["response"]["usage"]["input_tokens"], 22);
+    assert_eq!(failed["response"]["usage"]["output_tokens"], 1);
+    assert_eq!(failed["response"]["usage"]["total_tokens"], 23);
     assert!(payloads.iter().any(|event| {
         event["type"] == "response.output_item.done" && event["item"]["content"][0]["text"] == "h"
     }));
@@ -716,10 +750,10 @@ async fn responses_streaming_emits_function_call_events() {
             "response.in_progress",
             // Reasoning item ("Need tool.").
             "response.output_item.added",
-            "response.reasoning_part.added",
+            "response.content_part.added",
             "response.reasoning_text.delta",
             "response.reasoning_text.done",
-            "response.reasoning_part.done",
+            "response.content_part.done",
             "response.output_item.done",
             // Function call item.
             "response.output_item.added",
@@ -745,6 +779,12 @@ async fn responses_streaming_emits_function_call_events() {
     assert_eq!(output.len(), 3, "{text}");
     assert_eq!(output[0]["type"], "reasoning");
     assert_eq!(output[0]["content"][0]["text"], "Need tool.");
+    for index in [3, 6] {
+        assert_eq!(payloads[index]["item_id"], output[0]["id"]);
+        assert_eq!(payloads[index]["output_index"], 0);
+        assert_eq!(payloads[index]["content_index"], 0);
+        assert_eq!(payloads[index]["part"]["type"], "reasoning_text");
+    }
     let call = &output[1];
     assert_eq!(call["type"], "function_call");
     assert_eq!(call["name"], "get_weather");

@@ -12,6 +12,7 @@
 //! tool-response messages.
 
 use serde_json::Value;
+use thiserror_ext::AsReport as _;
 use tracing::warn;
 use uuid::Uuid;
 use vllm_chat::{
@@ -171,7 +172,7 @@ pub(crate) fn prepare_responses_request(
             _ => "tools",
         };
         ApiError::invalid_request(
-            format!("failed to resolve request tools: {error}"),
+            format!("failed to resolve request tools: {}", error.as_report()),
             Some(param),
         )
     })?;
@@ -350,6 +351,7 @@ fn validate_model(
 ) -> Result<(), ApiError> {
     match &request.model {
         None => Ok(()),
+        Some(model) if model.is_empty() => Ok(()),
         Some(model) if lora_resolution.model_names.iter().any(|name| name == model) => Ok(()),
         Some(model) => Err(ApiError::model_not_found(model.clone())),
     }
@@ -533,6 +535,15 @@ fn convert_input(
         }
     }
     assistant.flush(&mut messages);
+    if messages.is_empty() {
+        bail_invalid_request!(param = "input", "input must contain at least one message");
+    }
+    if continue_final && !matches!(messages.last(), Some(ChatMessage::Assistant { .. })) {
+        bail_invalid_request!(
+            param = "input",
+            "continuing a final assistant item requires non-empty assistant content"
+        );
+    }
 
     Ok((messages, continue_final))
 }
@@ -813,23 +824,13 @@ pub(crate) fn build_output_items(
             AssistantContentBlock::Text { .. } => None,
             AssistantContentBlock::ToolCall(call) => Some(ResponseOutputItem::FunctionCall {
                 id: format!("fc_{}", Uuid::new_v4().simple()),
-                call_id: tool_call_id(call),
+                call_id: call.id.clone(),
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
                 status: Some(ResponseItemStatus::Completed),
             }),
         })
         .collect()
-}
-
-/// Pick the wire `call_id` for one parsed tool call, generating one when the
-/// parser did not assign an ID (Python generates `make_tool_call_id`).
-fn tool_call_id(call: &AssistantToolCall) -> String {
-    if call.id.is_empty() {
-        format!("call_{}", Uuid::new_v4().simple())
-    } else {
-        call.id.clone()
-    }
 }
 
 /// Build the `usage` block of a completed response.

@@ -43,15 +43,13 @@ impl ResponseStreamEvent {
 
     /// Serialize the full wire payload including `type` and the assigned
     /// sequence number.
-    pub(crate) fn to_json(&self, sequence_number: u64) -> String {
-        let mut flattened = Map::with_capacity(self.payload.len() + 2);
-        flattened.insert(
+    pub(crate) fn into_json(mut self, sequence_number: u64) -> String {
+        self.payload.insert(
             "type".to_string(),
             Value::String(self.event_type.to_string()),
         );
-        flattened.insert("sequence_number".to_string(), Value::from(sequence_number));
-        flattened.extend(self.payload.clone());
-        serde_json::to_string(&Value::Object(flattened))
+        self.payload.insert("sequence_number".to_string(), Value::from(sequence_number));
+        serde_json::to_string(&Value::Object(self.payload))
             .expect("stream event payload must serialize to JSON")
     }
 }
@@ -238,7 +236,7 @@ impl OutputItemStreamer {
         vec![
             output_item_event("response.output_item.added", output_index, item),
             part_event(
-                "response.reasoning_part.added",
+                "response.content_part.added",
                 output_index,
                 &item_id,
                 [(
@@ -274,11 +272,7 @@ impl OutputItemStreamer {
 
     fn open_function_call(&mut self, id: &str, name: &str) -> ResponseStreamEvent {
         let item_id = format!("fc_{}", Uuid::new_v4().simple());
-        let call_id = if id.is_empty() {
-            format!("call_{}", Uuid::new_v4().simple())
-        } else {
-            id.to_string()
-        };
+        let call_id = id.to_string();
         self.streamed_ids.push((AssistantBlockKind::ToolCall, item_id.clone()));
         let output_index = self.output_index;
         self.current = Some(OpenItem::FunctionCall {
@@ -377,7 +371,7 @@ impl OutputItemStreamer {
                             [("text", Value::String(text))],
                         ),
                         part_event(
-                            "response.reasoning_part.done",
+                            "response.content_part.done",
                             output_index,
                             &item_id,
                             [(
@@ -435,15 +429,7 @@ impl OutputItemStreamer {
                 saw_delta: _,
             } => {
                 let (call_id, name, arguments) = match final_call {
-                    Some(call) => (
-                        if call.id.is_empty() {
-                            call_id
-                        } else {
-                            call.id.clone()
-                        },
-                        call.name.clone(),
-                        call.arguments.clone(),
-                    ),
+                    Some(call) => (call.id.clone(), call.name.clone(), call.arguments.clone()),
                     None => (call_id, name, arguments),
                 };
                 let mut events = vec![part_event(
@@ -595,8 +581,8 @@ mod tests {
             },
         });
         let payloads: Vec<Value> = events
-            .iter()
-            .map(|event| serde_json::from_str(&event.to_json(0)).unwrap())
+            .into_iter()
+            .map(|event| serde_json::from_str(&event.into_json(0)).unwrap())
             .collect();
 
         assert_eq!(payloads[0]["type"], "response.function_call_arguments.done");

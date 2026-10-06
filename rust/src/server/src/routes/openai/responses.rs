@@ -49,7 +49,9 @@ pub async fn create_responses(
 ) -> Response {
     let stream_requested = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
+    let lora_resolution = state
+        .resolve_model_with_loras(body.model.as_deref().filter(|model| !model.is_empty()))
+        .await;
 
     let prepared = match prepare_responses_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
@@ -252,6 +254,7 @@ async fn responses_event_stream(
                     created_at,
                     items.completed_output_items(),
                     "The response stream failed before generation completed.",
+                    None,
                 )
                 .await;
                 return Ok(());
@@ -272,6 +275,7 @@ async fn responses_event_stream(
             created_at,
             items.completed_output_items(),
             "The response stream ended before generation completed.",
+            None,
         )
         .await;
         return Ok(());
@@ -292,6 +296,7 @@ async fn responses_event_stream(
             created_at,
             items.final_output_items(&message),
             "The model failed to generate a response.",
+            Some(&usage),
         )
         .await;
         return Ok(());
@@ -337,6 +342,7 @@ async fn emit_failed(
     created_at: u64,
     output: Vec<self::types::ResponseOutputItem>,
     message: &str,
+    usage: Option<&ChatTokenUsage>,
 ) {
     let mut failed = build_response(
         meta,
@@ -344,7 +350,7 @@ async fn emit_failed(
         created_at,
         output,
         ResponseItemStatus::Failed,
-        None,
+        usage.map(build_usage),
         None,
         None,
     );
@@ -370,9 +376,10 @@ async fn responses_sse_stream(
             Ok(event) => event,
             Err(error) => match error {},
         };
-        let data = event.to_json(sequence);
+        let event_type = event.event_type();
+        let data = event.into_json(sequence);
         trace!(payload = %data, "responses emitting event");
-        y.yield_ok(Event::default().event(event.event_type()).data(data)).await;
+        y.yield_ok(Event::default().event(event_type).data(data)).await;
         sequence += 1;
     }
     Ok(())
