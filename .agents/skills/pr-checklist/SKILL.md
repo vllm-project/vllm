@@ -1,6 +1,6 @@
 ---
 name: pr-checklist
-description: Prepare a vLLM change for human PR review or re-review, or analyze an open pull request. Use to check design fit, behavioral coverage, performance evidence, diff quality, and closure of previous feedback before requesting maintainer attention.
+description: Prepare a vLLM change for human PR review or re-review, or analyze an open pull request. Use before opening a PR, drafts included (e.g. `gh pr create`), or pushing review fixes, to check design fit, behavioral coverage, performance evidence, diff quality, and closure of previous feedback.
 ---
 
 # PR Checklist
