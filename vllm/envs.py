@@ -214,6 +214,8 @@ if TYPE_CHECKING:
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
+    VLLM_KIMI_K3_AMD_MOE_ROUTER_DOWN_PROJ_STREAM: bool = False
+    VLLM_KIMI_K3_AMD_MLA_GATE_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
@@ -1659,6 +1661,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # speculator sees, so it is off by default while the effect is measured.
     "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", "0"))
+    ),
+    # AMD Kimi-K3 only. Overlap the latent-MoE router gate with the routed
+    # down-projection on a dedicated HIP stream for decode-sized batches.
+    # Off by default while output parity, graph capture and MI355X latency are
+    # validated.
+    "VLLM_KIMI_K3_AMD_MOE_ROUTER_DOWN_PROJ_STREAM": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_AMD_MOE_ROUTER_DOWN_PROJ_STREAM", "0"))
+    ),
+    # AMD Kimi-K3 only. Overlap MLA's output-gate projection with the attention
+    # front-end on a second, dedicated HIP stream. This stream is deliberately
+    # distinct from the latent-MoE router/down-projection stream.
+    "VLLM_KIMI_K3_AMD_MLA_GATE_STREAM": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_AMD_MLA_GATE_STREAM", "0"))
     ),
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.

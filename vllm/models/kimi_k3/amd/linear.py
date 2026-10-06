@@ -2,16 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
 
+import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
@@ -19,6 +22,9 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    GroupedTopKRouter,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -68,8 +74,15 @@ from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 
 logger = init_logger(__name__)
+
+# Largest batch (in tokens) that takes the stream paths. On MI355X both overlaps
+# gain up to 128 tokens; at 256 the GEMMs fill the GPU and the router overlap
+# turns into a loss.
+_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 128
+_MLA_GATE_STREAM_TOKEN_THRESHOLD = 128
 
 
 class KimiMLP(nn.Module):
@@ -163,6 +176,102 @@ def _apply_attn_res(
     )
 
 
+class _PackedRoutingRouter:
+    """Router wrapper that accepts an expert selection computed ahead of time.
+
+    The MoE runner's custom op only carries tensors, so a selection made on a
+    side stream travels in the ``router_logits`` slot as a ``[2, T, top_k]``
+    fp32 tensor (weights, then int32 ids bit-cast to fp32). Raw ``[T, E]``
+    logits are passed through to the wrapped router unchanged.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    @staticmethod
+    def pack(topk_weights: torch.Tensor, topk_ids: torch.Tensor) -> torch.Tensor:
+        return torch.stack(
+            (topk_weights.float(), topk_ids.to(torch.int32).view(torch.float32))
+        )
+
+    def select_experts(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if router_logits.dim() != 3:
+            return self.inner.select_experts(
+                hidden_states,
+                router_logits,
+                topk_indices_dtype,
+                input_ids=input_ids,
+            )
+        topk_ids = router_logits[1].view(torch.int32)
+        if topk_indices_dtype is not None and topk_indices_dtype != torch.int32:
+            topk_ids = topk_ids.to(topk_indices_dtype)
+        return router_logits[0], topk_ids
+
+
+def _supports_aiter_grouped_topk_packed(router) -> bool:
+    """Whether _aiter_grouped_topk_packed matches router.select_experts exactly."""
+    if not (
+        isinstance(router, GroupedTopKRouter)
+        and rocm_aiter_ops.is_fused_moe_enabled()
+        and router.e_score_correction_bias is not None
+        and router.eplb_state is None
+        and router.num_fused_shared_experts == 0
+    ):
+        return False
+    num_experts = router.global_num_experts
+    return (
+        num_experts > router.num_expert_group
+        and num_experts % router.num_expert_group == 0
+    )
+
+
+def _aiter_grouped_topk_packed(router, router_logits: torch.Tensor) -> torch.Tensor:
+    """Biased grouped top-k written straight into the packed routing tensor.
+
+    Same selection as GroupedTopKRouter.select_experts on the AITER path, but
+    the kernel writes into the two halves of the ``[2, T, top_k]`` buffer, so
+    no copy is needed to pack them.
+    """
+    num_tokens = router_logits.shape[0]
+    packed = torch.empty(
+        (2, num_tokens, router.top_k),
+        dtype=torch.float32,
+        device=router_logits.device,
+    )
+    topk_weights, topk_ids = packed[0], packed[1].view(torch.int32)
+    rocm_aiter_ops.biased_grouped_topk(
+        router_logits,
+        router.e_score_correction_bias,
+        topk_weights,
+        topk_ids,
+        router.num_expert_group,
+        router.topk_group,
+        router.renormalize,
+        routed_scaling_factor=router.routed_scaling_factor,
+    )
+    if (
+        router.skip_padding
+        and envs.VLLM_MOE_SKIP_PADDING
+        and is_forward_context_available()
+    ):
+        is_padding = get_forward_context().is_padding
+        if is_padding is not None:
+            is_padding = is_padding[:num_tokens].unsqueeze(1)
+            topk_weights.masked_fill_(is_padding, 0)
+            topk_ids.masked_fill_(is_padding, -1)
+    return packed
+
+
 class KimiMoE(nn.Module):
     def __init__(
         self,
@@ -170,6 +279,7 @@ class KimiMoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         layer_idx: int = 0,
+        router_down_proj_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -270,6 +380,16 @@ class KimiMoE(nn.Module):
             self.routed_expert_norm = None
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
+        self._router_down_proj_stream = (
+            router_down_proj_stream
+            if self.routed_expert_down_proj is not None
+            else None
+        )
+        self._router_down_proj_events = (
+            (torch.cuda.Event(), torch.cuda.Event())
+            if self._router_down_proj_stream is not None
+            else None
+        )
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
@@ -293,6 +413,21 @@ class KimiMoE(nn.Module):
             routed_output_transform=self.routed_output_transform,
             runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
         )
+        # The packed selection rides in the router_logits slot, so any runner
+        # path that dispatches or gathers router_logits by token rules it out.
+        if self._router_down_proj_stream is not None and (
+            self.experts.do_naive_dispatch_combine
+            or self.experts.moe_config.pcp_size > 1
+            or self.experts.routed_experts.quant_method.is_monolithic
+        ):
+            self._router_down_proj_stream = None
+            self._router_down_proj_events = None
+        self._direct_grouped_topk = False
+        if self._router_down_proj_stream is not None:
+            self._direct_grouped_topk = _supports_aiter_grouped_topk_packed(
+                self.experts.router
+            )
+            self.experts.router = cast(Any, _PackedRoutingRouter(self.experts.router))
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
             if w13_weight is None:
@@ -306,12 +441,74 @@ class KimiMoE(nn.Module):
                 moe_intermediate_size // self.tp_size
             )
 
+    def _route_packed(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Router GEMM plus expert selection, packed for _PackedRoutingRouter."""
+        router = self.experts.router
+        assert isinstance(router, _PackedRoutingRouter)
+        router_logits, _ = self.gate(hidden_states)
+        inner = router.inner
+        if (
+            self._direct_grouped_topk
+            and inner.capture_fn is None
+            and inner._routing_replay_out is None
+        ):
+            return _aiter_grouped_topk_packed(inner, router_logits)
+        topk_weights, topk_ids = inner.select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            topk_indices_dtype=self.experts._quant_method.topk_indices_dtype,
+        )
+        return _PackedRoutingRouter.pack(topk_weights, topk_ids)
+
+    def _maybe_overlap_router_and_down_proj(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run routing and the latent down-projection concurrently at decode.
+
+        On the stream path the side stream runs the router GEMM and the
+        latency-bound expert selection (grouped top-k), so the selection hides
+        behind the bandwidth-bound down-projection instead of sitting on the
+        critical path inside the MoE runner. The runner receives the selection
+        packed in ``router_logits`` and does not recompute it.
+        """
+        down_proj = self.routed_expert_down_proj
+        events = self._router_down_proj_events
+        stream = self._router_down_proj_stream
+        if down_proj is None:
+            router_logits, _ = self.gate(hidden_states)
+            return hidden_states, router_logits
+
+        use_stream = (
+            stream is not None
+            and events is not None
+            and hidden_states.shape[0] <= _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD
+        )
+        if not use_stream:
+            router_logits, _ = self.gate(hidden_states)
+            routed_hidden_states, _ = down_proj(hidden_states)
+            return routed_hidden_states, router_logits
+
+        assert stream is not None
+        assert events is not None
+        packed_routing, (routed_hidden_states, _) = maybe_execute_in_parallel(
+            lambda: self._route_packed(hidden_states),
+            lambda: down_proj(hidden_states),
+            events[0],
+            events[1],
+            stream,
+        )
+        return routed_hidden_states, packed_routing
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
+        routed_hidden_states, router_logits = self._maybe_overlap_router_and_down_proj(
+            hidden_states
+        )
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=routed_hidden_states,
+            router_logits=router_logits,
+            shared_experts_input=hidden_states if self.use_latent_moe else None,
         )
         return final_hidden_states.view(num_tokens, hidden_size)
 
@@ -333,6 +530,7 @@ class KimiMLAAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        mla_gate_stream: torch.cuda.Stream | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -450,6 +648,8 @@ class KimiMLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            gate_stream=mla_gate_stream,
+            gate_stream_token_threshold=_MLA_GATE_STREAM_TOKEN_THRESHOLD,
         )
 
     def forward(
@@ -466,6 +666,8 @@ class KimiDecoderLayer(nn.Module):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        router_down_proj_stream: torch.cuda.Stream | None = None,
+        mla_gate_stream: torch.cuda.Stream | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -520,6 +722,7 @@ class KimiDecoderLayer(nn.Module):
                 q_lora_rank=config.q_lora_rank,
                 kv_lora_rank=kv_lora_rank,
                 use_nope=mla_use_nope,
+                mla_gate_stream=mla_gate_stream,
             )
 
         if (
@@ -533,6 +736,7 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
                 layer_idx=layer_idx,
+                router_down_proj_stream=router_down_proj_stream,
             )
             self.mlp = self.block_sparse_moe
         else:
@@ -683,11 +887,29 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        # Keep the two K3-specific overlap paths on distinct model-level
+        # streams. Every layer owns its own event pair for graph capture.
+        self._router_down_proj_stream = (
+            torch.cuda.Stream()
+            if envs.VLLM_KIMI_K3_AMD_MOE_ROUTER_DOWN_PROJ_STREAM
+            else None
+        )
+        self._mla_gate_stream = (
+            torch.cuda.Stream() if envs.VLLM_KIMI_K3_AMD_MLA_GATE_STREAM else None
+        )
+        if (
+            self._router_down_proj_stream is not None
+            and self._mla_gate_stream is not None
+        ):
+            assert self._router_down_proj_stream is not self._mla_gate_stream
+
         def get_layer(prefix: str):
             return KimiDecoderLayer(
                 config,
                 vllm_config,
                 prefix,
+                router_down_proj_stream=self._router_down_proj_stream,
+                mla_gate_stream=self._mla_gate_stream,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
