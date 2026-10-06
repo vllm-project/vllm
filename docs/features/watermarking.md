@@ -48,8 +48,7 @@ callers, or strip and validate the field at the ingress boundary.
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
-contexts for all algorithms. Values above 16 are allowed and trigger a warning
-when using `gumbel` or `dual_key_gumbel`.
+contexts for all algorithms. Values above 16 are allowed and trigger a warning.
 
 `allow_target_only_watermarking` defaults to false and only has an effect when
 speculative decoding is enabled. It permits target-only watermarking for
