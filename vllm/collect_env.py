@@ -661,13 +661,17 @@ def get_pip_packages(run_lambda, patterns=None):
             cmd = [sys.executable, "-mpip", "list", "--format=freeze"]
         elif is_uv_venv():
             print("uv is set")
-            cmd = ["uv", "pip", "list", "--format=freeze"]
+            # Without --python, uv lists whichever environment it discovers from
+            # the working directory, not necessarily the one running this script.
+            cmd = ["uv", "pip", "list", "--format=freeze", "--python", sys.executable]
         else:
             raise RuntimeError(
                 "Could not collect pip list output (pip or uv module not available)"
             )
 
         out = run_and_read_all(run_lambda, cmd)
+        if out is None:
+            return None
         return "\n".join(
             line for line in out.splitlines() if any(name in line for name in patterns)
         )
