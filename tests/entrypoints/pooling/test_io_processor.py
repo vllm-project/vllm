@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
 from vllm import PoolingParams
+from vllm.config import PoolerConfig
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.late_chunking import build_late_chunking_metadata
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcessor
 from vllm.entrypoints.pooling.typing import OfflineEncodeInputsContext
@@ -79,10 +82,6 @@ def test_rejects_conflicting_pooling_task(processor: PoolingIOProcessor):
 
 
 def test_qwen3_reranker_warns_without_chat_template(monkeypatch):
-    from unittest.mock import MagicMock
-
-    from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcessor
-
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.get_model_cls", lambda *_: MagicMock()
     )
@@ -129,10 +128,6 @@ def test_qwen3_reranker_warns_without_chat_template(monkeypatch):
 
 
 def test_qwen3_vl_reranker_warns_with_vl_template(monkeypatch):
-    from unittest.mock import MagicMock
-
-    from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcessor
-
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.get_model_cls", lambda *_: MagicMock()
     )
@@ -179,10 +174,6 @@ def test_qwen3_vl_reranker_warns_with_vl_template(monkeypatch):
 
 
 def test_qwen3_reranker_no_warning_when_template_provided(monkeypatch):
-    from unittest.mock import MagicMock
-
-    from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcessor
-
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.get_model_cls", lambda *_: MagicMock()
     )
@@ -262,10 +253,6 @@ def test_score_leaves_caller_pooling_params_untouched(monkeypatch):
 
 @pytest.fixture
 def late_chunk_processor(processor):
-    from unittest.mock import Mock
-
-    from vllm.config import PoolerConfig
-
     processor.model_config = SimpleNamespace(
         is_encoder_decoder=False,
         architecture="NomicBertModel",
@@ -374,8 +361,6 @@ def test_late_chunking_rejects_unsupported_execution_before_render(
 
 
 def test_late_chunk_ranges_keep_unicode_overlaps_and_special_only_chunks():
-    from vllm.entrypoints.pooling.late_chunking import build_late_chunking_metadata
-
     text = "中 😀 e\u0301"
     offsets = [(0, 0), (0, 1), (2, 3), (2, 3), (4, 6), (0, 0)]
     metadata = build_late_chunking_metadata(text, len(offsets), offsets, 1)
@@ -401,7 +386,5 @@ def test_late_chunk_ranges_keep_unicode_overlaps_and_special_only_chunks():
     "offsets", [None, [(0, 1)], [(-1, 1), (0, 0)], [(0, 4), (0, 0)], [(2, 3), (0, 1)]]
 )
 def test_late_chunk_ranges_reject_missing_or_invalid_offsets(offsets):
-    from vllm.entrypoints.pooling.late_chunking import build_late_chunking_metadata
-
     with pytest.raises(VLLMValidationError, match="offsets"):
         build_late_chunking_metadata("abc", 2, offsets, 2)

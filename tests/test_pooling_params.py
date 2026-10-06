@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
+import msgspec
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -220,8 +222,6 @@ def test_late_chunk_size_rejects_non_positive_integers(value):
 
 
 def _late_chunking_model_config():
-    from types import SimpleNamespace
-
     return SimpleNamespace(
         architecture="NomicBertModel",
         model_impl="auto",
@@ -232,8 +232,6 @@ def _late_chunking_model_config():
 
 
 def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
-    import msgspec
-
     model_config = _late_chunking_model_config()
     params = PoolingParams(task="token_embed", late_chunk_size=3)
     params.verify(model_config)

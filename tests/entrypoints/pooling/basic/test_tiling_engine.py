@@ -2,11 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import torch
 
 from vllm import PoolingParams
+from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
+from vllm.outputs import (
+    LateChunk,
+    LateChunkingMetadata,
+    PoolingOutput,
+    PoolingRequestOutput,
+    RequestError,
+)
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
@@ -103,11 +113,6 @@ def test_tiling_engine_abort_on_exception(llm):
 
 
 def _mock_chunk_tiling_engine(outputs):
-    from types import SimpleNamespace
-
-    from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
-    from vllm.outputs import LateChunk, LateChunkingMetadata
-
     llm = mock.Mock(spec=PoolingOfflineMixin)
     llm._run_tiling_engine = PoolingOfflineMixin._run_tiling_engine.__get__(llm)
     llm._executor = SimpleNamespace(map=map)
@@ -134,20 +139,12 @@ def _mock_chunk_tiling_engine(outputs):
 
 
 def _chunk_output(request_id, **kwargs):
-    import torch
-
-    from vllm.outputs import PoolingOutput, PoolingRequestOutput
-
     return PoolingRequestOutput(
         str(request_id), PoolingOutput(torch.ones(1, 4)), [1, 2], 0, True, **kwargs
     )
 
 
 def test_late_chunk_mapping_follows_request_ids_and_preserves_request_errors():
-    from types import SimpleNamespace
-
-    from vllm.outputs import RequestError
-
     error = RequestError("test_error", "original error")
     failed = _chunk_output(1, error=error)
     # A failed request need not have a valid chunk tensor.
@@ -164,8 +161,6 @@ def test_late_chunk_mapping_follows_request_ids_and_preserves_request_errors():
 
 @pytest.mark.parametrize("error", [RuntimeError("step failed"), KeyboardInterrupt()])
 def test_late_chunk_mapping_aborts_on_failure_or_cancellation_and_is_not_reused(error):
-    from types import SimpleNamespace
-
     llm, requests = _mock_chunk_tiling_engine(error)
     processor = SimpleNamespace(render=lambda x: x)
     with pytest.raises(type(error)):
@@ -182,8 +177,6 @@ def test_late_chunk_mapping_aborts_on_failure_or_cancellation_and_is_not_reused(
 
 
 def test_late_chunk_mapping_rejects_successful_output_with_wrong_row_count():
-    from types import SimpleNamespace
-
     first = _chunk_output(0)
     first.outputs.data = first.outputs.data[:0]
     llm, requests = _mock_chunk_tiling_engine([[first, _chunk_output(1)]])

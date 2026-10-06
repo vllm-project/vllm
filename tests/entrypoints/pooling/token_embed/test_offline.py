@@ -3,9 +3,12 @@
 import weakref
 
 import pytest
+import torch
 
-from vllm import LLM, PoolingRequestOutput
+from tests.models.utils import check_embeddings_close
+from vllm import LLM, PoolingParams, PoolingRequestOutput
 from vllm.config import PoolerConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.tasks import PoolingTask
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -66,12 +69,6 @@ def test_unsupported_tasks(llm: LLM, task: PoolingTask, caplog_vllm):
 @pytest.mark.parametrize("use_v2_runner", [False, True])
 def test_nomic_late_chunking_offline(vllm_runner, monkeypatch, use_v2_runner):
     """Compare worker chunking with unnormalized states using both GPU runners."""
-    import torch
-
-    from tests.models.utils import check_embeddings_close
-    from vllm import PoolingParams
-    from vllm.exceptions import VLLMValidationError
-
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_runner else "0")
     prompts = [
         "search_document: Berlin is a city. It is in Germany.",
