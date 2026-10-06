@@ -70,7 +70,7 @@ def _top_k_per_row_prefill(
         )
 
         require_batch_invariant_quant_kernel()
-        torch.ops.vllm_batch_invariant.top_k_per_row_prefill(
+        torch.ops._C.deterministic_top_k_per_row_prefill(
             logits,
             row_starts,
             row_ends,

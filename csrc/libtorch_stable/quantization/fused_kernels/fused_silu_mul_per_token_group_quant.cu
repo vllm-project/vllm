@@ -21,14 +21,14 @@ limitations under the License.
 //   docker/patch/latest/sglang-deterministic.patch, for the source above.
 // - Local semantics: rounded and unrounded scale paths, packed UE8M0
 //   validation, 64-bit large-shape offsets, masked and contiguous layouts,
-//   and a standalone vLLM Torch operator binding.
+//   and vLLM's stable Torch operator binding.
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/util/Float8_e4m3fn.h>
+#include "../../torch_utils.h"
+
+#include <torch/headeronly/util/Float8_e4m3fn.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
-#include <torch/types.h>
 
 #include <algorithm>
 #include <cmath>
@@ -37,30 +37,31 @@ limitations under the License.
 #include <optional>
 #include <sstream>
 
-#define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CUDA(x) \
+  STD_TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) \
-  TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+  STD_TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) \
   CHECK_CUDA(x);       \
   CHECK_CONTIGUOUS(x)
 #define CHECK_EQ(a, b) \
-  TORCH_CHECK((a) == (b), "CHECK_EQ(" #a ", " #b ") failed. ", a, " vs ", b)
+  STD_TORCH_CHECK((a) == (b), "CHECK_EQ(" #a ", " #b ") failed. ", a, " vs ", b)
 
-#define DISPATCH_INPUT_DTYPE(pytorch_dtype, c_type, ...)                \
-  [&]() -> bool {                                                       \
-    switch (pytorch_dtype) {                                            \
-      case at::ScalarType::Half: {                                      \
-        using c_type = __half;                                          \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      case at::ScalarType::BFloat16: {                                  \
-        using c_type = __nv_bfloat16;                                   \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      default:                                                          \
-        TORCH_CHECK(false, "unsupported input dtype: ", pytorch_dtype); \
-        return false;                                                   \
-    }                                                                   \
+#define DISPATCH_INPUT_DTYPE(pytorch_dtype, c_type, ...)   \
+  [&]() -> bool {                                          \
+    switch (pytorch_dtype) {                               \
+      case torch::headeronly::ScalarType::Half: {          \
+        using c_type = __half;                             \
+        return __VA_ARGS__();                              \
+      }                                                    \
+      case torch::headeronly::ScalarType::BFloat16: {      \
+        using c_type = __nv_bfloat16;                      \
+        return __VA_ARGS__();                              \
+      }                                                    \
+      default:                                             \
+        STD_TORCH_CHECK(false, "unsupported input dtype"); \
+        return false;                                      \
+    }                                                      \
   }()
 
 namespace vllm::batch_invariant {
@@ -74,14 +75,16 @@ inline int get_sm_version() {
   int device = -1;
   int major = 0;
   int minor = 0;
-  TORCH_CHECK(cudaGetDevice(&device) == cudaSuccess,
-              "failed to get CUDA device");
-  TORCH_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
-                                     device) == cudaSuccess,
-              "failed to get CUDA compute capability major");
-  TORCH_CHECK(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor,
-                                     device) == cudaSuccess,
-              "failed to get CUDA compute capability minor");
+  STD_TORCH_CHECK(cudaGetDevice(&device) == cudaSuccess,
+                  "failed to get CUDA device");
+  STD_TORCH_CHECK(
+      cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
+                             device) == cudaSuccess,
+      "failed to get CUDA compute capability major");
+  STD_TORCH_CHECK(
+      cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor,
+                             device) == cudaSuccess,
+      "failed to get CUDA compute capability minor");
   return major * 10 + minor;
 }
 
@@ -304,7 +307,7 @@ struct MaskedLayoutScheduler {
                                   int& subwarps_per_block, dim3& grid,
                                   dim3& block) {
     subwarps_per_block = SUBWARPS_PER_BLOCK;
-    TORCH_CHECK(hidden_dim_num_groups % subwarps_per_block == 0);
+    STD_TORCH_CHECK(hidden_dim_num_groups % subwarps_per_block == 0);
     const int token_dim_blocks =
         std::min(DEFAULT_TOKEN_DIM_BLOCKS, num_tokens_per_expert);
     grid = dim3(hidden_dim_num_groups / subwarps_per_block, token_dim_blocks,
@@ -556,34 +559,35 @@ void fused_silu_mul_per_token_group_quant(
     // fuse_silu_and_mul: (num_tokens, hidden_size * 2)
     // fuse_silu_and_mul + masked_layout: (num_experts, num_tokens-with-padding,
     // hidden_size * 2)
-    torch::Tensor input, torch::Tensor output_q, torch::Tensor output_s,
-    int64_t group_size, double eps, double min_8bit, double max_8bit,
-    double clamp_limit, bool round_scale, bool scale_ue8m0,
-    bool fuse_silu_and_mul, const std::optional<torch::Tensor>& masked_m) {
+    const torch::stable::Tensor& input, torch::stable::Tensor& output_q,
+    torch::stable::Tensor& output_s, int64_t group_size, double eps,
+    double min_8bit, double max_8bit, double clamp_limit, bool round_scale,
+    bool scale_ue8m0, bool fuse_silu_and_mul,
+    const std::optional<torch::stable::Tensor>& masked_m) {
   CHECK_INPUT(input);
   CHECK_INPUT(output_q);
-  TORCH_CHECK(input.numel() > 0);
+  STD_TORCH_CHECK(input.numel() > 0);
 
-  TORCH_CHECK(std::abs(LOCAL_ABSMAX_ABS - eps) < 1e-13);
+  STD_TORCH_CHECK(std::abs(LOCAL_ABSMAX_ABS - eps) < 1e-13);
 
   CHECK_EQ(input.numel() % group_size, 0);
   const int64_t num_groups =
       input.numel() / group_size / (fuse_silu_and_mul ? 2 : 1);
 
   const bool masked_layout = masked_m.has_value();
-  TORCH_CHECK(output_s.dim() == (masked_layout ? 3 : 2));
+  STD_TORCH_CHECK(output_s.dim() == (masked_layout ? 3 : 2));
 
   const int num_local_experts = masked_layout ? input.size(0) : 1;
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  cudaStream_t stream = get_current_cuda_stream();
 
   auto dst_type = output_q.scalar_type();
 
   const bool is_column_major = output_s.stride(-2) < output_s.stride(-1);
-  TORCH_CHECK(!scale_ue8m0 || round_scale,
-              "packed UE8M0 scales require rounding");
-  TORCH_CHECK(!round_scale || is_column_major,
-              "rounded FP32 scales require column-major output");
+  STD_TORCH_CHECK(!scale_ue8m0 || round_scale,
+                  "packed UE8M0 scales require rounding");
+  STD_TORCH_CHECK(!round_scale || is_column_major,
+                  "rounded FP32 scales require column-major output");
   const int hidden_dim_num_groups =
       static_cast<int>(output_q.size(-1)) / group_size;
   const int num_tokens_per_expert = static_cast<int>(output_q.size(-2));
@@ -616,11 +620,11 @@ void fused_silu_mul_per_token_group_quant(
         per_token_group_quant_8bit_kernel<SCHEDULER, GROUP_SIZE,             \
                                           THREADS_PER_SUBWARP, T, DST_DTYPE, \
                                           __VA_ARGS__>,                      \
-        static_cast<T*>(input.data_ptr()),                                   \
-        static_cast<DST_DTYPE*>(output_q.data_ptr()),                        \
-        static_cast<output_s_dtype*>(output_s.data_ptr()),                   \
-        static_cast<int32_t*>(masked_m.has_value() ? masked_m->data_ptr()    \
-                                                   : 0),                     \
+        static_cast<const T*>(input.const_data_ptr()),                       \
+        static_cast<DST_DTYPE*>(output_q.mutable_data_ptr()),                \
+        static_cast<output_s_dtype*>(output_s.mutable_data_ptr()),           \
+        static_cast<const int32_t*>(                                         \
+            masked_m.has_value() ? masked_m->const_data_ptr() : nullptr),    \
         subwarps_per_block, hidden_dim_num_groups, scale_expert_stride,      \
         scale_hidden_stride, num_tokens_per_expert,                          \
         static_cast<float>(max_8bit), static_cast<float>(clamp_limit));      \
@@ -629,8 +633,8 @@ void fused_silu_mul_per_token_group_quant(
 #define LAUNCH_KERNEL(GROUP_SIZE, T, DST_DTYPE)                                \
   do {                                                                         \
     constexpr int THREADS_PER_SUBWARP = GROUP_SIZE / 16;                       \
-    TORCH_CHECK(THREADS_PER_SUBWARP * INPUT_PRIMARY_VEC_NUM_BYTES ==           \
-                group_size * sizeof(T));                                       \
+    STD_TORCH_CHECK(THREADS_PER_SUBWARP * INPUT_PRIMARY_VEC_NUM_BYTES ==       \
+                    group_size * sizeof(T));                                   \
                                                                                \
     using dst_dtype_info = DtypeInfo<DST_DTYPE>;                               \
     CHECK_EQ(dst_dtype_info::MIN, min_8bit);                                   \
@@ -729,30 +733,30 @@ void fused_silu_mul_per_token_group_quant(
     }                                                                          \
   } while (0)
 
-#define LAUNCH_KERNEL_OUTER(...)                    \
-  switch (group_size) {                             \
-    case 16:                                        \
-      LAUNCH_KERNEL(16, __VA_ARGS__);               \
-      break;                                        \
-    case 32:                                        \
-      LAUNCH_KERNEL(32, __VA_ARGS__);               \
-      break;                                        \
-    case 64:                                        \
-      LAUNCH_KERNEL(64, __VA_ARGS__);               \
-      break;                                        \
-    case 128:                                       \
-      LAUNCH_KERNEL(128, __VA_ARGS__);              \
-      break;                                        \
-    default:                                        \
-      TORCH_CHECK(false, "Unsupported group_size"); \
-  }                                                 \
+#define LAUNCH_KERNEL_OUTER(...)                        \
+  switch (group_size) {                                 \
+    case 16:                                            \
+      LAUNCH_KERNEL(16, __VA_ARGS__);                   \
+      break;                                            \
+    case 32:                                            \
+      LAUNCH_KERNEL(32, __VA_ARGS__);                   \
+      break;                                            \
+    case 64:                                            \
+      LAUNCH_KERNEL(64, __VA_ARGS__);                   \
+      break;                                            \
+    case 128:                                           \
+      LAUNCH_KERNEL(128, __VA_ARGS__);                  \
+      break;                                            \
+    default:                                            \
+      STD_TORCH_CHECK(false, "Unsupported group_size"); \
+  }                                                     \
   while (0)
 
   DISPATCH_INPUT_DTYPE(input.scalar_type(), scalar_t, [&] {
-    if (dst_type == at::ScalarType::Char) {
+    if (dst_type == torch::headeronly::ScalarType::Char) {
       LAUNCH_KERNEL_OUTER(scalar_t, int8_t);
       return true;
-    } else if (dst_type == at::ScalarType::Float8_e4m3fn) {
+    } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
       LAUNCH_KERNEL_OUTER(scalar_t, c10::Float8_e4m3fn);
       return true;
     }

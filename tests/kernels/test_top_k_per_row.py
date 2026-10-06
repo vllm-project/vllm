@@ -2042,7 +2042,7 @@ def _run_topk(
     row_starts = torch.tensor([row_start], dtype=torch.int32, device="cuda")
     row_ends = row_starts + row_length
     indices = torch.empty((1, top_k), dtype=torch.int32, device="cuda")
-    torch.ops.vllm_batch_invariant.top_k_per_row_prefill(
+    torch.ops._C.deterministic_top_k_per_row_prefill(
         logits,
         row_starts,
         row_ends,
@@ -2107,7 +2107,7 @@ def test_batch_invariant_topk_matches_vllm_score_and_tie_order() -> None:
 
     for _ in range(3):
         indices = torch.empty((1, 4), dtype=torch.int32, device="cuda")
-        torch.ops.vllm_batch_invariant.top_k_per_row_prefill(
+        torch.ops._C.deterministic_top_k_per_row_prefill(
             logits,
             row_starts,
             row_ends,
@@ -2134,7 +2134,7 @@ def test_batch_invariant_topk_has_no_packed_width_limit(width: int) -> None:
     row_ends = torch.tensor([min(width, 529), width], dtype=torch.int32, device="cuda")
     indices = torch.empty((2, top_k), dtype=torch.int32, device="cuda")
 
-    torch.ops.vllm_batch_invariant.top_k_per_row_prefill(
+    torch.ops._C.deterministic_top_k_per_row_prefill(
         logits,
         row_starts,
         row_ends,

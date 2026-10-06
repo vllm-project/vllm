@@ -87,6 +87,8 @@ def get_missing_precompiled_rust_extension_modules() -> list[str]:
 
 
 def has_precompiled_rust_extensions() -> bool:
+    if not rust_build.rust_py_extension_module_names():
+        return False
     return not get_missing_precompiled_rust_extension_modules()
 
 
@@ -1025,7 +1027,6 @@ class precompiled_wheel_utils:
                             "vllm/_flashkda_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
                             "vllm/_deepselect_C.abi3.so",
-                            "vllm/_vllm_batch_invariant_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                             "vllm/cumem_allocator.abi3.so",
@@ -1340,10 +1341,10 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
-            if "flashinfer-cubin" in req:
-                # Not on PyPI since 0.6.14 (only https://flashinfer.ai/whl), so
-                # it cannot be a wheel dependency; flashinfer falls back to
-                # fetching cubins at runtime when the package is absent.
+            if "flashinfer-cubin" in req or "flashinfer-jit-cache" in req:
+                # Not on PyPI (only https://flashinfer.ai/whl), so they
+                # cannot be wheel dependencies; flashinfer handles the
+                # absence of pre-compiled cubins/jit-cache at runtime.
                 continue
             if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
                 # [cu13] extra is the default; strip it on CUDA 12 builds.
@@ -1381,7 +1382,6 @@ if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
 if _is_cuda():
-    ext_modules.append(CMakeExtension(name="vllm._vllm_batch_invariant_C"))
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if USE_PRECOMPILED_EXTENSIONS or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")

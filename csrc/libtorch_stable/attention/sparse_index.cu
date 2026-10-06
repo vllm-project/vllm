@@ -3,10 +3,9 @@
 
 #include <algorithm>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../torch_utils.h"
+
 #include <cub/block/block_radix_sort.cuh>
-#include <torch/library.h>
 
 namespace vllm::batch_invariant {
 
@@ -74,43 +73,49 @@ __launch_bounds__(Capacity ? 128 : 256) void combine_swa_decode_kernel(
 
 }  // namespace
 
-void combine_topk_swa_decode(at::Tensor& combined_indices,
-                             at::Tensor& combined_lens,
-                             const at::Tensor& topk_indices,
-                             const at::Tensor& seq_lens,
-                             const at::Tensor& is_valid, int64_t M, int64_t N,
-                             int64_t top_k, int64_t compress_ratio,
+void combine_topk_swa_decode(torch::stable::Tensor& combined_indices,
+                             torch::stable::Tensor& combined_lens,
+                             const torch::stable::Tensor& topk_indices,
+                             const torch::stable::Tensor& seq_lens,
+                             const torch::stable::Tensor& is_valid, int64_t M,
+                             int64_t N, int64_t top_k, int64_t compress_ratio,
                              int64_t window_size) {
-  TORCH_CHECK(combined_indices.is_cuda() && combined_lens.is_cuda() &&
-                  topk_indices.is_cuda() && seq_lens.is_cuda() &&
-                  is_valid.is_cuda(),
-              "decode tensors must be CUDA");
-  TORCH_CHECK(combined_indices.scalar_type() == at::kInt &&
-                  combined_lens.scalar_type() == at::kInt &&
-                  topk_indices.scalar_type() == at::kInt &&
-                  seq_lens.scalar_type() == at::kInt,
-              "decode index tensors must be int32");
-  TORCH_CHECK(is_valid.scalar_type() == at::kBool, "is_valid must be bool");
-  TORCH_CHECK(combined_indices.dim() == 2 && topk_indices.dim() == 2,
-              "index tensors must be rank 2");
+  STD_TORCH_CHECK(
+      combined_indices.device().is_cuda() && combined_lens.device().is_cuda() &&
+          topk_indices.device().is_cuda() && seq_lens.device().is_cuda() &&
+          is_valid.device().is_cuda(),
+      "decode tensors must be CUDA");
+  STD_TORCH_CHECK(
+      combined_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+          combined_lens.scalar_type() == torch::headeronly::ScalarType::Int &&
+          topk_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+          seq_lens.scalar_type() == torch::headeronly::ScalarType::Int,
+      "decode index tensors must be int32");
+  STD_TORCH_CHECK(is_valid.scalar_type() == torch::headeronly::ScalarType::Bool,
+                  "is_valid must be bool");
+  STD_TORCH_CHECK(combined_indices.dim() == 2 && topk_indices.dim() == 2,
+                  "index tensors must be rank 2");
   const int64_t num_rows = seq_lens.numel();
-  TORCH_CHECK(combined_indices.size(0) == num_rows &&
-                  combined_lens.numel() == num_rows &&
-                  topk_indices.size(0) == num_rows &&
-                  is_valid.numel() == num_rows,
-              "decode tensors must have the same row count");
-  TORCH_CHECK(combined_indices.stride(1) == 1 && topk_indices.stride(1) == 1,
-              "index rows must be contiguous");
-  TORCH_CHECK(top_k >= 0 && top_k <= topk_indices.size(1) && top_k <= 512,
-              "fused decode combine supports top_k <= 512");
-  TORCH_CHECK(compress_ratio > 0 && window_size >= 0 && N >= 0,
-              "invalid sparse attention dimensions");
+  STD_TORCH_CHECK(combined_indices.size(0) == num_rows &&
+                      combined_lens.numel() == num_rows &&
+                      topk_indices.size(0) == num_rows &&
+                      is_valid.numel() == num_rows,
+                  "decode tensors must have the same row count");
+  STD_TORCH_CHECK(
+      combined_indices.stride(1) == 1 && topk_indices.stride(1) == 1,
+      "index rows must be contiguous");
+  STD_TORCH_CHECK(top_k >= 0 && top_k <= topk_indices.size(1) && top_k <= 512,
+                  "fused decode combine supports top_k <= 512");
+  STD_TORCH_CHECK(compress_ratio > 0 && window_size >= 0 && N >= 0,
+                  "invalid sparse attention dimensions");
   if (num_rows == 0) {
     return;
   }
 
-  const c10::cuda::CUDAGuard device_guard(combined_indices.device());
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      combined_indices.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(combined_indices.get_device_index());
   const auto launch = [&]<int Capacity>() {
     combine_swa_decode_kernel<Capacity><<<num_rows, 128, 0, stream>>>(
         combined_indices.mutable_data_ptr<int>(),
@@ -130,36 +135,42 @@ void combine_topk_swa_decode(at::Tensor& combined_indices,
   }
 }
 
-void combine_c128_swa_decode(at::Tensor& combined_indices,
-                             at::Tensor& combined_lens,
-                             const at::Tensor& seq_lens,
-                             const at::Tensor& is_valid, int64_t M, int64_t N,
-                             int64_t top_k, int64_t compress_ratio,
+void combine_c128_swa_decode(torch::stable::Tensor& combined_indices,
+                             torch::stable::Tensor& combined_lens,
+                             const torch::stable::Tensor& seq_lens,
+                             const torch::stable::Tensor& is_valid, int64_t M,
+                             int64_t N, int64_t top_k, int64_t compress_ratio,
                              int64_t window_size) {
-  TORCH_CHECK(combined_indices.is_cuda() && combined_lens.is_cuda() &&
-                  seq_lens.is_cuda() && is_valid.is_cuda(),
-              "decode tensors must be CUDA");
-  TORCH_CHECK(combined_indices.scalar_type() == at::kInt &&
-                  combined_lens.scalar_type() == at::kInt &&
-                  seq_lens.scalar_type() == at::kInt,
-              "decode index tensors must be int32");
-  TORCH_CHECK(is_valid.scalar_type() == at::kBool, "is_valid must be bool");
+  STD_TORCH_CHECK(
+      combined_indices.device().is_cuda() && combined_lens.device().is_cuda() &&
+          seq_lens.device().is_cuda() && is_valid.device().is_cuda(),
+      "decode tensors must be CUDA");
+  STD_TORCH_CHECK(
+      combined_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+          combined_lens.scalar_type() == torch::headeronly::ScalarType::Int &&
+          seq_lens.scalar_type() == torch::headeronly::ScalarType::Int,
+      "decode index tensors must be int32");
+  STD_TORCH_CHECK(is_valid.scalar_type() == torch::headeronly::ScalarType::Bool,
+                  "is_valid must be bool");
   const int64_t num_rows = seq_lens.numel();
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       combined_indices.dim() == 2 && combined_indices.size(0) == num_rows &&
           combined_lens.numel() == num_rows && is_valid.numel() == num_rows,
       "decode tensors must have the same row count");
-  TORCH_CHECK(combined_indices.stride(1) == 1, "index rows must be contiguous");
-  TORCH_CHECK(top_k >= 0 && top_k <= combined_indices.size(1),
-              "top_k exceeds the output width");
-  TORCH_CHECK(compress_ratio > 0 && window_size >= 0,
-              "invalid sparse attention dimensions");
+  STD_TORCH_CHECK(combined_indices.stride(1) == 1,
+                  "index rows must be contiguous");
+  STD_TORCH_CHECK(top_k >= 0 && top_k <= combined_indices.size(1),
+                  "top_k exceeds the output width");
+  STD_TORCH_CHECK(compress_ratio > 0 && window_size >= 0,
+                  "invalid sparse attention dimensions");
   if (num_rows == 0) {
     return;
   }
 
-  const c10::cuda::CUDAGuard device_guard(combined_indices.device());
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      combined_indices.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(combined_indices.get_device_index());
   combine_swa_decode_kernel<0><<<num_rows, kCombineThreads, 0, stream>>>(
       combined_indices.mutable_data_ptr<int>(),
       combined_lens.mutable_data_ptr<int>(), nullptr,

@@ -456,7 +456,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             and not swa_only
             and self.compress_ratio == 128
             and hasattr(
-                torch.ops.vllm_batch_invariant,
+                torch.ops._C,
                 "combine_c128_swa_decode",
             )
         )
@@ -464,7 +464,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             envs.VLLM_BATCH_INVARIANT
             and top_k <= 512
             and hasattr(
-                torch.ops.vllm_batch_invariant,
+                torch.ops._C,
                 "combine_topk_swa_decode",
             )
         )
@@ -508,7 +508,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
 
         if use_fused_c128_decode:
-            torch.ops.vllm_batch_invariant.combine_c128_swa_decode(
+            torch.ops._C.combine_c128_swa_decode(
                 combined_indices_out,
                 combined_lens_out,
                 seq_lens,

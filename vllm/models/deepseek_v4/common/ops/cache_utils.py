@@ -808,12 +808,12 @@ def combine_topk_swa_indices(
         and decode_is_valid is not None
         and topk <= 512
         and hasattr(
-            torch.ops.vllm_batch_invariant,
+            torch.ops._C,
             "combine_topk_swa_decode",
         )
     )
     if use_fused_decode:
-        torch.ops.vllm_batch_invariant.combine_topk_swa_decode(
+        torch.ops._C.combine_topk_swa_decode(
             combined_indices,
             combined_lens,
             topk_indices,
