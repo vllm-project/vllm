@@ -273,10 +273,11 @@ record:
 
 Enable `--kv-cache-metrics` to sample GPU block lifetimes. Sampling
 (`--kv-cache-metrics-sample`) is per allocation. Observations are emitted when
-blocks are evicted or recycled; still-resident blocks do not contribute yet.
+blocks are evicted from the prefix cache; still-resident blocks do not
+contribute yet. Recycling never-cached working blocks emits no observation.
 These histograms count block lifetimes, not requests, tokens, or bytes.
 
-- `vllm:kv_block_lifetime_seconds`: allocation to eviction/recycling, including
+- `vllm:kv_block_lifetime_seconds`: allocation to prefix-cache eviction, including
   time held by requests or transfers.
 - `vllm:kv_block_idle_before_evict_seconds`: the final uninterrupted interval
   with zero references, when the block was eligible for reuse. Any new request
@@ -289,14 +290,18 @@ These histograms count block lifetimes, not requests, tokens, or bytes.
 All three histograms carry a `kv_cache_group_id` label. Nonnegative values
 identify prefix-cache groups in the resolved KV cache configuration, allowing
 full-attention and sliding-window groups to be examined separately. `-1` means
-there was no cached hash at eviction/recycling (or group metadata was absent
-from an older engine). Temporary, never-cached allocations can therefore be
-excluded from prefix-cache retention queries. CPU-offload residency is not
-included.
+group metadata was absent from an older engine. Current engines only emit
+events with an actual cache group; never-cached allocations are skipped at
+collection time. Short-lived sliding-window blocks that were prefix-cached
+still count as real evictions in their group. CPU-offload residency is not
+included. These metrics measure individual block evictions, not the survival
+of a complete reusable request prefix.
 
 **Label cardinality:** with `G` configured KV cache groups, this label has at
 most `G + 1` values per existing `(model_name, engine)` label set: the group
-IDs and `-1`. Groups are fixed by the resolved model/cache layout; their IDs
+IDs and the legacy `-1` value. The Python exporter initializes an empty `-1`
+series for each histogram; its count stays zero with current engines. Groups
+are fixed by the resolved model/cache layout; their IDs
 do not grow with requests, allocations, or DCP ranks. Other layouts can have
 more groups, so check the resolved `kv_cache_config.kv_cache_groups` rather
 than assuming a universal count or target/draft ordering.
@@ -314,7 +319,8 @@ uses `B + 3` series per label set (`B` finite buckets, `+Inf`, `_sum`, and
 engine for `G = 2`, or 270 with `_created`.
 
 For example, plot median idle time separately for each cached group, scoped to
-one model/deployment:
+one model/deployment. The `-1` filter excludes legacy events without group
+metadata; current engines already skip never-cached blocks:
 
 ```promql
 histogram_quantile(0.5,

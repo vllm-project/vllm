@@ -65,6 +65,10 @@ class KVCacheMetricsCollector:
     def on_block_allocated(self, block: "KVCacheBlock") -> None:
         if self.should_sample_block():
             self.block_metrics[block.block_id] = BlockMetricsState()
+        else:
+            # Uncached recycling emits no eviction event, so an unsampled
+            # allocation must discard any state from the previous lifetime.
+            self.block_metrics.pop(block.block_id, None)
 
     def on_block_accessed(
         self, block: "KVCacheBlock", *, record_access: bool = True

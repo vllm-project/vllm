@@ -290,11 +290,30 @@ def test_transfer_pins_do_not_count_as_prefix_reuses(cached_pool, evict_while_pi
     assert event.reuse_gaps_seconds == (4.0,)
 
 
-def test_uncached_recycling_has_no_cache_group():
+@pytest.mark.parametrize("eviction_path", ["reallocate", "connector"])
+def test_uncached_blocks_do_not_emit_eviction_samples(eviction_path):
     collector = KVCacheMetricsCollector(sample_rate=1.0)
     pool = BlockPool(2, True, 16, metrics_collector=collector)
     (block,) = pool.get_new_blocks(1)
-    pool.free_blocks([block])
-    pool.get_new_blocks(1)
-    (event,) = collector.drain_events()
-    assert event.kv_cache_group_id is None
+    if eviction_path == "reallocate":
+        pool.free_blocks([block])
+        pool.get_new_blocks(1)
+    else:
+        pool.evict_blocks({block.block_id})
+        # A no-op invalidation must preserve tracking if this allocation is
+        # subsequently published to the prefix cache.
+        assert block.block_id in collector.block_metrics
+    assert collector.drain_events() == []
+
+
+@pytest.mark.parametrize("enable_caching", [False, True])
+def test_unsampled_reallocation_discards_previous_lifetime(enable_caching):
+    collector = KVCacheMetricsCollector(sample_rate=1.0)
+    pool = BlockPool(2, enable_caching, 16, metrics_collector=collector)
+    with patch.object(collector, "should_sample_block", side_effect=[True, False]):
+        (block,) = pool.get_new_blocks(1)
+        pool.free_blocks([block])
+        (reused,) = pool.get_new_blocks(1)
+    assert reused is block
+    assert collector.block_metrics == {}
+    assert collector.drain_events() == []

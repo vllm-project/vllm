@@ -982,8 +982,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_kv_block_lifetime = self._histogram_cls(
                 name="vllm:kv_block_lifetime_seconds",
                 documentation=(
-                    "Histogram of KV block lifetime from allocation to eviction "
-                    "or recycling. "
+                    "Histogram of KV block lifetime from allocation to "
+                    "prefix-cache eviction. Never-cached blocks are excluded. "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,

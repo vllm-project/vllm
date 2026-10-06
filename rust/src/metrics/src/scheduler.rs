@@ -410,7 +410,7 @@ impl SchedulerMetrics {
             Family::new_with_constructor(kv_block_lifetime_histogram as fn() -> Histogram);
         registry.register(
             "vllm:kv_block_lifetime_seconds",
-            "Histogram of KV block lifetime from allocation to eviction or recycling. Sampled metrics (controlled by --kv-cache-metrics-sample).",
+            "Histogram of KV block lifetime from allocation to prefix-cache eviction. Never-cached blocks are excluded. Sampled metrics (controlled by --kv-cache-metrics-sample).",
             kv_block_lifetime_seconds.clone(),
         );
 

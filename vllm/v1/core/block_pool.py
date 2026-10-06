@@ -743,16 +743,14 @@ class BlockPool:
 
         """
         evicted_hashes = self._remove_cached_block_hashes(block)
-        # Drain every sampled lifetime, distinguishing uncached recycling.
-        if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(
-                block, get_group_id(evicted_hashes[0]) if evicted_hashes else None
-            )
-
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        if self.metrics_collector:
+            self.metrics_collector.on_block_evicted(
+                block, get_group_id(evicted_hashes[0])
+            )
         self._emit_block_removed_events(evicted_hashes)
         return True
 
