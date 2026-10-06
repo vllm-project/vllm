@@ -669,9 +669,12 @@ class EngineCore:
 
     def step_with_batch_queue(
         self,
+        *,
+        drain_only: bool = False,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
         """Schedule and execute batches with the batch queue.
         Note that if nothing to output in this step, None is returned.
+        drain_only processes a submitted batch without scheduling new work.
 
         The execution flow is as follows:
         1. Try to schedule a new batch if the batch queue is not full.
@@ -693,7 +696,7 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
-        if self.scheduler.has_requests():
+        if not drain_only and self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -781,6 +784,19 @@ class EngineCore:
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
         return engine_core_outputs, model_executed
+
+    def drain_stats(self) -> list[SchedulerStats]:
+        """Finish submitted batches without scheduling remote connector cleanup."""
+        stats = []
+        while self.batch_queue:
+            outputs, model_executed = self.step_with_batch_queue(drain_only=True)
+            self.post_step(model_executed)
+            for output in outputs.values() if outputs else ():
+                if output.scheduler_stats is not None:
+                    stats.append(output.scheduler_stats)
+        if not stats and (snapshot := self.scheduler.make_stats()) is not None:
+            stats.append(snapshot)
+        return stats
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
@@ -1559,6 +1575,10 @@ class EngineCoreProc(EngineCore):
         while self._idle_state_callbacks:
             callback = self._idle_state_callbacks.pop()
             callback(self)
+
+    def flush_stats(self) -> None:
+        for stats in self.drain_stats():
+            self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _handle_shutdown(self) -> bool:
         # Check if shutdown was requested and handle it
