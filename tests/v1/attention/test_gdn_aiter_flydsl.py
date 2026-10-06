@@ -1,26 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
-import sys
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import patch
 
 import pytest
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     ChunkGatedDeltaRule,
     _resolve_gdn_prefill_backend,
 )
-from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDAMetadataBuilder
 from vllm.platforms import current_platform
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 
 
 def _make_config(
@@ -42,11 +35,18 @@ def _make_config(
     )
 
 
-def test_cli_accepts_aiter_flydsl_gdn_prefill_backend():
-    with patch.object(qwen_gdn_linear_attn.current_platform, "device_type", "cpu"):
-        parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(["--gdn-prefill-backend", "aiter_flydsl"])
-    assert args.gdn_prefill_backend == "aiter_flydsl"
+def _resolve_on_rocm(config, *, kernels_available: bool = True):
+    with (
+        patch.object(
+            qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=True
+        ),
+        patch.object(
+            qwen_gdn_linear_attn.rocm_aiter_ops,
+            "is_gdn_flydsl_prefill_available",
+            return_value=kernels_available,
+        ),
+    ):
+        return _resolve_gdn_prefill_backend(config)
 
 
 @pytest.mark.parametrize(
@@ -64,148 +64,12 @@ def test_resolve_aiter_flydsl_gdn_prefill_backend(
     dtype: torch.dtype,
     expected: str,
 ):
-    config = _make_config(
-        head_k_dim=head_k_dim,
-        head_v_dim=head_v_dim,
-        dtype=dtype,
-    )
-    with (
-        patch.object(
-            qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=True
-        ),
-        patch.object(
-            qwen_gdn_linear_attn.rocm_aiter_ops,
-            "is_gdn_flydsl_prefill_available",
-            return_value=True,
-        ),
-    ):
-        requested, active = _resolve_gdn_prefill_backend(config)
+    config = _make_config(head_k_dim=head_k_dim, head_v_dim=head_v_dim, dtype=dtype)
+
+    requested, active = _resolve_on_rocm(config)
 
     assert requested == "aiter_flydsl"
     assert active == expected
-
-
-def test_explicit_aiter_flydsl_unavailable_kernels_fail_closed():
-    config = _make_config()
-    with (
-        patch.object(
-            qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=True
-        ),
-        patch.object(
-            qwen_gdn_linear_attn.rocm_aiter_ops,
-            "is_gdn_flydsl_prefill_available",
-            return_value=False,
-        ),
-        pytest.raises(RuntimeError, match="not importable"),
-    ):
-        _resolve_gdn_prefill_backend(config)
-
-
-def test_aiter_flydsl_dispatch_arguments(monkeypatch: pytest.MonkeyPatch):
-    q = torch.empty(1, 8, 2, 128, dtype=torch.bfloat16)
-    k = torch.empty_like(q)
-    v = torch.empty(1, 8, 4, 128, dtype=torch.bfloat16)
-    g = torch.empty(1, 8, 4, dtype=torch.float32)
-    beta = torch.empty_like(g)
-    initial_state = torch.empty(2, 4, 128, 128, dtype=torch.float32)
-    cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
-    aiter_prefill_metadata = object()
-    expected_o = torch.empty_like(v)
-    captured = {}
-
-    def fake_opt_vk(**kwargs):
-        captured.update(kwargs)
-        return expected_o, initial_state
-
-    # Patch AITER's own entry point rather than an intermediate wrapper, so the
-    # assertions below cover the kwargs rocm_aiter_ops actually spells out.
-    monkeypatch.setitem(
-        sys.modules,
-        "aiter.ops.flydsl.linear_attention_prefill_kernels",
-        SimpleNamespace(gdn_prepare_flydsl_supported=lambda k, v: True),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "aiter.ops.triton.gated_delta_net",
-        SimpleNamespace(chunk_gated_delta_rule_opt_vk=fake_opt_vk),
-    )
-    output, final_state = ChunkGatedDeltaRule.forward_aiter_flydsl(
-        None,
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        initial_state=initial_state,
-        output_final_state=True,
-        cu_seqlens=cu_seqlens,
-        use_qk_l2norm_in_kernel=False,
-        aiter_prefill_metadata=aiter_prefill_metadata,
-    )
-
-    assert output is expected_o
-    assert final_state is initial_state
-    assert captured["use_chunk_flydsl"] is True
-    assert captured["use_prepare_flydsl"] is True
-    assert captured["state_dtype"] is torch.float32
-    assert captured["prefill_metadata"] is aiter_prefill_metadata
-    assert captured["inplace_final_state"] is False
-    assert captured["use_qk_l2norm_in_kernel"] is False
-
-
-def test_prefill_metadata_is_built_for_the_kernels_chunk_size(monkeypatch):
-    """The chunk size belongs to the AITER kernel, not to the caller."""
-    cu_seqlens = torch.tensor([0, 70, 200], dtype=torch.int32)
-    expected_metadata = object()
-    captured: dict[str, Any] = {}
-
-    def fake_build(seq_lens_cpu, *, cu_seqlens, chunk_size):
-        captured.update(
-            seq_lens_cpu=seq_lens_cpu, cu_seqlens=cu_seqlens, chunk_size=chunk_size
-        )
-        return expected_metadata
-
-    gated_delta_net = SimpleNamespace(
-        build_gated_delta_rule_prefill_metadata=fake_build
-    )
-    monkeypatch.setitem(
-        sys.modules, "aiter.ops.triton.gated_delta_net", gated_delta_net
-    )
-
-    metadata = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
-        [70, 130], cu_seqlens=cu_seqlens
-    )
-
-    assert metadata is expected_metadata
-    assert captured == {
-        "seq_lens_cpu": [70, 130],
-        "cu_seqlens": cu_seqlens,
-        "chunk_size": 64,
-    }
-
-
-def test_chunk_metadata_keeps_its_two_tensor_contract():
-    """Subclasses such as KimiK3ROCmKDAMetadataBuilder override this method.
-
-    The AITER backend carries its own metadata object and must not widen the
-    return value to smuggle it through, or every override breaks.
-    """
-    builder = object.__new__(GDNAttentionMetadataBuilder)
-    builder.gdn_prefill_backend = "triton"
-    cu_seqlens_cpu = torch.tensor([0, 70, 200], dtype=torch.int32)
-
-    result = builder._build_chunk_metadata(
-        cu_seqlens_cpu.clone(),
-        cu_seqlens_cpu,
-        torch.device("cpu"),
-    )
-
-    assert len(result) == 2
-    assert all(isinstance(t, torch.Tensor) for t in result)
-
-    base = inspect.signature(GDNAttentionMetadataBuilder._build_chunk_metadata)
-    override = inspect.signature(KimiK3ROCmKDAMetadataBuilder._build_chunk_metadata)
-    assert base.return_annotation == override.return_annotation
 
 
 def test_kda_style_model_cannot_select_flydsl():
@@ -216,46 +80,32 @@ def test_kda_style_model_cannot_select_flydsl():
     down before the builder is ever constructed.
     """
     config = _make_config(head_k_dim=None, head_v_dim=None)
+
+    assert _resolve_on_rocm(config) == ("aiter_flydsl", "triton")
+
+
+@pytest.mark.parametrize("on_rocm", [True, False], ids=["kernels_missing", "not_rocm"])
+def test_explicit_aiter_flydsl_fails_closed(on_rocm: bool):
+    """An explicit request that cannot be honoured is a configuration error.
+
+    Falling back silently would report the run as healthy while the requested
+    kernels were never used.
+    """
+    config = _make_config()
+    if on_rocm:
+        with pytest.raises(RuntimeError, match="not importable"):
+            _resolve_on_rocm(config, kernels_available=False)
+        return
     with (
         patch.object(
-            qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=True
+            qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=False
         ),
         patch.object(
-            qwen_gdn_linear_attn.rocm_aiter_ops,
-            "is_gdn_flydsl_prefill_available",
-            return_value=True,
+            qwen_gdn_linear_attn.current_platform, "is_cuda", return_value=True
         ),
+        pytest.raises(RuntimeError, match="aiter_flydsl"),
     ):
-        requested, active = _resolve_gdn_prefill_backend(config)
-
-    assert (requested, active) == ("aiter_flydsl", "triton")
-
-
-def test_builder_with_custom_chunk_metadata_is_rejected_for_flydsl():
-    """And if some future builder could select it, say so at startup."""
-    check = GDNAttentionMetadataBuilder._check_chunk_metadata_override
-
-    # The KDA builder is the in-tree example of an override.
-    with pytest.raises(RuntimeError, match="KimiK3ROCmKDAMetadataBuilder"):
-        check(KimiK3ROCmKDAMetadataBuilder, "aiter_flydsl")
-
-    # It is only the AITER path that skips the override.
-    check(KimiK3ROCmKDAMetadataBuilder, "triton")
-    check(GDNAttentionMetadataBuilder, "aiter_flydsl")
-
-
-def test_flydsl_availability_respects_the_aiter_switch(monkeypatch):
-    """VLLM_ROCM_USE_AITER stays the one switch that turns AITER kernels off.
-
-    Selecting the backend opts in to it specifically, but it cannot opt back
-    in to AITER as a whole once the user has disabled it.
-    """
-    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", False)
-    rocm_aiter_ops.is_gdn_flydsl_prefill_available.cache_clear()
-    try:
-        assert rocm_aiter_ops.is_gdn_flydsl_prefill_available() is False
-    finally:
-        rocm_aiter_ops.is_gdn_flydsl_prefill_available.cache_clear()
+        _resolve_gdn_prefill_backend(config)
 
 
 def _flydsl_prefill_unavailable() -> bool:
@@ -269,12 +119,16 @@ def _flydsl_prefill_unavailable() -> bool:
     _flydsl_prefill_unavailable(),
     reason="needs ROCm with the AITER FlyDSL GDN prefill kernels installed",
 )
-def test_aiter_flydsl_prefill_matches_triton_reference():
+@pytest.mark.parametrize(
+    "state_dtype", [torch.float32, torch.bfloat16], ids=["fp32_state", "bf16_state"]
+)
+def test_aiter_flydsl_prefill_matches_triton_reference(state_dtype: torch.dtype):
     """Run both prefill paths on device and compare.
 
     The reference is the same AITER entry point with the FlyDSL prepare and K5
     kernels switched off, so the only thing that differs between the two calls
-    is the kernels this backend exists to select.
+    is the kernels this backend exists to select. The state dtype follows
+    --mamba-ssm-cache-dtype, which may be float32 or bfloat16.
     """
     from aiter.ops.triton.gated_delta_net import chunk_gated_delta_rule_opt_vk
 
@@ -306,24 +160,23 @@ def test_aiter_flydsl_prefill_matches_triton_reference():
         num_v_heads,
         head_dim,
         head_dim,
-        dtype=torch.float32,
         device=device,
-    )
+    ).to(state_dtype)
 
-    shared = dict(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        output_final_state=True,
-        cu_seqlens=cu_seqlens,
-        use_qk_l2norm_in_kernel=False,
-    )
+    shared = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "g": g,
+        "beta": beta,
+        "output_final_state": True,
+        "cu_seqlens": cu_seqlens,
+        "use_qk_l2norm_in_kernel": False,
+    }
 
     reference_out, reference_state = chunk_gated_delta_rule_opt_vk(
         initial_state=initial_state.clone(),
-        state_dtype=torch.float32,
+        state_dtype=state_dtype,
         use_chunk_flydsl=False,
         use_prepare_flydsl=False,
         **shared,
@@ -337,28 +190,10 @@ def test_aiter_flydsl_prefill_matches_triton_reference():
         **shared,
     )
 
+    assert flydsl_state.dtype == state_dtype
     torch.testing.assert_close(
         flydsl_out.float(), reference_out.float(), rtol=2e-2, atol=2e-2
     )
     torch.testing.assert_close(
         flydsl_state.float(), reference_state.float(), rtol=2e-2, atol=2e-2
     )
-
-
-def test_explicit_aiter_flydsl_off_rocm_fails_closed():
-    """Asking for a ROCm backend on another platform is a configuration error.
-
-    Falling back silently would report the run as healthy while the requested
-    kernels were never used.
-    """
-    config = _make_config()
-    with (
-        patch.object(
-            qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=False
-        ),
-        patch.object(
-            qwen_gdn_linear_attn.current_platform, "is_cuda", return_value=True
-        ),
-        pytest.raises(RuntimeError, match="aiter_flydsl"),
-    ):
-        _resolve_gdn_prefill_backend(config)

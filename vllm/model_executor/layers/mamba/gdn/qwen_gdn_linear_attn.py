@@ -1596,9 +1596,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            # The per-layer cache exposed by vLLM is a non-contiguous view, while
-            # AITER's indexed K5 path requires a contiguous state pool. Keep the
-            # existing dense gather/write-back contract for every prefill backend.
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
             (
