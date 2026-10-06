@@ -291,6 +291,16 @@ CI_HCL_PATH="${CI_HCL_PATH:-/tmp/ci.hcl}"
 ZSTD_HCL_PATH="${ZSTD_HCL_PATH:-.buildkite/image_build/zstd.hcl}"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
 BAKE_FILES=(-f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" -f "${ZSTD_HCL_PATH}")
+BAKE_ARGS=()
+
+# VLLM_CI_COLD_BUILD=1 forces a from-scratch build for measurement runs:
+# no layer cache, no sccache. VLLM_USE_PRECOMPILED already defaults to "0"
+# (falsy per vllm/envs.py), so precompiled-wheel reuse stays off.
+if [[ "${VLLM_CI_COLD_BUILD:-0}" == "1" ]]; then
+    echo "--- :cold_face: VLLM_CI_COLD_BUILD=1: disabling layer cache and sccache"
+    BAKE_ARGS+=(--no-cache)
+    export USE_SCCACHE=0
+fi
 
 prepare_cache_tags
 ecr_login
@@ -377,7 +387,7 @@ BUILD_STATUS=0
 ) >&2 &
 memory_sampler_pid=$!
 
-docker --debug buildx bake "${BAKE_FILES[@]}" \
+docker --debug buildx bake "${BAKE_FILES[@]}" "${BAKE_ARGS[@]}" \
     --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
 
 kill "$memory_sampler_pid" 2>/dev/null || true
