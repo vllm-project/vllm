@@ -128,6 +128,8 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.dtype = None
         self.int64 = None
         self.int32 = None
+        self.uint8 = None
+        self.pointer_type = lambda element_ty: None
         self.tensor = None
         self.exp = None
         self.exp2 = None
