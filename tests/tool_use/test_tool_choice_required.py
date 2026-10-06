@@ -404,6 +404,11 @@ class TestNonFunctionToolsSkipped:
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
 
+    def test_get_json_schema_rejects_only_non_function_tools(self):
+        # An empty anyOf would compile to a grammar no output can satisfy.
+        with pytest.raises(VLLMValidationError, match="no function tool"):
+            get_json_schema_from_tools(tools=[WEB_SEARCH_TOOL], tool_choice="required")
+
 
 class TestMalformedToolSchemaDefs:
     """Malformed `$defs` in caller-supplied tool parameters is a 400, not a 500."""
