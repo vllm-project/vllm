@@ -7,6 +7,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.device_communicators.all_reduce_utils import (
     NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
     should_nccl_symm_mem_ag_rs,
@@ -114,6 +115,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
 
+        # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
+        config = get_current_vllm_config_or_none()
+        register = config is None or not config.use_cumem_cudagraph_pool
+
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
@@ -151,6 +156,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 symm_mem_enabled=(
                     self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
                 ),
+                register_graph_buffers=register,
             )
 
         # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
