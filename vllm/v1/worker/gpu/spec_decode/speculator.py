@@ -97,6 +97,7 @@ class BaseSpeculator(ABC):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
 
@@ -224,13 +225,13 @@ class DraftModelSpeculator(BaseSpeculator):
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
         self._validate_local_argmax_reduction()
 
-        all_attn_layers = set[str](
-            get_layers_from_vllm_config(
-                self.vllm_config,
-                AttentionLayerBase,  # type: ignore[type-abstract]
-            ).keys()
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        self.draft_attn_layer_names = all_attn_layers - target_attn_layer_names
+        self.draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
+        for layer_name in self.draft_attn_layer_names:
+            all_attn_layers[layer_name].is_draft_layer = True
 
         target_supports_mm = self.vllm_config.model_config.supports_multimodal_inputs
         draft_supports_mm = supports_multimodal_embeddings(self.model)
@@ -373,6 +374,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            positions=self.input_buffers.positions[:num_tokens],
             is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
@@ -403,6 +405,16 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states)
+
+    def get_draft_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states)
+
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
@@ -412,9 +424,13 @@ class DraftModelSpeculator(BaseSpeculator):
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        if draft_logits is None and self.use_local_argmax_reduction:
+            return self.get_draft_top_tokens(hidden_states, spec_step_idx)
+
+        logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None:
-            logits = self.model.compute_logits(hidden_states)
             sampler = (
                 gumbel_sample
                 if self.draft_watermarker is None
@@ -432,10 +448,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-        elif self.use_local_argmax_reduction:
-            return self.model.get_top_tokens(hidden_states)
         else:
-            logits = self.model.compute_logits(hidden_states)
             sampled = logits.argmax(dim=-1)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled

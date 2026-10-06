@@ -19,6 +19,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
+from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -532,6 +533,8 @@ class Worker(WorkerBase):
             self.device,
             num_ubatches,
             _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+            # Scratch holds no state across steps: discard it on sleep.
+            alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:
@@ -613,7 +616,10 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run()
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -649,8 +655,9 @@ class Worker(WorkerBase):
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
             self._scoped_allocator_max_split(max_split_size_mb=20),
+            set_current_vllm_config(self.vllm_config),
         ):
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
@@ -839,10 +846,17 @@ class Worker(WorkerBase):
         if mem_pool_context is None:
             mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
 
-        self.model_runner.initialize_kv_cache(
-            kv_cache_config,
-            kv_cache_allocation_context=mem_pool_context,
+        # Offload KV-init state, except on XPU, whose outermost pool would win.
+        runtime_pool = (
+            nullcontext()
+            if current_platform.is_xpu()
+            else self._maybe_get_memory_pool_context(tag="runtime")
         )
+        with runtime_pool:
+            self.model_runner.initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=mem_pool_context,
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
@@ -885,7 +899,12 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
+            self.model_runner._dummy_run(
+                size,
+                skip_eplb=True,
+                remove_lora=False,
+                randomize_inputs=self.randomize_dummy_inputs,
+            )
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
@@ -1002,7 +1021,9 @@ class Worker(WorkerBase):
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        set_random_seed(
+            self.model_config.seed, self.parallel_config.data_parallel_index
+        )
 
         # Eagerly trigger inductor's once-per-process lazy inits during
         # warmup (rather than on a later compile cache-miss at runtime).
@@ -1339,7 +1360,14 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1350,6 +1378,8 @@ class Worker(WorkerBase):
             )
 
         if is_start:
+            validate_profile_prefix(profile_prefix)
+
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
 
@@ -1361,9 +1391,6 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
-            if self.profiler_config.profiler == "proton" and self.profiler is not None:
-                self.profiler.set_output_name(trace_name)
-
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
                 self.profiler = create_worker_profiler(
@@ -1372,7 +1399,11 @@ class Worker(WorkerBase):
                     local_rank=self.local_rank,
                 )
 
-            self.profiler.start()
+            self.profiler.set_output_name(trace_name)
+            self.profiler.start(
+                delay_iterations=delay_iterations,
+                max_iterations=max_iterations,
+            )
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
@@ -1387,9 +1418,21 @@ class Worker(WorkerBase):
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
 
+    @property
+    def randomize_dummy_inputs(self) -> bool:
+        # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
+        return (
+            envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+            and self.parallel_config.data_parallel_size > 1
+        )
+
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        self.model_runner._dummy_run(
+            num_tokens,
+            uniform_decode=True,
+            randomize_inputs=self.randomize_dummy_inputs,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
