@@ -2,7 +2,7 @@ group: Kernels XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: vLLM IR Tests
+- label: :nvidia: (H200 MIG 18GB) vLLM IR
   key: vllm-ir-tests-2
   device: intel_gpu
   timeout_in_minutes: 35

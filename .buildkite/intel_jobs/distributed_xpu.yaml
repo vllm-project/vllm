@@ -389,6 +389,7 @@ steps:
     'pytest -v -s tests/distributed/test_context_parallel.py || true &&
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
     VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py --deselect="tests/distributed/test_weight_transfer.py::test_ipc_weight_transfer_between_processes[ray]" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_sparse_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_ipc_weight_transfer_between_processes[http]" || true &&
+    VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py || true &&
     pytest -v -s tests/distributed/test_packed_tensor.py || true'
 - label: ':nvidia: (B200) Distributed'
   key: distributed-tests-2xb200
@@ -505,7 +506,7 @@ steps:
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
-  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
+  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
   source_file_dependencies:
   - vllm/v1/executor/ray_executor_v2.py
   - vllm/v1/executor/abstract.py
@@ -522,4 +523,4 @@ steps:
     cd tests &&
     pytest -v -s distributed/test_ray_v2_executor.py -k "not test_ray_v2_executor_pg and not test_ray_v2_bundle_indices_env and not test_ray_v2_single_node_generation_with_pg and not test_ray_v2_invalid_bundle_indices" || true &&
     pytest -v -s distributed/test_pipeline_parallel.py -k ray || true &&
-    TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k ray || true'
+    TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k ray || true'
