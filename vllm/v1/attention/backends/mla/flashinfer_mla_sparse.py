@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MLAAttentionImpl,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
@@ -34,7 +35,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -272,7 +273,16 @@ class FlashInferMLASparseMetadataBuilder(
 class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilder):
     """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode uses device request boundaries; prefill metadata is not graph-safe.
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
