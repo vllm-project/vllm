@@ -20,7 +20,7 @@ def initialize_replayssm_ring_trackers(
     kv_cache_config: KVCacheConfig,
     forward_context: Mapping[str, Any],
 ) -> None:
-    """Allocate and bind one tracker pair per ReplaySSM cache group, and the
+    """Allocate and bind one tracker pair per window-ring cache group, and the
     stochastic-rounding seed slots of the FlashInfer ReplaySSM layers."""
     seeded: list[str] = []
     for group in kv_cache_config.kv_cache_groups:
@@ -28,7 +28,7 @@ def initialize_replayssm_ring_trackers(
             name
             for name in group.layer_names
             if isinstance(layer := forward_context.get(name), MambaBase)
-            and layer.use_replayssm
+            and (layer.use_replayssm or layer.use_window_rings)
         ]
         if not names:
             continue
