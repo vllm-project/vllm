@@ -380,9 +380,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
                 or (
-                    vllm_config.parallel_config.pipeline_parallel_size > 1
-                    and vllm_config.use_v2_model_runner
-                    and not get_pp_group().is_first_rank
+                    vllm_config.use_v2_model_runner and not get_pp_group().is_first_rank
                 )
                 else nullcontext()
             ):
