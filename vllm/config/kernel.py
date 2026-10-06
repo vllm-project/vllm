@@ -266,6 +266,9 @@ LinearBackend = Literal[
 ]
 
 
+W4A16PrefillDequantMode = Literal["off", "soft", "hard"]
+
+
 @config
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
@@ -382,6 +385,19 @@ class KernelConfig:
     """Backend overrides keyed by linear quantization scheme. Overrides take
     precedence over ``linear_backend``; for example,
     ``{"nvfp4_w4a16": "humming"}``."""
+
+    w4a16_prefill_dequant: W4A16PrefillDequantMode = "off"
+    """Cache a dense dequantized copy of each weight for the RDNA hybrid
+    W4A16 linear kernel's prefill GEMM (no-op for every other kernel). The
+    copy is ~4x the size of the int4 weight and comes out of the
+    gpu_memory_utilization budget, leaving less room for KV cache. Available
+    options:
+
+    - "off": No caching (default)
+    - "soft": Cache until the budget is exhausted, then warn and fall back
+      to the int4 prefill path for the remaining weights
+    - "hard": Cache until the budget is exhausted, then raise an error
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod
