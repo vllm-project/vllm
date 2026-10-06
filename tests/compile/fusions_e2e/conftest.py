@@ -45,6 +45,10 @@ def run_model(
     # other test needs (e.g. it forces block_size=16, which some attention
     # backends like FLASHINFER_MLA reject, and disables JIT warmup).
     model_kwargs.setdefault("kernel_config", {"enable_jit_warmup": True})
+    # These tests only run a few short prompts; a small fixed KV cache leaves
+    # headroom for allocations vLLM's memory profiler does not see.
+    model_kwargs.setdefault("gpu_memory_utilization", 0.01)
+    model_kwargs.setdefault("kv_cache_memory_bytes", 64 * 1024**2)
     with vllm_runner(
         model,
         compilation_config=compilation_config,
