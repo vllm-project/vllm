@@ -146,3 +146,9 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
 
 
 DeepseekV4AiterMegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
+
+
+def finalize_mega_moe_weights(model: nn.Module) -> None:
+    for module in model.modules():
+        if isinstance(module, DeepseekV4AiterMegaMoEExperts):
+            module.finalize_weights()

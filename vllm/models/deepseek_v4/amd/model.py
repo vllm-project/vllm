@@ -557,10 +557,6 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
         )
     if parallel_config.enable_eplb:
         raise NotImplementedError("AITER MegaMoE does not support EPLB.")
-    if vllm_config.speculative_config is not None:
-        raise NotImplementedError(
-            "AITER MegaMoE does not support speculative decoding yet."
-        )
     if getattr(vllm_config.model_config.hf_config, "expert_dtype", "fp4") != "fp4":
         raise NotImplementedError("AITER MegaMoE only supports fp4 experts.")
 
