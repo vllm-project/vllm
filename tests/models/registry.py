@@ -266,6 +266,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
     "ExaoneMoeForCausalLM": _HfExamplesInfo("LGAI-EXAONE/K-EXAONE-236B-A23B"),
+    # Last revision with the legacy architecture name and config fields
+    "ExaoneMoEForCausalLM": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B",
+        revision="90d2d5033a4ea53701ded73149d54106d10409a7",
+    ),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),

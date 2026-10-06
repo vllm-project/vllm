@@ -227,21 +227,23 @@ class ExaoneMoeAttention(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
 
-        if config.sliding_windows is not None:
-            self.sliding_window_size = config.sliding_windows[layer_idx]
-
-        if config.layer_types[layer_idx] == "full_attention":
-            self.sliding_window_size = None
-
+        # Configs published before K-EXAONE 2.0 only have the scalar
+        # `sliding_window` and no MTP fields; their MTP layer follows the main
+        # layer with the same index.
+        layer_types = config.layer_types
+        sliding_windows = getattr(config, "sliding_windows", None)
         if is_mtp:
-            self.sliding_window = (
-                config.mtp_layer_types[layer_idx] == "sliding_attention"
+            layer_types = getattr(config, "mtp_layer_types", None) or layer_types
+            sliding_windows = (
+                getattr(config, "mtp_sliding_windows", None) or sliding_windows
             )
-            if config.mtp_sliding_windows is not None:
-                self.sliding_window_size = config.mtp_sliding_windows[layer_idx]
 
-            if config.mtp_layer_types[layer_idx] == "full_attention":
-                self.sliding_window_size = None
+        if layer_types[layer_idx] == "full_attention":
+            self.sliding_window_size = None
+        elif sliding_windows is not None:
+            self.sliding_window_size = sliding_windows[layer_idx]
+        else:
+            self.sliding_window_size = config.sliding_window
 
         # apply rotary embeddings to every layer in full attention models
         self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
