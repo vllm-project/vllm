@@ -2043,6 +2043,10 @@ class ModelConfig:
         return self._model_info.supports_replayssm
 
     @property
+    def supports_sketchssm(self) -> bool:
+        return self._model_info.supports_sketchssm
+
+    @property
     def use_mla(self) -> bool:
         if envs.VLLM_MLA_DISABLE:
             return False

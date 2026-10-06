@@ -60,6 +60,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.mamba.sketchssm.mamba2 import (
+    mamba2_sketchssm_state_shapes,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -78,6 +81,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
     SupportsQuant,
     SupportsReplaySSM,
+    SupportsSketchSSM,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -727,6 +731,7 @@ class NemotronHForCausalLM(
     MixtureOfExperts,
     SupportsMambaPrefixCaching,
     SupportsReplaySSM,
+    SupportsSketchSSM,
 ):
     # Relevant only if self.has_moe is True
     is_non_gated_moe = True
@@ -769,7 +774,7 @@ class NemotronHForCausalLM(
             cache_config.mamba_cache_dtype,
             cache_config.mamba_ssm_cache_dtype,
         )
-        if cache_config.use_replayssm:
+        if cache_config.use_mamba_window_rings:
             return MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype,
                 vllm_config.model_config.dtype,
@@ -790,7 +795,7 @@ class NemotronHForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
-            - x_cache/dt_cache/B_cache ring-buffer shapes (use_replayssm only)
+            - x_cache/dt_cache/B_cache ring-buffer shapes (ReplaySSM/SketchSSM)
 
         """
         parallel_config = vllm_config.parallel_config
@@ -808,8 +813,8 @@ class NemotronHForCausalLM(
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
         )
-        if cache_config.use_replayssm:
-            return MambaStateShapeCalculator.append_replayssm_ring(
+        if cache_config.use_mamba_window_rings:
+            shapes = MambaStateShapeCalculator.append_replayssm_ring(
                 base_shapes=base_shape,
                 n_groups=hf_config.n_groups,
                 tp_world_size=parallel_config.tensor_parallel_size,
@@ -817,6 +822,9 @@ class NemotronHForCausalLM(
                 backend=vllm_config.mamba_config.backend,
                 num_speculative_tokens=vllm_config.num_speculative_tokens,
             )
+            if cache_config.sketchssm is not None:
+                return mamba2_sketchssm_state_shapes(shapes)
+            return shapes
         return base_shape
 
     @classmethod

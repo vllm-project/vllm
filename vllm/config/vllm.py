@@ -3342,6 +3342,8 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
+        if self.cache_config.sketchssm is not None:
+            self._validate_sketchssm()
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
             return self
@@ -3436,6 +3438,48 @@ class VllmConfig:
                 "(P/D disaggregation, KV cache offload)"
             )
         return self
+
+    def _validate_sketchssm(self) -> None:
+        from vllm.platforms import current_platform
+
+        if self.cache_config.use_replayssm:
+            raise ValueError(
+                "--sketchssm already applies ReplaySSM-style buffered state "
+                "updates; pass only --sketchssm (drop --use-replayssm)"
+            )
+        if not current_platform.is_cuda() or not (
+            current_platform.has_device_capability(80)
+        ):
+            raise ValueError(
+                "--sketchssm requires a CUDA GPU with compute capability 8.0 or newer"
+            )
+        if self.model_config is not None and not self.model_config.supports_sketchssm:
+            raise ValueError(
+                "--sketchssm is not supported for architecture "
+                f"{self.model_config.architecture!r}"
+            )
+        unsupported = []
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            unsupported.append("KV connectors")
+        if self.mamba_config.backend != MambaBackendEnum.TRITON:
+            unsupported.append("--mamba-backend other than triton")
+        if self.cache_config.mamba_cache_mode not in ("none", "align"):
+            unsupported.append("Mamba prefix caching other than align mode")
+        if self.num_speculative_tokens > 0:
+            unsupported.append("speculative decoding")
+        if not self.use_v2_model_runner:
+            unsupported.append("Model Runner V1")
+        if self.cache_config.mamba_ssm_cache_dtype != "float32":
+            unsupported.append("a non-float32 --mamba-ssm-cache-dtype")
+        if self.mamba_config.enable_stochastic_rounding:
+            unsupported.append("stochastic rounding of the SSM state")
+        if self.parallel_config.tensor_parallel_size > 1:
+            unsupported.append("tensor parallelism")
+        if unsupported:
+            raise ValueError("--sketchssm does not support " + ", ".join(unsupported))
 
 
 _current_vllm_config: VllmConfig | None = None

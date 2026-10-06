@@ -203,7 +203,8 @@ class CacheConfig:
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
-    Kimi-K3 speculative decode does not use B. Default 16."""
+    Kimi-K3 speculative decode does not use B. Also the SketchSSM window
+    length. Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
@@ -212,6 +213,12 @@ class CacheConfig:
     and mamba_cache_mode 'none'. In align mode flushes are most efficient when
     mamba_block_size is a multiple of replayssm_buffer_len, but this is not
     required."""
+    sketchssm: str | None = None
+    """SketchSSM calibration file, directory or Hugging Face repo id. Enables
+    SketchSSM decode, which reads a compact per-request sketch of the state."""
+    sketchssm_mean_rank: float | None = Field(default=None, ge=1, allow_inf_nan=False)
+    """Mean sketch rank per head for a portable `sketchssm` calibration
+    (default 8)."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
@@ -324,6 +331,11 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
+    @property
+    def use_mamba_window_rings(self) -> bool:
+        """Whether the Mamba cache holds ReplaySSM/SketchSSM window rings."""
+        return self.use_replayssm or self.sketchssm is not None
+
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
@@ -345,6 +357,12 @@ class CacheConfig:
             self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
             self.user_specified_block_size = True
+        return self
+
+    @model_validator(mode="after")
+    def _validate_sketchssm_mean_rank(self) -> "CacheConfig":
+        if self.sketchssm_mean_rank is not None and self.sketchssm is None:
+            raise ValueError("--sketchssm-mean-rank requires --sketchssm")
         return self
 
     @field_validator("cache_dtype", mode="after")

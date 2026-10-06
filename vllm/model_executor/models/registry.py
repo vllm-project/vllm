@@ -55,6 +55,7 @@ from .interfaces import (
     supports_multimodal_raw_input_only,
     supports_pp,
     supports_replayssm,
+    supports_sketchssm,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -879,6 +880,7 @@ class _ModelInfo:
     has_noops: bool
     supports_mamba_prefix_caching: bool
     supports_replayssm: bool
+    supports_sketchssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
     supported_video_pruning_methods: tuple[str, ...]
@@ -908,6 +910,7 @@ class _ModelInfo:
             is_hybrid=is_hybrid(model),
             supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
             supports_replayssm=supports_replayssm(model),
+            supports_sketchssm=supports_sketchssm(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only

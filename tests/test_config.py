@@ -246,6 +246,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             use_kda_recoverssm=False,
             mamba_cache_mode="none",
             replayssm_buffer_len=16,
+            sketchssm=None,
         ),
         num_speculative_tokens=3,
         model_config=SimpleNamespace(
@@ -288,6 +289,73 @@ def test_mamba_cache_mode_all_is_rejected():
     """The removed 'all' mode must fail validation instead of being ignored."""
     with pytest.raises(ValidationError, match="mamba_cache_mode"):
         CacheConfig(mamba_cache_mode="all")
+
+
+def _sketchssm_config(**overrides):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(supports_sketchssm=True, architecture="M"),
+        kv_transfer_config=None,
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON, enable_stochastic_rounding=False
+        ),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="none",
+            mamba_ssm_cache_dtype="float32",
+            use_replayssm=False,
+        ),
+        num_speculative_tokens=0,
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    for path, value in overrides.items():
+        *parents, name = path.split(".")
+        target = config
+        for parent in parents:
+            target = getattr(target, parent)
+        setattr(target, name, value)
+    return config
+
+
+def _sketchssm_gpu(monkeypatch, capability: int = 80):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "has_device_capability", lambda c: capability >= c
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({}, None),
+        ({"model_config.supports_sketchssm": False}, "not supported for"),
+        ({"mamba_config.backend": MambaBackendEnum.FLASHINFER}, "--mamba-backend"),
+        ({"cache_config.mamba_cache_mode": "align"}, None),
+        ({"cache_config.mamba_cache_mode": "all"}, "other than align mode"),
+        ({"cache_config.use_replayssm": True}, "drop --use-replayssm"),
+        ({"num_speculative_tokens": 2}, "speculative decoding"),
+        ({"use_v2_model_runner": False}, "Model Runner V1"),
+        ({"parallel_config.tensor_parallel_size": 2}, "tensor parallelism"),
+    ],
+)
+def test_validate_sketchssm(monkeypatch, overrides, match):
+    _sketchssm_gpu(monkeypatch)
+    config = _sketchssm_config(**overrides)
+    if match is None:
+        VllmConfig._validate_sketchssm(config)
+        return
+    with pytest.raises(ValueError, match=match):
+        VllmConfig._validate_sketchssm(config)
+
+
+def test_sketchssm_requires_sm80(monkeypatch):
+    _sketchssm_gpu(monkeypatch, capability=75)
+    with pytest.raises(ValueError, match="compute capability 8.0"):
+        VllmConfig._validate_sketchssm(_sketchssm_config())
+
+
+def test_sketchssm_mean_rank_requires_sketchssm():
+    with pytest.raises(ValueError, match="requires --sketchssm"):
+        CacheConfig(sketchssm_mean_rank=6)
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():

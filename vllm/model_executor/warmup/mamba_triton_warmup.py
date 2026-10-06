@@ -42,12 +42,24 @@ def _warm_batch_memcpy_kernel(device: torch.device) -> None:
     logger.info("Warmed Mamba batch_memcpy_kernel.")
 
 
+def _warm_sketchssm(runner: "GPUModelRunner") -> None:
+    """Warm the SketchSSM sketch build, which first runs after a prefill."""
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+
+    for module in runner.get_model().modules():
+        if isinstance(module, MambaMixer2) and module.sketchssm is not None:
+            module.sketchssm.warmup(module.kv_cache[1])
+
+
 @torch.inference_mode()
 def mamba_triton_warmup(runner: "GPUModelRunner") -> None:
-    """Warm prefix-cache memcpy for every Mamba-style KV cache group."""
+    """Warm prefix-cache memcpy for every Mamba-style KV cache group, and the
+    SketchSSM sketch build."""
     device = runner.device
     if device.type != "cuda":
         return
     if not _has_mamba_style_cache(runner):
         return
     _warm_batch_memcpy_kernel(device)
+    if runner.vllm_config.cache_config.sketchssm is not None:
+        _warm_sketchssm(runner)

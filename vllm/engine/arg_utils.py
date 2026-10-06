@@ -796,6 +796,8 @@ class EngineArgs:
     )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
+    sketchssm: str | None = CacheConfig.sketchssm
+    sketchssm_mean_rank: float | None = CacheConfig.sketchssm_mean_rank
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
@@ -1401,6 +1403,10 @@ class EngineArgs:
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
         )
         cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
+        cache_group.add_argument("--sketchssm", **cache_kwargs["sketchssm"])
+        cache_group.add_argument(
+            "--sketchssm-mean-rank", **cache_kwargs["sketchssm_mean_rank"]
+        )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -2274,6 +2280,8 @@ class EngineArgs:
             ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
+            sketchssm=self.sketchssm,
+            sketchssm_mean_rank=self.sketchssm_mean_rank,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
