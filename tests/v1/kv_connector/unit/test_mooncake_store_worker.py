@@ -51,6 +51,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheTensor,
     MambaSpec,
     RSWASpec,
 )
@@ -3520,6 +3521,8 @@ def _make_bare_worker(
     worker.kv_recv_threads = []
     worker.num_recv_threads = 1
     worker.recv_request_queue = queue.Queue()
+    worker._device_regions = {}
+    worker._kv_released = False
     worker.finished_store_req = set()
     worker.tp_size = 1
     worker.store_tp_size = None
@@ -4306,72 +4309,60 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
-def test_register_kv_caches_uses_transfer_group_memory_domain():
-    """Derived GPU caches must not change host-source transfer addresses."""
-    from vllm.v1.kv_cache_interface import (
-        KVCacheConfig,
-        KVCacheGroupRole,
-        KVCacheGroupSpec,
-        KVCacheTensor,
-    )
-
-    host_num_blocks = 4
-    gpu_num_blocks = 2
-    page_size = 32
-    source_spec = FullAttentionSpec(
+def _hisparse_worker(device_layer: str, **device_group_kwargs):
+    """A bare worker with a host-resident HiSparse source group (4 blocks) next
+    to a GPU group holding `device_layer` (2 blocks), and its KV caches."""
+    spec = FullAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
-    )
-    indexer_spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
-    )
-    source_group = KVCacheGroupSpec(
-        ["source"],
-        source_spec,
-        host_resident=True,
-    )
-    indexer_group = KVCacheGroupSpec(
-        ["indexer"],
-        indexer_spec,
-        enable_kv_transfer=False,
-        role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
     config = KVCacheConfig(
-        num_blocks=gpu_num_blocks,
+        num_blocks=2,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=host_num_blocks * page_size,
+                size=4 * 32,
                 layers=["source"],
-                layer_stride=host_num_blocks * page_size,
-                block_stride=page_size,
+                layer_stride=4 * 32,
+                block_stride=32,
                 host_resident=True,
             ),
             KVCacheTensor(
-                size=gpu_num_blocks * page_size,
-                layers=["indexer"],
-                layer_stride=gpu_num_blocks * page_size,
-                block_stride=page_size,
+                size=2 * 32, layers=[device_layer], layer_stride=2 * 32, block_stride=32
             ),
         ],
-        kv_cache_groups=[source_group, indexer_group],
-        hisparse_host_num_blocks=host_num_blocks,
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], spec, host_resident=True),
+            KVCacheGroupSpec([device_layer], spec, **device_group_kwargs),
+        ],
+        hisparse_host_num_blocks=4,
     )
-    worker = _make_bare_worker(num_gpu_blocks=gpu_num_blocks)
+    worker = _make_bare_worker(num_gpu_blocks=2)
     worker._kv_cache_config = config
     worker._kv_cache_groups = list(config.transfer_groups)
     worker.token_dbs = [
         ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+        for _ in worker._kv_cache_groups
     ]
-    source = torch.zeros(host_num_blocks, page_size, dtype=torch.uint8)
-    indexer = torch.zeros(gpu_num_blocks, page_size, dtype=torch.uint8)
+    caches = {
+        "source": torch.zeros(4, 32, dtype=torch.uint8),
+        device_layer: torch.zeros(2, 32, dtype=torch.uint8),
+    }
+    return worker, caches
 
-    _register_with_mocked_threads(
-        worker,
-        {"source": source, "indexer": indexer},
+
+def test_register_kv_caches_uses_transfer_group_memory_domain():
+    """Derived GPU caches must not change host-source transfer addresses."""
+    from vllm.v1.kv_cache_interface import KVCacheGroupRole
+
+    worker, caches = _hisparse_worker(
+        "indexer", enable_kv_transfer=False, role=KVCacheGroupRole.HISPARSE_INDEXER
     )
+    source = caches["source"]
+
+    _register_with_mocked_threads(worker, caches)
 
     db = worker.token_dbs[0]
     assert db.kv_caches_base_addr == [source.data_ptr()]
-    assert db.block_len == [page_size]
+    assert db.block_len == [32]
     worker.store.register_buffer.assert_called_once_with(
         source.data_ptr(), source.nbytes
     )
@@ -4436,6 +4427,121 @@ def test_register_kv_caches_separate_head_groups():
     assert db.kv_caches_base_addr == expected_addrs
     assert db.block_len == [head_block_bytes] * len(expected_addrs)
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+
+
+# ---------------------------------------------------------------------------
+# Sleep mode: release / restore of the KV cache registration
+# ---------------------------------------------------------------------------
+
+
+class _FakeRegistrationStore:
+    """Keeps the registered regions like the store; `fail` fails one region."""
+
+    def __init__(self):
+        self.registered: dict[int, int] = {}
+        self.fail: tuple[str, int] | None = None
+
+    def register_buffer(self, addr: int, length: int) -> int:
+        if self.fail == ("register", addr) or addr in self.registered:
+            return -1
+        self.registered[addr] = length
+        return 0
+
+    def unregister_buffer(self, addr: int) -> int:
+        if self.fail == ("unregister", addr) or addr not in self.registered:
+            return -1
+        del self.registered[addr]
+        return 0
+
+
+def _registered_worker(kind: str = "dense"):
+    """A worker that registered its KV caches with a fake store, plus the device
+    and host regions it registered."""
+    if kind == "dense":  # two device regions
+        worker = _make_bare_worker(num_gpu_blocks=2)
+        worker.token_dbs[0].store_layout = MagicMock()
+        caches = {n: torch.zeros(2, 4) for n in ("layer0", "__cross_layer__")}
+    else:  # one host region and one device region
+        worker, caches = _hisparse_worker("layer0")
+    worker.store = _FakeRegistrationStore()
+    _register_with_mocked_threads(worker, caches)
+    worker.kv_send_thread = SimpleNamespace(request_queue=queue.Queue())
+    host = {c.data_ptr(): c.nbytes for n, c in caches.items() if n == "source"}
+    device = {c.data_ptr(): c.nbytes for n, c in caches.items() if n != "source"}
+    return worker, device, host
+
+
+@pytest.mark.parametrize("kind", ["dense", "hisparse"])
+def test_sleep_cycle_releases_and_restores_device_regions(kind: str):
+    """Asleep, only host regions stay registered; waking registers the same
+    device addresses and lengths again. Both calls are idempotent."""
+    worker, device, host = _registered_worker(kind)
+    assert device and worker.store.registered == device | host
+    worker.restore_kv_caches()  # a wake-up without a sleep
+    for _ in range(2):
+        worker.release_kv_caches()
+        worker.release_kv_caches()  # sleeping after a discard
+        assert worker.store.registered == host
+        worker.restore_kv_caches()
+        worker.restore_kv_caches()  # a retried wake-up
+        assert worker.store.registered == device | host
+
+
+@pytest.mark.parametrize("in_flight", [False, True], ids=["queued", "in_flight"])
+@pytest.mark.parametrize("direction", ["put", "get"])
+def test_release_waits_for_transfers(direction: str, in_flight: bool):
+    """Nothing is unregistered while a put or get is queued or running."""
+    worker, device, _ = _registered_worker()
+    send_q = worker.kv_send_thread.request_queue
+    q = send_q if direction == "put" else worker.recv_request_queue
+    q.put("task")
+    if in_flight:
+        q.get()
+    finish = threading.Event()
+
+    def transfer() -> None:  # the transfer thread finishing the task
+        finish.wait()
+        if not in_flight:
+            q.get()
+        q.task_done()
+
+    threading.Thread(target=transfer, daemon=True).start()
+    release = threading.Thread(target=worker.release_kv_caches, daemon=True)
+    release.start()
+    release.join(0.2)
+    assert release.is_alive() and worker.store.registered == device
+    finish.set()
+    release.join(10)
+    assert not release.is_alive() and worker.store.registered == {}
+
+
+def test_release_times_out_and_keeps_registration(monkeypatch):
+    """A transfer that never finishes fails the release, which keeps the
+    registration, instead of hanging it."""
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "0")
+    worker, device, _ = _registered_worker()
+    worker.recv_request_queue.put("task")
+    with pytest.raises(TimeoutError):
+        worker.release_kv_caches()
+    assert worker.store.registered == device
+
+
+@pytest.mark.parametrize("op", ["unregister", "register"])
+def test_failed_store_call_rolls_back(op: str):
+    """A failed (un)register undoes the calls already made and raises, leaving
+    the registration as it was, so a retry starts from a clean state."""
+    worker, device, _ = _registered_worker()
+    if op == "register":
+        worker.release_kv_caches()
+    step = worker.restore_kv_caches if op == "register" else worker.release_kv_caches
+    before = dict(worker.store.registered)
+    worker.store.fail = (op, list(device)[-1])
+    with pytest.raises(RuntimeError, match=f"{op}_buffer failed"):
+        step()
+    assert worker.store.registered == before
+    worker.store.fail = None
+    step()
+    assert worker.store.registered == (device if op == "register" else {})
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -200,6 +201,12 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """False if the connector hands KV device memory to a NIC or another process
+        and cannot re-register it after sleep mode remaps the KV cache."""
+        return True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -286,6 +293,16 @@ class KVConnectorBase_V1(ABC):
             kv_caches: dictionary of layer names, kv cache
 
         """
+        return
+
+    def release_kv_caches(self) -> None:
+        """Before the KV cache is unmapped: wait for in-flight transfers, then
+        drop registrations of that memory. Idempotent."""
+        return
+
+    def restore_kv_caches(self) -> None:
+        """After the KV cache is mapped again: redo what `release_kv_caches`
+        dropped. Idempotent."""
         return
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
