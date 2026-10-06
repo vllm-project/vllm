@@ -2126,15 +2126,19 @@ def test_chunked_context_backend_correctness(
     AttentionBackendEnum.TRITON_MLA not in BACKENDS_TO_TEST,
     reason="TRITON_MLA is not available on this platform.",
 )
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @patch("vllm.envs.VLLM_BATCH_INVARIANT", True)
 def test_triton_mla_batch_invariant_prefill_is_chunk_independent(
     dist_init,
     workspace_init,
+    kv_cache_dtype,
 ):
     """The same tail rows are bitwise-equal across prefill chunk boundaries."""
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
         pytest.skip("CUDA device capability is unavailable.")
+    if kv_cache_dtype == "fp8" and not current_platform.has_device_capability(89):
+        pytest.skip("TRITON_MLA needs SM89+ for an FP8 KV cache.")
     try:
         invalid_reasons = (
             MLAPrefillBackendEnum.FLASH_ATTN.get_class().validate_configuration(
@@ -2226,7 +2230,7 @@ def test_triton_mla_batch_invariant_prefill_is_chunk_independent(
         head_size=head_size,
         dtype=vllm_config.model_config.dtype,
         sliding_window=vllm_config.model_config.get_sliding_window(),
-        cache_dtype_str="auto",
+        cache_dtype_str=kv_cache_dtype,
     )
 
     def run_chunk(query_len: int) -> torch.Tensor:
@@ -2258,6 +2262,7 @@ def test_triton_mla_batch_invariant_prefill_is_chunk_independent(
             num_blocks=16,
             common_attn_metadata=common_attn_metadata,
             randomize_blocks=False,
+            kv_cache_dtype=None if kv_cache_dtype == "auto" else kv_cache_dtype,
         )
         return run_attention_backend(
             AttentionBackendEnum.TRITON_MLA,
@@ -2277,6 +2282,7 @@ def test_triton_mla_batch_invariant_prefill_is_chunk_independent(
             mock_kv_b_proj,
             q_scale=q_scale,
             k_scale=k_scale,
+            kv_cache_dtype=kv_cache_dtype,
             prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
             chunked_prefill_workspace_size=1024,
         )
