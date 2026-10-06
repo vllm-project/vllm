@@ -54,7 +54,27 @@ def is_uva_available() -> bool:
     from vllm.platforms import current_platform
 
     # TODO: Add more requirements for UVA if needed.
-    return is_pin_memory_available() or current_platform.is_cpu()
+    if not (is_pin_memory_available() or current_platform.is_cpu()):
+        return False
+
+    if current_platform.is_cuda():
+        import torch
+        try:
+            # Confidential Computing (CC) mode on NVIDIA GPUs encrypts PCIe
+            # traffic, breaking zero-copy UVA coherence (the device sees stale
+            # data from the time the view was mapped). We check for this by
+            # doing a tiny write-after-map.
+            cpu = torch.zeros(1, dtype=torch.int32).pin_memory()
+            gpu_view = torch.ops._C.get_cuda_view_from_cpu_tensor(cpu)
+            torch.cuda.synchronize()
+            cpu.fill_(1)
+            torch.cuda.synchronize()
+            if (gpu_view + 0).item() != 1:
+                return False
+        except Exception:
+            pass
+
+    return True
 
 
 @cache
