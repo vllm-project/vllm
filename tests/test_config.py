@@ -306,25 +306,28 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
 @pytest.mark.parametrize(
     "kv_transfer_config",
     [
-        KVTransferConfig(
-            kv_connector="NixlConnector",
-            kv_role="kv_both",
+        *(
+            KVTransferConfig(kv_connector=connector, kv_role="kv_both")
+            for connector in ("NixlConnector", "NixlPullConnector")
         ),
-        KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "connectors": [
-                    {
-                        "kv_connector": "NixlConnector",
-                        "kv_role": "kv_both",
-                    },
-                    {
-                        "kv_connector": "OffloadingConnector",
-                        "kv_role": "kv_both",
-                    },
-                ]
-            },
+        *(
+            KVTransferConfig(
+                kv_connector="MultiConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {
+                            "kv_connector": connector,
+                            "kv_role": "kv_both",
+                        },
+                        {
+                            "kv_connector": "OffloadingConnector",
+                            "kv_role": "kv_both",
+                        },
+                    ]
+                },
+            )
+            for connector in ("NixlConnector", "NixlPullConnector")
         ),
     ],
 )
@@ -418,7 +421,8 @@ def test_nixl_dcp_check_skipped_for_submodel_config():
     assert submodel_config.model_config.use_mla is False
 
 
-def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
+@pytest.mark.parametrize("connector", ["NixlConnector", "NixlPullConnector"])
+def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch, connector):
     # Pretend the model has a single KV head so the DCP feasibility checks
     # pass and the MLA-only assert is what actually fires.
     monkeypatch.setattr(ModelConfig, "get_total_num_kv_heads", lambda self: 1)
@@ -432,7 +436,7 @@ def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
                 distributed_executor_backend="mp",
             ),
             kv_transfer_config=KVTransferConfig(
-                kv_connector="NixlConnector",
+                kv_connector=connector,
                 kv_role="kv_both",
             ),
         )
