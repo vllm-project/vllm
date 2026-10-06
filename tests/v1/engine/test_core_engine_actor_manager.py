@@ -15,7 +15,7 @@ import ray
 import zmq
 from torch.distributed import TCPStore
 
-from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
+from vllm.utils.network_utils import get_open_port, make_zmq_socket, split_zmq_path
 from vllm.v1.engine.core import EngineCoreActorMixin
 from vllm.v1.engine.core_client import BackgroundResources
 from vllm.v1.engine.utils import (
@@ -133,10 +133,31 @@ def _make_addresses() -> EngineZmqAddresses:
     )
 
 
-def test_non_moe_dp_launches_coordination_store(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("overrides", "expect_store"),
+    [
+        ({"data_parallel_backend": "mp"}, True),
+        ({}, True),
+        (
+            {
+                "data_parallel_backend": "mp",
+                "data_parallel_rank": 1,
+                "local_engines_only": True,
+            },
+            False,
+        ),
+        ({"data_parallel_backend": "mp", "data_parallel_rank_local": 0}, False),
+        ({"data_parallel_backend": "mp", "enable_elastic_ep": True}, False),
+        ({"data_parallel_backend": "mp", "data_parallel_size": 1}, False),
+    ],
+    ids=["mp", "ray", "non-master-node", "offline", "elastic-ep", "single-engine"],
+)
+def test_coordination_store_held_only_by_the_online_dp_master(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any], expect_store: bool
 ) -> None:
-    """Non-MoE DP still initializes the DP world group and needs a held port."""
+    """The DP master node holds a coordination store for both engine backends,
+    so engines there pick world-group ports at bind time. Every other
+    deployment keeps the pre-allocated ports and must not hold one."""
 
     class FakeManager:
         def __init__(self, **kwargs) -> None:
@@ -144,11 +165,15 @@ def test_non_moe_dp_launches_coordination_store(
 
     vllm_config = _make_vllm_config_ray_dp_multinode()
     parallel_config = vllm_config.parallel_config
-    parallel_config.data_parallel_backend = "mp"
+    for name, value in overrides.items():
+        setattr(parallel_config, name, value)
+    # A fresh port per case so a lingering handshake socket cannot fail the next.
+    parallel_config.data_parallel_rpc_port = get_open_port()
     parallel_config._coord_store_port = 0
     monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineProcManager", FakeManager)
+    monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineActorManager", FakeManager)
     monkeypatch.setattr(
-        "vllm.v1.engine.utils.wait_for_engine_startup", lambda *args: None
+        "vllm.v1.engine.utils.wait_for_engine_startup", lambda *args, **kwargs: None
     )
 
     with launch_core_engines(
@@ -157,10 +182,13 @@ def test_non_moe_dp_launches_coordination_store(
         log_stats=False,
         addresses=_make_addresses(),
     ) as engine_launch:
-        assert parallel_config._coord_store_port
         assert engine_launch.engine_manager is not None
-        # The store lives on the launch_core_engines frame; prove it is
-        # reachable while engines would be starting up.
+        if not expect_store:
+            assert not parallel_config._coord_store_port
+            return
+        assert parallel_config._coord_store_port
+        # Engines look the store up while they start, so it must be reachable
+        # for as long as this frame is alive.
         client = TCPStore(
             parallel_config.data_parallel_master_ip,
             parallel_config._coord_store_port,
