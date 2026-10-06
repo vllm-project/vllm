@@ -6,7 +6,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -261,9 +260,6 @@ class MiMoV2Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        # Flag off: the requantizing loader emits [Q | K | V], not this layout.
-        if not envs.VLLM_MIMO_EXACT_QKV:
-            fused_qkv_chunks = 0
         self.kv_chunk_rows = _fused_qkv_kv_chunk_rows(
             num_heads,
             num_kv_heads,
@@ -684,8 +680,7 @@ def _shard_fp8_qkv_proj(
         )
 
     exact_ok = (
-        envs.VLLM_MIMO_EXACT_QKV
-        and per_chunk_scales
+        per_chunk_scales
         and tp_size < ckpt_tp
         and ckpt_tp % tp_size == 0
         and q_per_chunk % block == 0
@@ -723,7 +718,7 @@ def _shard_fp8_qkv_proj(
             torch.cat(ss),
         )
 
-    if envs.VLLM_MIMO_EXACT_QKV and kv_chunk_rows:
+    if kv_chunk_rows:
         raise ValueError(
             "the padded [Q | K V pad] gather requires per-chunk scales, tp_size "
             f"a proper divisor below ckpt_tp={ckpt_tp}, and whole-block Q rows; "
