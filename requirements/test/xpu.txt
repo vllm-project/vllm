@@ -748,7 +748,7 @@ psutil==7.2.2
     #   -r requirements/test/../common.txt
     #   accelerate
     #   tensorizer
-py-cpuinfo==9.0.0
+py-cpuinfo2 ~= 10.1
     # via -r requirements/test/../common.txt
 pyarrow==25.0.1
     # via

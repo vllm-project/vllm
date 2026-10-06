@@ -854,7 +854,7 @@ psutil==7.2.2
     #   tilelang
 py==1.11.0
     # via pytest-forked
-py-cpuinfo==9.0.0
+py-cpuinfo2 ~= 10.1
     # via -r requirements/test/../common.txt
 py-spy==0.4.1
     # via ray

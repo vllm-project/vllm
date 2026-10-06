@@ -785,7 +785,7 @@ psutil==6.1.0
     #   tensorizer
 py==1.11.0
     # via pytest-forked
-py-cpuinfo==9.0.0
+py-cpuinfo2 ~= 10.1
     # via -r requirements/test/../common.txt
 py-spy==0.4.0
     # via ray
