@@ -46,6 +46,7 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
         finished_req_ids=set(),
         ec_connector_output=None,
         cudagraph_stats=None,
+        num_spec_tokens_to_schedule=0,
     )
 
     runner.sample_tokens(None)
@@ -258,7 +259,9 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
+    )
     runner.cudagraph_manager = SimpleNamespace(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
