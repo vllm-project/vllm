@@ -48,6 +48,7 @@ WATERMARK_CONFIG_FIELDS = (
     "deduplicate_contexts",
     "deduplicate_contexts_max_history",
     "prf",
+    "depth",
     "allow_target_only_watermarking",
 )
 
@@ -185,7 +186,7 @@ def _create_synthid_detector(
 DETECTOR_FACTORIES = {
     "gumbel": _create_gumbel_detector,
     "dual_key_gumbel": _create_dual_key_gumbel_detector,
-    "synthid": _create_synthid_detector,
+    "synthid_text": _create_synthid_detector,
 }
 
 
@@ -205,6 +206,7 @@ class WatermarkingCandidate:
             raise ValueError(f"PRF {self.prf} does not define a version")
         scheme_config = {
             "context_width": self.scheme_config.context_width,
+            "depth": self.scheme_config.depth,
             "generation_alpha": self.scheme_config.generation_alpha,
             "detection_alpha": self.scheme_config.detection_alpha,
             "generation_deduplicate_contexts": (
@@ -218,8 +220,6 @@ class WatermarkingCandidate:
             ),
             "p_value_threshold": self.scheme_config.p_value_threshold,
         }
-        if self.scheme == "synthid":
-            scheme_config["depth"] = self.scheme_config.depth
         return {
             "scheme": self.scheme,
             "scheme_config": scheme_config,
@@ -243,9 +243,8 @@ class WatermarkingCandidate:
 
         An allowlist rather than the whole dataclass, so a new production field
         is a deliberate golden change: WATERMARK_CONFIG_FIELDS names the fields
-        recorded here and test_goldens.py checks it still covers
-        WatermarkConfig, apart from SynthID's depth. Keys exceed 2**53 and
-        are decimal strings.
+        frozen here and test_goldens.py checks it covers WatermarkConfig
+        apart from the secret key. Keys exceed 2**53 and are decimal strings.
         """
         config = self._watermark_config()
         detector = self._detector()
@@ -254,8 +253,6 @@ class WatermarkingCandidate:
         watermark_config = {
             field: getattr(config, field) for field in WATERMARK_CONFIG_FIELDS
         }
-        if self.scheme == "synthid":
-            watermark_config["depth"] = config.depth
         return {
             "watermark_config": watermark_config,
             "derived_keys": {
@@ -484,10 +481,12 @@ def _candidate(
 
 
 WATERMARKING_CANDIDATES = (
-    _candidate("synthid-philox-key42-cw4-depth4", "synthid", 42, prf="philox", depth=4),
+    _candidate(
+        "synthid-philox-key42-cw4-depth4", "synthid_text", 42, prf="philox", depth=4
+    ),
     _candidate(
         "synthid-philox-key42-cw4-depth4-wrong-key",
-        "synthid",
+        "synthid_text",
         42,
         prf="philox",
         depth=4,

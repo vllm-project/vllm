@@ -52,7 +52,7 @@ def test_golden_fixture_guards(goldens: dict[str, dict]):
 
 def test_resolved_records_every_watermark_config_field():
     assert {field.name for field in dataclasses.fields(WatermarkConfig)} == (
-        set(WATERMARK_CONFIG_FIELDS) | {"key", "depth"}
+        set(WATERMARK_CONFIG_FIELDS) | {"key"}
     )
 
 
