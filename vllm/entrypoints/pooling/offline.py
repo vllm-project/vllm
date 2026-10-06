@@ -476,7 +476,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                         if pbar.n == num_requests:
                             pbar.refresh()
 
-        except BaseException:
+        except Exception:
             if added_request_ids:
                 self.llm_engine.abort_request(list(added_request_ids))
             raise
