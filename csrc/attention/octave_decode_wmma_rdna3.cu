@@ -110,7 +110,10 @@ __device__ __forceinline__ float sign_of(const int* bits, int i) {
   return ((bits[i >> 5] >> (i & 31)) & 1) ? -1.0f : 1.0f;
 }
 
-template <int VB, bool KC, int NSB, typename QT>
+// SP: sparse mode. Row qi attends to the logical positions idx[qi, 0..topk)
+// (negative entries are skipped) instead of its first q_to_klen[qi] tokens,
+// and every row is its own segment since rows do not share positions.
+template <int VB, bool KC, int NSB, typename QT, bool SP>
 __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     const QT* __restrict__ Q, const uint8_t* __restrict__ cache,
     const int* __restrict__ block_table, const int* __restrict__ q_to_req,
@@ -119,7 +122,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     int num_kv_heads, int block_size, int max_blocks, int num_reqs,
     int num_phys_blocks, int num_splits, int min_tps, int num_row_tiles,
     int64_t sq0, int64_t sq1, int64_t scb, int64_t sch, int64_t sct,
-    int64_t smo, int64_t smh, int64_t sms) {
+    int64_t smo, int64_t smh, int64_t sms, const int* __restrict__ idx,
+    int64_t sidx, int topk) {
   #ifndef OCTAVE_WMMA_STUB
   using F = Format<VB, KC>;
   constexpr int NG = KC ? 1 : 4;  // QK tiles (one per K scale)
@@ -187,12 +191,12 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     int rq = -1, ln = 0;
     if (qi < num_q) {
       rq = q_to_req[qi];
-      ln = q_to_klen[qi];
+      ln = SP ? topk : q_to_klen[qi];
       if (rq < 0 || rq >= num_reqs) {
         rq = 0;
         ln = 0;
       }
-      ln = min(max(ln, 0), max_kv);
+      ln = min(max(ln, 0), SP ? topk : max_kv);
     }
     rreq[r] = __builtin_amdgcn_readfirstlane(rq);
     rlen[r] = __builtin_amdgcn_readfirstlane(ln);
@@ -226,7 +230,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
   int seg0 = 0;
   while (seg0 < QG && rreq[seg0] >= 0) {
     int seg1 = seg0 + 1;
-    while (seg1 < QG && rreq[seg1] == rreq[seg0]) ++seg1;
+    if constexpr (!SP)
+      while (seg1 < QG && rreq[seg1] == rreq[seg0]) ++seg1;
     const int req = rreq[seg0];
     int Lmax = 0;
     for (int r = seg0; r < seg1; ++r) Lmax = max(Lmax, rlen[r]);
@@ -276,6 +281,25 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
         return cache_h + (int64_t)pb * scb +
                (int64_t)(pos - lb * block_size) * sct;
       };
+      // Sparse mode: slot of the pos-th selected position of this row, and
+      // whether that position maps to a live cache slot. Dead entries read
+      // slot 0 of block 0 and are masked out of the softmax.
+      const int* irow = SP ? idx + (int64_t)(grp * QG + seg0) * sidx : nullptr;
+      auto sel_block = [&](int pos, int& off) {
+        const int t = irow[min(pos, topk - 1)];
+        const int lb = max(t, 0) / block_size;
+        off = max(t, 0) - lb * block_size;
+        const int pb = (t >= 0 && lb < max_blocks)
+                           ? ((cint*)block_table)[req * max_blocks + lb]
+                           : -1;
+        return (pb >= 0 && pb < num_phys_blocks) ? pb : -1;
+      };
+      auto sel_ptr = [&](int pos) {
+        int off;
+        const int pb = sel_block(pos, off);
+        return pb < 0 ? cache_h
+                      : cache_h + (int64_t)pb * scb + (int64_t)off * sct;
+      };
 
       // Raw K loads, one tile ahead. Each lane of a pair owns 8 of the 16
       // k-steps of token rr: NR4 4-bit steps (8 bytes of codes each), then
@@ -290,10 +314,10 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       // Scales of token j (lane j), raw fp16 pairs. Block K: {k0, k1},
       // {k2, k3}, {v}. Compact K: {k, v}.
       uint32_t sc_a = 0, sc_b = 0, sc_v = 0;
-      auto load_k = [&](const uint8_t* tile, float dep) {
+      auto load_k = [&](const uint8_t* tile, int base, float dep) {
         uint32_t off = (uint32_t)(rr * (int)sct);
         asm volatile("" : "+v"(off) : "v"(dep));
-        const uint8_t* pk = tile + off;
+        const uint8_t* pk = SP ? sel_ptr(base + rr) : tile + off;
         const int chunk0 = useful ? 0 : NR3;
         if constexpr (NR4 > 0) {
           const int rope0 = useful ? 0 : NR4;
@@ -309,7 +333,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
               *(const uint32_t*)(pk + F::OFF_KN + F::KN / 4 + 4 * (c >> 1)) >>
               (4 * (c & 1));
         }
-        const uint8_t* ps = tile + (int64_t)j * sct + F::OFF_SC;
+        const uint8_t* ps =
+            (SP ? sel_ptr(base + j) : tile + (int64_t)j * sct) + F::OFF_SC;
         if constexpr (KC) {
           sc_a = *(const uint32_t*)ps;
           sc_v = sc_a >> 16;
@@ -322,13 +347,15 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       };
       // Raw V loads: lane rr's 16 dims of the even (useful) or odd tokens.
       uint2 vraw[8];
-      auto load_v = [&](const uint8_t* tile, float dep) {
+      auto load_v = [&](const uint8_t* tile, int base, float dep) {
         uint32_t off = (uint32_t)((useful ? 0 : 1) * (int)sct);
         asm volatile("" : "+v"(off) : "v"(dep));
         const uint8_t* pv = tile + off + F::OFF_V;
     #pragma unroll
         for (int i = 0; i < 8; ++i) {
-          const uint8_t* p = pv + (int64_t)(2 * i) * sct;
+          const uint8_t* p =
+              SP ? sel_ptr(base + 2 * i + (useful ? 0 : 1)) + F::OFF_V
+                 : pv + (int64_t)(2 * i) * sct;
           if constexpr (VB == 4) {
             vraw[i] = *(const uint2*)(p + 8 * rr);
           } else {
@@ -353,9 +380,9 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       };
 
       if (start < end) {
-        const uint8_t* t0 = tile_ptr(start);
-        load_k(t0, 0.f);
-        load_v(t0, 0.f);
+        const uint8_t* t0 = SP ? nullptr : tile_ptr(start);
+        load_k(t0, start, 0.f);
+        load_v(t0, start, 0.f);
       }
 
       for (int base = start; base < end; base += 16) {
@@ -407,15 +434,19 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
 
         // Next tile's K and scales now: softmax and PV hide them.
         const bool next = base + 16 < end;
-        const uint8_t* tn = next ? tile_ptr(base + 16) : nullptr;
-        if (next) load_k(tn, S[0][0]);
+        const uint8_t* tn = next && !SP ? tile_ptr(base + 16) : nullptr;
+        if (next) load_k(tn, base + 16, S[0][0]);
 
         float sc[8];
         float mloc = -INFINITY;
     #pragma unroll
         for (int e = 0; e < 8; ++e) {
           const int t = base + 2 * e + h;
-          const bool ok = t < end && t < qlen;
+          bool ok = t < end && t < qlen;
+          if constexpr (SP) {
+            int off;
+            ok = ok && sel_block(t, off) >= 0;
+          }
           const uint32_t a = pickw(sa_c, 2 * e);
           float v;
           if constexpr (KC) {
@@ -494,7 +525,7 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
           }
         }
         // Next tile's V, issued after the last PV WMMA.
-        if (next) load_v(tn, O[15][0]);
+        if (next) load_v(tn, base + 16, O[15][0]);
       }
 
       l += xhalf(l);
@@ -541,11 +572,14 @@ constexpr int kSqWmmaNsb = 2;
 // Launches the WMMA decode when the shape is covered; returns the number of
 // splits it wrote (for the reduce), or 0 when the caller must use its own
 // kernel.
+// With `indices` ([num_q, topk] int32 logical positions) the sparse variant
+// runs and q_to_klen is ignored.
 int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        torch::Tensor block_table, torch::Tensor q_to_req,
                        torch::Tensor q_to_klen, torch::Tensor mid_o,
                        torch::Tensor k_signs, double sm_scale,
-                       int64_t num_kv_splits, int64_t fmt) {
+                       int64_t num_kv_splits, int64_t fmt,
+                       const std::optional<torch::Tensor>& indices) {
   using namespace octave_wmma;
   static const bool arch_ok = [] {
     const auto* prop = at::cuda::getCurrentDeviceProperties();
@@ -564,11 +598,15 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
   const int ns = std::min<int>(kSqWmmaSplits, (int)num_kv_splits);
   if (num_q == 0) return ns;
   auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const bool sp = indices.has_value();
+  const int* idx = sp ? indices->data_ptr<int>() : nullptr;
+  const int64_t sidx = sp ? indices->stride(0) : 0;
+  const int topk = sp ? (int)indices->size(1) : 0;
   const int nrt = std::min(num_q, QG) * hpk > 16 ? 2 : 1;
   const int spb = 2 * kSqWmmaNsb / nrt;
   dim3 grid((num_q + QG - 1) / QG, num_kv_heads, (ns + spb - 1) / spb);
-  #define SQW(B, KC, T)                                                        \
-    decode_wmma<B, KC, kSqWmmaNsb, T><<<grid, 64 * kSqWmmaNsb, 0, stream>>>(   \
+  #define SQW_SP(B, KC, T, SP)                                                 \
+    decode_wmma<B, KC, kSqWmmaNsb, T, SP><<<grid, 64 * kSqWmmaNsb, 0, stream>>>(\
         (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),          \
         block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),                 \
         q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),                    \
@@ -576,7 +614,14 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
         num_kv_heads, cache.size(2), block_table.size(1), block_table.size(0), \
         cache.size(0), ns, kSqWmmaMinTps, nrt, query.stride(0),                \
         query.stride(1), cache.stride(0), cache.stride(1), cache.stride(2),    \
-        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2))
+        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2), idx, sidx, topk)
+  #define SQW(B, KC, T)          \
+    do {                         \
+      if (sp)                    \
+        SQW_SP(B, KC, T, true);  \
+      else                       \
+        SQW_SP(B, KC, T, false); \
+    } while (0)
   const bool bf = query.dtype() == at::kBFloat16;
   if (fmt == 4) {
     if (bf)
@@ -595,6 +640,7 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
       SQW(3, true, half);
   }
   #undef SQW
+  #undef SQW_SP
   return ns;
 }
 

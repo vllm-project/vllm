@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -45,10 +45,16 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
 )
+from vllm.v1.attention.ops import rocm_octave
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
     get_kv_quant_mode,
+)
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
 )
 
 from ..common.qsa_cache import QSAForwardMetadata
@@ -56,17 +62,65 @@ from . import model
 from .indexer_qsa import QSAIndexer
 
 
+def _octave_mid_o_capacity(vllm_config: VllmConfig) -> int:
+    """Query rows times splits the Octave split-KV partials hold: every split
+    up to the cudagraph capture size, and one split per row of a full chunk."""
+    capture = vllm_config.compilation_config.max_cudagraph_capture_size or 4
+    return max(
+        capture * vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph,
+        vllm_config.scheduler_config.max_num_batched_tokens,
+    )
+
+
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
     """Flash metadata supporting uniform decode and target-verify graphs."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # Layers run one after another, so they share one set of Octave
+        # split-KV partials; reserve it before the workspace is locked.
+        if kv_cache_spec.kv_quant_mode.is_octave and is_workspace_manager_initialized():
+            num_heads = vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            )
+            numel = (
+                _octave_mid_o_capacity(vllm_config)
+                * num_heads
+                * (kv_cache_spec.head_size + 2)
+            )
+            current_workspace_manager().get_simultaneous(((numel,), torch.float32))
+
+
+_OCTAVE_CACHE_DTYPES = ("octave_k3v4", "octave_k3v3", "octave_k3v3_compact")
+_QSA_CACHE_DTYPES = ("auto", "bfloat16", *_OCTAVE_CACHE_DTYPES)
+
 
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
-    """FullAttentionSpec backend used by the merged QSA owner."""
+    """FullAttentionSpec backend used by the merged QSA owner.
+
+    With an Octave ``kv_cache_dtype`` the main K/V cache holds one packed
+    Octave slot per (token, KV head) and sparse attention runs the Octave
+    sparse decode kernel over the selected positions.
+    """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = list(_QSA_CACHE_DTYPES)
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        from vllm.v1.attention.backends.rocm_octave_attn import (
+            RocmOctaveAttentionBackend,
+        )
+
+        return RocmOctaveAttentionBackend.customize_spec(spec)
 
     @staticmethod
     def get_name() -> str:
@@ -108,9 +162,79 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError(
                 "Qwen4Exp QSA does not support decode context parallelism"
             )
-        if self.kv_cache_dtype not in ("auto", "bfloat16"):
-            raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
+        if self.kv_cache_dtype not in _QSA_CACHE_DTYPES:
+            raise NotImplementedError(
+                "Qwen4Exp QSA requires a BF16 or Octave main KV cache"
+            )
         self.supports_quant_query_input = False
+        self.octave_fmt: rocm_octave.OctaveFormat | None = None
+        if self.kv_cache_dtype in _OCTAVE_CACHE_DTYPES:
+            self.octave_fmt = rocm_octave.OctaveFormat.from_cache_dtype(
+                self.kv_cache_dtype,
+                self.head_size,
+                rocm_octave.registered_rope_dim(self.head_size),
+            )
+            self._octave_signs: torch.Tensor | None = None
+            self._octave_mid_o: torch.Tensor | None = None
+            vllm_config = get_current_vllm_config()
+            self._octave_splits = (
+                vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+            )
+            self._octave_capacity = _octave_mid_o_capacity(vllm_config)
+
+    def _octave_buffers(
+        self, num_q: int, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Sign bits and split-KV partials, from the workspace every layer
+        shares (without one, a buffer allocated once, since captured graphs
+        hold its address). Larger batches use fewer splits so they fit."""
+        if self._octave_signs is None or self._octave_signs.device != device:
+            self._octave_signs = rocm_octave.sign_bits(self.head_size).to(device)
+        capacity = self._octave_capacity
+        splits = max(1, min(self._octave_splits, capacity // max(num_q, 1)))
+        row = self.head_size + 2
+        numel = capacity * self.num_heads * row
+        if is_workspace_manager_initialized():
+            (buf,) = current_workspace_manager().get_simultaneous(
+                ((numel,), torch.float32)
+            )
+        else:
+            if self._octave_mid_o is None:
+                self._octave_mid_o = torch.empty(
+                    numel, dtype=torch.float32, device=device
+                )
+            buf = self._octave_mid_o
+        mid_o = buf[: num_q * self.num_heads * splits * row]
+        return (
+            self._octave_signs,
+            mid_o.view(num_q, self.num_heads, splits, row),
+            splits,
+        )
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.octave_fmt is None:
+            super().do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
+            return
+        n = slot_mapping.shape[0]
+        if n == 0:
+            return
+        signs, _, _ = self._octave_buffers(1, key.device)
+        torch.ops._C.octave_cache_store(
+            key[:n],
+            value[:n],
+            kv_cache,
+            slot_mapping,
+            signs,
+            signs,
+            self.octave_fmt.kernel_code,
+        )
 
     def forward_qsa(
         self,
@@ -143,6 +267,23 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise RuntimeError("QSA owner did not provide its top-k buffer")
         logical_indices = topk_buffer[:num_tokens]
         token_to_req = token_to_req[:num_tokens]
+        if self.octave_fmt is not None:
+            signs, mid_o, splits = self._octave_buffers(num_tokens, query.device)
+            torch.ops._C.octave_decode_sparse(
+                output[:num_tokens],
+                query[:num_tokens],
+                kv_cache,
+                attn_metadata.block_table,
+                token_to_req,
+                logical_indices,
+                mid_o,
+                signs,
+                signs,
+                self.scale,
+                splits,
+                self.octave_fmt.kernel_code,
+            )
+            return output
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
@@ -185,8 +326,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             raise ValueError("Qwen4Exp QSA requires a paged KV cache")
         if model_config.dtype != torch.bfloat16:
             raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
-        if cache_config.cache_dtype not in ("auto", "bfloat16"):
-            raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
+        if cache_config.cache_dtype not in _QSA_CACHE_DTYPES:
+            raise NotImplementedError(
+                "Qwen4Exp QSA requires a BF16 or Octave main KV cache"
+            )
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         parallel_config = vllm_config.parallel_config
@@ -267,7 +410,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
-        if self.kv_cache_torch_dtype != torch.bfloat16:
+        if (
+            self.kv_cache_dtype not in _OCTAVE_CACHE_DTYPES
+            and self.kv_cache_torch_dtype != torch.bfloat16
+        ):
             raise NotImplementedError("Qwen4Exp QSA requires BF16 cache storage")
         self.kv_sharing_target_layer_name = None
         self.kv_cache = torch.tensor([])

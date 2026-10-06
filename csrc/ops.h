@@ -66,6 +66,13 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
                    double sm_scale, int64_t num_kv_splits, int64_t fmt,
                    int64_t query_group, bool use_wmma);
 
+void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
+                          torch::Tensor cache, torch::Tensor block_table,
+                          torch::Tensor q_to_req, torch::Tensor indices,
+                          torch::Tensor mid_o, torch::Tensor k_signs,
+                          torch::Tensor v_signs, double sm_scale,
+                          int64_t num_kv_splits, int64_t fmt);
+
 void octave_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
                    bool inverse);
 

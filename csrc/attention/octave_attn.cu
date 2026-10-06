@@ -803,7 +803,24 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        torch::Tensor block_table, torch::Tensor q_to_req,
                        torch::Tensor q_to_klen, torch::Tensor mid_o,
                        torch::Tensor k_signs, double sm_scale,
-                       int64_t num_kv_splits, int64_t fmt);
+                       int64_t num_kv_splits, int64_t fmt,
+                       const std::optional<torch::Tensor>& indices);
+
+static void launch_reduce(torch::Tensor out, torch::Tensor mid_o,
+                          torch::Tensor v_signs, int num_splits,
+                          cudaStream_t stream) {
+  dim3 grid(out.size(0), out.size(1));
+  if (out.dtype() == at::kBFloat16)
+    reduce_kernel<__hip_bfloat16><<<grid, 256, 0, stream>>>(
+        mid_o.data_ptr<float>(), (__hip_bfloat16*)out.data_ptr(),
+        v_signs.data_ptr<int>(), num_splits, mid_o.stride(0), mid_o.stride(1),
+        mid_o.stride(2), out.stride(0), out.stride(1));
+  else
+    reduce_kernel<half><<<grid, 256, 0, stream>>>(
+        mid_o.data_ptr<float>(), (half*)out.data_ptr(), v_signs.data_ptr<int>(),
+        num_splits, mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
+        out.stride(0), out.stride(1));
+}
 
 void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
                    torch::Tensor block_table, torch::Tensor q_to_req,
@@ -831,7 +848,8 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
   const int wmma_splits =
       use_wmma
           ? octave_decode_wmma(query, cache, block_table, q_to_req, q_to_klen,
-                               mid_o, k_signs, sm_scale, num_kv_splits, fmt)
+                               mid_o, k_signs, sm_scale, num_kv_splits, fmt,
+                               std::nullopt)
           : 0;
   if (wmma_splits > 0) {
     ns = wmma_splits;
@@ -853,17 +871,35 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
     }
   #undef SQ_DISPATCH
   }
-  dim3 grid2(num_q, hq);
-  if (bf)
-    reduce_kernel<__hip_bfloat16><<<grid2, 256, 0, stream>>>(
-        mid_o.data_ptr<float>(), (__hip_bfloat16*)out.data_ptr(),
-        v_signs.data_ptr<int>(), ns, mid_o.stride(0), mid_o.stride(1),
-        mid_o.stride(2), out.stride(0), out.stride(1));
-  else
-    reduce_kernel<half><<<grid2, 256, 0, stream>>>(
-        mid_o.data_ptr<float>(), (half*)out.data_ptr(), v_signs.data_ptr<int>(),
-        ns, mid_o.stride(0), mid_o.stride(1), mid_o.stride(2), out.stride(0),
-        out.stride(1));
+  launch_reduce(out, mid_o, v_signs, ns, stream);
+}
+
+// Sparse decode: query row i attends to the logical positions indices[i, :]
+// of request q_to_req[i] (negative entries are skipped). WMMA tier only.
+void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
+                          torch::Tensor cache, torch::Tensor block_table,
+                          torch::Tensor q_to_req, torch::Tensor indices,
+                          torch::Tensor mid_o, torch::Tensor k_signs,
+                          torch::Tensor v_signs, double sm_scale,
+                          int64_t num_kv_splits, int64_t fmt) {
+  const int num_q = query.size(0);
+  if (num_q == 0) return;
+  check_cache(cache, fmt);
+  TORCH_CHECK(query.size(2) == D && query.stride(2) == 1);
+  TORCH_CHECK(out.dtype() == query.dtype());
+  TORCH_CHECK(indices.dim() == 2 && indices.size(0) >= num_q &&
+              indices.stride(1) == 1 && indices.dtype() == at::kInt);
+  TORCH_CHECK(mid_o.size(2) >= num_kv_splits && mid_o.size(3) >= D + 2);
+  TORCH_CHECK(num_kv_splits <= 1024 && mid_o.stride(3) == 1);
+  const at::cuda::OptionalCUDAGuard guard(device_of(query));
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const int ns =
+      octave_decode_wmma(query, cache, block_table, q_to_req, q_to_req, mid_o,
+                         k_signs, sm_scale, num_kv_splits, fmt, indices);
+  TORCH_CHECK(ns > 0,
+              "octave_decode_sparse: needs the WMMA tier (gfx11, head size "
+              "256, GQA group <= 8)");
+  launch_reduce(out, mid_o, v_signs, ns, stream);
 }
 
 void octave_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
@@ -892,6 +928,12 @@ void octave_cache_store(torch::Tensor, torch::Tensor, torch::Tensor,
 void octave_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                    torch::Tensor, double, int64_t, int64_t, int64_t, bool) {
+  TORCH_CHECK(false, "octave requires ROCm");
+}
+void octave_decode_sparse(torch::Tensor, torch::Tensor, torch::Tensor,
+                          torch::Tensor, torch::Tensor, torch::Tensor,
+                          torch::Tensor, torch::Tensor, torch::Tensor, double,
+                          int64_t, int64_t) {
   TORCH_CHECK(false, "octave requires ROCm");
 }
 void octave_rotate(torch::Tensor, torch::Tensor, bool, bool) {
