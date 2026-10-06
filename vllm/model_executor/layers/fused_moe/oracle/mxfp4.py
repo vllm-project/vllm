@@ -8,7 +8,11 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.config import get_current_vllm_config
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import (
+    FLASHINFER_MOE_EP_CUTEDSL,
+    FLASHINFER_MOE_EP_DEEP_GEMM,
+    MoEBackend,
+)
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -145,6 +149,9 @@ class Mxfp4MoeBackend(Enum):
     EMULATION = "EMULATION"
     # Humming
     HUMMING = "HUMMING"
+    # FlashInfer MoE-EP megakernels: routing outside, dispatch/GEMMs/combine fused.
+    FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
+    FLASHINFER_MOE_EP_DEEP_GEMM = "FLASHINFER_MOE_EP_DEEP_GEMM"
 
 
 # Backends that share the same TRTLLM weight format
@@ -163,6 +170,13 @@ TRITON_BACKENDS = (
 B12X_BACKENDS = (
     Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
     Mxfp4MoeBackend.B12X_MXFP4_BF16,
+)
+
+# Megakernels consume the checkpoint's MXFP4 tensors through the shared
+# FlashInfer MoE-EP adapter; vLLM does not convert their weight layout.
+FLASHINFER_MOE_EP_MXFP4_BACKENDS = (
+    Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
+    Mxfp4MoeBackend.FLASHINFER_MOE_EP_DEEP_GEMM,
 )
 
 
@@ -291,6 +305,13 @@ def backend_to_kernel_cls(
 
         return [OCP_MXQuantizationEmulationTritonExperts]
 
+    elif backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (  # noqa: E501
+            FlashInferMoeEpExperts,
+        )
+
+        return [FlashInferMoeEpExperts]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -314,6 +335,10 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
             Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         ],
         "flashinfer_cutlass_afp8": [Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8],
+        "flashinfer_moe_ep_cutedsl": [Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL],
+        "flashinfer_moe_ep_mega_deep_gemm": [
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_DEEP_GEMM
+        ],
         "triton": [Mxfp4MoeBackend.TRITON],
         "triton_unfused": [Mxfp4MoeBackend.TRITON_UNFUSED],
         "humming": [Mxfp4MoeBackend.HUMMING],
@@ -735,6 +760,9 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     activation: MoEActivation | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
+    if backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
+        # The megakernel takes the model's dimensions and validates them itself.
+        return hidden_size, intermediate_size
     if backend in B12X_BACKENDS:
         # b12x plans for the exact model dimensions. B12xExperts validates the
         # required MXFP4 block alignment before selecting the backend.
@@ -1382,6 +1410,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
+    use_separated_a4w4: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1596,8 +1625,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
             fp4_dtype = torch.float4_e2m1fn_x2
             e8m0_dtype = torch.float8_e8m0fnu
-            # SiTUv2 flydsl uses separated gate/up layout (a4w4).
-            guinterleave = False
+            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
             w13 = rocm_aiter_ops.shuffle_weight_a16w4(
                 w13_weight.data.view(fp4_dtype), 16, guinterleave
             )
@@ -1627,10 +1655,16 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
+        # DeepSeek V4.1 a4w4 uses ATOM's SEPARATED gate/up layout instead of
+        # the default INTERLEAVE shuffle (INTERLEAVE + fp4x2 has no tuned
+        # kernel and produces garbage output). Must match GateMode.SEPARATED
+        # in rocm_aiter_moe.py.
+        is_guinterleave = not use_separated_a4w4
+
         w13_weight = torch.nn.Parameter(
             _shuf_w(
                 w13_weight.data.view(torch.float4_e2m1fn_x2),
-                is_guinterleave=True,
+                is_guinterleave=is_guinterleave,
                 gate_up=True,
             ),
             requires_grad=False,
@@ -1638,14 +1672,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         shuffled_w13_scale = _shuf_s(
             w13_weight_scale.reshape(-1, w13_weight_scale.shape[-1]),
             num_experts,
-            True,
+            is_guinterleave,
             True,
         )
 
         w2_weight = torch.nn.Parameter(
             _shuf_w(
                 w2_weight.data.view(torch.float4_e2m1fn_x2),
-                is_guinterleave=True,
+                is_guinterleave=is_guinterleave,
                 gate_up=False,
             ),
             requires_grad=False,
@@ -1654,7 +1688,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         shuffled_w2_scale = _shuf_s(
             w2_weight_scale.reshape(-1, w2_weight_scale.shape[-1]),
             num_experts,
-            True,
+            is_guinterleave,
             False,
         )
 
@@ -1821,6 +1855,29 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias=w2_bias,
             _cache_permute_indices=_cache_permute_indices,
         )
+    elif mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
+        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+            mxfp4_moe_ep_weights,
+        )
+
+        # DeepGEMM consumes MXFP4 directly; CuTeDSL gets bf16 and requantizes.
+        weights = mxfp4_moe_ep_weights(
+            FLASHINFER_MOE_EP_CUTEDSL
+            if mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL
+            else FLASHINFER_MOE_EP_DEEP_GEMM,
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+        )
+        return (
+            weights.w13,
+            weights.w2,
+            weights.w13_scale,
+            weights.w2_scale,
+            w13_bias,
+            w2_bias,
+        )
     elif mxfp4_backend == Mxfp4MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_mxfp4_moe_layer_for_cpu,
@@ -1868,6 +1925,9 @@ def make_mxfp4_moe_quant_config(
     layer: "RoutedExperts | None" = None,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
+    if mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
+        # The megakernel quantizes activations itself and owns its scales.
+        return FusedMoEQuantConfig.make("nvfp4", weight_dtype="mxfp4")
     if mxfp4_backend == Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
         return mxfp4_mxfp8_moe_quant_config(
             w1_bias=w1_bias,

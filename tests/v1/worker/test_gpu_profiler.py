@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -98,7 +99,14 @@ def test_torch_profiler_rebuilds_one_shot_profiler_each_round(tmp_path):
 
 
 def test_torch_profiler_records_each_profile_round(tmp_path):
-    traces: list[torch.profiler.profile] = []
+    trace_paths: list[str] = []
+
+    def export_trace(prof: torch.profiler.profile) -> None:
+        # Export as each round stops instead of parsing every round at the end.
+        path = str(tmp_path / f"round_{len(trace_paths)}.json")
+        prof.export_chrome_trace(path)
+        trace_paths.append(path)
+
     wrapper = TorchProfilerWrapper(
         ProfilerConfig(
             profiler="torch",
@@ -108,7 +116,7 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
         worker_name="worker",
         local_rank=1,
         activities=["CPU"],
-        on_trace_ready=traces.append,
+        on_trace_ready=export_trace,
     )
 
     for run in range(2):
@@ -117,10 +125,16 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
             pass
         wrapper.stop()
 
-    assert len(traces) == 2
-    for run, trace in enumerate(traces):
+    assert len(trace_paths) == 2
+    for run, path in enumerate(trace_paths):
+        # The CPU profiler records every thread in the process, and an event
+        # name from elsewhere in a long session can hold invalid UTF-8.
+        with open(path, encoding="utf-8", errors="replace") as f:
+            events = json.load(f)["traceEvents"]
         assert {
-            event.name for event in trace.events() if event.name.startswith("run_")
+            event["name"]
+            for event in events
+            if event.get("name", "").startswith("run_")
         } == {f"run_{run}"}
 
 
@@ -609,6 +623,15 @@ def make_proton_wrapper(
 _requires_cuda_for_proton = pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="Proton profiling tests require an NVIDIA CUDA platform.",
+)
+
+# Proton subscribes to CUPTI itself, and a process gets one CUPTI subscriber.
+# CI's kernel-launch recorder is another, injected through CUDA_INJECTION64_PATH
+# on recording runs, and there Proton's cuptiSubscribe fails with error 39.
+_requires_no_injected_cupti_tool = pytest.mark.skipif(
+    bool(os.environ.get("CUDA_INJECTION64_PATH")),
+    reason="Another CUPTI tool is injected (CUDA_INJECTION64_PATH); "
+    "Proton has to be the only one.",
 )
 
 
@@ -1176,6 +1199,7 @@ def test_proton_initializes_before_cuda_graph_capture():
 
 
 @_requires_cuda_for_proton
+@_requires_no_injected_cupti_tool
 @pytest.mark.parametrize("context", ["shadow", "python"])
 @pytest.mark.parametrize("output_format", ["hatchet", "hatchet_msgpack"])
 def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_format):

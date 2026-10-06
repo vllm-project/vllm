@@ -354,6 +354,7 @@ class RustFrontendProcessManager:
         engine_count: int,
         data_parallel_size: int,
         stats_update_address: str | None = None,
+        grpc_sock: Any | None = None,
     ):
         import os
         import subprocess
@@ -377,6 +378,12 @@ class RustFrontendProcessManager:
             "--data-parallel-size",
             str(data_parallel_size),
         ]
+        pass_fds = [fd]
+        if grpc_sock is not None:
+            grpc_fd = grpc_sock.fileno()
+            os.set_inheritable(grpc_fd, True)
+            cmd.extend(["--grpc-listen-fd", str(grpc_fd)])
+            pass_fds.append(grpc_fd)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
@@ -391,6 +398,16 @@ class RustFrontendProcessManager:
                 "data_parallel_hybrid_lb",
             },
         )
+
+        # `model_tag` is the positional `vllm serve` model argument. When the
+        # model is supplied only through `--config`, argparse populates `model`
+        # while leaving `model_tag` unset. The Rust frontend requires
+        # `model_tag` in its JSON bootstrap payload, so use the resolved model
+        # as a fallback.
+        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+        if model_tag is not None:
+            args_dict["model_tag"] = model_tag
+
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
         # declarations on SharedRuntimeArgs fields. Forward the env-driven
@@ -408,7 +425,7 @@ class RustFrontendProcessManager:
 
         redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
-        self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
+        self._proc = subprocess.Popen(cmd, pass_fds=pass_fds)
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [
@@ -520,12 +537,17 @@ def run_api_server_worker_proc(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Entrypoint for individual API server worker processes."""
+    if logging_config := getattr(args, "logging_config", None):
+        from vllm.logger import configure_logging
+
+        configure_logging(logging_config)
+
     from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
 
-    # Set process title and add process-specific prefix to stdout and stderr.
+    # Set process title and process-specific log metadata.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 
