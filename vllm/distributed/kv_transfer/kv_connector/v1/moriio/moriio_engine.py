@@ -237,28 +237,18 @@ class MoRIIOWriter:
                         task.request_id,
                     )
                     self._mark_request_done(task.transfer_id)
-            elif now - task.enqueue_time > defer_timeout:
-                if not self._fail_deferred_task(task, now - task.enqueue_time):
-                    still_deferred.append(task)
+            elif (
+                now - task.enqueue_time > defer_timeout
+                and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
+            ):
+                self._notify_write_failed(task, now - task.enqueue_time)
             else:
                 still_deferred.append(task)
 
         self._deferred_tasks = still_deferred
 
-    def _fail_deferred_task(self, task: WriteTask, age: float) -> bool:
-        """Fail a write before its source blocks are released."""
-        wrapper = self.worker.moriio_wrapper
-        with wrapper.lock:
-            if wrapper._is_transfer_terminal_locked(task.transfer_id):
-                return True
-            # The allocation can arrive between the ready check and this lock.
-            # Let the writer execute it on the next pass instead of racing a
-            # write_failed notification against write_done.
-            if task.transfer_id in wrapper.done_remote_allocate_req_dict:
-                return False
-            wrapper._mark_transfer_terminal_locked(task.transfer_id)
+    def _notify_write_failed(self, task: WriteTask, age: float) -> None:
         self._clear_transfer_state(task.transfer_id)
-
         logger.error(
             "Deferred write task for request %s timed out after %.1fs waiting "
             "for remote blocks",
@@ -270,7 +260,7 @@ class MoRIIOWriter:
         for decode_dp_rank in range(max(task.remote_dp_size, 1)):
             remote_ip, remote_port = self._resolve_notify_endpoint(task, decode_dp_rank)
             try:
-                wrapper.send_notify(
+                self.worker.moriio_wrapper.send_notify(
                     task.transfer_id,
                     remote_ip,
                     remote_port,
@@ -282,12 +272,6 @@ class MoRIIOWriter:
                     decode_dp_rank,
                     task.transfer_id,
                 )
-
-        # The transfer is terminal, so no write can target these blocks anymore
-        # and they are safe to release even if a notification failed.
-        with wrapper.lock:
-            wrapper.done_req_ids.append(MoRIIOTransferAck(task.transfer_id))
-        return True
 
     def _clear_transfer_state(self, transfer_id: TransferId) -> None:
         with self._write_state_lock:
@@ -905,6 +889,23 @@ class MoRIIOWrapper:
             self.done_req_ids.append(MoRIIOTransferAck(transfer_id, consumer_tp_size))
             self.done_remote_allocate_req_dict.pop(transfer_id, None)
             self._mark_transfer_terminal_locked(transfer_id)
+
+    def fail_unallocated_write(self, transfer_id: TransferId) -> bool:
+        """Mark a WRITE transfer terminal and release its source blocks if
+        decode never sent its allocation.
+
+        Returns False if the transfer is already terminal or the allocation
+        has arrived; the writer then drops or executes the task as usual.
+        """
+        with self.lock:
+            if (
+                self._is_transfer_terminal_locked(transfer_id)
+                or transfer_id in self.done_remote_allocate_req_dict
+            ):
+                return False
+            self._mark_transfer_terminal_locked(transfer_id)
+            self.done_req_ids.append(MoRIIOTransferAck(transfer_id))
+            return True
 
     def _handle_completion_message(self, msg: str):
         with self.lock:

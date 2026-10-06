@@ -1111,7 +1111,14 @@ class MoRIIOConnectorScheduler:
                     _should_notify = self._global_dp_rank == remote_dp_rank
                 else:
                     _should_notify = self._is_kv_master
-                if _should_notify:
+                if _should_notify and num_external_tokens == 0:
+                    # Nothing left to fetch (full local prefix hit), so release
+                    # the producer's blocks instead of sending an empty
+                    # allocation, which it rejects.
+                    self._release_write_prefill_blocks(
+                        request.request_id, request.kv_transfer_params
+                    )
+                elif _should_notify:
                     peer_zmq = get_peer_zmq_from_request_id(
                         request.request_id, is_producer=False
                     )
@@ -1157,26 +1164,18 @@ class MoRIIOConnectorScheduler:
                         _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
-                    transfer_id = request.kv_transfer_params["transfer_id"]
                     for tp_index in range(self.tp_size):
                         target_port = remote_notify_port + get_port_offset(
                             _remote_dp_rank_for_port, tp_index
                         )
-                        if num_external_tokens > 0:
-                            self.send_notify_block(
-                                req_id=request.request_id,
-                                transfer_id=transfer_id,
-                                block_notify_list=blocks.get_block_ids()[0],
-                                host=_notify_host,
-                                port=target_port,
-                            )
-                        else:
-                            # Nothing left to fetch (full local prefix hit), so
-                            # release the producer's blocks instead of sending
-                            # an empty allocation, which it rejects.
-                            self._send_transfer_release(
-                                transfer_id, _notify_host, target_port
-                            )
+
+                        self.send_notify_block(
+                            req_id=request.request_id,
+                            transfer_id=request.kv_transfer_params["transfer_id"],
+                            block_notify_list=blocks.get_block_ids()[0],
+                            host=_notify_host,
+                            port=target_port,
+                        )
 
             # Only trigger 1 KV transfer per request.
 
@@ -1502,18 +1501,12 @@ class MoRIIOConnectorScheduler:
             if req_id in self._deferred_send_deadlines:
                 safe.add(req_id)
 
-        # WRITE blocks must only be released after the worker marks the transfer
-        # terminal. Its timeout path sends the consumer failure and then ACKs.
-        # READ has no deferred worker task, so retain its scheduler watchdog.
-        expired = (
-            [
-                req_id
-                for req_id, (deadline, _) in self._deferred_send_deadlines.items()
-                if now >= deadline
-            ]
-            if self.mode == MoRIIOMode.READ
-            else []
-        )
+        # Reap deferred sends whose ACK never arrived (avoid leaking blocks).
+        expired = [
+            req_id
+            for req_id, (deadline, _) in self._deferred_send_deadlines.items()
+            if self.mode == MoRIIOMode.READ and now >= deadline
+        ]
         if expired:
             safe.update(expired)
             logger.warning(
@@ -2680,8 +2673,7 @@ class MoRIIOConnectorWorker:
             mapping = self.transfer_id_to_request_id
             for transfer_id in self.moriio_wrapper.pop_failed_write_req_ids():
                 pending[transfer_id] = None
-            smaller = pending if len(pending) <= len(mapping) else mapping
-            for transfer_id in [t for t in smaller if t in pending and t in mapping]:
+            for transfer_id in [t for t in pending if t in mapping]:
                 del pending[transfer_id]
                 failed_recving.add(mapping[transfer_id])
             while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
