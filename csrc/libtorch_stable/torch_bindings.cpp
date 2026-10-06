@@ -115,6 +115,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor? bias) -> ()");
 
+  ops.def(
+      "cutlass_scaled_mm_sm120_n64(Tensor! out, Tensor a, Tensor b, "
+      "Tensor a_scales, Tensor b_scales) -> ()");
+  // The implementation is registered by the SM120 compilation unit.
+
   // CUTLASS w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
   ops.def(
