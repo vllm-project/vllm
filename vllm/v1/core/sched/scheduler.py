@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -37,6 +38,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_priority import apply_g1_priority
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
@@ -60,6 +62,8 @@ from vllm.v1.kv_cache_interface import (
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
+from vllm.v1.kv_hints.actions import SetPriority
+from vllm.v1.kv_hints.dispatch import KvHintDispatcher
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     KV_FETCH_COMPLETED_WAITING,
@@ -333,6 +337,14 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+        )
+        self.kv_hint_dispatcher = KvHintDispatcher()
+        self.kv_hint_dispatcher.register(
+            "vllm.set_priority",
+            "1.0",
+            SetPriority,
+            partial(apply_g1_priority, self.kv_cache_manager),
+            when="successful_completion",
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
@@ -2594,6 +2606,8 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if request.kv_hints is not None:
+                self.kv_hint_dispatcher.dispatch(request)
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
@@ -2681,6 +2695,12 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+
+        self.kv_hint_dispatcher.finish(
+            request,
+            successful=request.status
+            in (RequestStatus.FINISHED_STOPPED, RequestStatus.FINISHED_LENGTH_CAPPED),
+        )
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
