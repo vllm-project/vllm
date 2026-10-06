@@ -1,5 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Portions adapted from ROCm/aiter (https://github.com/ROCm/aiter/pull/5750):
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 """MXFP8 GEMM on 32x32 block-scaled weights for gfx950 (``tl.dot_scaled``).
 
 ``y = x @ w.T`` with an MXFP8 activation (e4m3 values, one E8M0 scale per
@@ -18,6 +40,10 @@ Two kernels, picked per shape from a table tuned on MI355X:
 Either can split K. The partials are normally summed in the same launch by
 the last program of each output tile to finish, in split order, so the result
 does not depend on scheduling. Otherwise a second launch reduces them.
+
+The packed kernel and the in-launch split-K reduction on one XCD
+(``_split_tile``, ``_sum_splits``, ``_split_counters``, ``_k_partition``) are
+adapted from the group32 GEMM in ROCm/aiter#5750.
 """
 
 from typing import NamedTuple
@@ -119,16 +145,16 @@ def _block32_tiled_kernel(
     for kk in range(0, K_PER_SPLIT, BLOCK_K):
         if EVEN_K:
             x = tl.load(x_ptrs, mask=m_mask[:, None], other=0.0)
-            xs = tl.load(xs_ptrs, mask=m_mask[:, None], other=127)
+            xs = tl.load(xs_ptrs, mask=m_mask[:, None], other=0)
             w = tl.load(w_ptrs, mask=n_mask[:, None], other=0.0)
-            ws = tl.load(ws_ptrs, mask=n_mask[:, None], other=127)
+            ws = tl.load(ws_ptrs, mask=n_mask[:, None], other=0)
         else:
             k_ok = (offs_k + kk) < K
             s_ok = (offs_sk + kk // 32) < K // 32
             x = tl.load(x_ptrs, mask=m_mask[:, None] & k_ok[None, :], other=0.0)
-            xs = tl.load(xs_ptrs, mask=m_mask[:, None] & s_ok[None, :], other=127)
+            xs = tl.load(xs_ptrs, mask=m_mask[:, None] & s_ok[None, :], other=0)
             w = tl.load(w_ptrs, mask=n_mask[:, None] & k_ok[None, :], other=0.0)
-            ws = tl.load(ws_ptrs, mask=n_mask[:, None] & s_ok[None, :], other=127)
+            ws = tl.load(ws_ptrs, mask=n_mask[:, None] & s_ok[None, :], other=0)
         acc = tl.dot_scaled(x, xs, "e4m3", w.T, ws, "e4m3", acc=acc)
         x_ptrs += BLOCK_K
         w_ptrs += BLOCK_K
@@ -214,9 +240,9 @@ def _block32_packed_kernel(
             ws_mask = ws_mask & (wg < K // 32)
         x = tl.load(x_ptr + rows[:, None] * K + xk, mask=x_mask, other=0.0)
         w = tl.load(w_ptr + cols[:, None] * K + wk, mask=w_mask, other=0.0)
-        xs = tl.load(xs_ptr + rows[:, None] * (K // 32) + xg, mask=xs_mask, other=127)
+        xs = tl.load(xs_ptr + rows[:, None] * (K // 32) + xg, mask=xs_mask, other=0)
         ws = tl.load(
-            ws_ptr + (cols[:, None] // 32) * (K // 32) + wg, mask=ws_mask, other=127
+            ws_ptr + (cols[:, None] // 32) * (K // 32) + wg, mask=ws_mask, other=0
         )
         acc = tl.dot_scaled(x, xs, "e4m3", w.T, ws, "e4m3", acc=acc)
     # Keep only products of matching K panels: the block diagonal.
