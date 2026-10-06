@@ -268,11 +268,6 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
-    /// TCP port for the gRPC Inference service. When not set, no gRPC server is
-    /// started.
-    #[arg(long)]
-    #[serde(default)]
-    pub grpc_port: Option<u16>,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -363,6 +358,14 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_scale_out: bool,
 
+    /// Send an SSE keep-alive comment line every this many seconds when a
+    /// streaming response is idle (queued, prefill, or between tokens), to
+    /// prevent reverse proxies/tunnels with read timeouts from closing the
+    /// connection. Defaults to 0, which disables keep-alive comments entirely.
+    #[arg(long, default_value_t = 0)]
+    #[serde(default)]
+    pub sse_keep_alive_interval: u64,
+
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
     #[educe(Debug(ignore))]
@@ -372,7 +375,9 @@ pub struct SharedRuntimeArgs {
     pub api_key: Vec<String>,
 
     /// Disable periodic logging of engine statistics (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     #[arg(long)]
     #[serde(default)]
     pub disable_log_stats: bool,
@@ -495,6 +500,7 @@ impl SharedRuntimeArgs {
     fn into_bootstrapped_config(
         self,
         listen_fd: i32,
+        grpc_listen_fd: Option<i32>,
         input_address: String,
         output_address: String,
         coordinator_address: Option<String>,
@@ -529,6 +535,7 @@ impl SharedRuntimeArgs {
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
+            grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -545,8 +552,9 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
-            grpc_port: self.grpc_port,
             shutdown_timeout,
+            // The engine is launched and supervised by another process.
+            manages_engine: false,
             keep_alive_timeout,
             profiler,
         }
@@ -557,11 +565,13 @@ impl SharedRuntimeArgs {
     fn into_managed_config(
         self,
         listener_mode: HttpListenerMode,
+        grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
         engine_count: usize,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
+        manages_engine: bool,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
@@ -587,6 +597,7 @@ impl SharedRuntimeArgs {
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
+            grpc_listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -603,8 +614,8 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
-            grpc_port: self.grpc_port,
             shutdown_timeout,
+            manages_engine,
             keep_alive_timeout,
             profiler,
         }
@@ -616,6 +627,8 @@ impl SharedRuntimeArgs {
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
+            sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
+                .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
         }
     }
 
@@ -680,6 +693,10 @@ pub struct FrontendArgs {
     /// supervisor.
     #[arg(long)]
     pub listen_fd: i32,
+    /// Inherited gRPC listening socket file descriptor passed by the Python
+    /// supervisor. When not set, no gRPC server is started.
+    #[arg(long)]
+    pub grpc_listen_fd: Option<i32>,
     /// Frontend input ROUTER socket address that the Python engines will
     /// connect to.
     #[arg(long)]
@@ -715,6 +732,7 @@ impl FrontendArgs {
         let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
+            self.grpc_listen_fd,
             self.input_address,
             self.output_address,
             self.coordinator_address,
@@ -744,6 +762,10 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
+    /// TCP port for the gRPC Inference and Control services. When not set, no
+    /// gRPC server is started.
+    #[arg(long)]
+    pub grpc_port: Option<u16>,
 
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
@@ -773,14 +795,27 @@ impl ServeArgs {
                 port: self.port,
             },
         };
+        // gRPC follows the HTTP TCP host. With a Unix socket it defaults to IPv4
+        // loopback rather than all interfaces, so the side-car is never
+        // accidentally network-exposed.
+        let grpc_listener_mode = self.grpc_port.map(|port| HttpListenerMode::BindTcp {
+            host: match self.uds {
+                Some(_) => "127.0.0.1".to_string(),
+                None => self.host.clone(),
+            },
+            port,
+        });
 
         self.runtime.clone().into_managed_config(
             listener_mode,
+            grpc_listener_mode,
             handshake_address,
             self.managed_engine.handshake_host.clone(),
             self.managed_engine.data_parallel_size,
             local_input_address,
             local_output_address,
+            // `--data-parallel-size-local 0` runs the frontend without a local engine.
+            self.managed_engine.data_parallel_size_local != Some(0),
         )
     }
 
