@@ -17,7 +17,6 @@ from vllm.config.profiler import (
     validate_profile_iteration_bounds,
     validate_profile_prefix,
 )
-from vllm.config.utils import replace
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -39,7 +38,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.profiler.wrapper import TorchProfilerWrapper, create_frontend_profiler
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -226,26 +225,12 @@ class AsyncLLM(EngineClient):
             and vllm_config.profiler_config.should_profile_frontend
         ):
             if self._profile_session_guard_enabled:
-                profiler_dir = vllm_config.profiler_config.torch_profiler_dir
-                logger.info(
-                    "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
-                    profiler_dir,
-                )
                 self._frontend_profiler_worker_name = (
                     f"{socket.gethostname()}_{os.getpid()}.async_llm"
                 )
-                frontend_profiler_config = replace(
+                self.profiler = create_frontend_profiler(
                     vllm_config.profiler_config,
-                    delay_iterations=0,
-                    max_iterations=0,
-                    wait_iterations=0,
-                    warmup_iterations=0,
-                )
-                self.profiler = TorchProfilerWrapper(
-                    frontend_profiler_config,
                     worker_name=self._frontend_profiler_worker_name,
-                    local_rank=0,
-                    activities=["CPU"],
                 )
             else:
                 logger.warning(

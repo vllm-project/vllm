@@ -24,6 +24,7 @@ from vllm.config.profiler import (
     _is_uri_path,
     validate_profile_iteration_bounds,
 )
+from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -753,6 +754,29 @@ def create_worker_profiler(
     assert profiler_type == "proton", f"Unknown profiler type: {profiler_type}"
     logger.debug("Starting Proton profiler with trace name: %s", worker_name)
     return ProtonProfilerWrapper(profiler_config, worker_name=worker_name)
+
+
+def create_frontend_profiler(
+    profiler_config: ProfilerConfig, *, worker_name: str
+) -> TorchProfilerWrapper:
+    """Create the CPU-only frontend profiler, which runs for the whole session
+    rather than following engine iterations."""
+    logger.info(
+        "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",
+        profiler_config.torch_profiler_dir,
+    )
+    return TorchProfilerWrapper(
+        replace(
+            profiler_config,
+            delay_iterations=0,
+            max_iterations=0,
+            wait_iterations=0,
+            warmup_iterations=0,
+        ),
+        worker_name=worker_name,
+        local_rank=0,
+        activities=["CPU"],
+    )
 
 
 def create_graph_capture_profiler(

@@ -129,7 +129,7 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     vllm_config.profiler_config.should_profile_frontend = False
     _mock_async_llm_dependencies(monkeypatch)
     profiler = MagicMock()
-    monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
+    monkeypatch.setattr(async_llm_module, "create_frontend_profiler", profiler)
 
     engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
 
@@ -342,7 +342,7 @@ def test_multi_client_profile_uses_idempotent_engine_requests(
     )
     engine_core = _mock_async_llm_dependencies(monkeypatch)
     profiler = MagicMock()
-    monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
+    monkeypatch.setattr(async_llm_module, "create_frontend_profiler", profiler)
     engines = [
         AsyncLLM(
             vllm_config,
@@ -390,7 +390,7 @@ def test_frontend_profiler_ignores_worker_iteration_bounds(
     )
     _mock_async_llm_dependencies(monkeypatch)
     profiler = MagicMock()
-    monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
+    monkeypatch.setattr("vllm.profiler.wrapper.TorchProfilerWrapper", profiler)
 
     engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
 
