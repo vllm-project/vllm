@@ -30,7 +30,6 @@ Everything in this module runs once, on the host, during model construction.
 
 import math
 import warnings
-from typing import Literal
 
 import numpy as np
 import torch
@@ -339,13 +338,16 @@ class KerdockDGCodeGenerator:
     Args:
         m: Either 6 or 8. Fixes the vector dimension `N = 2^m`.
         code_type: ``"kerdock"`` for K(m) = DG(m,0), ``"dg1"`` for DG(m,1).
+            Typed ``str`` rather than a ``Literal`` because the only caller
+            reads it from a checkpoint's JSON config; the value is validated
+            below.
 
     """
 
     def __init__(
         self,
         m: int,
-        code_type: Literal["kerdock", "dg1"] = "kerdock",
+        code_type: str = "kerdock",
     ):
         if m not in (6, 8):
             raise ValueError(f"m must be 6 or 8, got {m}")
