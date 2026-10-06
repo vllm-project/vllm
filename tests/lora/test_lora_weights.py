@@ -69,6 +69,17 @@ def test_moe_packing_keeps_per_projection_scaling(packer, stacked: bool):
     assert packed.scaling == pytest.approx([2.0, 4.0, 8.0])
 
 
+def test_moe_packing_keeps_per_expert_scaling():
+    """Experts of one projection can have different scaling, e.g. from
+    alpha_pattern."""
+    loras = moe_loras(RSLORA_SCALING) + moe_loras(RSLORA_SCALING)
+    loras[4].scaling = 2 * RSLORA_SCALING  # w2 of expert 1
+    expected = [lora.lora_b * lora.scaling for lora in loras]
+    packed = PackedLoRALayerWeights.pack_moe(loras, "experts").optimize()
+    for i, lora_b in enumerate(packed.lora_b):
+        torch.testing.assert_close(lora_b, torch.stack(expected[i::3]))
+
+
 def test_from_config_uses_checkpoint_module_name():
     peft_helper = PEFTHelper(
         r=RANK,
