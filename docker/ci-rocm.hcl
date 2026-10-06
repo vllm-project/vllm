@@ -91,10 +91,6 @@ variable "DEEPEP_BRANCH" {
   default = ""
 }
 
-variable "MOONCAKE_BRANCH" {
-  default = ""
-}
-
 variable "NIXL_CACHE_KEY" {
   default = ""
 }
@@ -104,10 +100,6 @@ variable "ROCSHMEM_CACHE_KEY" {
 }
 
 variable "DEEPEP_CACHE_KEY" {
-  default = ""
-}
-
-variable "MOONCAKE_CACHE_KEY" {
   default = ""
 }
 
@@ -255,7 +247,6 @@ function "get_cache_from_rocm_deps" {
     NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY}" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
     ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH}" : ""),
     DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}" : ""),
-    MOONCAKE_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:mooncake-rocm-${MOONCAKE_CACHE_KEY}" : (MOONCAKE_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:mooncake-rocm-${MOONCAKE_BRANCH}" : ""),
   ])
 }
 
@@ -277,13 +268,6 @@ function "get_cache_to_rocm_deepep" {
   params = []
   result = compact([
     DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH},mode=min" : ""),
-  ])
-}
-
-function "get_cache_to_rocm_mooncake" {
-  params = []
-  result = compact([
-    MOONCAKE_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:mooncake-rocm-${MOONCAKE_CACHE_KEY},mode=min" : (MOONCAKE_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:mooncake-rocm-${MOONCAKE_BRANCH},mode=min" : ""),
   ])
 }
 
@@ -417,14 +401,6 @@ target "deepep-rocm-ci" {
   output     = ["type=cacheonly"]
 }
 
-target "mooncake-rocm-ci" {
-  inherits   = ["_common-rocm", "_ci-rocm"]
-  target     = "export_mooncake"
-  cache-from = get_cache_from_rocm_deps()
-  cache-to   = get_cache_to_rocm_mooncake()
-  output     = ["type=cacheonly"]
-}
-
 # Builds only the ci_base stage (NIXL, DeepEP, torchcodec, etc.)
 # Invoked by the ensure-ci-base step when the content hash of ci_base-affecting
 # files drifts from the remote image label. Per-PR builds then pull the result
@@ -455,5 +431,5 @@ target "ci-base-rocm-ci" {
 # Group for ci_base builds -- exports dependency stage caches alongside the
 # ci_base image so future rebuilds can reuse them independently.
 group "ci-base-rocm-ci-with-deps" {
-  targets = ["nixl-rocm-ci", "rocshmem-rocm-ci", "deepep-rocm-ci", "mooncake-rocm-ci", "ci-base-rocm-ci"]
+  targets = ["nixl-rocm-ci", "rocshmem-rocm-ci", "deepep-rocm-ci", "ci-base-rocm-ci"]
 }

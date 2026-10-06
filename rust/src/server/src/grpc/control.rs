@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
@@ -13,6 +14,7 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
 
 use super::{ControlServer, pb};
+use crate::config::LoraModulePath;
 use crate::lora::{LoadLoraError, LoraDisabledError, LoraPathAccessError, UnloadLoraError};
 use crate::state::AppState;
 
@@ -22,6 +24,7 @@ pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
 pub struct ControlServiceImpl {
     state: Arc<AppState>,
     rl_lock: Mutex<()>,
+    engine_shutdown: Option<CancellationToken>,
 }
 
 impl ControlServiceImpl {
@@ -29,7 +32,13 @@ impl ControlServiceImpl {
         Self {
             state,
             rl_lock: Mutex::new(()),
+            engine_shutdown: None,
         }
+    }
+
+    pub fn with_engine_shutdown(mut self, shutdown: Option<CancellationToken>) -> Self {
+        self.engine_shutdown = shutdown;
+        self
     }
 
     fn ready(&self) -> &EngineCoreReadyResponse {
@@ -49,6 +58,7 @@ impl ControlServiceImpl {
             data_parallel_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
             world_size: ready.world_size,
+            data_parallel_size_local: self.client().engine_count() as u32,
         }
     }
 
@@ -147,7 +157,7 @@ fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
 fn load_lora_status(error: LoadLoraError) -> Status {
     let code = match &error {
         LoadLoraError::Disabled(_) => Code::FailedPrecondition,
-        LoadLoraError::InvalidRequest(_) => Code::InvalidArgument,
+        LoadLoraError::InvalidAdapter { .. } => Code::InvalidArgument,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => Code::InvalidArgument,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidConfiguration { .. }) => {
             Code::Internal
@@ -177,6 +187,18 @@ fn list_loras_status(error: LoraDisabledError) -> Status {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for ControlServiceImpl {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        let shutdown = self.engine_shutdown.as_ref().ok_or_else(|| {
+            Status::failed_precondition("this frontend does not manage the engine process")
+        })?;
+        tracing::info!("engine shutdown requested via gRPC");
+        shutdown.cancel();
+        Ok(Response::new(pb::ShutdownResponse {}))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,
@@ -194,6 +216,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
             rl_capabilities: Some(self.rl_capabilities()),
+            effective_attention_block_size: self.client().effective_attention_block_size(),
         }))
     }
 
@@ -247,11 +270,13 @@ impl pb::control_server::Control for ControlServiceImpl {
         request: Request<pb::LoadLoraRequest>,
     ) -> Result<Response<pb::LoadLoraResponse>, Status> {
         let request = request.into_inner();
-        let adapter = self
-            .state
-            .load_lora(request.lora_name, request.source_path, false, false)
-            .await
-            .map_err(load_lora_status)?;
+        let module = LoraModulePath {
+            name: request.lora_name,
+            path: request.source_path,
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        };
+        let adapter = self.state.load_lora(module, false).await.map_err(load_lora_status)?;
         Ok(Response::new(pb::LoadLoraResponse {
             adapter: Some(lora_to_proto(&adapter)),
         }))
