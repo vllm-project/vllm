@@ -37,11 +37,11 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     WeightCacheUnavailableError,
     check_ipc_platform_support,
     check_ipc_quant_support,
+    connect_daemon,
     get_current_device_uuid,
     get_socket_path,
     recv_msg,
     send_msg,
-    verify_socket_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
@@ -409,27 +409,11 @@ class IpcModelLoader(BaseModelLoader):
         )
 
     def _connect(self, timeout: float) -> socket.socket:
-        socket_path = self._resolve_socket_path()
-        # The auto-derived per-user directory is locked to 0700 and checked
-        # strictly. When the operator explicitly configures a path they own the
-        # trust decision, so only ownership/symlink safety is enforced.
-        strict_perms = self.socket_path is None and self.socket_dir is None
-        try:
-            verify_socket_owner(socket_path, strict_perms=strict_perms)
-        except OSError as e:
-            raise WeightCacheUnavailableError(
-                f"Weight cache socket {socket_path} is unavailable: {e}"
-            ) from e
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        try:
-            sock.connect(socket_path)
-        except OSError as e:
-            sock.close()
-            raise WeightCacheUnavailableError(
-                f"Cannot connect to weight cache daemon at {socket_path}: {e}"
-            ) from e
-        return sock
+        return connect_daemon(
+            self._resolve_socket_path(),
+            timeout,
+            strict_perms=self.socket_path is None and self.socket_dir is None,
+        )
 
     def _resolve_socket_path(self) -> str:
         if self.socket_path is not None:
