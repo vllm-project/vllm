@@ -26,8 +26,10 @@ pub(super) struct ResponseOptions {
     pub include_usage: bool,
     /// Whether the caller asked for usage on every streamed chunk.
     pub include_continuous_usage: bool,
-    /// Whether the caller requested output logprobs on generate choices.
-    pub include_logprobs: bool,
+    /// Requested output logprobs (`sampling_params.logprobs`): `None` omits
+    /// them, `Some(n)` returns `max(n, 1)` candidates per position, `Some(-1)`
+    /// all of them.
+    pub logprobs: Option<i32>,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether the caller requested final prompt token metadata.
@@ -56,7 +58,7 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let include_logprobs = request.sampling_params.inner.logprobs.is_some();
+    let logprobs = request.sampling_params.inner.logprobs;
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
     let return_token_ids = request.return_token_ids.unwrap_or(false);
     let mut sampling_params = request.sampling_params.inner;
@@ -83,7 +85,8 @@ pub(super) fn prepare_generate_request(
         data_parallel_rank: ctx.data_parallel_rank,
         session_id: ctx.session_id,
         kv_hints: None,
-        reasoning_parser_kwargs: None,
+        reasoning_parser_kwargs: Default::default(),
+        reasoning_ended: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
     };
@@ -95,7 +98,7 @@ pub(super) fn prepare_generate_request(
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,
-            include_logprobs,
+            logprobs,
             include_prompt_logprobs,
             return_token_ids,
         },

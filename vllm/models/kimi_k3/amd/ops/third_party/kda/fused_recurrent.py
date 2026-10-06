@@ -164,15 +164,24 @@ def fused_recurrent_kda_fwd_kernel(
     APPLY_BETA_SIGMOID: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    IS_SINGLE_SEQUENCE: tl.constexpr,
+    SEQUENCE_LENGTH: tl.constexpr,
     num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0)
     i_v = pid % tl.cdiv(V, BV)
     i_nh = pid // tl.cdiv(V, BV)
-    i_n, i_h = i_nh // H, i_nh % H
-    bos = tl.load(cu_seqlens + i_n).to(tl.int64)
-    eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-    sequence_length = eos - bos
+    if IS_SINGLE_SEQUENCE:
+        i_n, i_h = 0, i_nh
+    else:
+        i_n, i_h = i_nh // H, i_nh % H
+    if SEQUENCE_LENGTH:
+        bos = i_n * SEQUENCE_LENGTH
+        sequence_length = SEQUENCE_LENGTH
+    else:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        sequence_length = eos - bos
     if sequence_length == 0:
         return
 
@@ -208,6 +217,14 @@ def fused_recurrent_kda_fwd_kernel(
     p_v = v + bos * stride_qkv_token + i_h * V + o_v
     p_g = g + bos * stride_g_token + i_h * K + o_k
     p_beta = beta + bos * stride_beta_token + i_h
+    if USE_GATE_IN_KERNEL:
+        b_a = exp(tl.load(A_log + i_h).to(tl.float32))
+        if HAS_DT_BIAS:
+            b_bias = tl.load(
+                dt_bias + i_h * K + o_k,
+                mask=m_k,
+                other=0.0,
+            ).to(tl.float32)
     for i_t in tl.range(0, sequence_length, num_stages=num_stages):
         b_q = tl.load(p_q, mask=m_k, other=0.0, eviction_policy="evict_last").to(
             tl.float32
@@ -219,8 +236,8 @@ def fused_recurrent_kda_fwd_kernel(
             tl.float32
         )
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+            b_q *= tl.rsqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k *= tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q *= scale
 
         b_gate = tl.load(
@@ -231,13 +248,7 @@ def fused_recurrent_kda_fwd_kernel(
         ).to(tl.float32)
         if USE_GATE_IN_KERNEL:
             if HAS_DT_BIAS:
-                b_bias = tl.load(
-                    dt_bias + i_h * K + o_k,
-                    mask=m_k,
-                    other=0.0,
-                ).to(tl.float32)
                 b_gate += b_bias
-            b_a = exp(tl.load(A_log + i_h).to(tl.float32))
             if USE_LOWER_BOUND:
                 b_gate = lower_bound * tl.sigmoid(b_a * b_gate)
             else:
@@ -288,6 +299,60 @@ def fused_recurrent_kda_fwd_kernel(
         p_out += stride_out_token
 
 
+def _get_static_sequence_length(
+    total_tokens: int,
+    head_sequences: int,
+    is_single_sequence: bool,
+    uniform_sequence_length: int | None,
+) -> int:
+    if is_single_sequence:
+        return total_tokens
+    # MI355X performance gate: 192 head-sequences is 16 sequences at H=12.
+    # Static loops win through 16; dynamic loops win at 32 for short queries.
+    if (
+        uniform_sequence_length is not None
+        and uniform_sequence_length > 1
+        and head_sequences <= 192
+    ):
+        return uniform_sequence_length
+    return 0
+
+
+def _select_kda_launch_config(
+    use_gate_in_kernel: bool,
+    is_spec_decoding: bool,
+    head_sequences: int,
+    static_sequence_length: int,
+    has_multi_token_sequence: bool,
+) -> tuple[int, int, int]:
+    if static_sequence_length:
+        BV = 4 if head_sequences <= 24 else 8
+        if static_sequence_length == 1:
+            num_stages = 2
+        elif static_sequence_length <= 3:
+            num_stages = 8 if head_sequences <= 24 else 4
+        elif static_sequence_length <= 6:
+            num_stages = 6
+        elif static_sequence_length <= 10:
+            num_stages = 10
+        else:
+            num_stages = 12
+        return BV, 1, num_stages
+
+    if use_gate_in_kernel and is_spec_decoding:
+        if head_sequences <= 24:
+            return 4, 1, 4 if has_multi_token_sequence else 2
+        if has_multi_token_sequence and head_sequences <= 48:
+            return 8, 1, 4
+        if has_multi_token_sequence:
+            return 8, 1, 2
+        return 32, 4, 2
+
+    if use_gate_in_kernel:
+        return 32, 4, 2
+    return 8, 1, 2
+
+
 def fused_recurrent_kda_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -300,6 +365,7 @@ def fused_recurrent_kda_fwd(
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
+    uniform_sequence_length: int | None = None,
     use_qk_l2norm_in_kernel: bool = True,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
@@ -336,6 +402,10 @@ def fused_recurrent_kda_fwd(
         assert num_accepted_tokens is None
     else:
         assert ssm_state_indices.stride(1) == 1
+    if uniform_sequence_length is not None:
+        assert num_accepted_tokens is not None
+        assert uniform_sequence_length > 0
+        assert N * uniform_sequence_length == T
     assert cu_seqlens.is_contiguous()
     if use_gate_in_kernel:
         assert A_log is not None and A_log.is_contiguous()
@@ -344,8 +414,22 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
-    BV = 32 if use_gate_in_kernel else 8
-    num_warps = 4 if use_gate_in_kernel else 1
+    is_spec_decoding = num_accepted_tokens is not None
+    is_single_sequence = is_spec_decoding and N == 1
+    head_sequences = H * N
+    static_sequence_length = _get_static_sequence_length(
+        total_tokens=T,
+        head_sequences=head_sequences,
+        is_single_sequence=is_single_sequence,
+        uniform_sequence_length=uniform_sequence_length,
+    )
+    BV, num_warps, num_stages = _select_kda_launch_config(
+        use_gate_in_kernel=use_gate_in_kernel,
+        is_spec_decoding=is_spec_decoding,
+        head_sequences=head_sequences,
+        static_sequence_length=static_sequence_length,
+        has_multi_token_sequence=T > N,
+    )
     grid = (cdiv(V, BV) * N * H,)
     fused_recurrent_kda_fwd_kernel[grid](
         q=q,
@@ -379,8 +463,10 @@ def fused_recurrent_kda_fwd(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
+        IS_SINGLE_SEQUENCE=is_single_sequence,
+        SEQUENCE_LENGTH=static_sequence_length,
         num_warps=num_warps,
-        num_stages=2,
+        num_stages=num_stages,
     )
     return out, initial_state
 
@@ -398,6 +484,7 @@ def fused_recurrent_kda(
     cu_seqlens: torch.Tensor,
     ssm_state_indices: torch.Tensor,
     num_accepted_tokens: torch.Tensor | None = None,
+    uniform_sequence_length: int | None = None,
     out: torch.Tensor | None = None,
     fuse_gate: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -433,6 +520,7 @@ def fused_recurrent_kda(
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
+        uniform_sequence_length=uniform_sequence_length,
         use_qk_l2norm_in_kernel=True,
         A_log=A_log if fuse_gate else None,
         dt_bias=dt_bias if fuse_gate else None,

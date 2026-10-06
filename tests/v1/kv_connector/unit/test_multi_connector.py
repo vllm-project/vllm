@@ -68,6 +68,7 @@ class MockConnector(KVConnectorBase_V1):
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
         mock.get_kv_connector_stats.return_value = None
+        mock.get_mem_pool_context.return_value = None
         return mock
 
     @classmethod
@@ -201,6 +202,50 @@ def mc() -> MultiConnector:
     return mc
 
 
+@pytest.mark.parametrize("chosen", [0, 1])
+def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
+    request = MagicMock(request_id="request")
+    for i, connector in enumerate(mc._connectors):
+        connector.get_num_new_matched_tokens.return_value = (
+            (16, True) if i == chosen else (0, False)
+        )
+        connector.get_loaded_kv_cache_group_ids.return_value = (i,)
+
+    assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    assert mc.get_loaded_kv_cache_group_ids(request) == (chosen,)
+    mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
+
+
+def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
+    assert mc.get_mem_pool_context() is None
+
+
+def test_multi_connector_forwards_mem_pool_context(mc: MultiConnector):
+    context = MagicMock()
+    provider = MagicMock(spec_set=KVConnectorBase_V1)
+    provider.get_mem_pool_context.return_value = context
+    mc._connectors = [mc._connectors[0], provider]
+
+    assert mc.get_mem_pool_context() is context
+    provider.get_mem_pool_context.assert_called_once_with()
+
+
+def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
+    providers = [
+        MagicMock(spec_set=KVConnectorBase_V1),
+        MagicMock(spec_set=KVConnectorBase_V1),
+    ]
+    for provider in providers:
+        provider.get_mem_pool_context.return_value = MagicMock()
+    mc._connectors = providers
+
+    with pytest.raises(
+        ValueError,
+        match="Multiple connectors provide a KV cache memory pool",
+    ):
+        mc.get_mem_pool_context()
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""
@@ -320,6 +365,7 @@ def test_multi_example_connector_consistency():
     # First three events are from initialization. Layer hooks run before the
     # deferred load starts after the forward pass.
     expected_worker_prefix = [
+        "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
@@ -569,6 +615,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             }
         }
 
@@ -594,6 +641,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             },
             "MockConnector": {"mock_field": [1, 2, 3]},
         }
@@ -625,6 +673,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             },
         }
 
@@ -646,6 +695,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             }
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
@@ -677,6 +727,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             }
         )
 
@@ -710,6 +761,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             },
             "ExampleConnector": {"some_field": [1, 2, 3]},
         }
@@ -749,6 +801,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -766,6 +819,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -799,6 +853,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -827,6 +882,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -855,6 +911,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -886,6 +943,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
