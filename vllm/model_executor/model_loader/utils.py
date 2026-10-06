@@ -199,6 +199,17 @@ def process_weights_after_loading(
         set_torchao_reload_attrs(model, model_config)
 
 
+def initialize_runtime_state_after_loading(
+    model: nn.Module,
+    target_device: torch.device,
+) -> None:
+    for _, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, QuantizeMethodBase):
+            with device_loading_context(module, target_device):
+                quant_method.initialize_runtime_state_after_loading(module)
+
+
 @contextmanager
 def device_loading_context(module: torch.nn.Module, target_device: torch.device):
     if target_device.type == "cpu":

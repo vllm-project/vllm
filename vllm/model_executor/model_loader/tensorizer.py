@@ -485,7 +485,9 @@ def init_tensorizer_model(
 
 
 def deserialize_tensorizer_model(
-    model: nn.Module, tensorizer_config: TensorizerConfig
+    model: nn.Module,
+    tensorizer_config: TensorizerConfig,
+    preserve_serialized_dtype: bool = False,
 ) -> None:
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
     if not is_valid_deserialization_uri(tensorizer_config.tensorizer_uri):
@@ -505,7 +507,7 @@ def deserialize_tensorizer_model(
         ) as stream,
         TensorDeserializer(
             stream,
-            dtype=tensorizer_config.dtype,
+            dtype=None if preserve_serialized_dtype else tensorizer_config.dtype,
             device=f"{device_type}:{device_index}",
             **tensorizer_args.deserialization_kwargs,
         ) as deserializer,

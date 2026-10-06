@@ -9,6 +9,9 @@ import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_make_workspace_new,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     is_fp8_marlin_supported,
@@ -78,6 +81,19 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             layer, self.size_k_first, input_dtype=self.marlin_input_dtype
         )
         del layer.input_scale
+
+    def initialize_runtime_state_after_loading(
+        self, layer: torch.nn.Module
+    ) -> None:
+        if layer.weight.dtype != torch.int32:
+            raise ValueError(
+                "Native FP8 Marlin weights must retain their packed int32 dtype; "
+                f"got {layer.weight.dtype}."
+            )
+        layer.workspace = marlin_make_workspace_new(
+            layer.weight.device,
+            existing=getattr(layer, "workspace", None),
+        )
 
     def apply_weights(
         self,
