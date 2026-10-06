@@ -486,3 +486,52 @@ class TestForcedNamedToolChoiceEmptyParams:
         choice = ToolChoiceFunction(type="function", name="ping")
         schema = get_json_schema_from_tools(choice, [tool])
         assert schema == {"type": "object", "properties": {}}
+
+
+class TestToolSchemaDefs:
+    """`$defs` is hoisted to the grammar root so every tool's `#/$defs/...`
+    reference resolves there. It must be read from the request's tools without
+    mutating them: the Responses `tools` echo and any later render of the same
+    request (the built-in tool loop) still need the definitions."""
+
+    PARAMS = {
+        "type": "object",
+        "properties": {"location": {"$ref": "#/$defs/Location"}},
+        "required": ["location"],
+        "$defs": {
+            "Location": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            }
+        },
+    }
+
+    @pytest.fixture(params=["chat", "responses"])
+    def tool(self, request):
+        params = deepcopy(self.PARAMS)
+        if request.param == "chat":
+            return ChatCompletionToolsParam.model_validate(
+                {
+                    "type": "function",
+                    "function": {"name": "create_event", "parameters": params},
+                }
+            )
+        return FunctionTool(type="function", name="create_event", parameters=params)
+
+    @staticmethod
+    def _params(tool):
+        if isinstance(tool, ChatCompletionToolsParam):
+            return tool.function.parameters
+        return tool.parameters
+
+    def test_required_hoists_defs_without_mutating_tools(self, tool):
+        first = get_json_schema_from_tools("required", [tool])
+        second = get_json_schema_from_tools("required", [tool])
+        assert isinstance(first, dict)
+
+        assert self._params(tool) == self.PARAMS
+        assert first == second
+        assert first["$defs"] == self.PARAMS["$defs"]
+        embedded = first["items"]["anyOf"][0]["properties"]["parameters"]
+        assert "$defs" not in embedded
+        assert embedded["properties"] == self.PARAMS["properties"]
