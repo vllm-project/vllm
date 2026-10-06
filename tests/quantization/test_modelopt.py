@@ -688,7 +688,6 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [
-        ("auto", MarlinNvFp4LinearKernel),
         ("humming", HummingNvFp4LinearKernel),
         ("flashinfer_cutedsl", FlashInferCuteDslNvFp4W4A16LinearKernel),
     ],
@@ -696,24 +695,64 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
-    ``use_a16=True`` defaults to Marlin, but an explicit backend wins. The
-    generic method routes this through ``select_linear_kernel``."""
+    an explicit backend wins over the ``auto`` default. The generic method
+    routes this through ``select_linear_kernel``."""
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
         RuntimeDtypes,
         select_linear_kernel,
     )
 
-    if linear_backend != "auto":
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            pytest.skip(reason)
+    is_supported, reason = kernel_cls.is_supported()
+    if not is_supported:
+        pytest.skip(reason)
 
     vllm_config = VllmConfig()
     vllm_config.kernel_config.linear_backend = linear_backend
     spec = QuantSpec(weight=kNvfp4Static, activation=None)
     rt = RuntimeDtypes(torch.bfloat16, torch.bfloat16)
     with set_current_vllm_config(vllm_config):
+        kernel = select_linear_kernel(spec, MagicMock(), rt)
+    assert isinstance(kernel, kernel_cls)
+
+
+@pytest.mark.parametrize(
+    ("compute_capability", "has_bf16_fp4", "kernel_cls"),
+    [
+        (90, True, MarlinNvFp4LinearKernel),
+        (100, True, FlashInferCuteDslNvFp4W4A16LinearKernel),
+        (103, True, FlashInferCuteDslNvFp4W4A16LinearKernel),
+        (100, False, MarlinNvFp4LinearKernel),
+    ],
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_modelopt_w4a16_auto_prefers_cutedsl_on_sm100(
+    monkeypatch, compute_capability, has_bf16_fp4, kernel_cls
+):
+    """``auto`` for W4A16 picks FlashInfer CuTe-DSL on SM100/SM103 when its
+    BF16 x FP4 GEMM is available and Marlin otherwise (#53014). Capability and
+    FlashInfer availability are patched so the result does not depend on the
+    CI GPU."""
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization.modelopt import (
+        RuntimeDtypes,
+        select_linear_kernel,
+    )
+    from vllm.platforms.interface import DeviceCapability
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(compute_capability // 10, compute_capability % 10),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.nvfp4.flashinfer.has_flashinfer_bf16_fp4",
+        lambda: has_bf16_fp4,
+    )
+
+    spec = QuantSpec(weight=kNvfp4Static, activation=None)
+    rt = RuntimeDtypes(torch.bfloat16, torch.bfloat16)
+    with set_current_vllm_config(VllmConfig()):
         kernel = select_linear_kernel(spec, MagicMock(), rt)
     assert isinstance(kernel, kernel_cls)
 
