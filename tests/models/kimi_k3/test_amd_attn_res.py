@@ -171,6 +171,7 @@ def test_amd_attn_res_fused_contract(
     expected = expected.to(prefix.dtype)
     original_blocks = blocks.clone()
     block_write_idx = num_blocks if write_block else -1
+    prefix_snapshot = torch.empty_like(prefix)
 
     actual = attn_res(
         prefix,
@@ -183,10 +184,12 @@ def test_amd_attn_res_fused_contract(
         block_write_idx,
         eps,
         output_eps,
+        prefix_snapshot=prefix_snapshot,
     )
 
     torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
     torch.testing.assert_close(prefix, expected_prefix, atol=0, rtol=0)
+    torch.testing.assert_close(prefix_snapshot, expected_prefix, atol=0, rtol=0)
     if write_block:
         original_blocks[:, block_write_idx].copy_(expected_prefix)
     torch.testing.assert_close(blocks, original_blocks, atol=0, rtol=0)
