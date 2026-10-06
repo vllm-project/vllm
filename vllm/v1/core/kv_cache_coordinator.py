@@ -345,6 +345,8 @@ class KVCacheCoordinator(ABC):
         self, num_computed_tokens: int, kv_cache_group_id: int
     ) -> int:
         """Return the prefix eligible for hashing in this group."""
+        # Only cache tokens with finalized KV. The last num_reprefillable_tokens
+        # tokens can be re-prefilled during multi-module MTP.
         return max(0, num_computed_tokens - self.num_reprefillable_tokens)
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
@@ -361,8 +363,6 @@ class KVCacheCoordinator(ABC):
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue
-            # Only cache tokens with finalized KV. The last num_reprefillable_tokens
-            # tokens can be re-prefilled during multi-module MTP.
             manager.cache_blocks(
                 request,
                 self.get_num_cacheable_tokens(num_computed_tokens, group_id),

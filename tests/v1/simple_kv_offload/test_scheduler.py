@@ -3100,7 +3100,7 @@ def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
     [(True, False), (False, False), (False, True)],
     ids=["swa", "replicated_full", "sharded_full"],
 )
-def test_dcp_draft_offload_preserves_prefix(
+def test_eager_store_matches_gpu_cacheable_prefix(
     retention_interval: int | None,
     chunk_size: int,
     prefill_lookahead: int,
