@@ -10,17 +10,23 @@ import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
+from transformers import Qwen4ExpTextConfig
 
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -30,7 +36,6 @@ from vllm.models.qwen4_exp.common.ple import (
     compute_ple_shard_overlap,
     copy_ple_embedding_shard_,
 )
-from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
@@ -43,8 +48,125 @@ from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
+    PleShortConvAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import MambaSpec
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("full_graph", [False, True])
+@pytest.mark.parametrize(
+    "query_lens,drafts,spec_rows,non_spec_rows,token_order",
+    [
+        pytest.param([4, 2, 0], [3, 1, -1], [0, 1], [], None, id="spec-padding"),
+        pytest.param(
+            [3, 1, 2, 5, 0],
+            [2, -1, 1, -1, -1],
+            [0, 2],
+            [1, 3],
+            [0, 1, 2, 4, 5, 3, 6, 7, 8, 9, 10],
+            id="mixed-padding",
+        ),
+        pytest.param([1, 5], [-1, -1], [], [0, 1], None, id="non-spec"),
+    ],
+)
+def test_ple_metadata_preserves_request_and_token_order(
+    device, full_graph, query_lens, drafts, spec_rows, non_spec_rows, token_order
+):
+    """Preserve state routing, acceptance and prefill offsets without GPU sync."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    device = torch.device(device)
+    config = VllmConfig()
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=3
+    )
+    config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.FULL if full_graph else CUDAGraphMode.NONE
+    )
+    config.compilation_config.max_cudagraph_capture_size = 32
+    builder = PleShortConvAttentionMetadataBuilder(
+        MambaSpec(block_size=16, shapes=((16, 64),), dtypes=(torch.float32,)),
+        ["ple"],
+        config,
+        device,
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[q + 16 for q in query_lens], query_lens=query_lens),
+        16,
+        device,
+        arange_block_indices=True,
+    )
+    common.is_prefilling = torch.tensor(
+        [q > 1 and d < 0 for q, d in zip(query_lens, drafts)]
+    )
+    # Token padding is independent of the sum of per-request query lengths.
+    common.num_actual_tokens += 3
+    accepted = torch.arange(1, len(query_lens) + 1, dtype=torch.int32, device=device)
+    drafts_cpu = torch.tensor(drafts, dtype=torch.int32)
+    sync_mode = torch.cuda.get_sync_debug_mode() if device.type == "cuda" else None
+    if sync_mode is not None:
+        torch.cuda.set_sync_debug_mode("error")
+    try:
+        metadata = builder.build(
+            0,
+            common,
+            num_accepted_tokens=accepted,
+            num_decode_draft_tokens_cpu=drafts_cpu,
+        )
+    finally:
+        if sync_mode is not None:
+            torch.cuda.set_sync_debug_mode(sync_mode)
+
+    def check(actual, expected):
+        torch.testing.assert_close(
+            actual, torch.tensor(expected, dtype=actual.dtype, device=device)
+        )
+
+    assert metadata.num_spec_decodes == len(spec_rows)
+    assert metadata.num_decodes == sum(query_lens[i] == 1 for i in non_spec_rows)
+    assert metadata.num_prefills == sum(query_lens[i] > 1 for i in non_spec_rows)
+    if spec_rows:
+        torch.testing.assert_close(
+            metadata.spec_state_indices_tensor[: len(spec_rows)],
+            common.block_table_tensor[spec_rows, 0],
+        )
+        torch.testing.assert_close(
+            metadata.num_accepted_tokens[: len(spec_rows)], accepted[spec_rows]
+        )
+        check(
+            metadata.spec_query_start_loc[: len(spec_rows) + 1],
+            [0, *accumulate(query_lens[i] for i in spec_rows)],
+        )
+        if full_graph and not non_spec_rows:
+            check(metadata.spec_state_indices_tensor[len(spec_rows) :], [NULL_BLOCK_ID])
+            check(metadata.num_accepted_tokens[len(spec_rows) :], [1])
+            check(
+                metadata.spec_query_start_loc[len(spec_rows) + 1 :], [sum(query_lens)]
+            )
+            assert (
+                metadata.spec_state_indices_tensor.data_ptr()
+                == builder.spec_state_indices_tensor.data_ptr()
+            )
+    if non_spec_rows:
+        torch.testing.assert_close(
+            metadata.state_indices_tensor, common.block_table_tensor[non_spec_rows, 0]
+        )
+        prefill_lens = [query_lens[i] for i in non_spec_rows if query_lens[i] > 1]
+        check(metadata.query_start_loc_p, [0, *accumulate(prefill_lens)])
+        check(metadata.has_initial_states_p, [True] * len(prefill_lens))
+    if token_order is not None:
+        check(
+            torch.cat((metadata.spec_token_indx, metadata.non_spec_token_indx)),
+            token_order,
+        )
+    else:
+        assert metadata.spec_token_indx is None
+        assert metadata.non_spec_token_indx is None
+    assert metadata.nums_dict is None
+    assert metadata.batch_ptr is None
+    assert metadata.token_chunk_offset_ptr is None
 
 
 def _mock_etp_group(
@@ -446,6 +568,34 @@ def test_ple_embedding_respects_modelopt_exclusion() -> None:
     )
 
 
+def test_ple_embedding_respects_inc_layer_config() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = INCConfig(
+        weight_bits=4,
+        group_size=128,
+        block_name_to_quantize="model.layers",
+        extra_config={".*ple.*": {"bits": 16, "data_type": "float"}},
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+    quant_config.extra_config = None
+    with pytest.raises(NotImplementedError, match="INCConfig"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix)
+
+
+def test_ple_embedding_is_unquantized_under_quark() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = QuarkConfig({"exclude": [], "global_quant_config": {}})
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
 def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
     quant_config = ModelOptNvFp4Config(exclude_modules=[prefix])
@@ -487,6 +637,32 @@ def test_pinned_embedding_forward_finalizes_prefetched_output(
 
     assert output.dtype == embedding._prefetch_buffer.dtype
     assert torch.equal(output, expected)
+
+
+def test_pinned_embedding_forward_requires_prior_start_prefetch() -> None:
+    """Forward before any start_prefetch must fail loudly, not read garbage."""
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._prefetch_buffer = None
+    embedding._prefetch_stream = None
+    embedding._output_dim = 6
+    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match="prior start_prefetch"):
+        embedding(hidden_states)
+
+
+def test_pinned_embedding_finalize_requires_prior_start_prefetch() -> None:
+    """_finalize_prefetch before any start_prefetch must fail loudly."""
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._prefetch_buffer = None
+    embedding._prefetch_stream = None
+    embedding.tp_size = 1
+    output = torch.zeros(2, 6, dtype=torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match="prior start_prefetch"):
+        embedding._finalize_prefetch(torch.empty(4, 2, 3), output)
 
 
 def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
@@ -601,6 +777,67 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
         rtol=0,
         atol=0,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_pinned_embedding_start_prefetch_allocates_lazily_and_feeds_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """start_prefetch lazily allocates the stream/buffer, then forward consumes it.
+
+    Exercises the full pinned-prefetch contract end to end: first call
+    allocates the side stream and buffer with the constructor geometry,
+    and forward finalizes the lookup into the returned output.
+    """
+    _mock_etp_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    with torch.device("cuda:0"):
+        embedding = Qwen4ExpPLEPinnedHostEmbedding(
+            4,
+            3,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=Qwen4ExpPLEUnquantizedEmbeddingMethod(),
+            num_ngram_heads=2,
+            max_total_tokens=4,
+        )
+    assert embedding._prefetch_buffer is None
+    assert embedding._prefetch_stream is None
+
+    loaded_weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    loaded_weight = loaded_weight.to(torch.bfloat16)
+    copy_ple_embedding_shard_(
+        embedding.weight,
+        loaded_weight,
+        checkpoint_start=0,
+        tp_start=0,
+        tp_end=4,
+    )
+
+    ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16, device="cuda:0")
+    embedding.start_prefetch(hidden_states, ngram_ids)
+
+    buffer = embedding._prefetch_buffer
+    assert buffer is not None
+    assert buffer.shape == (4, 2, 3)
+    assert buffer.dtype == torch.bfloat16
+    assert buffer.device.type == "cuda"
+    assert embedding._prefetch_stream is not None
+
+    output = embedding(hidden_states)
+
+    expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
@@ -1541,6 +1778,11 @@ def _make_conv_metadata(
             else None
         ),
         non_spec_query_start_loc=(non_spec_query_start_loc if has_non_spec else None),
+        query_start_loc_p=(
+            non_spec_query_start_loc[case.num_decodes :] - case.num_decodes
+            if num_prefills
+            else None
+        ),
         has_initial_states_p=(
             torch.arange(num_prefills, device=device) % 2 == 0 if num_prefills else None
         ),
@@ -1877,6 +2119,25 @@ def test_amd_fp8_embedding_loads_checkpoint_shards_and_global_scale(
     torch.testing.assert_close(
         dequantized.cpu(), loaded_weight.to(torch.bfloat16) * 0.25, rtol=0, atol=0
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")
+def test_amd_pinned_embedding_prefetch_machinery_is_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pinned embedding must not allocate the prefetch stream/buffer in init.
+
+    Paths that never prefetch (AMD uses the synchronous pinned-lookup op)
+    keep the stream/buffer unallocated for the process lifetime. NVIDIA's
+    first ``start_prefetch`` — the eager profile run, always before cudagraph
+    capture — allocates them lazily.
+    """
+    module, _ = _build_amd_ngram_embedding(
+        monkeypatch, device="cuda:0", cpu_offload=True, fp8_checkpoint=False
+    )
+    embedding = module.ngram_embedding
+    assert embedding._prefetch_buffer is None
+    assert embedding._prefetch_stream is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")

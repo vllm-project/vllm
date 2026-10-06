@@ -85,9 +85,11 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
     speculator.max_model_len = speculator.draft_max_seq_len = 32
     speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
     speculator.input_buffers = SimpleNamespace(
+        positions=torch.arange(4, dtype=torch.int64),
         query_start_loc=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
         seq_lens=torch.tensor([11, 21, 0, 0], dtype=torch.int32),
     )
+    speculator.dcp_size = 1
     speculator.block_tables = SimpleNamespace(
         cp_size=1,
         input_block_tables=[torch.zeros(4, 1, dtype=torch.int32)],
@@ -97,7 +99,9 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
     speculator.attn_groups = [
         [
             SimpleNamespace(
-                get_metadata_builder=lambda _: SimpleNamespace(build=build),
+                get_metadata_builder=lambda _: SimpleNamespace(
+                    build=build, supports_update_block_table=False
+                ),
                 layer_names=["draft"],
             )
         ]
@@ -183,6 +187,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         parallel_config=SimpleNamespace(
             data_parallel_size=1,
             data_parallel_rank=0,
+            decode_context_parallel_size=1,
         ),
     )
 
@@ -369,19 +374,22 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     (
         "method_name",
         "cg_mode",
+        "num_speculative_steps",
         "expected_eager_calls",
         "expected_graph_replays",
     ),
     [
-        ("_multi_step_decode", CUDAGraphMode.NONE, 3, 0),
-        ("_multi_step_decode", CUDAGraphMode.FULL, 0, 3),
-        ("_fused_multi_step_decode", CUDAGraphMode.NONE, 3, 0),
-        ("_fused_multi_step_decode", CUDAGraphMode.FULL, 0, 1),
+        ("_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
+        ("_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 3),
+        ("_fused_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
+        ("_fused_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 1),
+        ("_multi_step_decode", CUDAGraphMode.FULL, 3, 0, 2),
     ],
 )
 def test_multi_step_decode_replays_captured_graph_as_expected(
     method_name,
     cg_mode,
+    num_speculative_steps,
     expected_eager_calls,
     expected_graph_replays,
 ):
@@ -411,6 +419,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         batch_desc=batch_desc,
         seq_lens_cpu_upper_bound=None,
         num_tokens_across_dp=None,
+        num_speculative_steps=num_speculative_steps,
     )
 
     assert generate_draft.call_count == expected_eager_calls

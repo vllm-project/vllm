@@ -299,6 +299,10 @@ def _make_mock_backend_for_kernel_block_size(
 ):
     class _MockBackend:
         @staticmethod
+        def get_name():
+            return "MOCK"
+
+        @staticmethod
         def get_supported_kernel_block_sizes():
             return supported_sizes
 
@@ -480,6 +484,67 @@ def test_preferred_block_size_rejects_backends_with_no_common_size():
     classes = [_mock_backend([16], exact=True), _mock_backend([MultipleOf(64)])]
     with pytest.raises(ValueError, match="share no supported KV cache block size"):
         Platform._preferred_block_size_for_backends(classes, 16, None)
+
+
+@pytest.mark.parametrize("cpu", [False, True])
+def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
+    # Alignment that lands on a size an exact-size sibling rejects must fail
+    # here, not later in select_common_block_size().
+    backends = [_mock_backend([MultipleOf(16)]), _mock_backend([16], exact=True)]
+    monkeypatch.setattr(
+        Platform, "_find_non_ssm_backends", classmethod(lambda cls, c: backends)
+    )
+
+    def bump(cls, vllm_config, backend_cls):
+        vllm_config.cache_config.block_size = 32
+
+    monkeypatch.setattr(Platform, "_align_hybrid_block_size", classmethod(bump))
+    cache_config = SimpleNamespace(
+        block_size=16, user_specified_block_size=True, kv_cache_dtype_skip_layers=None
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config, model_config=SimpleNamespace(is_hybrid=True)
+    )
+    from vllm.platforms.cpu import CpuPlatform  # overrides the method; must check too
+
+    platform = CpuPlatform if cpu else Platform
+    with pytest.raises(ValueError, match="MOCK_EXACT"):
+        platform.update_block_size_for_backend(vllm_config)
+
+
+def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
+    # XPU's GDN rounding runs after super()'s check, so it must check again.
+    try:
+        from vllm.platforms.xpu import XPUPlatform
+    except ImportError:
+        pytest.skip("vllm_xpu_kernels not importable outside an XPU stack")
+
+    backends = [_mock_backend([MultipleOf(16)]), _mock_backend([16], exact=True)]
+    monkeypatch.setattr(
+        Platform, "update_block_size_for_backend", classmethod(lambda cls, c: None)
+    )
+    monkeypatch.setattr(
+        Platform, "_find_non_ssm_backends", classmethod(lambda cls, c: backends)
+    )
+    gdn_layer = SimpleNamespace(
+        get_attn_backend=lambda: SimpleNamespace(get_name=lambda: "GDN_ATTN")
+    )
+    monkeypatch.setattr(
+        "vllm.config.vllm.get_layers_from_vllm_config",
+        lambda vllm_config, layer_type: {"gdn": gdn_layer},
+    )
+    cache_config = SimpleNamespace(
+        block_size=16,
+        mamba_cache_mode="none",
+        mamba_page_size_padded=None,
+        user_specified_block_size=True,
+        kv_cache_dtype_skip_layers=None,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config, model_config=SimpleNamespace(is_hybrid=True)
+    )
+    with pytest.raises(ValueError, match="MOCK_EXACT"):
+        XPUPlatform.update_block_size_for_backend(vllm_config)
 
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
