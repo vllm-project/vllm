@@ -138,7 +138,8 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     const int expert_scales_stride,  // groups * N
     const int expert_zeros_stride,   // groups * (N/8)
     const bool mul_topk_weight,
-    const int output_topk) {  // >0: reduce output by token_id/output_topk
+    const int output_topk,    // >0: reduce output by token_id/output_topk
+    const int zero_offset) {  // 1 for GPTQ v1 zeros, 0 for v2
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
   const int offset_n = blockIdx.y * BLOCK_KN_SIZE * 4;
@@ -207,9 +208,6 @@ __global__ void moe_gemm_q4_kernel_rdna3(
   // qdq_4_rdna3.cuh); bf16 keeps fp32 scalars as before.
   float yf_h[4][2], zf_h[4][2];
   float z_b_f[4], y_b_f[4];
-
-  // GPTQv1: zero_offset = 1
-  constexpr int zero_offset = 1;
 
   auto refresh_group = [&](int g) {
     const uint32_t* qz_row = expert_qzeros + g * (size_n / 8);
@@ -479,7 +477,7 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     const T*, T*, const uint32_t*, const T*, const uint32_t*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const int, const int,
-    const bool, const int) {}
+    const bool, const int, const int) {}
 
 #endif  // __HIP__RDNA3__ || !__HIP_DEVICE_COMPILE__
 
@@ -495,7 +493,7 @@ void launch_moe_gemm_q4(
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
     int size_n, int size_k, int groups, int top_k, int expert_weight_stride,
     int expert_scales_stride, int expert_zeros_stride, bool mul_topk_weight,
-    int output_topk, cudaStream_t stream) {
+    int output_topk, int zero_offset, cudaStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid(num_token_blocks,
             (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
@@ -505,7 +503,7 @@ void launch_moe_gemm_q4(
       a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
       expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups, top_k,
       expert_weight_stride, expert_scales_stride, expert_zeros_stride,
-      mul_topk_weight, output_topk);
+      mul_topk_weight, output_topk, zero_offset);
 }
 
 template <typename T>
@@ -516,7 +514,8 @@ void dispatch_moe_gemm_q4(
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
     int size_n, int size_k, int groups, int top_k, int block_size_m,
     int expert_weight_stride, int expert_scales_stride, int expert_zeros_stride,
-    bool mul_topk_weight, int output_topk, cudaStream_t stream) {
+    bool mul_topk_weight, int output_topk, int zero_offset,
+    cudaStream_t stream) {
   // Dispatch to template instantiation based on block_size_m
   switch (block_size_m) {
     case 1:
@@ -524,28 +523,28 @@ void dispatch_moe_gemm_q4(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset, stream);
       break;
     case 2:
       launch_moe_gemm_q4<T, 2>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset, stream);
       break;
     case 4:
       launch_moe_gemm_q4<T, 4>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset, stream);
       break;
     case 8:
       launch_moe_gemm_q4<T, 8>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset, stream);
       break;
     default:
       TORCH_CHECK(false,
@@ -575,6 +574,8 @@ void dispatch_moe_gemm_q4(
 //   top_k                  int
 //   block_size_m           int (1, 2, 4, or 8)
 //   mul_topk_weight        bool
+//   output_topk            int (>0 reduces the output over top-k)
+//   use_v2_format          bool (false: GPTQ v1 zeros, stored as zero - 1)
 
 void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
@@ -583,7 +584,7 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor expert_ids,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
-                         int64_t output_topk) {
+                         int64_t output_topk, bool use_v2_format) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(c.is_cuda(), "c must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
@@ -633,7 +634,7 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
         num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks, size_m,
         size_n, size_k, groups, (int)top_k, (int)block_size_m,
         expert_weight_stride, expert_scales_stride, expert_zeros_stride,
-        mul_topk_weight, (int)output_topk, stream);
+        mul_topk_weight, (int)output_topk, use_v2_format ? 0 : 1, stream);
   };
 
   if (a.scalar_type() == torch::kHalf) {

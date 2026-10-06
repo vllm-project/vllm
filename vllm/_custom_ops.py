@@ -714,6 +714,7 @@ def moe_gptq_gemm_rdna3(
     block_size_m: int,
     mul_topk_weight: bool,
     output_topk: int = 0,
+    use_v2_format: bool = False,
 ) -> None:
     torch.ops._rocm_C.moe_gptq_gemm_rdna3(
         a,
@@ -729,6 +730,7 @@ def moe_gptq_gemm_rdna3(
         block_size_m,
         mul_topk_weight,
         output_topk,
+        use_v2_format,
     )
 
 

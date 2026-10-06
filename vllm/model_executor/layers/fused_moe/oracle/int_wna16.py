@@ -155,8 +155,6 @@ def _backend_incompatibility_reason(
     if backend == WNA16MoEBackend.RDNA3:
         if not isinstance(quant_config, QuantizationArgs):
             return "only compressed-tensors checkpoints are supported"
-        if may_have_zp:
-            return "asymmetric checkpoints are not supported"
         if may_have_bias:
             return "expert bias is not supported"
         if quant_config.actorder == "group":
@@ -890,14 +888,10 @@ def _process_awq_weights_marlin(
 def _synthesize_rdna3_qzeros(
     groups: int, out_features: int, device: torch.device
 ) -> torch.Tensor:
-    """Create the packed zero-point tensor for symmetric quantization.
-
-    GPTQv1 +1 quirk: the kernel adds 1 to the stored zeros, so encode
-    (bias - 1) = 7 for uint4b8 (bias=8).
-    """
+    """Create the packed (GPTQ v2) zero points for symmetric quantization."""
     zeros = torch.full(
         (groups, out_features),
-        scalar_types.uint4b8.bias - 1,
+        scalar_types.uint4b8.bias,
         dtype=torch.int32,
         device=device,
     )
@@ -910,6 +904,8 @@ def _process_weights_rdna3(
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     group_size: int,
+    w13_qzeros: torch.Tensor | None = None,
+    w2_qzeros: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -926,9 +922,10 @@ def _process_weights_rdna3(
 
     Transposes the canonical N-first inputs to the K-first layout of
     ``moe_gptq_gemm_rdna3`` (weights ``[E, K // 8, N]``, scales
-    ``[E, groups, N]``), interleaves the packed nibbles per expert (the exllama
-    shuffle the dense RDNA3 kernel also uses) and synthesizes the symmetric
-    zero points the kernel dequantizes with.
+    ``[E, groups, N]``, zero points ``[E, groups, N // 8]``), interleaves the
+    packed nibbles per expert (the exllama shuffle the dense RDNA3 kernel also
+    uses) and, for symmetric checkpoints, synthesizes the zero points. Zero
+    points are in GPTQ v2 format (no +1 offset).
     """
     device = w13.device
     num_experts = w13.size(0)
@@ -944,7 +941,9 @@ def _process_weights_rdna3(
         ops.gptq_shuffle(w2_e, 4)
         w2[e] = w2_e
 
-    def _qzeros(w: torch.Tensor) -> torch.Tensor:
+    def _qzeros(w: torch.Tensor, qzeros: torch.Tensor | None) -> torch.Tensor:
+        if qzeros is not None:
+            return qzeros.transpose(1, 2).contiguous()
         qz = _synthesize_rdna3_qzeros((w.size(1) * 8) // group_size, w.size(2), device)
         return qz.unsqueeze(0).expand(num_experts, -1, -1).contiguous()
 
@@ -953,8 +952,8 @@ def _process_weights_rdna3(
         w2,
         w13_scale.transpose(1, 2).contiguous(),
         w2_scale.transpose(1, 2).contiguous(),
-        _qzeros(w13),
-        _qzeros(w2),
+        _qzeros(w13, w13_qzeros),
+        _qzeros(w2, w2_qzeros),
         None,  # w13_input_global_scale
         None,  # w2_input_global_scale
         None,  # w13_bias
@@ -1666,6 +1665,8 @@ def convert_to_wna16_moe_kernel_format(
             w13_scale,
             w2_scale,
             quant_config.group_size,
+            w13_qzeros,
+            w2_qzeros,
         )
     elif backend == WNA16MoEBackend.CPU:
         return _process_weights_cpu(
