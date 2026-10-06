@@ -142,7 +142,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
         if self.dcp_size > 1:
             interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-            block_size = self.block_size
+            block_size: int | None = self.block_size
         else:
             interleave = metadata.cp_kv_cache_interleave_size
             block_size = metadata.block_size
