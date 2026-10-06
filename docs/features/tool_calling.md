@@ -484,7 +484,7 @@ extracts directly (no guided decoding needed for `tool_choice="auto"`):
 ```text
 <|channel|>thought
 ...reasoning...<channel|>
-<|tool_call|>call:get_weather{location:<|"|>San Francisco<|"|>}<tool_call|>
+<|tool_call>call:get_weather{location:<|"|>San Francisco<|"|>}<tool_call|>
 ```
 
 String arguments are wrapped in `<|"|>` delimiters; numbers and booleans stay bare
