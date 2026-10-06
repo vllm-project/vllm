@@ -13,6 +13,7 @@ from transformers import PreTrainedConfig
 
 from vllm.config import PoolerConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
+from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.layers.pooler.seqwise.methods import (
     CLSPool,
     LastPool,
@@ -20,11 +21,14 @@ from vllm.model_executor.layers.pooler.seqwise.methods import (
     get_seq_pooling_method,
 )
 from vllm.model_executor.layers.pooler.special import DispatchPooler
+from vllm.model_executor.layers.pooler.tokwise.heads import TokenEmbeddingPoolerHead
 from vllm.model_executor.layers.pooler.tokwise.methods import (
     AllPool,
+    LateChunkPool,
     StepPool,
     get_tok_pooling_method,
 )
+from vllm.model_executor.layers.pooler.tokwise.poolers import TokenPooler
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata, PoolingStates
@@ -609,8 +613,6 @@ class TestGetTokPoolingMethod:
 
 
 def _make_late_chunk_pool(*, head_dtype=None, chunked=False, async_scheduling=False):
-    from vllm.model_executor.layers.pooler.tokwise.methods import LateChunkPool
-
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             enable_chunked_prefill=chunked, async_scheduling=async_scheduling
@@ -629,10 +631,6 @@ def _make_late_chunk_pool(*, head_dtype=None, chunked=False, async_scheduling=Fa
 def test_late_chunk_pool_matches_fp32_means_before_projection_and_normalization(
     chunk_size, dtype, head_dtype
 ):
-    from vllm.model_executor.layers.pooler.activations import PoolerNormalize
-    from vllm.model_executor.layers.pooler.tokwise.heads import TokenEmbeddingPoolerHead
-    from vllm.model_executor.layers.pooler.tokwise.poolers import TokenPooler
-
     # Unequal norms expose the incorrect normalize-then-average implementation.
     hidden = (torch.arange(28).reshape(7, 4) - 10).to(dtype)
     projector = torch.nn.Linear(4, 3, bias=True).to(head_dtype or dtype)
