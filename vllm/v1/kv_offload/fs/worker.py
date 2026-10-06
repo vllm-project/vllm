@@ -71,6 +71,7 @@ class FSOffloadingWorker(OffloadingWorker):
 
         Returns:
             Futures whose completion signals the I/O is done.
+
         """
 
     def shutdown_backend(self) -> None:
@@ -219,6 +220,7 @@ class ThreadPoolFSWorker(FSOffloadingWorker):
         Args:
             file_path: destination file path.
             ops: list of (device_ptr, size_bytes, file_offset) tuples.
+
         """
 
     @abstractmethod
@@ -230,6 +232,7 @@ class ThreadPoolFSWorker(FSOffloadingWorker):
         Args:
             file_path: source file path.
             ops: list of (device_ptr, size_bytes, file_offset) tuples.
+
         """
 
     def submit_io(
