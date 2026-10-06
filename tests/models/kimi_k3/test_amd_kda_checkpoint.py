@@ -73,6 +73,10 @@ def _builder(
     )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    vllm_config.cache_config.hash_block_size = prefix_match_unit or block_size
+    vllm_config.cache_config.mamba_ckpt_block_size = (
+        vllm_config.cache_config.hash_block_size
+    )
     if num_spec:
         vllm_config.speculative_config = _StubSpeculativeConfig(num_spec)
     return KimiK3ROCmKDAMetadataBuilder(

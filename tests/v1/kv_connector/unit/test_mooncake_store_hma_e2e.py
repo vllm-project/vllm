@@ -442,7 +442,9 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
-        num_prompt_tokens=20,
+        num_prompt_tokens=13,
+        prefill_end_tokens=20,
+        completed_token_len=20,
         boundary_state_offloads=[(1, mamba_cow_block, 12)],
     )
 
@@ -515,7 +517,7 @@ def test_offload_syncs_event_before_put():
         can_save=True,
         num_prompt_tokens=12,
         store_job_id=1,
-        boundary_state_offloads=[(1, 7, 12)],
+        boundary_state_offloads=[(1, 7, 8)],
     )
     req.current_event = event
 
@@ -533,7 +535,8 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     offload must persist every FA block up to the boundary — the normal save
     floors to the lcm, so those blocks are otherwise never written and the
     consumer's per-group lookup would miss. The mamba boundary block still
-    reads the core-provided CoW target."""
+    reads the core-provided CoW target. Without EAGLE, the 12-token prompt's
+    resend-safe checkpoint is 8, leaving two attention blocks to save."""
     full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -591,19 +594,18 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        boundary_state_offloads=[(1, mamba_cow_block, 12)],
+        boundary_state_offloads=[(1, mamba_cow_block, 8)],
     )
 
     send._maybe_offload_boundary_states(req)
 
-    # FA (block 4): full blocks ending at 4, 8 and 12, keyed by their normal
+    # FA (block 4): full blocks ending at 4 and 8, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under
     # the boundary sub-hash, read from the CoW target.
     expected = {
         token_dbs[0].key_for(hs[0]): [1 * 512],
         token_dbs[0].key_for(hs[1]): [2 * 512],
-        token_dbs[0].key_for(hs[2]): [3 * 512],
-        token_dbs[1].key_for(hs[2]): [10_000 + mamba_cow_block * 512],
+        token_dbs[1].key_for(hs[1]): [10_000 + mamba_cow_block * 512],
     }
     assert store.puts == expected
 
@@ -616,7 +618,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
     partial prefix hits silently returned 0 while the store side kept writing
     them. Here the mamba block (16) exceeds the hash unit (4), so
     ``enable_partial_hash_hits`` is on and the lookup must find the stored
-    boundary at 12.
+    boundary at 8.
     """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
@@ -673,7 +675,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         replicate_config=MagicMock(),
     )
 
-    # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//4-1]).
+    # A 12-token prompt leaves a resend-safe sub-block checkpoint at 8.
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
     req = ReqMeta(
         req_id="r0",
@@ -681,15 +683,15 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
-        num_prompt_tokens=20,
-        boundary_state_offloads=[(1, 7, 12)],
+        num_prompt_tokens=12,
+        boundary_state_offloads=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(req)
 
     worker.store = store
 
-    # A 13-token prompt sharing the prefix must hit the stored boundary at 12.
-    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 12
+    # A 13-token prompt sharing the prefix must hit the stored boundary at 8.
+    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
 
 
 def test_worker_setup_tolerates_finer_scratch_group():
@@ -779,7 +781,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         group_participates=[True, True],
     )
 
-    # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//8-1]).
+    # Persist the sub-block partial tail at boundary 8 (keyed by hs[8//8-1]).
     hs = [BlockHash(bytes([i + 1]) * 8) for i in range(3)]
     req = ReqMeta(
         req_id="r0",
@@ -787,8 +789,8 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
-        num_prompt_tokens=20,
-        boundary_state_offloads=[(1, 7, 12)],
+        num_prompt_tokens=12,
+        boundary_state_offloads=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(req)
 

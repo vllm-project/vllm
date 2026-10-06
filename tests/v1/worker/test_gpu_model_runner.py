@@ -1569,7 +1569,11 @@ def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
     from vllm.v1.worker.gpu import model_runner as v2_model_runner_module
 
     runner = object.__new__(v2_model_runner_module.GPUModelRunner)
-    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=16)
+    runner.vllm_config = VllmConfig(
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=ParallelConfig(cp_kv_cache_interleave_size=16),
+    )
+    runner.parallel_config = runner.vllm_config.parallel_config
     runner.cp_interleave = 1
 
     class StopInitialization(Exception):
@@ -1582,7 +1586,9 @@ def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
     )
 
     with pytest.raises(StopInitialization):
-        runner.initialize_kv_cache(SimpleNamespace())
+        runner.initialize_kv_cache(
+            KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+        )
 
     assert runner.cp_interleave == 16
 

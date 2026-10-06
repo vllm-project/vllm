@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.config import CacheConfig
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -66,7 +67,9 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.dcp_size = 1
     runner.dcp_rank = 0
     runner.cp_interleave = 1
-    runner.cache_config = SimpleNamespace(enable_prefix_caching=True)
+    runner.cache_config = CacheConfig(
+        enable_prefix_caching=True, mamba_cache_mode="none"
+    )
     parallel_config = SimpleNamespace(
         decode_context_parallel_size=1,
         cp_kv_cache_interleave_size=1,
@@ -74,7 +77,8 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.parallel_config = parallel_config
     runner.vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
-        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        cache_config=runner.cache_config,
+        kv_transfer_config=None,
     )
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(
@@ -195,7 +199,11 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     )
     vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
-        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
+        cache_config=CacheConfig(
+            enable_prefix_caching=mamba_cache_mode == "align",
+            mamba_cache_mode=mamba_cache_mode,
+        ),
+        kv_transfer_config=None,
     )
     runner = SimpleNamespace(
         max_model_len=max_model_len,

@@ -918,6 +918,7 @@ class TestNixlHandshake:
         worker.slot_size_per_layer = [4096]
         worker.block_len_per_layer = [4096 * worker.block_size]
         worker.num_blocks = 1
+        worker.kv_cache_config.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
         worker.src_blocks_data = np.array(
             [(0, worker.block_len_per_layer[0], worker.tp_rank)],
