@@ -10,7 +10,11 @@ import pytest
 import torch
 from utils import skip_unsupported
 
-from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
+from vllm.model_executor.determinism.batch_invariant import (
+    init_batch_invariance,
+    matmul_batch_invariant,
+    matmul_persistent,
+)
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
     _get_tuned_matmul_arch_family,
@@ -129,3 +133,27 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     batch_output = matmul_batch_invariant(a, b)
 
     assert torch.equal(single_output[0], batch_output[0])
+
+
+@skip_unsupported
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(80),
+    reason="Triton matmul overrides are only installed on SM8x",
+)
+def test_mm_out_dtype_batch_invariance():
+    init_batch_invariance()
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(42)
+    a = torch.randn((32, 4096), dtype=torch.bfloat16, device=device)
+    w = torch.randn((8192, 4096), dtype=torch.bfloat16, device=device) * 0.02
+
+    def head(x):
+        return torch.mm(x, w.t(), out_dtype=torch.float32)
+
+    batch_output = head(a)
+    assert batch_output.dtype == torch.float32
+    torch.testing.assert_close(head(a[:1])[0], batch_output[0], rtol=0, atol=0)
+    assert torch.equal(
+        batch_output, matmul_persistent(a, w.t(), out_dtype=torch.float32)
+    )
+    assert torch.equal(torch.compile(head)(a), batch_output)
