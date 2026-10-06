@@ -211,3 +211,91 @@ def test_token_classify(pooling_type: str):
         with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "2"])
+def test_late_chunk_size_rejects_non_positive_integers(value):
+    with pytest.raises(VLLMValidationError, match="positive integer"):
+        PoolingParams(late_chunk_size=value)
+
+
+def _late_chunking_model_config():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        architecture="NomicBertModel",
+        model_impl="auto",
+        is_matryoshka=False,
+        hf_config=SimpleNamespace(),
+        pooler_config=PoolerConfig(seq_pooling_type="MEAN", tok_pooling_type="ALL"),
+    )
+
+
+def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
+    import msgspec
+
+    model_config = _late_chunking_model_config()
+    params = PoolingParams(task="token_embed", late_chunk_size=3)
+    params.verify(model_config)
+    assert params.skip_reading_prefix_cache is True
+    assert params.use_activation is True
+    # With caching disabled by the frontend, this override is harmless.
+    explicit_cache_flag = PoolingParams(
+        task="token_embed", late_chunk_size=3, skip_reading_prefix_cache=False
+    )
+    explicit_cache_flag.verify(model_config)
+    assert explicit_cache_flag.skip_reading_prefix_cache is False
+    clone = params.clone()
+    clone.late_chunk_size = 7
+    assert params.late_chunk_size == 3
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
+        == params
+    )
+    # A message written before the appended field still uses the old default.
+    wire = msgspec.msgpack.decode(msgspec.msgpack.encode(PoolingParams()))
+    assert msgspec.convert(wire[:-1], type=PoolingParams).late_chunk_size is None
+
+
+@pytest.mark.parametrize(
+    "task", ["embed", "classify", "token_classify", "plugin", None]
+)
+def test_late_chunking_rejects_other_tasks(task):
+    with pytest.raises(VLLMValidationError, match="requires token_embed"):
+        PoolingParams(task=task, late_chunk_size=2).verify(
+            _late_chunking_model_config()
+        )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"architecture": "BertModel"},
+        {"model_impl": "transformers"},
+        {"is_matryoshka": True},
+        {"seq_pooling_type": "CLS"},
+        {"tok_pooling_type": "STEP"},
+        {"enable_chunked_processing": True},
+        {"num_experts": 8},
+    ],
+)
+def test_late_chunking_rejects_unverified_model_contracts(override):
+    model_config = _late_chunking_model_config()
+    for key, value in override.items():
+        target = (
+            model_config.hf_config
+            if key == "num_experts"
+            else model_config.pooler_config
+            if hasattr(model_config.pooler_config, key)
+            else model_config
+        )
+        setattr(target, key, value)
+    with pytest.raises(VLLMValidationError, match="dense NomicBertModel"):
+        PoolingParams(task="token_embed", late_chunk_size=2).verify(model_config)
+
+
+def test_late_chunking_rejects_dimension_reduction():
+    with pytest.raises(VLLMValidationError, match="does not support"):
+        PoolingParams(task="token_embed", late_chunk_size=2, dimensions=4).verify(
+            _late_chunking_model_config()
+        )

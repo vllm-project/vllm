@@ -18,6 +18,7 @@ from vllm.model_executor.layers.pooler.activations import (
     resolve_classifier_act_fn,
 )
 from vllm.model_executor.models.adapters import _load_st_projector
+from vllm.pooling_params import supports_late_chunking
 from vllm.tasks import POOLING_TASKS, PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
@@ -28,6 +29,7 @@ from .heads import (
     TokenPoolerHeadOutputItem,
 )
 from .methods import (
+    LateChunkPool,
     TokenPoolingMethod,
     TokenPoolingMethodOutputItem,
     get_tok_pooling_method,
@@ -104,6 +106,8 @@ def pooler_for_token_embed(
 
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
+    if supports_late_chunking(model_config):
+        pooling = LateChunkPool(model_config.head_dtype)
     head = TokenEmbeddingPoolerHead(
         head_dtype=model_config.head_dtype,
         projector=projector
