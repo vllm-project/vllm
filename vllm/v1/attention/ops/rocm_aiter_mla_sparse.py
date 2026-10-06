@@ -49,7 +49,7 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
 
 @functools.cache
 def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
-    """gfx942 prefill kernel from aiter#6002.
+    """gfx942 prefill kernel, when that launch is installed.
 
     Missing that launch keeps the in-tree kernel.
     """
@@ -63,8 +63,8 @@ def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
         source = inspect.getsource(pa_mod)
     except OSError:
         return None
-    # aiter#6002 is the gfx942 launch. An older pa_prefill_sparse still imports
-    # and would run a different kernel, so stay on the in-tree path.
+    # An older pa_prefill_sparse still imports and would run a different
+    # kernel, so stay on the in-tree path.
     if 'DEVICE_ARCH == "gfx942"' not in source:
         logger.info_once(
             "AITER pa_prefill_sparse has no gfx942 kernel; "
@@ -3556,6 +3556,7 @@ def _rocm_sparse_attn_prefill_ragged_aiter_opus(
 
 
 def _rocm_sparse_attn_prefill_aiter(
+    pa_prefill_sparse: Callable[..., torch.Tensor],
     q: torch.Tensor,
     kv: torch.Tensor,
     indices: torch.Tensor,
@@ -3563,11 +3564,8 @@ def _rocm_sparse_attn_prefill_aiter(
     scale: float,
     attn_sink: torch.Tensor | None,
     output: torch.Tensor,
-) -> bool:
-    """gfx942 path for aiter#6002. One KV pool; the extend sources stay unset."""
-    pa_prefill_sparse = _get_aiter_pa_prefill_sparse()
-    if pa_prefill_sparse is None:
-        return False
+) -> None:
+    """gfx942 path. One KV pool; the extend sources stay unset."""
     indices = _as_int32_contiguous_1d(indices)
     indptr = _as_int32_contiguous_1d(indptr)
     written = pa_prefill_sparse(
@@ -3584,7 +3582,6 @@ def _rocm_sparse_attn_prefill_aiter(
     )
     if written.data_ptr() != output.data_ptr():
         output.copy_(written[..., : output.shape[-1]].to(output.dtype))
-    return True
 
 
 @functools.lru_cache
@@ -4176,7 +4173,8 @@ def rocm_sparse_attn_prefill(
         ):
             return
 
-    if _get_aiter_pa_prefill_sparse() is not None:
+    pa_prefill_sparse = _get_aiter_pa_prefill_sparse()
+    if pa_prefill_sparse is not None:
         if ragged_indices is None or ragged_indptr is None:
             assert indices is not None
             indices_2d = indices.reshape(indices.shape[0], -1)
@@ -4187,7 +4185,8 @@ def rocm_sparse_attn_prefill(
                 else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
                 num_rows=kv.shape[0],
             )
-        if _rocm_sparse_attn_prefill_aiter(
+        _rocm_sparse_attn_prefill_aiter(
+            pa_prefill_sparse,
             q=q,
             kv=kv.squeeze(1),
             indices=ragged_indices,
@@ -4195,8 +4194,8 @@ def rocm_sparse_attn_prefill(
             scale=scale,
             attn_sink=opus_attn_sink,
             output=output,
-        ):
-            return
+        )
+        return
 
     if ragged_indices is not None and ragged_indptr is not None:
         _rocm_sparse_attn_prefill_ragged_triton(
