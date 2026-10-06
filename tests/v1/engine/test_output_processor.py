@@ -1576,11 +1576,23 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
         )
         output_processor.add_request(request, None, queue=queue)
 
+    # EngineCore sends no output for aborted requests, so the abort itself
+    # must record them as finished or they are missing from the metrics.
+    iteration_stats = IterationStats()
     for request in requests:
         if abort_by == "internal":
-            output_processor.abort_requests([request.request_id], internal=True)
+            request_ids, internal = [request.request_id], True
         else:
-            output_processor.abort_requests([request.external_req_id], internal=False)
+            request_ids, internal = [request.external_req_id], False
+        output_processor.abort_requests(
+            request_ids, internal, get_iteration_stats=lambda _: iteration_stats
+        )
+
+    assert [
+        (finished.request_id, finished.finish_reason)
+        for finished in iteration_stats.finished_requests
+    ] == [(request.external_req_id, FinishReason.ABORT) for request in requests]
+    assert not output_processor.has_unfinished_requests()
 
 
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))

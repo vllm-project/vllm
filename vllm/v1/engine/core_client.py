@@ -91,6 +91,10 @@ class EngineCoreClient(ABC):
         """KV-event publisher config of each ready engine, keyed by DP rank."""
         return {}
 
+    def get_engine_index(self, request_id: str) -> int:
+        """Index of the engine serving the request, as reported in its outputs."""
+        return 0
+
     @staticmethod
     def make_client(
         multiprocess_mode: bool,
@@ -897,6 +901,9 @@ class MPClient(EngineCoreClient):
             self._kv_event_sources[response.data_parallel_rank] = (
                 response.kv_events_config
             )
+
+    def get_engine_index(self, request_id: str) -> int:
+        return self.engine_ranks_managed[0]
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return dict(self._kv_event_sources)
@@ -1767,6 +1774,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 engine_manager.local_engine_actors
             )
             self.eep_scaling_cache = None
+
+    def get_engine_index(self, request_id: str) -> int:
+        if (engine := self.reqs_in_flight.get(request_id)) is not None:
+            return int.from_bytes(engine, "little")
+        return super().get_engine_index(request_id)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids or self.resources.engine_dead:

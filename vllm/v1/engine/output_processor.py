@@ -3,7 +3,7 @@
 
 import asyncio
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -525,8 +525,18 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+    def abort_requests(
+        self,
+        request_ids: Iterable[str],
+        internal: bool,
+        get_iteration_stats: Callable[[str], IterationStats] | None = None,
+    ) -> list[str]:
         """Abort a list of requests.
+
+        EngineCore does not send outputs for these requests, so they are not
+        otherwise counted. If get_iteration_stats is given, each aborted
+        request is recorded as finished with FinishReason.ABORT in the stats
+        it returns for the internal request ID.
 
         The request_ids may be either external request IDs (those passed to
         InputProcessor.process_inputs()) or internal request IDs (those randomly
@@ -563,6 +573,10 @@ class OutputProcessor:
             if req_state is not None:
                 self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
+                if get_iteration_stats is not None:
+                    self._update_stats_from_finished(
+                        req_state, FinishReason.ABORT, get_iteration_stats(request_id)
+                    )
                 # Produce final abort output.
                 if req_state.queue is not None and (
                     request_output := req_state.make_request_output(
@@ -583,7 +597,11 @@ class OutputProcessor:
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
                     child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs, internal=True)
+                    child_reqs = self.abort_requests(
+                        child_reqs,
+                        internal=True,
+                        get_iteration_stats=get_iteration_stats,
+                    )
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
         self._update_admission_stats()
@@ -839,27 +857,33 @@ class OutputProcessor:
 
         # Calculate timing metrics
         e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
-        queued_time = metrics.scheduled_ts - metrics.queued_ts
-        prefill_time = metrics.first_token_ts - metrics.scheduled_ts
-        decode_time = metrics.last_token_ts - metrics.first_token_ts
-        inference_time = metrics.last_token_ts - metrics.scheduled_ts
 
         # Build attributes dict
         attributes: dict[str, Any] = {
-            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN: (
-                metrics.first_token_latency
-            ),
             SpanAttributes.GEN_AI_LATENCY_E2E: e2e_time,
-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE: queued_time,
             SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS: prompt_length,
             SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
                 metrics.num_generation_tokens
             ),
-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL: prefill_time,
-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
             SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
         }
+
+        # Phases the request never reached have no latency to report.
+        if metrics.first_token_ts:
+            attributes[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] = (
+                metrics.first_token_latency
+            )
+        for attribute, latency in (
+            (SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE, metrics.queued_time),
+            (SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, metrics.prefill_time),
+            (SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, metrics.decode_time),
+            (
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE,
+                metrics.inference_time,
+            ),
+        ):
+            if latency is not None:
+                attributes[attribute] = latency
 
         # Add optional request parameters
         if req_state.top_p:

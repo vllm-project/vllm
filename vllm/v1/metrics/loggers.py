@@ -764,7 +764,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
         counter_request_success_base = self._counter_cls(
             name="vllm:request_success",
-            documentation="Count of successfully processed requests.",
+            documentation="Count of finished requests, by finish reason.",
             labelnames=labelnames + ["finished_reason"],
         )
         for reason in FinishReason:
@@ -1189,10 +1189,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
-        self.histogram_iteration_tokens[engine_idx].observe(
-            iteration_stats.prompt_token_stats.computed
-            + iteration_stats.num_generation_tokens
-        )
+        # Stats recorded without scheduler stats (e.g. frontend aborts) are
+        # not an engine iteration.
+        if scheduler_stats is not None:
+            self.histogram_iteration_tokens[engine_idx].observe(
+                iteration_stats.prompt_token_stats.computed
+                + iteration_stats.num_generation_tokens
+            )
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
             self.histogram_max_num_generation_tokens_request[engine_idx].observe(
@@ -1212,28 +1215,34 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_e2e_time_request[engine_idx].observe(
                 finished_request.e2e_latency
             )
-            self.histogram_queue_time_request[engine_idx].observe(
-                finished_request.queued_time
-            )
-            self.histogram_prefill_time_request[engine_idx].observe(
-                finished_request.prefill_time
-            )
-            self.histogram_inference_time_request[engine_idx].observe(
-                finished_request.inference_time
-            )
-            self.histogram_decode_time_request[engine_idx].observe(
-                finished_request.decode_time
-            )
+            # Phases the request never reached are None and not observed.
+            if finished_request.queued_time is not None:
+                self.histogram_queue_time_request[engine_idx].observe(
+                    finished_request.queued_time
+                )
+            if finished_request.prefill_time is not None:
+                self.histogram_prefill_time_request[engine_idx].observe(
+                    finished_request.prefill_time
+                )
+            if finished_request.inference_time is not None:
+                self.histogram_inference_time_request[engine_idx].observe(
+                    finished_request.inference_time
+                )
+            if finished_request.decode_time is not None:
+                self.histogram_decode_time_request[engine_idx].observe(
+                    finished_request.decode_time
+                )
             self.histogram_request_num_preemptions[engine_idx].observe(
                 finished_request.num_preemptions
             )
-            # Calculate prefill KV compute (excludes cached tokens)
-            prefill_kv_computed = finished_request.num_prompt_tokens - max(
-                finished_request.num_cached_tokens, 0
-            )
-            self.histogram_prefill_kv_computed_request[engine_idx].observe(
-                prefill_kv_computed
-            )
+            if finished_request.prefill_time is not None:
+                # Calculate prefill KV compute (excludes cached tokens)
+                prefill_kv_computed = finished_request.num_prompt_tokens - max(
+                    finished_request.num_cached_tokens, 0
+                )
+                self.histogram_prefill_kv_computed_request[engine_idx].observe(
+                    prefill_kv_computed
+                )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
                 finished_request.num_prompt_tokens
             )
