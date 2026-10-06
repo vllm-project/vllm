@@ -32,12 +32,15 @@ from vllm.config import (
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    MRotaryEmbedding,
+    Phi3LongRoPEScaledRotaryEmbedding,
+    RotaryEmbedding,
+)
 from vllm.model_executor.layers.rotary_embedding.fope import FourierRotaryEmbedding
 from vllm.model_executor.models.llama import LlamaAttention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheLayout
 
@@ -98,6 +101,7 @@ def test_cuda_fusion_warning_uses_selected_backend_capability(
             )
             assert layer.attn_backend is backend
             assert layer.impl.fused_rope_kvcache_q_out_supported() is supports_fusion
+            assert layer._fuse_rope_kvcache is (enabled and supports_fusion)
     warnings = [
         record.getMessage()
         for record in caplog_vllm.records
@@ -117,39 +121,29 @@ class _IdentityProjection(torch.nn.Module):
         return hidden_states, None
 
 
-class _IdentityRotary(torch.nn.Module):
-    def forward(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return query, key
+def _rope() -> RotaryEmbedding:
+    return RotaryEmbedding(64, 64, 512, 10000, True, torch.float16)
 
 
 class _ManualPathMarker(Attention):
     rope_kvcache_fusion_max_token_num = 256
+    head_size = 64
+    _fuse_rope_kvcache = True
 
     def __init__(self) -> None:
         torch.nn.Module.__init__(self)
-
-    def forward_with_fused_rope_kvcache(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        rotary_emb: torch.nn.Module,
-    ) -> torch.Tensor:
-        return query + 1
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        *,
+        positions: torch.Tensor,
+        rotary_emb: torch.nn.Module,
     ) -> torch.Tensor:
-        return query - 1
+        rotation = self._get_fused_rope_rotation(positions, query, rotary_emb)
+        return query + 1 if rotation is not None else query - 1
 
 
 @support_torch_compile(
@@ -163,56 +157,43 @@ class _CompiledLlamaAttentionCallSite(torch.nn.Module):
 
     def __init__(self, vllm_config: VllmConfig | None = None) -> None:
         super().__init__()
-        self.q_size = 1
-        self.kv_size = 1
+        self.q_size = 64
+        self.kv_size = 64
         self.qkv_proj = _IdentityProjection()
-        self.rotary_emb = _IdentityRotary()
+        self.rotary_emb = _rope()
         self.attn = _ManualPathMarker()
         self.o_proj = _IdentityProjection()
-        self._use_fused_rope_kvcache = True
 
 
 def _manual_fusion_layer() -> SimpleNamespace:
     return SimpleNamespace(
-        _rope_kvcache_fusion_enabled=True,
-        _fuse_attn_quant=False,
-        attn_type=AttentionType.DECODER,
-        attn_backend=SimpleNamespace(forward_includes_kv_cache_update=False),
-        kv_sharing_target_layer_name=None,
+        _fuse_rope_kvcache=True,
+        rope_kvcache_fusion_max_token_num=256,
         head_size=64,
-        head_size_v=64,
-        dtype=torch.float16,
-        kv_cache_torch_dtype=torch.float16,
-        query_quant=None,
-        impl=SimpleNamespace(fused_rope_kvcache_q_out_supported=lambda: True),
     )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend constructor")
+@pytest.mark.parametrize("cache_dtype", ["float16", "bfloat16"])
 def test_manual_fusion_requires_matching_activation_and_cache_dtype(
-    monkeypatch: pytest.MonkeyPatch,
+    cache_dtype: str,
     default_vllm_config: VllmConfig,
 ) -> None:
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    with vllm.config.set_current_vllm_config(default_vllm_config):
-        rotary_emb = RotaryEmbedding(
+    default_vllm_config.compilation_config.pass_config.fuse_rope_kvcache = True
+    with set_default_torch_dtype(torch.float16):
+        layer = Attention(
+            num_heads=4,
             head_size=64,
-            rotary_dim=64,
-            max_position_embeddings=128,
-            base=10000,
-            is_neox_style=True,
-            dtype=torch.float16,
+            scale=0.125,
+            num_kv_heads=2,
+            cache_config=CacheConfig(cache_dtype=cache_dtype),
+            prefix=_LAYER_NAME,
+            attn_backend=AttentionBackendEnum.FLASH_ATTN.get_class(),
         )
-    layer = _manual_fusion_layer()
-
-    assert Attention.manual_rope_kvcache_fusion_supported(layer, rotary_emb)
-    layer.kv_cache_torch_dtype = torch.bfloat16
-    assert not Attention.manual_rope_kvcache_fusion_supported(layer, rotary_emb)
+    assert layer._fuse_rope_kvcache is (cache_dtype == "float16")
 
 
-def test_manual_fusion_rejects_rotary_with_custom_native_forward(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+def test_fourier_rotary_embedding_opts_out_of_fusion() -> None:
     vllm_config = VllmConfig(compilation_config=CompilationConfig(custom_ops=["none"]))
     with vllm.config.set_current_vllm_config(vllm_config):
         rotary_emb = FourierRotaryEmbedding(
@@ -228,13 +209,33 @@ def test_manual_fusion_rejects_rotary_with_custom_native_forward(
             fope_sep_head=True,
             fope_init_factor=1.0,
         )
-    layer = _manual_fusion_layer()
+    assert rotary_emb.get_rotation(torch.arange(4), torch.float16) is None
 
-    assert type(rotary_emb).forward is RotaryEmbedding.forward
-    assert type(rotary_emb).forward_cuda is RotaryEmbedding.forward_cuda
-    assert type(rotary_emb).forward_native is not RotaryEmbedding.forward_native
-    assert rotary_emb.cos_sin_cache.dim() == 3
-    assert not Attention.manual_rope_kvcache_fusion_supported(layer, rotary_emb)
+
+@pytest.mark.parametrize(
+    "unsupported", ["positions", "flashinfer", "head_size", "device"]
+)
+def test_rotation_fallback_preserves_cache(
+    unsupported: str, default_vllm_config: VllmConfig
+) -> None:
+    rotary_emb = _rope()
+    positions = torch.arange(4)
+    query = torch.empty(4, 64, dtype=torch.bfloat16)
+    layer = _manual_fusion_layer()
+    if unsupported == "positions":
+        positions = positions.view(2, 2)
+    elif unsupported == "flashinfer":
+        rotary_emb.use_flashinfer = True
+    elif unsupported == "head_size":
+        layer.head_size = 128
+    else:
+        query = query.to("meta")
+    cache = rotary_emb.cos_sin_cache
+
+    assert (
+        Attention._get_fused_rope_rotation(layer, positions, query, rotary_emb) is None
+    )
+    assert rotary_emb.cos_sin_cache is cache
 
 
 def test_missing_slot_mapping_rotates_query_without_materializing_key(
@@ -289,9 +290,10 @@ def test_llama_manual_rope_eager_call_site_keeps_token_threshold(
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(mode=CompilationMode.NONE)
     )
-    model = _CompiledLlamaAttentionCallSite(vllm_config=vllm_config)
+    with vllm.config.set_current_vllm_config(vllm_config):
+        model = _CompiledLlamaAttentionCallSite(vllm_config=vllm_config)
     positions = torch.arange(num_tokens)
-    hidden_states = torch.zeros(num_tokens, 3)
+    hidden_states = torch.zeros(num_tokens, 3 * 64)
 
     output = LlamaAttention.forward(model, positions, hidden_states)
 
@@ -340,7 +342,7 @@ def test_llama_manual_rope_call_site_is_stable_when_guards_are_dropped(
         model = _CompiledLlamaAttentionCallSite(vllm_config=vllm_config).cuda()
         for num_tokens in token_counts:
             positions = torch.arange(num_tokens, device="cuda")
-            hidden_states = torch.zeros(num_tokens, 3, device="cuda")
+            hidden_states = torch.zeros(num_tokens, 3 * 64, device="cuda")
             output = model(positions, hidden_states)
             torch.testing.assert_close(output, torch.ones_like(output))
 
@@ -353,7 +355,7 @@ class _FunctionalRoPEAttention(torch.nn.Module):
         self.qkv_proj = torch.nn.Linear(
             self.qkv_size, self.qkv_size, bias=False, dtype=torch.float16
         )
-        self.rotary_emb = RotaryEmbedding(
+        self.rotary_emb: torch.nn.Module = RotaryEmbedding(
             self.head_size,
             rotary_dim=self.head_size,
             max_position_embeddings=128,
@@ -387,14 +389,15 @@ class _FunctionalRoPEAttention(torch.nn.Module):
 
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         query, key, value = self._split_qkv(qkv)
-        return self.attn.forward_with_fused_rope_kvcache(
-            positions, query, key, value, self.rotary_emb
+        return self.attn(
+            query, key, value, positions=positions, rotary_emb=self.rotary_emb
         )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test on CUDA.")
-def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
-    mocker, disable_vllm_compile_cache, tmp_path
+@pytest.mark.parametrize("path", ["fused", "disabled", "longrope", "mrope"])
+def test_attention_owned_rope_preserves_graph_order_and_fallback(
+    path: str, mocker, disable_vllm_compile_cache, tmp_path
 ):
     from vllm.compilation.backends import VllmBackend
 
@@ -418,7 +421,7 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
             use_inductor_graph_partition=False,
             inductor_compile_config={"force_disable_caches": True},
             pass_config=PassConfig(
-                fuse_rope_kvcache=True,
+                fuse_rope_kvcache=path != "disabled",
                 fuse_attn_quant=False,
             ),
         ),
@@ -435,13 +438,23 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
     ):
         torch.manual_seed(0)
         model = _FunctionalRoPEAttention(vllm_config, device)
-        assert model.attn.manual_rope_kvcache_fusion_supported(model.rotary_emb)
+        assert model.attn._fuse_rope_kvcache is (path != "disabled")
+        if path == "longrope":
+            model.rotary_emb = Phi3LongRoPEScaledRotaryEmbedding(
+                64, 64, 256, 128, 10000, True, dtype, [1.0] * 32, [2.0] * 32
+            )
+        elif path == "mrope":
+            model.rotary_emb = MRotaryEmbedding(
+                64, 64, 128, 10000, True, dtype, mrope_section=[8, 12, 12]
+            )
         qkv = torch.randn(
             num_tokens,
             (model.num_heads + 2 * model.num_kv_heads) * model.head_size,
             dtype=dtype,
         )
         positions = torch.arange(num_tokens, dtype=torch.long)
+        if path == "mrope":
+            positions = torch.stack([positions, positions * 2, positions * 3])
         common_metadata = create_common_attn_metadata(
             BatchSpec([num_tokens], [num_tokens]),
             block_size=16,
@@ -481,7 +494,7 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
         incumbent_output, incumbent_cache = run(model.incumbent)
         fused_update = mocker.spy(model.attn.impl, "do_rope_and_kv_cache_update_q_out")
         torch._dynamo.mark_dynamic(qkv, 0)
-        torch._dynamo.mark_dynamic(positions, 0)
+        torch._dynamo.mark_dynamic(positions, positions.dim() - 1)
         backend = VllmBackend(vllm_config)
         compiled = torch.compile(model, backend=backend, fullgraph=True)
         fused_output, fused_cache = run(compiled)
@@ -507,10 +520,16 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
         for node in call_nodes
         if node.target is torch.ops.vllm.unified_attention_with_output
     ]
-    assert len(fused_nodes) == len(attention_nodes) == 1
-    assert fused_nodes[0].args[-1] is attention_nodes[0].args[4]
-    assert attention_nodes[0].args[1:3] == (None, None)
-    fused_update.assert_called_once()
+    assert len(attention_nodes) == 1
+    if path == "fused":
+        assert len(fused_nodes) == 1
+        assert fused_nodes[0].args[-1] is attention_nodes[0].args[4]
+        assert attention_nodes[0].args[1:3] == (None, None)
+        fused_update.assert_called_once()
+    else:
+        assert fused_nodes == []
+        assert all(arg is not None for arg in attention_nodes[0].args[1:3])
+        fused_update.assert_not_called()
     torch.testing.assert_close(incumbent_output, fused_output, atol=2e-3, rtol=2e-3)
     assert torch.count_nonzero(fused_cache).item() > 0
     torch.testing.assert_close(incumbent_cache, fused_cache, atol=2e-3, rtol=2e-3)

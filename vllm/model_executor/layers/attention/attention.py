@@ -54,7 +54,7 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
-    from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+    from vllm.model_executor.layers.rotary_embedding.base import RopeRotation
 
 logger = init_logger(__name__)
 
@@ -441,11 +441,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         compilation_config = vllm_config.compilation_config
-        self._rope_kvcache_fusion_enabled = bool(
-            compilation_config.pass_config.fuse_rope_kvcache
-        )
+        pass_config = compilation_config.pass_config
         if (
-            self._rope_kvcache_fusion_enabled
+            pass_config.fuse_rope_kvcache
             and current_platform.is_cuda()
             and not self.impl.fused_rope_kvcache_q_out_supported()
         ):
@@ -455,9 +453,17 @@ class Attention(nn.Module, AttentionLayerBase):
                 "use unfused RoPE and KV-cache updates.",
                 self.attn_backend.get_name(),
             )
-        self._fuse_attn_quant = bool(compilation_config.pass_config.fuse_attn_quant)
+        self._fuse_rope_kvcache = bool(
+            pass_config.fuse_rope_kvcache
+            and not self.attn_backend.forward_includes_kv_cache_update
+            and kv_sharing_target_layer_name is None
+            and self.head_size_v == self.head_size
+            and self.kv_cache_torch_dtype == self.dtype
+            and not pass_config.fuse_attn_quant
+            and self.impl.fused_rope_kvcache_q_out_supported()
+        )
         self.rope_kvcache_fusion_max_token_num = (
-            compilation_config.pass_config.rope_kvcache_fusion_max_token_num
+            pass_config.rope_kvcache_fusion_max_token_num
         )
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -515,7 +521,8 @@ class Attention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
         *,
-        encoded_layer_name: LayerNameType | None = None,
+        positions: torch.Tensor | None = None,
+        rotary_emb: nn.Module | None = None,
     ) -> torch.Tensor:
         """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
@@ -525,10 +532,32 @@ class Attention(nn.Module, AttentionLayerBase):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
 
-        `key` and `value` may be omitted when a capability-gated fused update
-        has already written them to the cache and the attention backend reads
-        only from that cache.
+        When `rotary_emb` is given, RoPE is applied to `query` and `key` here,
+        fused with the KV-cache update when the backend supports it.
         """
+        encoded = (
+            self.layer_name
+            if self.use_direct_call
+            else _encode_layer_name(self.layer_name)
+        )
+        if rotary_emb is not None:
+            assert positions is not None and key is not None and value is not None
+            rotation = self._get_fused_rope_rotation(positions, query, rotary_emb)
+            if rotation is None:
+                query, key = rotary_emb(positions, query, key)
+            else:
+                q = query.view(-1, self.num_heads, self.head_size)
+                query = torch.empty_like(q, memory_format=torch.contiguous_format)
+                key = key.view(-1, self.num_kv_heads, self.head_size)
+                value = value.view(-1, self.num_kv_heads, self.head_size_v)
+                op = (
+                    fused_rope_and_unified_kv_cache_update_q_out
+                    if self.use_direct_call
+                    else torch.ops.vllm.fused_rope_and_unified_kv_cache_update_q_out
+                )
+                op(q, key, value, query, *rotation, encoded)
+                key = value = None
+
         if output_dtype is None:
             output_dtype = query.dtype
         if self.query_quant is not None:
@@ -583,13 +612,6 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             # Skip this if sharing KV cache with an earlier attention layer.
-            # The fused path reuses its encoded handle to avoid a duplicate
-            # hoisted graph input for every attention layer.
-            encoded = (
-                encoded_layer_name
-                if encoded_layer_name is not None
-                else _encode_layer_name(self.layer_name)
-            )
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
@@ -609,78 +631,27 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         return output.view(-1, hidden_size)
 
-    def manual_rope_kvcache_fusion_supported(
-        self, rotary_emb: "RotaryEmbedding"
-    ) -> bool:
-        """Return whether this layer can use manual RoPE/cache fusion."""
-        from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-
-        return (
-            current_platform.is_cuda()
-            and self._rope_kvcache_fusion_enabled
-            and self.attn_type == AttentionType.DECODER
-            and not self.attn_backend.forward_includes_kv_cache_update
-            and self.kv_sharing_target_layer_name is None
-            and self.head_size_v == self.head_size
-            and self.kv_cache_torch_dtype == self.dtype
-            and self.query_quant is None
-            and not self._fuse_attn_quant
-            and isinstance(rotary_emb, RotaryEmbedding)
-            and type(rotary_emb).forward is RotaryEmbedding.forward
-            and type(rotary_emb).forward_native is RotaryEmbedding.forward_native
-            and type(rotary_emb).forward_cuda is RotaryEmbedding.forward_cuda
-            and not rotary_emb.use_flashinfer
-            and rotary_emb.head_size == self.head_size
-            and 0 < rotary_emb.rotary_dim <= self.head_size
-            and rotary_emb.rotary_dim % 2 == 0
-            and self.impl.fused_rope_kvcache_q_out_supported()
-        )
-
-    def forward_with_fused_rope_kvcache(
+    def _get_fused_rope_rotation(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        rotary_emb: "RotaryEmbedding",
-    ) -> torch.Tensor:
-        """Run attention after writing rotated Q and K/V cache in one op."""
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size_v)
-        cos_sin_cache = rotary_emb._match_cos_sin_cache_dtype(query)
-        encoded = _encode_layer_name(self.layer_name)
-        query_out = torch.empty_like(query, memory_format=torch.contiguous_format)
-
-        if self.use_direct_call:
-            fused_rope_and_unified_kv_cache_update_q_out(
-                query,
-                key,
-                value,
-                query_out,
-                positions,
-                cos_sin_cache,
-                rotary_emb.is_neox_style,
-                self.layer_name,
-            )
-        else:
-            torch.ops.vllm.fused_rope_and_unified_kv_cache_update_q_out(
-                query,
-                key,
-                value,
-                query_out,
-                positions,
-                cos_sin_cache,
-                rotary_emb.is_neox_style,
-                encoded,
-            )
-
-        return self.forward(
-            query_out,
-            None,
-            None,
-            encoded_layer_name=encoded,
-        )
+        rotary_emb: nn.Module,
+    ) -> "RopeRotation | None":
+        # vLLM drops Dynamo shape guards, so compiled graphs always take the
+        # fused op and it applies the token threshold at runtime.
+        if not self._fuse_rope_kvcache or not (
+            torch.compiler.is_compiling()
+            or query.shape[0] <= self.rope_kvcache_fusion_max_token_num
+        ):
+            return None
+        get_rotation = getattr(rotary_emb, "get_rotation", None)
+        if (
+            get_rotation is None
+            or rotary_emb.head_size != self.head_size
+            or positions.device != query.device
+        ):
+            return None
+        return get_rotation(positions, query.dtype)
 
     def _rope_and_kv_cache_update_q_out(
         self,
@@ -698,9 +669,6 @@ class Attention(nn.Module, AttentionLayerBase):
         assert impl.fused_rope_kvcache_q_out_supported(), (
             "The attention backend does not support cache-only fused RoPE."
         )
-        # vLLM drops Dynamo shape guards, so a compiled model call site cannot
-        # own this dynamic threshold. Keep the compiled path stable and select
-        # the native kernel or incumbent fallback here at runtime.
         if (
             layer_slot_mapping is not None
             and query.shape[0] <= self.rope_kvcache_fusion_max_token_num

@@ -184,8 +184,17 @@ Other attention backends do not support fused output quantization yet.
 **What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
 a single kernel, eliminating one launch and the intermediate write/read of rotated K.
 
-The Llama model definition uses a manual call site on supported NVIDIA
-FlashAttention decoder layers. It writes rotated Q to graph-owned storage and writes
+The Llama model definition passes positions and its rotary module to `Attention`.
+The rotary module's `get_rotation()` describes a supported rotation as positions,
+a `[cos | sin]` table, and the NeoX/interleaved convention. `Attention` owns the
+selection between fusion and the ordinary rotary call; it does not inspect rotary
+subclass method identities. Modules without this interface or returning `None`
+keep their existing forward, including Fourier RoPE and MRoPE. Ordinary RoPE and
+cache-only scaling variants support this interface; the FlashInfer rotary path
+retains its existing cache-precision behavior and stays unfused.
+
+On supported NVIDIA FlashAttention decoder layers, the fused operation writes
+rotated Q to graph-owned storage and writes
 K/V directly to the paged cache before attention. The CUDA kernel consumes logical
 cache views and their strides, so it supports every physical KV-cache layout advertised
 by FlashAttention. Unsupported cache formats, attention variants, and parallelism
