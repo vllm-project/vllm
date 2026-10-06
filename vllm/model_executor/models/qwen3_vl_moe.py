@@ -25,6 +25,7 @@
 """Inference-only Qwen3-VL-MoE model compatible with HuggingFace weights."""
 
 from itertools import islice
+from typing import ClassVar
 
 import torch
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
@@ -35,6 +36,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -43,6 +45,7 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
+    Qwen3MoeDecoderLayer,
     Qwen3MoeForCausalLM,
     Qwen3MoeModel,
     Qwen3MoeSparseMoeBlock,
@@ -54,7 +57,7 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
-from .utils import maybe_prefix
+from .utils import StageMissingLayer, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -62,6 +65,15 @@ logger = init_logger(__name__)
 class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3VLMoeConfig)
+
+
+class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            is_fused_checkpoint_transposed=True,
+        )
 
 
 @support_torch_compile(
@@ -77,6 +89,19 @@ class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layer_type: type[torch.nn.Module] = Qwen3VLMoeDecoderLayer,
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            decoder_layer_type=decoder_layer_type,
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -145,7 +170,7 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -153,6 +178,9 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
 
 
 class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+    language_model: Qwen3MoeLLMForCausalLM
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -200,7 +228,7 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
 class Qwen3VLMoeForConditionalGeneration(
     Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
 ):
-    is_3d_moe_weight: bool = True
+    is_3d_moe_weight: ClassVar[bool] = True
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -213,19 +241,27 @@ class Qwen3VLMoeForConditionalGeneration(
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
+        self._init_video_pruning(multimodal_config)
 
-        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = Qwen3_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+
+        self.use_deepstack = hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ) and not isinstance(self.visual, StageMissingLayer)
         self.deepstack_num_level = (
             len(config.vision_config.deepstack_visual_indexes)
             if self.use_deepstack
@@ -234,27 +270,21 @@ class Qwen3VLMoeForConditionalGeneration(
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
-        with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Qwen3_VisionTransformer(
-                config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "visual"),
-            )
-
-            # register buffer for deepstack
-            if self.use_deepstack:
-                self.deepstack_input_embeds = [
-                    torch.zeros(
-                        vllm_config.scheduler_config.max_num_batched_tokens,
-                        config.text_config.hidden_size,
-                    )
-                    for _ in range(self.deepstack_num_level)
-                ]
+        if self.use_deepstack:
+            self.deepstack_input_embeds = [
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    config.text_config.hidden_size,
+                )
+                for _ in range(self.deepstack_num_level)
+            ]
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
-                vllm_config=vllm_config.with_hf_config(config.text_config),
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config,
+                    architectures=["Qwen3MoeForCausalLM"],
+                ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
@@ -269,8 +299,8 @@ class Qwen3VLMoeForConditionalGeneration(
             )
 
         # Whether to include the gate_up_proj mapping is determined by
-        # the language model.
-        self.packed_modules_mapping = (
+        # the language model. Keep this override local to the instance.
+        self.packed_modules_mapping = (  # type: ignore[misc]
             self.packed_modules_mapping | self.language_model.packed_modules_mapping
         )
 

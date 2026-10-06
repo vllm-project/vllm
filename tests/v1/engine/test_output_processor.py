@@ -3,8 +3,11 @@
 
 import math
 import time
+from unittest.mock import MagicMock, Mock
 
+import numpy as np
 import pytest
+import torch
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -14,20 +17,81 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
-from vllm.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import (
+    CompletionOutput,
+    PoolingRequestOutput,
+    RequestOutput,
+    SamplingMask,
+)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    RequestState,
+)
+from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
+from vllm.v1.outputs import SamplingMaskLists
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_delta_output_without_new_tokens_returns_empty_logprobs(
+    flat_logprobs: bool,
+) -> None:
+    accumulated = FlatLogprobs() if flat_logprobs else []
+    accumulated.append({1: Logprob(logprob=-0.5, rank=1)})
+
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = accumulated
+    state.logprobs_processor.cumulative_logprob = -0.5
+    state.output_kind = RequestOutputKind.DELTA
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    output = state._new_completion_output([], None, None)
+
+    assert isinstance(output.logprobs, FlatLogprobs if flat_logprobs else list)
+    assert len(output.logprobs) == 0
+
+
+def test_completion_output_preserves_each_sampling_mask_position() -> None:
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = RequestOutputKind.DELTA
+    state.request_index = 0
+    state.sampling_mask_chunks = [
+        SamplingMaskLists(
+            token_ids=np.array([10, 11, 20]),
+            offsets=np.array([0, 2, 3]),
+        ),
+        SamplingMaskLists(token_ids=np.array([30, 31, 32])),
+    ]
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    output = state._new_completion_output([1, 2, 3], FinishReason.LENGTH, None)
+
+    assert output.sampling_mask is not None
+    assert output.sampling_mask.token_ids == [[10, 11], [20], [30, 31, 32]]
 
 
 def _ref_convert_id_to_token(
@@ -42,6 +106,7 @@ def _ref_convert_id_to_token(
 
     Returns:
       String representation of input token id
+
     """
     return tokenizer.decode([token_id]) or ""
 
@@ -138,6 +203,134 @@ def test_incremental_detokenization(
         assert gen_toks == ref_gen_toks, f"{gen_toks=}, {ref_gen_toks=}"
 
     assert output_processor.get_num_unfinished_requests() == 0
+    assert not output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize("do_remote_prefill", [True, False])
+def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
+    """P/D disaggregation: num_cached_tokens should report the P worker's
+    cache hits (passed via kv_transfer_params) instead of the local count,
+    which sees the KVs pulled from the remote prefill as a ~100% hit.
+    """
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+
+    prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+    kv_transfer_params = {
+        "do_remote_prefill": do_remote_prefill,
+        "remote_prefill_cached_tokens": 5,
+    }
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=prompt_tokens,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            extra_args={"kv_transfer_params": kv_transfer_params},
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=len(prompt_tokens),
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=len(prompt_tokens) - 1,
+    )
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-0-int",
+                new_token_ids=[42],
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+    request_output = processed.request_outputs[0]
+    if do_remote_prefill:
+        assert request_output.num_cached_tokens == 5
+    else:
+        assert request_output.num_cached_tokens == len(prompt_tokens) - 1
+
+
+def test_request_stream_interval_raises_but_not_below_engine_default(
+    dummy_test_vectors,
+):
+    """A per-request stream_interval can raise the interval above the engine
+    default but not below it (values under the default clamp up), without
+    altering the generated text."""
+    engine_stream_interval = 5
+    # Request 0 (below the default) clamps up to 5; request 1 raises it to 10.
+    request_stream_intervals = [1, 10]
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=engine_stream_interval,
+    )
+
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=RequestOutputKind.DELTA,
+                stop=[],
+                include_stop_str_in_output=False,
+                stream_interval=request_stream_intervals[idx],
+            ),
+            pooling_params=None,
+        )
+        for idx, prompt_tokens in enumerate(
+            dummy_test_vectors.prompt_tokens[: len(request_stream_intervals)]
+        )
+    ]
+
+    num_requests = len(requests)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens[:num_requests],
+        prompts_list=dummy_test_vectors.prompt_tokens[:num_requests],
+        request_ids=[req.request_id for req in requests],
+    )
+
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
+
+    gen_strings: dict[str, str] = {}
+    gen_tokens: dict[str, list[int]] = {}
+    while outputs := engine_core.get_outputs():
+        for request_output in output_processor.process_outputs(outputs).request_outputs:
+            request_id = request_output.request_id
+            new_tokens = request_output.outputs[0].token_ids
+            if request_id not in gen_strings:
+                gen_strings[request_id] = request_output.outputs[0].text
+                gen_tokens[request_id] = list(new_tokens)
+                assert len(new_tokens) == 1, f"{len(new_tokens)=}"
+                continue
+            gen_strings[request_id] += request_output.outputs[0].text
+            gen_tokens[request_id].extend(new_tokens)
+            if not request_output.finished:
+                requested = request_stream_intervals[int(request_id.split("-")[1])]
+                interval = max(requested, engine_stream_interval)
+                assert len(new_tokens) == interval, f"{len(new_tokens)=}, {interval=}"
+
+    for idx in range(num_requests):
+        request_id = f"request-{idx}"
+        assert gen_strings[request_id] == dummy_test_vectors.generation_strings[idx]
+        assert gen_tokens[request_id] == dummy_test_vectors.generation_tokens[idx]
+
     assert not output_processor.has_unfinished_requests()
 
 
@@ -335,7 +528,7 @@ def _validate_logprobs(
                 ref_prompt_logprob_toks,
                 ref_prompt_logprob_vals,
                 ref_prompt_token_ranks,
-                _,
+                *_,
             ) = ref_prompt_logprobs
             for idx, (prompt_token, pos_logprob_dict) in enumerate(
                 zip(prompt_token_ids[1:], prompt_logprobs[1:])
@@ -634,6 +827,7 @@ def test_stop_token(
         stop_token_type: "eos_token_id" for EOS, "stop_token_ids" for stop token
         ignore_eos: if True, EOS stops are disabled
         dummy_test_vectors: dummy engine core outputs and other data structures
+
     """
     model_id = dummy_test_vectors.tokenizer.name_or_path
     if model_id != "meta-llama/Llama-3.2-1B":
@@ -1146,6 +1340,7 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 async def test_request_output_collector():
     NUM_REQS = 3
     TEXT = "a"
+    routed_experts = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
 
     def make_outputs() -> list[RequestOutput]:
         return [
@@ -1161,6 +1356,9 @@ async def test_request_output_collector():
                         token_ids=[idx],
                         cumulative_logprob=(idx + 1 * 1.0),
                         logprobs=[{"a": idx, "b": idx}],
+                        routed_experts=(
+                            routed_experts if idx == NUM_REQS - 1 else None
+                        ),
                         finish_reason="length" if (idx == NUM_REQS - 1) else None,
                     )
                 ],
@@ -1213,6 +1411,7 @@ async def test_request_output_collector():
 
     assert output.finished
     assert output.outputs[0].finish_reason == "length"
+    np.testing.assert_array_equal(output.outputs[0].routed_experts, routed_experts)
     # Text, token_ids, and logprobs should get merged.
     assert output.outputs[0].text == TEXT * num_to_put
     for tok_0, tok_1 in zip(output.outputs[0].token_ids, list(range(num_to_put))):
@@ -1222,6 +1421,46 @@ async def test_request_output_collector():
     # Cumulative logprobs should be the last one.
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
+
+
+def test_routed_experts_are_accumulated_until_finish():
+    state = RequestState(
+        request_id="request-int",
+        external_req_id="request",
+        parent_req=None,
+        request_index=0,
+        lora_request=None,
+        output_kind=RequestOutputKind.DELTA,
+        prompt="prompt",
+        prompt_token_ids=[1, 2, 3, 4],
+        prompt_embeds=None,
+        logprobs_processor=Mock(
+            logprobs=None,
+            cumulative_logprob=0.0,
+            pop_prompt_logprobs=Mock(return_value=None),
+        ),
+        detokenizer=Mock(get_next_output_text=Mock(return_value="")),
+        max_tokens_param=2,
+        arrival_time=0.0,
+        queue=None,
+        log_stats=False,
+        stream_interval=1,
+    )
+    prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
+    decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
+    state.routed_experts_chunks.append(prompt_chunk)
+
+    partial = state.make_request_output([5], None, None, None)
+    assert partial is not None
+    assert partial.outputs[0].routed_experts is None
+
+    state.routed_experts_chunks.append(decode_chunk)
+    finished = state.make_request_output([6], None, FinishReason.LENGTH, None)
+    assert finished is not None
+    np.testing.assert_array_equal(
+        finished.outputs[0].routed_experts,
+        np.concatenate((prompt_chunk, decode_chunk)),
+    )
 
 
 @pytest.mark.asyncio
@@ -1342,3 +1581,147 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+def test_sampling_masks_follow_output_kind(output_kind):
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = output_kind
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    supports = [[10, 11], [20], [30, 31]]
+    masks = []
+    for position, support in enumerate(supports):
+        state.sampling_mask_chunks.append(SamplingMaskLists(np.asarray(support)))
+        finish = FinishReason.LENGTH if position == len(supports) - 1 else None
+        mask = state._new_completion_output([support[0]], finish, None).sampling_mask
+        masks.append(mask.token_ids if mask is not None else None)
+
+    if output_kind == RequestOutputKind.DELTA:
+        assert masks == [[support] for support in supports]
+    else:
+        assert masks == [None, None, supports]
+
+
+def test_request_output_add_merges_delta_sampling_masks():
+    def delta(token_ids, sampling_mask):
+        completion = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,
+            sampling_mask=sampling_mask,
+        )
+        return RequestOutput(
+            request_id="request",
+            prompt=None,
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[completion],
+            finished=False,
+        )
+
+    merged = delta([], None)
+    merged.add(delta([10], SamplingMask([[10, 11]])), aggregate=True)
+    merged.add(delta([20], SamplingMask([[20]])), aggregate=True)
+
+    assert merged.outputs[0].token_ids == [10, 20]
+    assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
+
+
+@pytest.mark.skip_global_cleanup
+def test_pooling_cache_miss_is_a_request_error_and_batch_continues():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=[1, 2],
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=None,
+            pooling_params=PoolingParams(task="embed"),
+        )
+        for idx in range(2)
+    ]
+    for request in requests:
+        output_processor.add_request(request, prompt=None)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=requests[0].request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            ),
+            EngineCoreOutput(
+                request_id=requests[1].request_id,
+                new_token_ids=[],
+                pooling_output=torch.tensor([1.0, 2.0]),
+                finish_reason=FinishReason.STOP,
+            ),
+        ]
+    )
+
+    assert len(processed.request_outputs) == 2
+    failed, succeeded = processed.request_outputs
+    assert isinstance(failed, PoolingRequestOutput)
+    assert failed.error is not None
+    assert failed.error.code == "multimodal_cache_miss"
+    assert failed.error.retryable
+    assert isinstance(succeeded, PoolingRequestOutput)
+    assert succeeded.error is None
+    assert torch.equal(succeeded.outputs.data, torch.tensor([1.0, 2.0]))
+
+
+@pytest.mark.skip_global_cleanup
+def test_async_pooling_cache_miss_does_not_fail_output_processor():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-int",
+        external_req_id="request",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    queue = RequestOutputCollector(
+        output_kind=RequestOutputKind.FINAL_ONLY,
+        request_id=request.request_id,
+    )
+    output_processor.add_request(request, prompt=None, queue=queue)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            )
+        ]
+    )
+
+    assert processed.request_outputs == []
+    output = queue.get_nowait()
+    assert isinstance(output, PoolingRequestOutput)
+    assert output.error is not None
+    assert output.error.retryable
+    assert not output_processor.has_unfinished_requests()

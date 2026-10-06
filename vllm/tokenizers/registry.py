@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import huggingface_hub
 from typing_extensions import TypeVar, assert_never
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
@@ -18,6 +18,7 @@ from vllm.transformers_utils.repo_utils import (
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
+from .hf import CachedHfTokenizer
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -39,10 +40,15 @@ _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
 }
 
 _VLLM_TOKENIZERS = {
+    # ``cohere`` mode uses the standard cached HF tokenizer; only the
+    # renderer (template stage) is replaced with a melody-based one.
+    "cohere": ("hf", "CachedHfTokenizer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
+    "deepseek_v41": ("deepseek_v41", "DeepseekV41Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
+    "kimi_k3": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
     # Inkling uses the plain HF tokenizer for token operations; the "inkling"
     # mode exists to select the InklingRenderer, which renders chat to
@@ -67,8 +73,6 @@ class _TokenizerRegistry:
             )
 
         self.tokenizers[tokenizer_mode] = (module, class_name)
-
-        return None
 
     def load_tokenizer_cls(self, tokenizer_mode: str) -> type[TokenizerLike]:
         if tokenizer_mode not in self.tokenizers:
@@ -133,23 +137,19 @@ def resolve_tokenizer_args(
         else:
             assert_never(runner_type)
 
-    if tokenizer_mode == "slow":
-        if kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
-
-        tokenizer_mode = "hf"
-        kwargs["use_fast"] = False
-
     # Try to use official Mistral tokenizer if possible
     if (
         tokenizer_mode == "auto"
         and is_mistral_model_repo(
-            model_name_or_path=str(tokenizer_name), revision=revision
+            model_name_or_path=str(tokenizer_name),
+            revision=revision,
+            token=kwargs.get("token"),
         )
         and any_pattern_in_repo_files(
             model_name_or_path=str(tokenizer_name),
             allow_patterns=["tekken.json", "tokenizer.model.v*"],
             revision=revision,
+            token=kwargs.get("token"),
         )
     ):
         tokenizer_mode = "mistral"
@@ -157,6 +157,13 @@ def resolve_tokenizer_args(
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
+
+    if tokenizer_mode == "hf":
+        if kwargs.pop("mistral_format", False):
+            raise ValueError(
+                "mistral_format=True is not supported with tokenizer_mode='hf'"
+            )
+        kwargs["mistral_format"] = False
 
     return tokenizer_mode, tokenizer_name, args, kwargs
 
@@ -204,17 +211,28 @@ def get_tokenizer(
         **kwargs,
     )
 
+    if tokenizer_cls == TokenizerLike:
+        tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
+    else:
+        tokenizer_cls_ = tokenizer_cls
+
     # Ensure that, if the config were to come from vllm.transformers_utils.config, it is
     # registered with AutoConfig before the tokenizer is loaded. This is necessary since
     # tokenizer_cls_.from_pretrained will call AutoConfig.from_pretrained internally.
     # This may fail for paths that don't have a model config (e.g. LoRA adapters),
     # which is fine — those don't need custom config registration.
+    # HF-backed tokenizers must receive the HF config. In a dual-format Mistral
+    # repository, auto detection intentionally prefers params.json, but passing
+    # that generic config to AutoTokenizer can select the wrong tokenizer class.
+    config_format = "hf" if tokenizer_cls_ is CachedHfTokenizer else "auto"
     config = None
     with contextlib.suppress(ValueError, OSError):
         config = get_config(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            config_format=config_format,
+            token=kwargs.get("token"),
         )
 
     # Some models have an incorrect tokenizer_class on the hub.
@@ -228,10 +246,12 @@ def get_tokenizer(
             model_type,
         )
         tokenizer_cls_ = TokenizersBackend
-    elif tokenizer_cls == TokenizerLike:
-        tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
-    else:
-        tokenizer_cls_ = tokenizer_cls
+
+    if config is not None and tokenizer_cls_ is CachedHfTokenizer:
+        # AutoTokenizer otherwise reloads config.json internally. Reuse the
+        # config that get_config just loaded successfully so a concurrent Hub
+        # cache refresh cannot invalidate the file between the two reads.
+        kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:

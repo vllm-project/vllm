@@ -37,7 +37,7 @@ void fused_experts_fp_kernel_impl(
     int64_t num_tokens_post_pad,
     float alpha,
     float limit,
-    CPUAcTMethod act_func,
+    CPUActMethod act_func,
     bool with_bias) {
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
@@ -60,9 +60,6 @@ void fused_experts_fp_kernel_impl(
   const int64_t stride_e = 2 * N * packed_K;
   const int64_t stride_n = packed_K;
 
-  int64_t avg_M = std::max(int64_t(1), M * topk / E);
-  const bool use_brgemm = can_use_brgemm<packed_t>(avg_M);
-
   int64_t B_tmp_size_per_thread = MAX_CACHE_BLOCK_SIZE * BLOCK_N * std::max(K, N);
 
   // here we only parallel on half of 2N to fuse silu_and_mul with gemm
@@ -70,6 +67,7 @@ void fused_experts_fp_kernel_impl(
     // get local pointers
     int tid = get_thread_num();
     scalar_t* __restrict__ A = A_tmp + tid * BLOCK_M * K;
+    bool use_brgemm = false;
 
     loop_2d<packed_t>(mb0, mb1, nb0, nb1, BLOCK_N * K, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
       int64_t n_size = std::min(2 * N - nb * BLOCK_N, BLOCK_N);
@@ -86,6 +84,11 @@ void fused_experts_fp_kernel_impl(
       bool do_unpack = (mb == mb0) || (expert_id != pre_expert_id);
 
       int64_t m_size = offsets[mb + 1] - offsets[mb];
+      if (m_size == 0) {
+        return;
+      }
+      const bool brg = can_use_brgemm<packed_t>(m_size, n_size);
+      use_brgemm |= brg;
 
       if (nb_offset == 0) {
         // 1.a load A
@@ -111,7 +114,7 @@ void fused_experts_fp_kernel_impl(
           /*   lda          */ K,
           /*   ldb          */ n_size,
           /*   ldc          */ 2 * N,
-          /*   brg          */ use_brgemm,
+          /*   brg          */ brg,
           /*   block_size_K */ block_size_K,
           /*   do_unpack    */ do_unpack);
     });
@@ -122,17 +125,17 @@ void fused_experts_fp_kernel_impl(
   });
 
   // stage 1.5: intermediate_cache1 = silu(intermediate_cache0)
-  if (act_func == CPUAcTMethod::silu_and_mul) {
+  if (act_func == CPUActMethod::silu_and_mul) {
     at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
       for (int64_t m = begin; m < end; ++m) {
         silu_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, ic0 + m * 2 * N + N, N);
       }
     });
-  } else if (act_func == CPUAcTMethod::swiglu) {
+  } else if (act_func == CPUActMethod::swiglu) {
     at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
       for (int64_t m = begin; m < end; ++m) {
-        clamp_sigmoid_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, N, alpha, limit);
-        clamp_sigmoid_and_mul_stub(ic1 + m * N + N / 2, ic0 + m * 2 * N + N, N, alpha, limit);
+        clamp_sigmoid_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, N / 2, alpha, limit);
+        clamp_sigmoid_and_mul_stub(ic1 + m * N + N / 2, ic0 + m * 2 * N + N, N / 2, alpha, limit);
       }
     });
   }
@@ -152,10 +155,16 @@ void fused_experts_fp_kernel_impl(
   parallel_2d(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     int tid = get_thread_num();
     alignas(64) scalar_t C[BLOCK_M * BLOCK_K];
+    bool use_brgemm = false;
 
     loop_2d<packed_t>(mb0, mb1, nb0, nb1, BLOCK_N * IC, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
       int64_t m_size = offsets[mb + 1] - offsets[mb];
+      if (m_size == 0) {
+        return;
+      }
       int64_t n_size = std::min(OC - nb * BLOCK_N, BLOCK_N);
+      const bool brg = can_use_brgemm<packed_t>(m_size, n_size);
+      use_brgemm |= brg;
 
       // A ptr from ic1 of [M * topk, N] in sorted order
       // so as to avoid copy A to tmp buffer again
@@ -187,7 +196,7 @@ void fused_experts_fp_kernel_impl(
           /*   lda          */ IC,
           /*   ldb          */ n_size,
           /*   ldc          */ BLOCK_N,
-          /*   brg          */ use_brgemm,
+          /*   brg          */ brg,
           /*   block_size_K */ block_size_K,
           /*   do_unpack    */ do_unpack);
 
@@ -243,7 +252,7 @@ void fused_experts_fp_kernel_impl(
       int64_t num_tokens_post_pad,                                           \
       float alpha,                                                           \
       float limit,                                                           \
-      CPUAcTMethod act_func,                                                 \
+      CPUActMethod act_func,                                                 \
       bool with_bias)
 
 INSTANTIATE_MOE_FP_TEMPLATE(at::BFloat16, at::Float8_e4m3fn, float, false);
