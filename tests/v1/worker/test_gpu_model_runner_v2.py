@@ -3,13 +3,15 @@
 
 import contextlib
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 
+import vllm.v1.worker.gpu.attn_utils as attn_utils
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -148,6 +150,80 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
 
     assert captured["max_num_blocks_per_group"] == [1, 1]
     assert captured["slot_mapping_enabled"] == [False, True]
+
+
+@pytest.mark.parametrize("supports_batch_invariance", [False, True])
+@patch("vllm.envs.VLLM_BATCH_INVARIANT", True)
+def test_init_attn_backend_checks_custom_backend_batch_invariance(
+    monkeypatch, supports_batch_invariance: bool
+):
+    class FakeBuilder:
+        requires_block_table_width = False
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def set_kernel_block_size(self, _kernel_block_size):
+            pass
+
+        def get_cudagraph_support(self, *_args):
+            return AttentionCGSupport.ALWAYS
+
+    class CustomBackend(AttentionBackend):
+        @staticmethod
+        def get_name() -> str:
+            return "CustomBackend"
+
+        @staticmethod
+        def get_impl_cls():
+            raise NotImplementedError
+
+        @staticmethod
+        def get_builder_cls():
+            return FakeBuilder
+
+        @classmethod
+        def supports_batch_invariance(cls) -> bool:
+            return supports_batch_invariance
+
+    layer = SimpleNamespace(
+        kv_sharing_target_layer_name=None,
+        num_heads=1,
+        get_attn_backend=lambda: CustomBackend,
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *args, **kwargs: {"attn": layer},
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attn"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.bfloat16,
+                ),
+            )
+        ],
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        model_config=SimpleNamespace(max_model_len=16),
+        parallel_config=SimpleNamespace(use_ubatching=False),
+    )
+    ctx = (
+        contextlib.nullcontext()
+        if supports_batch_invariance
+        else pytest.raises(RuntimeError, match="batch_invariant mode is not supported")
+    )
+
+    with ctx:
+        attn_utils.init_attn_backend(kv_cache_config, vllm_config, torch.device("cpu"))
 
 
 @pytest.mark.parametrize(
