@@ -568,6 +568,14 @@ ENV_PATH="${{SCRIPT_DIR}}/{env_rel}"
 
 source "${{ENV_PATH}}"
 
+# Released/nightly vLLM images keep recipe-relative assets such as
+# examples/*.jinja under /vllm-workspace. Launch sweep server subprocesses
+# from there when available so relative recipe assets resolve like they do
+# in serve_with_recipe.sh.
+if [[ -d /vllm-workspace/examples ]]; then
+  cd /vllm-workspace
+fi
+
 # recipe tools may be newer than the installed vLLM package. Only pass the
 # resilience flag when this vLLM CLI actually supports it.
 CONTINUE_ON_ERROR_ARG=""
@@ -1059,6 +1067,14 @@ CONFIG_PATH="${{SCRIPT_DIR}}/{config_rel}"
 ENV_PATH="${{SCRIPT_DIR}}/{env_rel}"
 
 source "${{ENV_PATH}}"
+
+# Released/nightly vLLM images keep recipe-relative assets such as
+# examples/*.jinja under /vllm-workspace. Launch sweep server subprocesses
+# from there when available so relative recipe assets resolve like they do
+# in serve_with_recipe.sh.
+if [[ -d /vllm-workspace/examples ]]; then
+  cd /vllm-workspace
+fi
 
 # recipe tools may be newer than the installed vLLM package. Only pass the
 # resilience flag when this vLLM CLI actually supports it.
