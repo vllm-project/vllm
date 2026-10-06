@@ -220,6 +220,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if process_local_only:
         return
 
+    if current_platform.is_rocm():
+        from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
+            rocm_segmented_attn_autotune_warmup,
+        )
+
+        rocm_segmented_attn_autotune_warmup(worker)
+
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
