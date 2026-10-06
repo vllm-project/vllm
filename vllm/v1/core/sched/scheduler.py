@@ -689,8 +689,7 @@ class Scheduler(SchedulerInterface):
             # without a single executed step, waiting longer cannot help:
             # the counter that would release this hold can only advance on
             # a step that schedules something. Release instead of starving.
-            and self.empty_schedules_since_executed
-            < self.local_prefill_interval
+            and self.empty_schedules_since_executed < self.local_prefill_interval
             and any(not r.is_prefill_chunk for r in self.running)
         ):
             defer_prefills = True
