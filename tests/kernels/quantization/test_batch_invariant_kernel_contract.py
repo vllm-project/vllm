@@ -9,13 +9,10 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-@pytest.mark.skipif(
-    not fp8_utils.is_batch_invariant_quant_kernel_enabled(),
-    reason="batch-invariant quant kernel not available",
-)
 @pytest.mark.parametrize("use_ue8m0", [False, True])
 @pytest.mark.parametrize("clamp_limit", [None, 7.0])
 def test_fused_quant_is_independent_of_cobatched_tokens(use_ue8m0, clamp_limit):
+    assert fp8_utils.is_batch_invariant_quant_kernel_enabled()
     torch.manual_seed(42)
     x = torch.randn(5, 1024, device="cuda", dtype=torch.bfloat16) * 3
     inputs = (x[:2].contiguous(), x.contiguous())

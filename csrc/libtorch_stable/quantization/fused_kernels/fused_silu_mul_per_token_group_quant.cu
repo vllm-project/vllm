@@ -307,9 +307,7 @@ struct MaskedLayoutScheduler {
                                   int& subwarps_per_block, dim3& grid,
                                   dim3& block) {
     subwarps_per_block = SUBWARPS_PER_BLOCK;
-    while (hidden_dim_num_groups % subwarps_per_block != 0) {
-      subwarps_per_block /= 2;
-    }
+    STD_TORCH_CHECK(hidden_dim_num_groups % subwarps_per_block == 0);
     const int token_dim_blocks =
         std::min(DEFAULT_TOKEN_DIM_BLOCKS, num_tokens_per_expert);
     grid = dim3(hidden_dim_num_groups / subwarps_per_block, token_dim_blocks,
@@ -329,7 +327,7 @@ struct MaskedLayoutScheduler {
     const int token_idx_start = blockIdx.y;
 
     const int64_t hidden_dim_group_idx =
-        blockIdx.x * subwarps_per_block + subwarp_id;
+        blockIdx.x * SUBWARPS_PER_BLOCK + subwarp_id;
 
     const int curr_expert_token_num = masked_m[expert_idx];
 
@@ -581,9 +579,7 @@ void fused_silu_mul_per_token_group_quant(
 
   const int num_local_experts = masked_layout ? input.size(0) : 1;
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      input.get_device_index());
-  cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+  cudaStream_t stream = get_current_cuda_stream();
 
   auto dst_type = output_q.scalar_type();
 

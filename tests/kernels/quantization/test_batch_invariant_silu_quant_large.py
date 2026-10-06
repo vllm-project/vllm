@@ -35,12 +35,9 @@ def _quant(x: torch.Tensor, use_ue8m0: bool) -> tuple[torch.Tensor, torch.Tensor
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-@pytest.mark.skipif(
-    not fp8_utils.is_batch_invariant_quant_kernel_enabled(),
-    reason="batch-invariant kernel library not available",
-)
 @pytest.mark.parametrize("use_ue8m0", [True, False])
 def test_fused_silu_quant_accepts_inputs_beyond_int32(use_ue8m0: bool):
+    assert fp8_utils.is_batch_invariant_quant_kernel_enabled()
     rows, width = 524288 + 128, 4096  # rows * width > 2**31 elements
     if torch.cuda.get_device_properties(0).total_memory < 24 * 1024**3:
         pytest.skip("needs >= 24 GiB of device memory for the >2**31-element input")
