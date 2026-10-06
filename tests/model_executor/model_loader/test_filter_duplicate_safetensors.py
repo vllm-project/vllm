@@ -125,7 +125,7 @@ def test_loader_does_not_read_shards_the_model_skips(mtp_checkpoint, monkeypatch
     )
 
     class Drafter(torch.nn.Module):
-        def skip_checkpoint_weight(self, name: str) -> bool:
+        def is_unused_checkpoint_weight(self, name: str) -> bool:
             return _skip_non_mtp(name)
 
     loader = DefaultModelLoader(LoadConfig(load_format="instanttensor"))

@@ -251,7 +251,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             name = name.replace(f"model.layers.{spec_layer}.", "model.")
         return name
 
-    def skip_checkpoint_weight(self, name: str) -> bool:
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
         return (
             get_spec_layer_idx_from_weight_name(self.config, name) is None
             and "embed_tokens" not in name
@@ -284,7 +284,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name or self.skip_checkpoint_weight(name):
+            if "rotary_emb.inv_freq" in name or self.is_unused_checkpoint_weight(name):
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:

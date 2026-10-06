@@ -787,9 +787,9 @@ def filter_mm_encoder_only_safetensors_files(
 
 def filter_safetensors_files_by_weight_name(
     hf_weights_files: list[str],
-    skip_weight: Callable[[str], bool],
+    is_unused_weight: Callable[[str], bool],
 ) -> list[str]:
-    """Drop safetensors shards in which `skip_weight` accepts every tensor.
+    """Drop safetensors shards in which `is_unused_weight` accepts every tensor.
 
     Loaders that read whole files (InstantTensor, fastsafetensors, multi-thread,
     eager, prefetch) cannot skip single tensors, so dropping shards is their
@@ -797,7 +797,7 @@ def filter_safetensors_files_by_weight_name(
 
     Args:
         hf_weights_files: Safetensors shard paths.
-        skip_weight: Returns True for checkpoint weight names the model does
+        is_unused_weight: Returns True for checkpoint weight names the model does
             not load.
 
     Returns:
@@ -808,7 +808,7 @@ def filter_safetensors_files_by_weight_name(
     kept: list[str] = []
     for st_file in hf_weights_files:
         with safe_open(st_file, framework="pt") as f:
-            if not all(skip_weight(name) for name in f.keys()):  # noqa: SIM118
+            if not all(is_unused_weight(name) for name in f.keys()):  # noqa: SIM118
                 kept.append(st_file)
     if not kept:
         return hf_weights_files

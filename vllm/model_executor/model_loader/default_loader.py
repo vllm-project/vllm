@@ -76,7 +76,7 @@ class DefaultModelLoader(BaseModelLoader):
         allow_patterns_overrides: list[str] | None = None
         """If defined, weights will load exclusively using these patterns."""
 
-        skip_weight: Callable[[str], bool] | None = None
+        is_unused_weight: Callable[[str], bool] | None = None
         """If defined, safetensors shards holding only weights whose checkpoint
         name (before *prefix*) it accepts are not read."""
 
@@ -288,9 +288,9 @@ class DefaultModelLoader(BaseModelLoader):
                     f"`{source.model_or_path}`; check language_model prefixes "
                     f"{self._encoder_only_lm_prefixes}"
                 )
-        if source.skip_weight is not None and use_safetensors:
+        if source.is_unused_weight is not None and use_safetensors:
             hf_weights_files = filter_safetensors_files_by_weight_name(
-                hf_weights_files, source.skip_weight
+                hf_weights_files, source.is_unused_weight
             )
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
@@ -368,7 +368,7 @@ class DefaultModelLoader(BaseModelLoader):
             prefix="",
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
-            skip_weight=getattr(model, "skip_checkpoint_weight", None),
+            is_unused_weight=getattr(model, "is_unused_checkpoint_weight", None),
         )
         yield from self._get_weights_iterator(primary_weights)
 

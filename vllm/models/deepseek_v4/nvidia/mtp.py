@@ -356,7 +356,7 @@ class DeepSeekV4MTP(nn.Module):
             f"model.layers.{self.config.num_hidden_layers + mtp_layer_idx}.",
         )
 
-    def skip_checkpoint_weight(self, name: str) -> bool:
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
         name = self._to_spec_layer_name(name)
         return get_spec_layer_idx_from_weight_name(self.config, name) is None
 
