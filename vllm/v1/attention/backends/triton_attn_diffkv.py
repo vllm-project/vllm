@@ -2,12 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton attention backend with different K/V head dimensions (DiffKV).
 
-The KV cache layout is identical to ``FlashAttentionDiffKVBackend`` — K
-and V are packed along the last dim:
-
-    [num_blocks, block_size, num_kv_heads, head_size_qk + head_size_v]
-
-so existing helpers (``triton_reshape_and_cache_flash_diffkv``) are reused.
+The KV cache layout is identical to ``FlashAttentionDiffKVBackend``: K and V
+are packed along the last dim in the logical shape
+``[num_blocks, num_kv_heads, block_size, head_size_qk + head_size_v]``.
 """
 
 from typing import ClassVar
@@ -26,7 +23,6 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
     TritonAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
 )
@@ -60,7 +56,7 @@ class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
         head_size_v_padded = next_power_of_2(head_size_v)
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                self.softmax_segm_max.shape[0],
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 head_size_v_padded,
@@ -74,10 +70,11 @@ class TritonAttentionDiffKVBackend(TritonAttentionBackend):
     # V head dim — set per layer via ``set_head_size_v`` before instantiation.
     head_size_v: int = 128
 
-    # No FP8 / int8 KV cache for the DiffKV path yet; require fp16/bf16/fp32.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @classmethod
@@ -95,43 +92,6 @@ class TritonAttentionDiffKVBackend(TritonAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["TritonAttentionDiffKVMetadataBuilder"]:
         return TritonAttentionDiffKVMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        return (
-            num_blocks,
-            block_size,
-            num_kv_heads,
-            head_size + TritonAttentionDiffKVBackend.head_size_v,
-        )
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size,
-            #  num_kv_heads, head_size + head_size_v)
-            return (1, 0, 2, 3, 4)
-        elif cache_layout == "NHD":
-            return (0, 1, 2, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers,
-            #  block_size, head_size + head_size_v)
-            return (1, 3, 0, 2, 4)
-        elif cache_layout == "HND":
-            return (0, 2, 1, 3)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
@@ -151,15 +111,14 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype
+            not in TritonAttentionDiffKVBackend.supported_kv_cache_dtypes
+        ):
             raise NotImplementedError(
-                "TritonAttentionDiffKVBackend does not yet support quantized "
+                "TritonAttentionDiffKVBackend supports only fp8/fp8_e4m3 quantized "
                 f"KV cache (got kv_cache_dtype={self.kv_cache_dtype!r})."
-            )
-        if self._is_per_token_head_quant:
-            raise NotImplementedError(
-                "TritonAttentionDiffKVBackend does not support per-token-head "
-                "quantization."
             )
         if self.chunk_lookback > -1:
             raise NotImplementedError(
@@ -175,13 +134,12 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        # Cache is packed [..., head_size_qk + head_size_v]; the diffkv
-        # reshape kernel writes K to [..., :head_size_qk] and V to
-        # [..., head_size_qk:hqk+hv].
+        # Cache is logical (B, H, N, C); the diffkv reshape kernel expects
+        # (B, N, H, C).
         triton_reshape_and_cache_flash_diffkv(
             key,
             value,
-            kv_cache,
+            kv_cache.transpose(1, 2),
             slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,
@@ -210,7 +168,7 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
             query:    [num_tokens, num_heads, head_size_qk]
             key:      [num_tokens, num_kv_heads, head_size_qk]
             value:    [num_tokens, num_kv_heads, head_size_v]
-            kv_cache: [num_blocks, block_size, num_kv_heads,
+            kv_cache: [num_blocks, num_kv_heads, block_size,
                        head_size_qk + head_size_v]
             output:   [num_tokens, num_heads, head_size_v]
         """
@@ -231,8 +189,11 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         head_size_qk = self.head_size
         head_size_v = TritonAttentionDiffKVBackend.head_size_v
 
-        # Slice the packed cache into K / V views.  Strides on dims 0/1/2
-        # match the original cache; dim 3 stays contiguous (stride 1).
+        # Triton DiffKV kernels consume (B, N, H, D) cache views.
+        kv_cache = kv_cache.transpose(1, 2)
+        quantized = is_quantized_kv_cache(self.kv_cache_dtype)
+        if quantized:
+            kv_cache = kv_cache.view(self.fp8_dtype)
         key_cache = kv_cache[..., :head_size_qk]
         value_cache = kv_cache[..., head_size_qk : head_size_qk + head_size_v]
 
@@ -244,6 +205,11 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
             cu_seqlens_q=attn_metadata.query_start_loc,
             seqused_k=attn_metadata.seq_lens,
             softmax_scale=self.scale,
+            q_descale=(
+                layer._q_scale if quantized and query.dtype == self.fp8_dtype else None
+            ),
+            k_descale=layer._k_scale if quantized else None,
+            v_descale=layer._v_scale if quantized else None,
             causal=True,
             alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,

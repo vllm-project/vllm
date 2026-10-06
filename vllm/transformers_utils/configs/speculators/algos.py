@@ -14,8 +14,7 @@ def register_speculator(name):
 
 @register_speculator("eagle3")
 def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply Eagle-3 specific configuration transformations to the `dict` used to
+    """Apply Eagle-3 specific configuration transformations to the `dict` used to
     construct the Transformers PreTrainedConfig.
 
     Eagle-3 specific fields:
@@ -28,7 +27,6 @@ def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
         provide intermediate hidden states that help the drafter make better
         predictions. This is the standard field used in Eagle3 checkpoints.
     """
-
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
     if config_dict.get("target_hidden_size") is not None:
         pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
@@ -54,8 +52,7 @@ def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
 
 @register_speculator("peagle")
 def update_peagle(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply PEagle (Parallel Eagle) specific configuration transformations to
+    """Apply PEagle (Parallel Eagle) specific configuration transformations to
     the `dict` used to construct the Transformers PreTrainedConfig.
 
     PEagle specific fields:
@@ -92,8 +89,7 @@ def update_peagle(config_dict: dict, pre_trained_config: dict) -> None:
 
 @register_speculator("dflash")
 def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply DFlash specific configuration transformations to the `dict` used to
+    """Apply DFlash specific configuration transformations to the `dict` used to
     construct the Transformers PreTrainedConfig.
 
     DFlash specific fields:
@@ -106,6 +102,9 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         DFlash drafter. Mapped to both eagle_aux_hidden_state_layer_ids
         (for gpu_model_runner) and dflash_config.target_layer_ids (for the
         DFlash model).
+    - sample_from_anchor: Whether to sample from the anchor position. Default
+        False (anchor is a bonus token, only mask tokens predict, yielding
+        block_size - 1 speculative tokens).
     """
     pre_trained_config["architectures"] = ["DFlashDraftModel"]
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
@@ -119,6 +118,7 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     pre_trained_config["dflash_config"] = {
         "mask_token_id": config_dict["mask_token_id"],
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
+        "sample_from_anchor": config_dict.get("sample_from_anchor", False),
     }
     # Enable causal masking in SWA for vllm-project/speculators models
     pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
@@ -126,10 +126,32 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     )
 
 
+@register_speculator("dflash2")
+def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
+    """Apply DFlash2 specific configuration transformations to the `dict` used
+    to construct the Transformers PreTrainedConfig.
+
+    DFlash2 extends DFlash with a grouped convolution layer and a
+    low-rank candidate selector head. It reuses the same DFlash runtime
+    (method="dflash") but has its own architecture (DFlash2DraftModel)
+    and additional config fields for the convolution and selector.
+    """
+    update_dflash(config_dict, pre_trained_config)
+    pre_trained_config["architectures"] = ["DFlash2DraftModel"]
+
+    for key in (
+        "conv_kernel_size",
+        "conv_group_size",
+        "selector_rank",
+        "selector_top_k",
+    ):
+        if config_dict.get(key) is not None:
+            pre_trained_config["dflash_config"][key] = config_dict[key]
+
+
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply DSpark specific configuration transformations to the `dict` used to
+    """Apply DSpark specific configuration transformations to the `dict` used to
     construct the Transformers PreTrainedConfig.
 
     DSpark extends DFlash with a Markov logit-bias head, reusing the same
@@ -146,10 +168,26 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     - aux_hidden_state_layer_ids (required): target layer indices feeding the
         drafter. Mapped to both eagle_aux_hidden_state_layer_ids and
         target_layer_ids (DSpark's i-1 layer semantics).
+    - sample_from_anchor: Whether to sample from the anchor position. Default
+        False (anchor is a bonus token, only mask tokens predict, yielding
+        block_size - 1 speculative tokens).
     """
-    pre_trained_config["architectures"] = ["Qwen3DSparkModel"]
-    # Speculators DSpark uses the 1+N fill-in block (anchor is a bonus token).
-    pre_trained_config["dspark_bonus_anchor"] = True
+    architectures = config_dict.get("architectures") or []
+    supported_architectures = {
+        "Qwen3DSparkModel",
+        "Qwen3OmniDSparkModel",
+    }
+    selected_architectures = [
+        architecture
+        for architecture in architectures
+        if architecture in supported_architectures
+    ]
+    # Legacy msModelSpec checkpoints use a training-only architecture name.
+    pre_trained_config["architectures"] = selected_architectures or ["Qwen3DSparkModel"]
+
+    sample_from_anchor = config_dict.get("sample_from_anchor", False)
+    pre_trained_config["sample_from_anchor"] = sample_from_anchor
+    pre_trained_config["dspark_bonus_anchor"] = not sample_from_anchor
 
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
@@ -165,6 +203,7 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         "block_size",
         "enable_confidence_head",
         "confidence_head_with_markov",
+        "use_aux_hidden_state",
     ):
         if config_dict.get(key) is not None:
             pre_trained_config[key] = config_dict[key]

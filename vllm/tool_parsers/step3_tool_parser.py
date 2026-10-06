@@ -8,16 +8,16 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -32,8 +32,7 @@ logger = init_logger(__name__)
 
 
 class Step3ToolParser(ToolParser):
-    """
-    Tool parser for a model that uses a specific XML-like format for tool calls.
+    """Tool parser for a model that uses a specific XML-like format for tool calls.
     This version uses a robust, stateful, cursor-based streaming parser and
     consolidates tool arguments into a single message.
     """

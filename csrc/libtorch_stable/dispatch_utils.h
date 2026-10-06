@@ -21,6 +21,21 @@
 #define VLLM_STABLE_DISPATCH_FP8_CASE(enum_type, ...) \
   THO_PRIVATE_CASE_TYPE_USING_HINT(enum_type, fp8_t, __VA_ARGS__)
 
+// Same idea, for dispatching on an int32/int64 index tensor (e.g. topk_ids)
+// nested inside a value-type dispatch. Named 'idx_t' instead of 'scalar_t'.
+#define VLLM_STABLE_DISPATCH_IDX_CASE(enum_type, ...) \
+  THO_PRIVATE_CASE_TYPE_USING_HINT(enum_type, idx_t, __VA_ARGS__)
+
+#define VLLM_STABLE_DISPATCH_CASE_IDX_TYPES(...)                     \
+  VLLM_STABLE_DISPATCH_IDX_CASE(torch::headeronly::ScalarType::Int,  \
+                                __VA_ARGS__)                         \
+  VLLM_STABLE_DISPATCH_IDX_CASE(torch::headeronly::ScalarType::Long, \
+                                __VA_ARGS__)
+
+#define VLLM_STABLE_DISPATCH_IDX_TYPES(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(TYPE, NAME,                       \
+                      VLLM_STABLE_DISPATCH_CASE_IDX_TYPES(__VA_ARGS__))
+
 #define VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES(...)                  \
   THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float, __VA_ARGS__) \
   THO_DISPATCH_CASE(torch::headeronly::ScalarType::Half, __VA_ARGS__)  \

@@ -68,6 +68,30 @@ def test_resolve_tokenizer_args_idempotent(runner_type):
     )
 
 
+@pytest.mark.parametrize("input_kwargs", [{}, {"mistral_format": False}])
+def test_resolve_tokenizer_args_forces_hf_mistral_format_false(input_kwargs):
+    resolved_mode, _, _, kwargs = resolve_tokenizer_args(
+        "mistralai/Mistral-Nemo-Instruct-2407",
+        tokenizer_mode="hf",
+        **input_kwargs,
+    )
+
+    assert resolved_mode == "hf"
+    assert kwargs["mistral_format"] is False
+
+
+def test_resolve_tokenizer_args_rejects_hf_mistral_format_true():
+    with pytest.raises(
+        ValueError,
+        match="mistral_format=True is not supported with tokenizer_mode='hf'",
+    ):
+        resolve_tokenizer_args(
+            "mistralai/Mistral-Nemo-Instruct-2407",
+            tokenizer_mode="hf",
+            mistral_format=True,
+        )
+
+
 def test_customized_tokenizer():
     TokenizerRegistry.register("test_tokenizer", __name__, TestTokenizer.__name__)
 
@@ -109,6 +133,8 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
     try:
 
         def fake_from_pretrained(path_or_repo_id: str, *args, **kwargs):
+            passed_config = kwargs.pop("config")
+            assert isinstance(passed_config, Qwen3_5MoeConfig)
             loaded_config = AutoConfig.from_pretrained(
                 path_or_repo_id,
                 trust_remote_code=False,

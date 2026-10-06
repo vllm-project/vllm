@@ -11,6 +11,7 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner as GPUModelRunnerV2,
 )
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
 
 class XPUModelRunner(GPUModelRunner):
@@ -29,6 +30,18 @@ class XPUModelRunner(GPUModelRunner):
 
 class XPUModelRunnerV2(GPUModelRunnerV2):
     """A model runner for XPU devices."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        with _torch_cuda_wrapper():
+            super().__init__(vllm_config, device)
+
+
+class XPUMMEncoderModelRunner(MMEncoderModelRunner):
+    """An encoder-only model runner for XPU devices."""
 
     def __init__(
         self,
@@ -60,4 +73,5 @@ def _torch_cuda_wrapper():
         torch.cuda.graph = partial(torch.xpu.graph)
         torch.cuda.CUDAGraph = torch.xpu.XPUGraph
         torch.cuda.graph_pool_handle = partial(torch.xpu.graph_pool_handle)
+        torch.cuda.is_current_stream_capturing = torch.xpu.is_current_stream_capturing
     yield

@@ -22,15 +22,6 @@ union half_uint16 {
   __device__ half_uint16(half val) : as_half(val) {}
 };
 
-// Max_scale premultiplied by 1/256
-
-__forceinline__ __device__ half dq_scale(const int qs, const half max_scale) {
-  int qs_i = qs + 1;
-  half qs_h = __int2half_rn(qs_i * qs_i);
-  qs_h = __hmul(qs_h, max_scale);
-  return qs_h;
-}
-
 __forceinline__ __device__ half dq(const int q, const int qzero,
                                    const half scale) {
   return __hmul(__int2half_rn(q - qzero), scale);
