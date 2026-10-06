@@ -1721,6 +1721,90 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
     assert torch.equal(draft_logits[batch_slots], logits.view(num_reqs, num_steps, -1))
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("deduplicate_contexts", ["none", "single_turn", "all"])
+def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dtype):
+    """The fused CUDA `sample_parallel` is bit-exact with sampling step by step."""
+    num_reqs, num_steps, vocab_size, max_num_reqs = 4, 5, 1500, 6
+    generator = torch.Generator().manual_seed(0)
+    # Tokens 0-2 dominate, so contexts repeat and deduplication fires.
+    logits = torch.randn(num_reqs, num_steps, vocab_size, generator=generator) * 3
+    logits[..., :3] += 6
+    logits[0, 1, 5] = float("nan")
+    logits = logits.to(dtype).cuda()
+    # Row 3 is a padding row; slot 2 is greedy and row 1 is opted out.
+    idx_mapping = torch.tensor([4, 2, 0, -1], dtype=torch.int32)
+    idx_mapping = idx_mapping.repeat_interleave(num_steps).cuda()
+    temperature = torch.tensor([0.7, 1.0, 0.0, 1.3, 0.6, 0.9]).cuda()
+    seeds = torch.arange(max_num_reqs).cuda() * 1000
+    pos = (torch.arange(num_steps).repeat(num_reqs) + 20).cuda()
+    draft_step = torch.arange(num_steps).repeat(num_reqs).cuda()
+    contexts = torch.randint(0, 3, (num_reqs, 2), generator=generator)
+    contexts[0, 0] = -1
+    all_token_ids = torch.randint(0, 3, (max_num_reqs, 32), generator=generator)
+
+    def run(fused: bool):
+        draft_watermarker = DraftWatermarker(
+            GumbelWatermarker(key=42, context_width=2),
+            max_num_reqs=max_num_reqs,
+            device=torch.device("cuda"),
+            num_speculative_steps=num_steps,
+            deduplicate_contexts=deduplicate_contexts,
+            deduplicate_contexts_max_history=None,
+        )
+        draft_watermarker.prepare(
+            contexts=contexts.cuda(),
+            enabled=torch.tensor([True, False, True, True]).cuda(),
+            all_token_ids=all_token_ids.cuda(),
+            prompt_lens=torch.full((max_num_reqs,), 4).cuda(),
+            total_lens=torch.full((max_num_reqs,), 24).cuda(),
+        )
+        draft_logits = torch.zeros(max_num_reqs, num_steps, vocab_size, dtype=dtype)
+        draft_logits = draft_logits.cuda()
+        args = (temperature, seeds)
+        kwargs = dict(apply_temperature=True, is_drafting=True)
+        if fused:
+            sampled = draft_watermarker.sample_parallel(
+                logits.view(-1, vocab_size),
+                idx_mapping,
+                *args,
+                pos,
+                logits_cache=draft_logits,
+                logits_cache_col=draft_step,
+                **kwargs,
+            )
+        else:
+            by_step = [t.view(num_reqs, num_steps) for t in (idx_mapping, pos)]
+            steps = draft_step.view(num_reqs, num_steps)
+            sampled = torch.stack(
+                [
+                    draft_watermarker.sample(
+                        logits[:, step],
+                        by_step[0][:, step],
+                        *args,
+                        by_step[1][:, step],
+                        logits_cache=draft_logits,
+                        logits_cache_col=steps[:, step],
+                        **kwargs,
+                    )
+                    for step in range(num_steps)
+                ],
+                dim=1,
+            ).view(-1)
+        return (
+            sampled,
+            draft_watermarker.contexts,
+            draft_watermarker.prior_contexts,
+            draft_logits,
+        )
+
+    for fused, reference in zip(run(fused=True), run(fused=False)):
+        torch.testing.assert_close(fused, reference, rtol=0, atol=0, equal_nan=True)
+
+
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
     speculator.draft_logits = torch.zeros(2, 1, 8)
