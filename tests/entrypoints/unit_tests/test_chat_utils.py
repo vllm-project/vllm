@@ -814,6 +814,21 @@ async def test_parse_chat_messages_single_image_async(
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
 
 
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+def test_parse_chat_messages_assistant_reasoning_field(mistral_model_config, field):
+    conversation, _, _ = parse_chat_messages(
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1", field: "past thinking"},
+            {"role": "user", "content": "q2"},
+        ],
+        mistral_model_config,
+        content_format="string",
+    )
+    assert conversation[1]["reasoning"] == "past thinking"
+    assert conversation[1]["reasoning_content"] == "past thinking"
+
+
 def test_parse_chat_messages_multiple_images(
     phi3v_model_config,
     image_url,
