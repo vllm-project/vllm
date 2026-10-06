@@ -26,7 +26,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
-from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
 )
@@ -210,7 +209,8 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
     ]
-    AVAILABLE_BACKENDS = prioritize_humming(AVAILABLE_BACKENDS)
+    # Humming stays behind Marlin for NVFP4: it folds separate w1/w3 global
+    # scales into float block scales, which it cannot run on SM90.
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.B12X,
