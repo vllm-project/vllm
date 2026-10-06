@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
-from vllm.models.deepseek_v32.amd.mono_decode import split_kv_b
+from vllm.models.deepseek_v32.amd.mono_decode import _weight_preshuffled, split_kv_b
 
 
 def _dequant(w: torch.Tensor, s: torch.Tensor, bm: int, bk: int) -> torch.Tensor:
@@ -29,3 +31,16 @@ def test_split_kv_b_keeps_checkpoint_blocks(heads: int):
     uv = _dequant(w_uv, s_uv, 64, 128).view(heads, v, kv)
     torch.testing.assert_close(uk, ref[:, :nope].transpose(1, 2), rtol=0, atol=0)
     torch.testing.assert_close(uv, ref[:, nope:], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("plain_flag", ["skip_weight_relayout", "is_bmm"])
+def test_plain_layout_linear_is_not_preshuffled(plain_flag: str):
+    method = SimpleNamespace(fp8_linear=SimpleNamespace(preshuffles_weight=True))
+    shuffled = torch.nn.Module()
+    shuffled.quant_method = method
+    plain = torch.nn.Module()
+    plain.quant_method = method
+    setattr(plain, plain_flag, True)
+
+    assert _weight_preshuffled(shuffled)
+    assert not _weight_preshuffled(plain)

@@ -17,6 +17,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_TP = 4
+_TP_SIZES = (4, 8)
 _SPARSE_TOPK = 2048
 # Decode steps the fused path takes; each needs a kernel chunk of two or more
 # rows, and a single row is launched as two.
@@ -58,7 +59,10 @@ def mono_decode_unsupported_reason(vllm_config: VllmConfig) -> str | None:
     pc = vllm_config.parallel_config
     checks = (
         (on_gfx950(), "requires gfx950"),
-        (pc.tensor_parallel_size == _TP, f"requires tensor parallel size {_TP}"),
+        (
+            pc.tensor_parallel_size in _TP_SIZES,
+            "requires tensor parallel size 4 or 8",
+        ),
         (
             pc.pipeline_parallel_size == 1 and pc.data_parallel_size == 1,
             "does not support pipeline or data parallelism",
@@ -211,11 +215,12 @@ class GlmMonoDecode:
             prepare_glm5_weights,
         )
 
-        cfg = glm5_tp_config(_TP)
+        tp = get_tensor_model_parallel_world_size()
+        cfg = glm5_tp_config(tp)
         rank = get_tensor_model_parallel_rank()
         group = get_tp_group().cpu_group
         sparse = list(self._model.layers[self._num_dense :])
-        weights = [_layer_weights(layer, cfg, rank) for layer in sparse]
+        weights = [_layer_weights(layer, cfg, rank, tp) for layer in sparse]
         prepared = [
             prepare_glm5_weights(w, AttentionWeight.FP8_BLOCK128) for w in weights
         ]
@@ -227,7 +232,7 @@ class GlmMonoDecode:
                     w,
                     chunk,
                     rank=rank,
-                    npes=_TP,
+                    npes=tp,
                     group=group,
                     topk=_SPARSE_TOPK,
                     launches_per_step=1,
@@ -300,6 +305,11 @@ def split_kv_b(
 
 
 def _weight_preshuffled(linear: torch.nn.Module) -> bool:
+    # The preshuffling kernel leaves these weights in the plain layout.
+    if getattr(linear, "skip_weight_relayout", False) or getattr(
+        linear, "is_bmm", False
+    ):
+        return False
     return any(
         getattr(getattr(method, "fp8_linear", None), "preshuffles_weight", False)
         for method in (
@@ -340,7 +350,9 @@ def _fp4_storage(tensor: torch.Tensor) -> torch.Tensor:
     return view
 
 
-def _layer_weights(layer: DeepseekV32DecoderLayer, cfg, rank: int) -> LayerWeights:
+def _layer_weights(
+    layer: DeepseekV32DecoderLayer, cfg, rank: int, tp: int
+) -> LayerWeights:
     from aiter.ops.flydsl.glm5_mono import (
         LayerWeights,
         Mxfp4ScaleLayout,
@@ -390,7 +402,7 @@ def _layer_weights(layer: DeepseekV32DecoderLayer, cfg, rank: int) -> LayerWeigh
         tensors,
         cfg,
         rank,
-        _TP,
+        tp,
         mxfp4_weight_layout=Mxfp4WeightLayout.ATOM,
         mxfp4_scale_layout=Mxfp4ScaleLayout.ATOM,
         physical_experts=physical,
