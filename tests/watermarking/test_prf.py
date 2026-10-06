@@ -57,7 +57,12 @@ def test_prf_pairs_contexts_with_target_tokens():
 )
 @pytest.mark.parametrize("key", [42, 15726070495360670683])
 @pytest.mark.parametrize("context_width", [1, 4, 16])
-def test_philox_accelerator_matches_cpu(key: int, context_width: int):
+@pytest.mark.parametrize("stream", [0, 1, 2, 2**32])
+def test_philox_accelerator_matches_cpu(
+    key: int,
+    context_width: int,
+    stream: int,
+):
     contexts = torch.arange(2 * context_width, dtype=torch.int64).reshape(
         2, context_width
     )
@@ -69,6 +74,42 @@ def test_philox_accelerator_matches_cpu(key: int, context_width: int):
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-    expected_words = prf.uint32(contexts, token_ids)
-    actual_words = prf.uint32(contexts.cuda(), token_ids.cuda()).cpu()
+    expected_words = prf.uint32(
+        contexts,
+        token_ids,
+        stream=stream,
+    )
+    actual_words = prf.uint32(
+        contexts.cuda(),
+        token_ids.cuda(),
+        stream=stream,
+    ).cpu()
     torch.testing.assert_close(actual_words, expected_words, rtol=0, atol=0)
+
+
+def test_philox_stream_zero_preserves_compatibility():
+    contexts = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
+    token_ids = torch.tensor([7, 8])
+    prf = PhiloxPRF(42)
+
+    assert torch.equal(
+        prf.uint32(contexts, token_ids),
+        prf.uint32(contexts, token_ids, stream=0),
+    )
+
+
+def test_philox_streams_are_deterministic_and_distinct():
+    contexts = torch.tensor([[-1, -1, 7], [11, 12, 13]])
+    token_ids = torch.arange(32)
+    prf = PhiloxPRF(42)
+
+    stream_0 = prf.uint32(contexts, token_ids, stream=0)
+    stream_1 = prf.uint32(contexts, token_ids, stream=1)
+    stream_2 = prf.uint32(contexts, token_ids, stream=2)
+
+    assert torch.equal(
+        stream_1,
+        prf.uint32(contexts, token_ids, stream=1),
+    )
+    assert not torch.equal(stream_0, stream_1)
+    assert not torch.equal(stream_1, stream_2)
