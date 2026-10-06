@@ -143,7 +143,8 @@ def test_prom_metrics_observe_host_metrics():
     assert created["vllm:hisparse_host_cache_usage_perc"].set_values == [0.75]
     assert created["vllm:hisparse_pending_page_transfers"].set_values == [3]
     assert created["vllm:hisparse_host_block_lifetime_seconds"].observed == [5.0, 3.0]
-    assert created[
-        "vllm:hisparse_host_block_idle_before_evict_seconds"
-    ].observed == [2.0, 3.0]
+    assert created["vllm:hisparse_host_block_idle_before_evict_seconds"].observed == [
+        2.0,
+        3.0,
+    ]
     assert created["vllm:hisparse_host_block_reuse_gap_seconds"].observed == [1.0, 2.0]
