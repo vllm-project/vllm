@@ -532,36 +532,30 @@ def _gen_mm_extra_hash_keys(
         assert -start_mm_idx <= len(mm_features)
         start_mm_idx = len(mm_features) + start_mm_idx
 
+    # Placeholders may overlap (e.g. use_audio_in_video), so keep scanning
+    # past mm inputs that do not end in this block.
     curr_mm_idx = start_mm_idx
-    while mm_features and curr_mm_idx < len(mm_features):
+    next_mm_idx: int | None = None
+    while curr_mm_idx < len(mm_features):
         mm_feature = mm_features[curr_mm_idx]
         assert mm_feature.identifier is not None
         offset = mm_feature.mm_position.offset
         length = mm_feature.mm_position.length
-        if end_token_idx > offset:
-            if start_token_idx >= offset + length:
-                # This block has passed the current mm input.
-                curr_mm_idx += 1
-                continue
-
+        if end_token_idx <= offset:
+            # This block has not reached the current mm input.
+            break
+        if start_token_idx < offset + length:
             # The block contains the current mm input. Include its offset
             # relative to the start of the block so prefix-cache keys stay
             # distinct when the same MM item appears at different positions
             # within otherwise-identical placeholder blocks.
             extra_keys.append(("mm", mm_feature.identifier, offset - start_token_idx))
-
-            if end_token_idx >= offset + length:
-                # If this block contains the end of the current mm input,
-                # move to the next mm input as this block may also contain
-                # the next mm input.
-                curr_mm_idx += 1
-            else:
-                # Otherwise this block is done with mm inputs.
-                break
-        else:
-            # This block has not reached the current mm input.
-            break
-    return extra_keys, curr_mm_idx
+            if next_mm_idx is None and end_token_idx < offset + length:
+                next_mm_idx = curr_mm_idx
+        curr_mm_idx += 1
+    if next_mm_idx is None:
+        next_mm_idx = curr_mm_idx
+    return extra_keys, next_mm_idx
 
 
 def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str, str]]:
