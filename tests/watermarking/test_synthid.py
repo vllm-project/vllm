@@ -17,7 +17,7 @@ from vllm.v1.watermarking.synthid import (
 
 
 def test_synthid_config_and_factory():
-    config = WatermarkConfig(key=42, algorithm="synthid", context_width=3, depth=5)
+    config = WatermarkConfig(key=42, algorithm="synthid_text", context_width=3, depth=5)
     watermarker = create_watermarker(config)
 
     assert isinstance(watermarker, SynthIDWatermarker)
@@ -31,7 +31,7 @@ def test_synthid_config_and_factory():
 @pytest.mark.parametrize("depth", [0, 33])
 def test_synthid_config_rejects_invalid_depth(depth):
     with pytest.raises(ValidationError):
-        WatermarkConfig(key=42, algorithm="synthid", depth=depth)
+        WatermarkConfig(key=42, algorithm="synthid_text", depth=depth)
     assert WatermarkConfig(key=42, algorithm="gumbel", depth=depth).depth == depth
 
 
@@ -39,8 +39,8 @@ def test_synthid_config_rejects_invalid_depth(depth):
     ("kwargs", "match"),
     [
         ({"context_width": 0}, "context_width must be positive"),
-        ({"depth": 0}, "SynthID depth must be between 1 and 32"),
-        ({"depth": 33}, "SynthID depth must be between 1 and 32"),
+        ({"depth": 0}, "SynthID-Text depth must be between 1 and 32"),
+        ({"depth": 33}, "SynthID-Text depth must be between 1 and 32"),
         ({"key": -1}, "Philox keys must fit in 64 bits"),
     ],
 )
@@ -108,7 +108,7 @@ def test_synthid_sample_uses_watermarked_logits_and_skip_mask():
 
 
 def test_synthid_requires_random_sampler():
-    with pytest.raises(ValueError, match="SynthID requires a random sampler"):
+    with pytest.raises(ValueError, match="SynthID-Text requires a random sampler"):
         SynthIDWatermarker(42).sample(torch.zeros(1, 3), torch.zeros(1, 4))
 
 

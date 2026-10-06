@@ -28,10 +28,10 @@ class SynthIDWatermarker(Watermarker):
         if context_width < 1:
             raise ValueError("context_width must be positive")
         if not 1 <= depth <= 32:
-            raise ValueError("SynthID depth must be between 1 and 32")
+            raise ValueError("SynthID-Text depth must be between 1 and 32")
         selected_prf = create_prf(prf, key)
         if not isinstance(selected_prf, PhiloxPRF):
-            raise ValueError("SynthID requires the Philox PRF")
+            raise ValueError("SynthID-Text requires the Philox PRF")
         self.prf = selected_prf
         self._context_width = context_width
         self.depth = depth
@@ -49,7 +49,7 @@ class SynthIDWatermarker(Watermarker):
         """Reweight [batch, vocab] scores using bits from Philox words.
 
         Each Philox word provides up to 32 binary g-values for a candidate token.
-        The SynthID reweighting is applied sequentially across these bits.
+        The SynthID-Text reweighting is applied sequentially across these bits.
 
         Extract each bit plane lazily instead of materializing a
         [batch, vocab, depth] tensor. This keeps temporary memory proportional to
@@ -62,7 +62,7 @@ class SynthIDWatermarker(Watermarker):
             g = ((words >> bit) & 1).to(scores.dtype)
             # Sum each row's probability mass on g=1 candidates: [B, V] -> [B, 1].
             g_mass = (g * probs).sum(dim=1, keepdim=True)
-            # Apply one SynthID reweighting step.
+            # Apply one SynthID-Text reweighting step.
             probs = probs * (1 + g - g_mass)
 
         log_probs = torch.log(probs)
@@ -81,7 +81,7 @@ class SynthIDWatermarker(Watermarker):
         vocabulary = torch.arange(logits.shape[-1], device=logits.device)
 
         # [B, context_width] and [V] produce one Philox word per candidate:
-        # [B, V]. The individual SynthID bits are extracted lazily during
+        # [B, V]. The individual SynthID-Text bits are extracted lazily during
         # reweighting to avoid a [B, V, depth] intermediate tensor.
         words = self.prf.uint32(contexts, vocabulary)
 
@@ -95,7 +95,7 @@ class SynthIDWatermarker(Watermarker):
         skip_mask: torch.Tensor | None = None,
     ) -> WatermarkSample:
         if random_sampler is None:
-            raise ValueError("SynthID requires a random sampler")
+            raise ValueError("SynthID-Text requires a random sampler")
 
         watermarked_logits = self.watermark_logits(logits, contexts)
         if skip_mask is not None:
@@ -112,7 +112,7 @@ class SynthIDWatermarker(Watermarker):
         logits: torch.Tensor,
         contexts: torch.Tensor,
     ) -> WatermarkSample:
-        raise ValueError("SynthID requires a random sampler")
+        raise ValueError("SynthID-Text requires a random sampler")
 
 
 def _binomial_survival(hits: int, trials: int) -> float:
@@ -139,7 +139,7 @@ def _binomial_survival(hits: int, trials: int) -> float:
 
 
 class SynthIDWatermarkDetector(WatermarkDetector):
-    """Detect a surplus of Philox-derived SynthID bits in generated tokens.
+    """Detect a surplus of Philox-derived SynthID-Text bits in generated tokens.
 
     The score is the mean g value. The p-value uses an ideal-PRF
     Binomial(num_scored_tokens * depth, 0.5) null distribution.
@@ -155,10 +155,10 @@ class SynthIDWatermarkDetector(WatermarkDetector):
         deduplicate_contexts: bool = True,
     ) -> None:
         if not 1 <= depth <= 32:
-            raise ValueError("SynthID depth must be between 1 and 32")
+            raise ValueError("SynthID-Text depth must be between 1 and 32")
         selected_prf = create_prf(prf, key)
         if not isinstance(selected_prf, PhiloxPRF):
-            raise ValueError("SynthID requires the Philox PRF")
+            raise ValueError("SynthID-Text requires the Philox PRF")
         super().__init__(context_width, p_value_threshold, deduplicate_contexts)
         self.prf = selected_prf
         self.depth = depth

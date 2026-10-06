@@ -4170,7 +4170,7 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
 def test_synthid_rejects_speculative_decoding(allow_target_only):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(
-        algorithm="synthid",
+        algorithm="synthid_text",
         key=42,
         allow_target_only_watermarking=allow_target_only,
     )
@@ -4183,9 +4183,9 @@ def test_synthid_rejects_speculative_decoding(allow_target_only):
 
     with pytest.raises(
         ValueError,
-        match="SynthID watermarking does not support speculative decoding",
+        match="SynthID-Text watermarking does not support speculative decoding",
     ):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(

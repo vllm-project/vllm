@@ -18,6 +18,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 1,
+          "depth": 32,
           "detection_alpha": 0.0,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.0,
@@ -120,6 +121,7 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -150,6 +152,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -252,6 +255,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -282,6 +286,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 5,
+          "depth": 32,
           "detection_alpha": 0.5,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.5,
@@ -384,6 +389,7 @@
           "context_width": 5,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -414,6 +420,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.2,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -516,6 +523,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -546,6 +554,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -592,6 +601,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -622,6 +632,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 16,
+          "depth": 32,
           "detection_alpha": 1.0,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 1.0,
@@ -724,6 +735,7 @@
           "context_width": 16,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -754,6 +766,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.4,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.4,
@@ -856,6 +869,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -886,6 +900,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 1,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -972,6 +987,7 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -1002,6 +1018,7 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -1088,6 +1105,7 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -1118,6 +1136,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 1,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -1220,6 +1239,7 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -1250,6 +1270,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 5,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": false,
           "generation_alpha": 0.1,
@@ -1352,6 +1373,7 @@
           "context_width": 5,
           "deduplicate_contexts": "none",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -1382,6 +1404,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -1484,6 +1507,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -1514,6 +1538,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -1616,6 +1641,7 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -1652,6 +1678,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -1754,6 +1781,7 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -1784,6 +1812,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -1886,6 +1915,7 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": null,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -1916,6 +1946,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -2018,6 +2049,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": null,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -2048,6 +2080,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -2150,6 +2183,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -2180,6 +2214,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": false,
           "generation_alpha": 0.1,
@@ -2282,6 +2317,7 @@
           "context_width": 4,
           "deduplicate_contexts": "none",
           "deduplicate_contexts_max_history": null,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -2312,6 +2348,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -2358,6 +2395,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -2388,6 +2426,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -2490,6 +2529,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -2520,6 +2560,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 16,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -2622,6 +2663,7 @@
           "context_width": 16,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -2652,6 +2694,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 1,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -2738,6 +2781,7 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -2768,6 +2812,7 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "depth": 32,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
           "generation_alpha": 0.1,
@@ -2854,6 +2899,7 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "depth": 32,
           "enforce": false,
           "prf": "philox"
         }
@@ -2881,7 +2927,7 @@
         "key": "42",
         "prf": "philox",
         "prf_version": "philox4x32-10-v1",
-        "scheme": "synthid",
+        "scheme": "synthid_text",
         "scheme_config": {
           "context_width": 4,
           "depth": 4,
@@ -2981,7 +3027,7 @@
           "type": "SynthIDWatermarkDetector"
         },
         "watermark_config": {
-          "algorithm": "synthid",
+          "algorithm": "synthid_text",
           "allow_target_only_watermarking": false,
           "alpha": 0.1,
           "context_width": 4,
@@ -3014,7 +3060,7 @@
         "key": "42",
         "prf": "philox",
         "prf_version": "philox4x32-10-v1",
-        "scheme": "synthid",
+        "scheme": "synthid_text",
         "scheme_config": {
           "context_width": 4,
           "depth": 4,
@@ -3114,7 +3160,7 @@
           "type": "SynthIDWatermarkDetector"
         },
         "watermark_config": {
-          "algorithm": "synthid",
+          "algorithm": "synthid_text",
           "allow_target_only_watermarking": false,
           "alpha": 0.1,
           "context_width": 4,
