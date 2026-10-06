@@ -84,6 +84,8 @@ class EngineCoreReadyProgress:
     seq: int = 0
     state: EngineCoreReadyState = EngineCoreReadyState.IDLE
     last_progress_at: float = 0.0
+    operation: str | None = None
+    operation_since: float = 0.0
 
 
 class EngineCoreClient(ABC):
@@ -238,6 +240,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def all_engines_idle(self) -> bool:
+        raise NotImplementedError
+
+    def get_in_progress_operations(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     async def set_weight_version_async(self, weight_version: str) -> None:
@@ -1249,6 +1254,9 @@ class AsyncMPClient(MPClient):
         if outputs.ready_progress_seq != progress.seq:
             progress.seq = outputs.ready_progress_seq
             progress.last_progress_at = now
+        if outputs.ready_operation != progress.operation:
+            progress.operation = outputs.ready_operation
+            progress.operation_since = now
 
     def get_stalled_engine_ranks(self, timeout_s: float) -> list[int]:
         if timeout_s <= 0:
@@ -1273,6 +1281,19 @@ class AsyncMPClient(MPClient):
             progress.state == EngineCoreReadyState.IDLE
             for progress in self._ready_progress.values()
         )
+
+    def get_in_progress_operations(self) -> list[dict[str, Any]]:
+        """Utility calls the EngineCores reported as currently executing."""
+        now = time.monotonic()
+        return [
+            {
+                "operation": progress.operation,
+                "engine_rank": rank,
+                "elapsed_s": round(now - progress.operation_since, 1),
+            }
+            for rank, progress in self._ready_progress.items()
+            if progress.operation is not None
+        ]
 
     def _mark_engine_busy(self, engine: EngineIdentity) -> None:
         rank = self._ready_engine_ranks.setdefault(

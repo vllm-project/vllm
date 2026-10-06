@@ -22,12 +22,23 @@ class EngineDeadError(VLLMServerError):
 
 
 class EngineUnhealthyError(VLLMServerError):
-    """Raised when the engine is alive but not ready to serve traffic."""
+    """Raised when the engine is alive but not ready to serve traffic.
 
-    pass
+    Args:
+        message: Human-readable description.
+        reason: Machine-readable not-ready reason reported by ``/ready``.
+        details: Extra JSON-serializable fields reported by ``/ready``.
+
+    """
+
+    def __init__(self, message: str = "", reason: str = "unhealthy", **details):
+        super().__init__(message)
+        self.reason = reason
+        self.details = details
 
 
 class EngineSleepingError(EngineUnhealthyError):
     """Raised when the engine is intentionally sleeping or paused."""
 
-    pass
+    def __init__(self, message: str = "", **details):
+        super().__init__(message, reason="sleeping", **details)

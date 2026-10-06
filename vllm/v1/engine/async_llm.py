@@ -1074,13 +1074,29 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
     async def check_health_gpu(self) -> None:
-        """Check readiness using busy progress or an idle GPU execution."""
+        """Check readiness using busy progress or an idle GPU execution.
+
+        Raises:
+            EngineDeadError: If the EngineCore is dead.
+            EngineUnhealthyError: If the engine is not ready. ``reason`` and
+                ``details`` describe why, including the utility calls (e.g.
+                ``collective_rpc``) the EngineCores are executing.
+
+        """
+        try:
+            await self._check_ready()
+        except EngineUnhealthyError as exc:
+            exc.details["in_progress"] = self.engine_core.get_in_progress_operations()
+            raise
+
+    async def _check_ready(self) -> None:
         await self.check_health()
 
         sleeping_ranks = self.engine_core.get_sleeping_engine_ranks()
         if sleeping_ranks:
             raise EngineSleepingError(
-                f"Engine is sleeping or paused (engine ranks: {sleeping_ranks})"
+                f"Engine is sleeping or paused (engine ranks: {sleeping_ranks})",
+                engine_ranks=sleeping_ranks,
             )
 
         # busy progress check
@@ -1089,12 +1105,11 @@ class AsyncLLM(EngineClient):
         if stalled_ranks:
             raise EngineUnhealthyError(
                 "EngineCore made no model-step progress for "
-                f"{stall_timeout:g}s (engine ranks: {stalled_ranks})"
+                f"{stall_timeout:g}s (engine ranks: {stalled_ranks})",
+                reason="stalled",
+                engine_ranks=stalled_ranks,
+                stall_timeout_s=stall_timeout,
             )
-
-        # idle GPU health check, if dp size is > 1, skip
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
-            return
 
         if not self.engine_core.all_engines_idle():
             return
@@ -1121,12 +1136,18 @@ class AsyncLLM(EngineClient):
         except EngineDeadError:
             raise
         except TimeoutError as exc:
+            timeout = envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT
             raise EngineUnhealthyError(
-                "Idle GPU health check timed out after "
-                f"{envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT:g}s"
+                f"Idle GPU health check timed out after {timeout:g}s",
+                reason="probe_timeout",
+                timeout_s=timeout,
             ) from exc
         except Exception as exc:
-            raise EngineUnhealthyError("Idle GPU health check failed") from exc
+            raise EngineUnhealthyError(
+                "Idle GPU health check failed",
+                reason="probe_failed",
+                error=repr(exc),
+            ) from exc
         finally:
             if task.done() and self._idle_health_probe_task is task:
                 self._idle_health_probe_task = None

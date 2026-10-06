@@ -107,11 +107,14 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 READY_PROGRESS_BROADCAST_CLIENT_INDEX = -2
 READY_PROGRESS_PUBLISH_INTERVAL_S = 1.0
-READY_STATE_UTILITY_METHODS = frozenset(
-    {"pause_scheduler", "resume_scheduler", "sleep", "wake_up"}
-)
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+
+def _ready_operation_name(method_name: str, args: tuple) -> str:
+    if method_name == "collective_rpc" and args and isinstance(args[0], str):
+        return f"collective_rpc:{args[0]}"
+    return method_name
 
 
 class EngineCore:
@@ -1203,6 +1206,7 @@ class EngineCoreProc(EngineCore):
             self._last_ready_published_state = EngineCoreReadyState.IDLE
             self._last_ready_published_seq = self._ready_progress_seq
             self._last_ready_published_at = time.monotonic()
+            self._ready_operation: str | None = None
 
             # Initialize fault tolerance settings.
             self.enable_fault_tolerance = (
@@ -1614,6 +1618,7 @@ class EngineCoreProc(EngineCore):
             for output in outputs.values():
                 output.ready_progress_seq = self._ready_progress_seq
                 output.ready_state = ready_state
+                output.ready_operation = self._ready_operation
 
         self.output_queue.put_nowait(
             (
@@ -1621,6 +1626,7 @@ class EngineCoreProc(EngineCore):
                 EngineCoreOutputs(
                     ready_progress_seq=self._ready_progress_seq,
                     ready_state=ready_state,
+                    ready_operation=self._ready_operation,
                 ),
             )
         )
@@ -1703,10 +1709,18 @@ class EngineCoreProc(EngineCore):
             # Lazily look-up utility method so that failure will be handled/returned.
             def get_result():
                 method = getattr(self, method_name)
-                result = method(*self._convert_msgspec_args(method, args))
-                if method_name in READY_STATE_UTILITY_METHODS:
+                converted_args = self._convert_msgspec_args(method, args)
+                if method_name == "check_health_gpu":
+                    return method(*converted_args)
+                # Publish the operation before running it: the output thread
+                # still sends while the busy loop is blocked inside the call.
+                self._ready_operation = _ready_operation_name(method_name, args)
+                self._maybe_publish_ready_progress(force=True)
+                try:
+                    return method(*converted_args)
+                finally:
+                    self._ready_operation = None
                     self._maybe_publish_ready_progress(force=True)
-                return result
 
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
@@ -2292,6 +2306,15 @@ class DPEngineCoreProc(EngineCoreProc):
         if has_global_unfinished:
             self.engines_running = True
 
+    def check_health_gpu(self, cache_ttl_s: float) -> None:
+        """Liveness ping for MoE DP; intentionally runs no GPU work.
+
+        Utility calls are served by the busy loop, so a reply proves the loop
+        is not wedged (e.g. in a control RPC); a hung loop times out the probe
+        in the frontend. A dummy batch here would run outside the DP wave and
+        could deadlock against a peer's wave collectives.
+        """
+
     def barrier(self):
         """Blocking barrier on the DP process group (test-only utility)."""
         import torch.distributed as dist
@@ -2381,7 +2404,10 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not self.model_executor.is_sleeping:
                     with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
-                    self._record_ready_progress()
+                    # A rank that holds requests but scheduled none is stalled,
+                    # even though it keeps the wave alive with dummy batches.
+                    if not local_unfinished_reqs:
+                        self._record_ready_progress()
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(

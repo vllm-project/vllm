@@ -292,6 +292,9 @@ class EngineCoreOutputs(
     # are consumed by the frontend and are not exposed in request results.
     ready_progress_seq: int | None = None
     ready_state: EngineCoreReadyState | None = None
+    # Utility call the EngineCore is executing, if any; valid when
+    # ready_state is set.
+    ready_operation: str | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:

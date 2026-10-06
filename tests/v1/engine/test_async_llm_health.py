@@ -10,12 +10,18 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 import vllm.envs as envs
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreReadyState
+from vllm.v1.engine import (
+    EngineCoreOutputs,
+    EngineCoreReadyState,
+    EngineCoreRequestType,
+)
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import (
     READY_PROGRESS_BROADCAST_CLIENT_INDEX,
+    DPEngineCoreProc,
     EngineCore,
     EngineCoreProc,
+    EngineShutdownState,
 )
 from vllm.v1.engine.core_client import AsyncMPClient, EngineCoreReadyProgress
 from vllm.v1.engine.exceptions import EngineSleepingError, EngineUnhealthyError
@@ -24,6 +30,8 @@ from vllm.v1.engine.exceptions import EngineSleepingError, EngineUnhealthyError
 def make_async_engine(core, data_parallel_size: int = 1) -> AsyncLLM:
     if not hasattr(core, "get_sleeping_engine_ranks"):
         core.get_sleeping_engine_ranks = Mock(return_value=[])
+    if not hasattr(core, "get_in_progress_operations"):
+        core.get_in_progress_operations = Mock(return_value=[])
     engine = object.__new__(AsyncLLM)
     engine.engine_core = core
     engine.vllm_config = SimpleNamespace(
@@ -86,6 +94,29 @@ async def test_check_health_gpu_busy_stalled(data_parallel_size: int):
 
 
 @pytest.mark.asyncio
+async def test_check_health_gpu_reports_reason_and_in_progress():
+    operation = {
+        "operation": "collective_rpc:update_weights",
+        "engine_rank": 0,
+        "elapsed_s": 70.0,
+    }
+    core = SimpleNamespace(
+        get_stalled_engine_ranks=Mock(return_value=[0]),
+        all_engines_idle=Mock(return_value=False),
+        check_health_gpu_async=AsyncMock(),
+        get_in_progress_operations=Mock(return_value=[operation]),
+    )
+    engine = make_async_engine(core)
+
+    with pytest.raises(EngineUnhealthyError) as exc_info:
+        await engine.check_health_gpu()
+
+    assert exc_info.value.reason == "stalled"
+    assert exc_info.value.details["engine_ranks"] == [0]
+    assert exc_info.value.details["in_progress"] == [operation]
+
+
+@pytest.mark.asyncio
 async def test_idle_gpu_probe_delegates_cache_to_engine_core(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -105,7 +136,7 @@ async def test_idle_gpu_probe_delegates_cache_to_engine_core(
 
 
 @pytest.mark.asyncio
-async def test_check_health_gpu_dp_only_checks_rank_progress():
+async def test_check_health_gpu_dp_probes_when_all_idle():
     core = SimpleNamespace(
         get_stalled_engine_ranks=Mock(return_value=[]),
         all_engines_idle=Mock(return_value=True),
@@ -116,8 +147,7 @@ async def test_check_health_gpu_dp_only_checks_rank_progress():
     await engine.check_health_gpu()
 
     core.get_stalled_engine_ranks.assert_called_once()
-    core.all_engines_idle.assert_not_called()
-    core.check_health_gpu_async.assert_not_awaited()
+    core.check_health_gpu_async.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -353,6 +383,7 @@ def test_engine_core_broadcasts_busy_and_throttles_progress(
     core._last_ready_published_state = EngineCoreReadyState.IDLE
     core._last_ready_published_seq = 0
     core._last_ready_published_at = 0.0
+    core._ready_operation = None
     core._last_health_dummy_batch_at = 100.0
     core.engines_running = True
     core.scheduler = SimpleNamespace(has_requests=Mock(return_value=False))
@@ -386,3 +417,77 @@ def test_engine_core_broadcasts_busy_and_throttles_progress(
     core._maybe_publish_ready_progress()
     _, output = core.output_queue.get_nowait()
     assert output.ready_state == EngineCoreReadyState.SLEEPING
+
+
+def test_dp_engine_core_probe_is_liveness_only():
+    """A dummy batch outside the wave loop could deadlock MoE DP peers."""
+    core = object.__new__(DPEngineCoreProc)
+    core.model_executor = SimpleNamespace(execute_dummy_batch=Mock())
+
+    core.check_health_gpu(10)
+
+    core.model_executor.execute_dummy_batch.assert_not_called()
+
+
+def test_engine_core_publishes_operation_around_utility_call():
+    """The running utility is broadcast before it starts and cleared after, so
+    every API server can report what a blocked busy loop is doing."""
+    core = object.__new__(EngineCoreProc)
+    core.output_queue = queue.Queue()
+    core.shutdown_state = EngineShutdownState.RUNNING
+    core._ready_progress_seq = 0
+    core._last_ready_published_state = EngineCoreReadyState.IDLE
+    core._last_ready_published_seq = 0
+    core._last_ready_published_at = 0.0
+    core._ready_operation = None
+    core._last_health_dummy_batch_at = 0.0
+    core.engines_running = False
+    core.scheduler = SimpleNamespace(has_requests=Mock(return_value=False))
+    core.batch_queue = None
+    core.is_sleeping = Mock(return_value=False)  # type: ignore[method-assign]
+    seen_during_call = []
+    core.collective_rpc = lambda method: seen_during_call.append(  # type: ignore[method-assign]
+        core._ready_operation
+    )
+
+    core._handle_client_request(
+        EngineCoreRequestType.UTILITY, (0, 1, "collective_rpc", ("update_weights",))
+    )
+
+    assert seen_during_call == ["collective_rpc:update_weights"]
+    published = [
+        output.ready_operation
+        for client_index, output in core.output_queue.queue
+        if client_index == READY_PROGRESS_BROADCAST_CLIENT_INDEX
+    ]
+    assert published == ["collective_rpc:update_weights", None]
+
+
+@pytest.mark.asyncio
+async def test_async_client_reports_engine_operations():
+    client = object.__new__(AsyncMPClient)
+    client._ready_progress = {
+        0: EngineCoreReadyProgress(),
+        1: EngineCoreReadyProgress(),
+    }
+
+    await AsyncMPClient.process_engine_outputs(
+        client,
+        EngineCoreOutputs(
+            engine_index=0,
+            ready_progress_seq=0,
+            ready_state=EngineCoreReadyState.IDLE,
+            ready_operation="collective_rpc:update_weights",
+        ),
+    )
+    (operation,) = client.get_in_progress_operations()
+    assert operation["operation"] == "collective_rpc:update_weights"
+    assert operation["engine_rank"] == 0
+
+    await AsyncMPClient.process_engine_outputs(
+        client,
+        EngineCoreOutputs(
+            engine_index=0, ready_progress_seq=0, ready_state=EngineCoreReadyState.IDLE
+        ),
+    )
+    assert client.get_in_progress_operations() == []
