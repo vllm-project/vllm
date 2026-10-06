@@ -159,12 +159,17 @@ class NixlBaseConnectorScheduler:
         ]
         # Tokens per block for groups whose blocks map to token positions (one
         # entry per KV cache group, before transfer-group selection). None for
-        # other groups (e.g. SSM state), whose host-buffer save stays per-step.
+        # other groups (e.g. SSM state).
         dcp_size = parallel_config.decode_context_parallel_size
         self._save_block_size: list[int | None] = [
             spec.block_size * (dcp_size if spec.dcp_sharded else 1)
             if isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
             else None
+            for spec in (g.kv_cache_spec for g in kv_cache_config.kv_cache_groups)
+        ]
+        # Speculative scratch slots of each SSM group, None for other groups.
+        self._save_ssm_spec_blocks: list[int | None] = [
+            spec.num_speculative_blocks if isinstance(spec, MambaSpec) else None
             for spec in (g.kv_cache_spec for g in kv_cache_config.kv_cache_groups)
         ]
 
@@ -452,6 +457,9 @@ class NixlBaseConnectorScheduler:
         # finish, and blocks allocated ahead (e.g. spec-decode lookahead) are
         # not written yet.
         assert scheduler_output.num_scheduled_tokens is not None
+        # Preemption frees the request's blocks, so it starts over when resumed.
+        for req_id in scheduler_output.preempted_req_ids or ():
+            self._reqs_save_state.pop(req_id, None)
         for req_id, new_block_id_groups, resumed in yield_req_data(scheduler_output):
             req = self._reqs_need_save.get(req_id)
             if req is None:
@@ -470,11 +478,21 @@ class NixlBaseConnectorScheduler:
                         blocks.extend(new_blocks)
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             end = req.num_computed_tokens + num_scheduled_tokens
+            last_chunk = end >= req.num_prompt_tokens
             to_save: list[list[int]] = []
             for group_id, blocks in enumerate(table):
                 block_size = self._save_block_size[group_id]
+                num_spec_blocks = self._save_ssm_spec_blocks[group_id]
                 if block_size is not None:
                     to_save.append(blocks[saved // block_size : cdiv(end, block_size)])
+                elif num_spec_blocks is not None:
+                    # Each chunk rewrites the SSM state in place; copy its slot
+                    # once the last chunk has written it.
+                    to_save.append(
+                        clip_ssm_state_blocks(blocks, num_spec_blocks)
+                        if last_chunk
+                        else []
+                    )
                 elif new_block_id_groups is not None:
                     to_save.append(list(new_block_id_groups[group_id]))
                 else:
@@ -488,7 +506,7 @@ class NixlBaseConnectorScheduler:
                 ),
                 kv_transfer_params=req.kv_transfer_params,
             )
-            if end < req.num_prompt_tokens:
+            if not last_chunk:
                 # Partial prefill: keep the request in _reqs_need_save until
                 # its last chunk is scheduled.
                 self._reqs_save_state[req_id] = (table, end)

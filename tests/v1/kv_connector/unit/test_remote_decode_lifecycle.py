@@ -13,6 +13,7 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -366,4 +367,98 @@ def test_host_buffer_save_includes_prefix_cache_hit_blocks():
     (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
     (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
     assert saved2 == table[96 // block_size : -(-110 // block_size)]
+    assert req_id not in connector_scheduler._reqs_save_state
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_host_buffer_save_restarts_after_preemption(use_v2_model_runner: bool):
+    """Preemption between prefill chunks frees the request's blocks. When it is
+    scheduled again (as a resumed request with the V1 model runner, as a new
+    one with V2), every block it covers is copied again from token 0."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=24,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    scheduler.use_v2_model_runner = use_v2_model_runner
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=40,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    out2 = scheduler.schedule()
+    if use_v2_model_runner:
+        assert [r.req_id for r in out2.scheduled_new_reqs] == [req_id]
+    else:
+        assert out2.scheduled_cached_reqs.resumed_req_ids == {req_id}
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert saved2 == table[: -(-40 // block_size)]
+    assert req_id not in connector_scheduler._reqs_save_state
+
+
+def test_host_buffer_save_hybrid_attention_and_mamba():
+    """Hybrid model with mamba_cache_mode="none" (one SSM state block per
+    request). The attention group is saved by token position, so the block
+    straddling the chunk boundary is copied again. Every chunk rewrites the SSM
+    state block in place, so the last chunk must copy it."""
+    block_size, max_model_len, num_tokens, token_budget = 16, 1024, 40, 24
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=token_budget,
+        max_model_len=max_model_len,
+        kv_role="kv_producer",
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    vllm_config.cache_config.enable_prefix_caching = False
+    kv_cache_config = make_kv_cache_config(
+        block_size, mamba_enabled=True, mamba_block_size=max_model_len
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        kv_cache_config=kv_cache_config,
+        scheduler_block_size=max_model_len,
+    )
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=num_tokens,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    attn1, _ = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    attn_table, ssm_table = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert attn1 == attn_table[: -(-token_budget // block_size)]
+    assert len(ssm_table) == 1
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+
+    out2 = scheduler.schedule()
+    attn2, ssm2 = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    attn_table, _ = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert (
+        attn2 == attn_table[token_budget // block_size : -(-num_tokens // block_size)]
+    )
+    assert ssm2 == ssm_table
     assert req_id not in connector_scheduler._reqs_save_state

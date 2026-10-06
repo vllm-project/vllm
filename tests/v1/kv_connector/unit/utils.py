@@ -167,6 +167,7 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
+    scheduler_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -196,7 +197,7 @@ def create_scheduler(
         kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
-        block_size=block_size,
+        block_size=scheduler_block_size or block_size,
     )
 
 
@@ -477,6 +478,7 @@ def make_kv_cache_config(
     sw_size: int = 128,
     num_blocks: int = 100,
     mamba_cache_mode: Literal["align", "none"] = "none",
+    mamba_block_size: int | None = None,
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -507,7 +509,7 @@ def make_kv_cache_config(
             KVCacheGroupSpec(
                 ["mamba0", "mamba1"],
                 MambaSpec(
-                    block_size=block_size,
+                    block_size=mamba_block_size or block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
                     mamba_cache_mode=mamba_cache_mode,
