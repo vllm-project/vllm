@@ -278,6 +278,14 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    flashinfer_moe_search_strategy: Literal["exhaustive", "factorized"] = "exhaustive"
+    """Experimental search policy for uncached ordinary FlashInfer MoE calls.
+    Used when FlashInfer autotuning is enabled. Factorized search needs a
+    FlashInfer build that supports moe_search_strategy. Existing cached choices
+    are reused across strategies; use an empty tuning cache to retune.
+    This changes startup search, not the MoE backend or serving precision.
+    """
+
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
@@ -406,6 +414,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "flashinfer_moe_search_strategy",
             "ir_op_priority",  # handled separately below
         }
         if self.linear_backend_per_quant is None:

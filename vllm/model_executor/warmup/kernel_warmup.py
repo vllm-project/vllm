@@ -431,6 +431,12 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     tuner = AutoTuner.get()
 
     autotune_kwargs: dict = {}
+    moe_search_strategy = (
+        runner.vllm_config.kernel_config.flashinfer_moe_search_strategy
+    )
+    if moe_search_strategy != "exhaustive":
+        autotune_kwargs["moe_search_strategy"] = moe_search_strategy
+    logger.info("FlashInfer ordinary MoE search strategy: %s.", moe_search_strategy)
     skip_ops = _flashinfer_autotune_skip_ops(runner)
     if skip_ops:
         logger.info_once(

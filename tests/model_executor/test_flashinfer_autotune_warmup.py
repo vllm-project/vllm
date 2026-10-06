@@ -44,7 +44,10 @@ def _make_runner(modules, *, max_tokens: int = 8192, linear_backend: str = "auto
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
-            kernel_config=SimpleNamespace(linear_backend=linear_backend),
+            kernel_config=SimpleNamespace(
+                linear_backend=linear_backend,
+                flashinfer_moe_search_strategy="exhaustive",
+            ),
             attention_config=SimpleNamespace(hisparse_config=None),
         ),
         get_model=Mock(
@@ -313,3 +316,77 @@ def test_pp1_retains_world_synchronization_and_existing_cache_name(autotune_run)
         (0, "autotune_configs.json")
     ]
     assert all(groups == [(0, 1, 2, 3)] for groups in run.profile_groups.values())
+
+
+@pytest.mark.parametrize("strategy", ["exhaustive", "factorized"])
+@pytest.mark.parametrize("fail_warmup", [False, True])
+def test_moe_search_preserves_cache_and_group_cleanup(
+    strategy, fail_warmup, tmp_path, monkeypatch
+):
+    """A changed search policy must retain cache reuse and failure cleanup."""
+    runner = _make_runner([])
+    runner.vllm_config.kernel_config.flashinfer_moe_search_strategy = strategy
+    cache_path = tmp_path / "autotune_configs.json"
+    cache_path.write_bytes(b"prepared choices")
+    tuner = Mock()
+    tuner.save_configs.side_effect = lambda path: cache_path.write_bytes(b"saved")
+    set_group = Mock()
+    monkeypatch.setitem(
+        sys.modules,
+        "flashinfer.autotuner",
+        SimpleNamespace(
+            AutoTuner=Mock(get=Mock(return_value=tuner)),
+            set_autotune_process_group=set_group,
+        ),
+    )
+    world = Mock(rank_in_group=0, world_size=2, cpu_group=object())
+    world.broadcast_object.side_effect = lambda value, src: value
+    failure = RuntimeError("warmup failed") if fail_warmup else None
+    with (
+        patch("vllm.distributed.parallel_state.get_world_group", return_value=world),
+        patch(
+            "vllm.distributed.parallel_state.get_pp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch.object(
+            warmup, "resolve_flashinfer_autotune_file", return_value=cache_path
+        ),
+        patch.object(
+            warmup, "_flashinfer_autotune_skip_ops", return_value={"fp4_gemm"}
+        ),
+        patch.object(
+            warmup, "_run_flashinfer_autotune_dummy_runs", side_effect=failure
+        ),
+        patch.object(warmup, "_run_flashinfer_bf16_autotune_dummy_run"),
+        patch.object(warmup, "replayssm_autotune_warmup"),
+        patch.object(warmup, "_autotune_kimi_k3_kda_qkvg"),
+        patch("vllm.utils.flashinfer.autotune") as autotune,
+    ):
+        if fail_warmup:
+            with pytest.raises(RuntimeError, match="warmup failed"):
+                flashinfer_autotune(runner)
+        else:
+            flashinfer_autotune(runner)
+
+    kwargs = {"tune_mode": True, "skip_ops": {"fp4_gemm"}}
+    if strategy == "factorized":
+        kwargs["moe_search_strategy"] = strategy
+    autotune.assert_called_once_with(**kwargs)
+    tuner.load_configs.assert_called_once_with(str(cache_path))
+    assert set_group.call_args_list == [call(world.cpu_group), call(None)]
+    assert world.barrier.call_count == (1 if fail_warmup else 2)
+    if fail_warmup:
+        tuner.save_configs.assert_not_called()
+        assert cache_path.read_bytes() == b"prepared choices"
+    else:
+        tuner.save_configs.assert_called_once_with(str(cache_path))
+        assert cache_path.read_bytes() == b"saved"
+
+
+def test_moe_search_policy_keeps_compilation_cache_identity():
+    from vllm.config.kernel import KernelConfig
+
+    assert (
+        KernelConfig().compute_hash()
+        == KernelConfig(flashinfer_moe_search_strategy="factorized").compute_hash()
+    )
