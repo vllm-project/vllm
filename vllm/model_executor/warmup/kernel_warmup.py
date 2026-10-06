@@ -446,7 +446,8 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
     (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
     rank. A rank with a cache hit skips the per-tactic reduce the others block
-    in, so ranks load only if every rank in the tuning group has a matching file.
+    in, so ranks keep loaded configs only if every rank in the tuning group
+    has a matching file and successfully loads it.
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
@@ -487,7 +488,15 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
     if _all_ranks_have_matching_cache(cache_path, tune_group):
-        tuner.load_configs(str(cache_path))
+        loaded = tuner.load_configs(str(cache_path))
+        if tune_group.world_size > 1:
+            loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
+            torch.distributed.all_gather_object(
+                loaded_by_rank, loaded, group=tune_group.cpu_group
+            )
+            loaded = all(loaded_by_rank)
+        if not loaded:
+            tuner.clear_cache()
 
     group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)

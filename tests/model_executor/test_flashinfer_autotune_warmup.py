@@ -150,6 +150,10 @@ class _AutotuneGroup:
     def all_gather_object(self, out, obj):
         # Ranks run sequentially: snapshot every rank's file before any saves.
         self.record(("all_gather",))
+        if isinstance(obj, bool):
+            out[:] = [rank not in self.run.rejected_load_ranks for rank in self.ranks]
+            assert out[self.rank_in_group] == obj
+            return
         out[:] = self.run.gathered.setdefault(
             self.ranks,
             [
@@ -170,8 +174,15 @@ class _AutotuneTuner:
         self._dirty = False
 
     def load_configs(self, path):
+        if self.run.rank in self.run.rejected_load_ranks:
+            return False
         self.loaded = json.loads(Path(path).read_text())
         self.cache.update(self.loaded)
+        return True
+
+    def clear_cache(self):
+        self.cache.clear()
+        self._dirty = False
 
     def save_configs(self, path):
         self.run.saves.append((self.run.rank, Path(path), dict(self.cache)))
@@ -201,6 +212,7 @@ class _AutotuneRun:
             defaultdict(lambda: defaultdict(list))
         )
         self.gathered = {}
+        self.rejected_load_ranks: set[int] = set()
         self.tuners = {}
         self.saves = []
         self.profile_groups = defaultdict(list)
@@ -338,3 +350,15 @@ def test_mismatched_rank_caches_are_ignored_by_every_rank(autotune_run):
     rerun.assert_collectives_match()
     assert all(tuner.loaded is None for tuner in rerun.tuners.values())
     assert set(rerun.profile_groups) == {0, 1, 2, 3}
+
+
+@pytest.mark.parametrize("pp, tp", [(1, 1), (1, 4), (2, 4)])
+def test_rejected_cache_retunes_every_rank_in_its_tuning_group(autotune_run, pp, tp):
+    """Matching files can still be incompatible with one rank's runtime."""
+    autotune_run(pp=pp, tp=tp).execute()
+    rerun = autotune_run(pp=pp, tp=tp)
+    rerun.rejected_load_ranks = {tp - 1}
+    rerun.execute()
+    rerun.assert_collectives_match()
+    assert set(rerun.profile_groups) == set(range(tp))
+    assert {rank for rank, _, _ in rerun.saves} == set(range(tp))
