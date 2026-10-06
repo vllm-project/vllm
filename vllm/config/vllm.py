@@ -1228,7 +1228,9 @@ class VllmConfig:
                 "MoRIIOConnector",
                 "MooncakeConnector",
             ):
-                if kv_transfer_config.has_connector(connector_name):
+                if kv_transfer_config.has_connector(
+                    connector_name, match_aliases=False
+                ):
                     raise ValueError(
                         "--enable-return-routed-experts is incompatible with "
                         f"{connector_name}; PD auxiliary output is not supported."
@@ -1514,9 +1516,9 @@ class VllmConfig:
         self._verify_trace_replay_config()
 
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
-        if self.kv_transfer_config is not None and (
-            self.kv_transfer_config.has_connector("NixlConnector")
-            or self.kv_transfer_config.has_connector("NixlPullConnector")
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("NixlPullConnector")
         ):
             dcp_size = self.parallel_config.decode_context_parallel_size
             transfer_tp_size = max(
@@ -3438,9 +3440,8 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if self.kv_transfer_config is None or not (
-            self.kv_transfer_config.has_connector("NixlConnector")
-            or self.kv_transfer_config.has_connector("NixlPullConnector")
+        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
+            "NixlPullConnector"
         ):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
@@ -3472,13 +3473,17 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
-        # size is pinned to block_size by each worker.
-        nixl_pd_active = (
+        # Skip DCP interleave-size compatibility for NIXL P/D only when the
+        # interleave size will be resolved to block_size by each worker.
+        nixl_auto_interleave = (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
+            and self.kv_transfer_config.has_connector("NixlPullConnector")
+            and self.parallel_config._allow_auto_resolve_cp_interleave_size
         )
-        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
+        if (
+            self.parallel_config.decode_context_parallel_size > 1
+            and not nixl_auto_interleave
+        ):
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
