@@ -343,14 +343,14 @@ def test_transfer(
     gpu_spec = GPULoadStoreSpec(
         gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
     )
-    cpu_spec = CPULoadStoreSpec(cpu_blocks)
+    cpu_spec = CPULoadStoreSpec(cpu_chunks)
     device_ptrs = resolve_device_pointers(gpu_spec, kv_caches)
 
     handler = worker._store_handler if gpu_to_cpu else worker._load_handler
     if gpu_to_cpu:
-        dst_to_src = dict(zip(cpu_blocks_expanded, gpu_blocks))
+        dst_to_src = dict(zip(cpu_chunks_expanded, gpu_blocks))
     else:
-        dst_to_src = dict(zip(gpu_blocks, cpu_blocks_expanded))
+        dst_to_src = dict(zip(gpu_blocks, cpu_chunks_expanded))
     num_dst_sub_blocks = num_gpu_blocks
 
     # collect gpu and cpu tensor lists for verification
@@ -553,7 +553,7 @@ def test_transfer_multi_group(
     gpu_spec = GPULoadStoreSpec(
         gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
     )
-    cpu_spec = CPULoadStoreSpec(cpu_blocks)
+    cpu_spec = CPULoadStoreSpec(cpu_chunks)
     device_ptrs = resolve_device_pointers(gpu_spec, canonical_kv_caches)
 
     handler = worker._store_handler if gpu_to_cpu else worker._load_handler
