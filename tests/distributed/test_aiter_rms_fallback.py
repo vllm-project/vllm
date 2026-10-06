@@ -10,6 +10,7 @@ import torch
 
 import vllm._aiter_ops as aiter_ops
 import vllm.distributed as vllm_distributed
+import vllm.kernels  # noqa: F401
 
 
 def test_rocm_aiter_gemma_rmsnorm_falls_back_after_allreduce(

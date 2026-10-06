@@ -1058,33 +1058,6 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     return out, y_scale
 
 
-def _unfused_allreduce_rmsnorm(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-    gemma_norm: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fall back when the fused custom all-reduce rejects the input."""
-    import aiter
-
-    from vllm.distributed import tensor_model_parallel_all_reduce
-
-    reduced = tensor_model_parallel_all_reduce(input_)
-    out = torch.empty_like(input_)
-    residual_out = torch.empty_like(residual)
-    aiter.rmsnorm2d_fwd_with_add(
-        out,
-        reduced,
-        residual,
-        residual_out,
-        weight,
-        epsilon,
-        gemma_norm=gemma_norm,
-    )
-    return out, residual_out
-
-
 def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     input_: torch.Tensor,
     residual: torch.Tensor,
@@ -1156,7 +1129,15 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         gemma_norm=gemma_norm,
     )
     if result is None:
-        return _unfused_allreduce_rmsnorm(input_, residual, weight, epsilon, gemma_norm)
+        from vllm.distributed import tensor_model_parallel_all_reduce
+
+        return torch.ops.vllm_aiter.fused_add_rms_norm(
+            tensor_model_parallel_all_reduce(input_),
+            residual,
+            weight,
+            epsilon,
+            gemma_norm,
+        )
     return result[0], result[1]
 
 
