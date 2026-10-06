@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import pytest
 from xgrammar import Grammar
 from xgrammar.testing import _is_grammar_accept_string
@@ -19,6 +20,11 @@ def grammar_accepts(schema: dict, text: str) -> bool:
     return _is_grammar_accept_string(Grammar.from_json_schema(schema), text)
 
 
+# ================================================
+# Unsupported schemas
+# ================================================
+
+
 @pytest.fixture
 def unsupported_string_schemas():
     return [
@@ -35,16 +41,12 @@ def unsupported_string_schemas():
 
 
 @pytest.fixture
-def unsupported_integer_schemas():
-    return [
-        {"type": "integer", "multipleOf": 120},
-    ]
-
-
-@pytest.fixture
-def unsupported_number_schemas():
+def unsupported_multipleOf_schemas():
     return [
         {"type": "number", "multipleOf": 120},
+        {"Even": {"type": "number", "multipleOf": 2}},
+        {"type": "integer", "multipleOf": 120},
+        {"Even": {"type": "integer", "multipleOf": 2}},
     ]
 
 
@@ -141,6 +143,81 @@ def unsupported_pattern_properties_combinations():
 
 
 @pytest.fixture
+def unsupported_multibranch_allof():
+    """Regression tests for issue #56556
+    [Bug]: JSON schema with multiple allOf branches is silently ignored
+    by the xgrammar structured-output backend #56556
+
+    Xgrammar currently does NOT support multi-branch allOf.
+    Bug reported to xgrammar team for tracking progress on resolving:
+    https://github.com/mlc-ai/xgrammar/issues/937
+    """
+    return [
+        {
+            "allOf": [
+                {"type": "string"},
+                {"enum": ["yes", "no"]},
+            ]
+        },
+        # Multi-branch test case with > 2 branches:
+        {
+            "allOf": [
+                {"type": "string"},
+                {"minLength": 2},
+                {"maxLength": 10},
+            ]
+        },
+        {
+            "allOf": [
+                {"type": "integer"},
+                {"minimum": 0},
+            ]
+        },
+        # Non root multi-branch allOf:
+        {
+            "type": "object",
+            "properties": {
+                "is_this_sparta": {
+                    "allOf": [
+                        {"type": "string"},
+                        {"enum": ["yes", "no"]},
+                    ],
+                },
+            },
+        },
+    ]
+
+
+@pytest.fixture
+def unsupported_vllm_issue_56556_schema():
+    """Bug repro from vLLM issue #56556"""
+    return [
+        {
+            "$defs": {
+                "Base": {
+                    "type": "object",
+                    "properties": {"x": {"type": "integer", "minimum": 10}},
+                    "required": ["x"],
+                }
+            },
+            "allOf": [
+                {"$ref": "#/$defs/Base"},
+                {
+                    "type": "object",
+                    "properties": {"y": {"type": "string"}},
+                    "required": ["y"],
+                },
+            ],
+        },
+    ]
+
+
+# ================================================
+# Supported schemas
+# ================================================
+
+
+@pytest.fixture
 def supported_frankenstein_schema():
     # IMPORTANT(arpera):
     # Do NOT add more keywords here! This schema is overcrowded enough that a new
@@ -178,11 +255,6 @@ def supported_frankenstein_schema():
 
 
 @pytest.fixture
-def property_names_schema():
-    return {"type": "object", "propertyNames": {"pattern": "^[a-z_]+$"}}
-
-
-@pytest.fixture
 def pattern_properties_schema():
     return {
         "type": "object",
@@ -190,19 +262,80 @@ def pattern_properties_schema():
     }
 
 
+@pytest.fixture
+def property_names_schema():
+    return {"type": "object", "propertyNames": {"pattern": "^[a-z_]+$"}}
+
+
+@pytest.fixture
+def supported_allof_anyof_and_oneof():
+    """Xgrammar DO support some variants of anyOf, allOf, oneOf
+    This test case was made during working on covering
+    unsupported multi-branch allOf to make sure the bug
+    is NOT present in other combinators.
+    See for more context in this file test `unsupported_multibranch_allof`
+    """
+    return [
+        # single-branch allOf:
+        {
+            "allOf": [
+                {"type": "string"},
+            ],
+        },
+        # Corner cases: empty allOf, this is a valid schema
+        {"allOf": []},
+        # multi-branch allOf:
+        # is NOT supported yet, see vLLM issue #56556
+        # single-branch anyOf:
+        {
+            "anyOf": [],
+        },
+        # multi-branch anyOf:
+        {
+            "anyOf": [
+                {"type": "string"},
+                {"type": "integer"},
+            ],
+        },
+        # single-branch oneOf:
+        {
+            "oneOf": [
+                {"type": "integer", "minimum": 0, "maximum": 100},
+            ],
+        },
+        # multi-branch oneOf:
+        {
+            "oneOf": [
+                {"type": "integer", "minimum": 0, "maximum": 100},
+                {"type": "string", "enum": ["auto", "none"]},
+            ],
+        },
+        # Corner case:
+        # "allOf" is a property name, not allOf combinator keyword
+        {"type": "object", "properties": {"allOf": {"type": "string"}}},
+    ]
+
+
+# ================================================
+# Test has_xgrammar_unsupported_json_features functionality
+# ================================================
+
+
 class TestHasXGrammarUnsupportedJsonFeatures:
     @pytest.mark.parametrize(
         "schema_type",
         [
             "unsupported_string_schemas",
-            "unsupported_integer_schemas",
-            "unsupported_number_schemas",
+            "unsupported_multipleOf_schemas",
             "unsupported_array_schemas",
             "unsupported_property_names_combinations",
             "unsupported_pattern_properties_combinations",
+            # vLLM issue #56556
+            "unsupported_multibranch_allof",
+            "unsupported_vllm_issue_56556_schema",
         ],
     )
-    def test_unsupported_json_features_by_type(self, schema_type, request):
+    def test_unsupported_json_features(self, schema_type, request):
         schemas = request.getfixturevalue(schema_type)
         for schema in schemas:
             assert has_xgrammar_unsupported_json_features(schema), (
@@ -215,13 +348,19 @@ class TestHasXGrammarUnsupportedJsonFeatures:
             "supported_frankenstein_schema",
             "pattern_properties_schema",
             "property_names_schema",
+            # Additional test cases implemented during work on
+            # vLLM issue #56556
+            "supported_allof_anyof_and_oneof",
         ],
     )
     def test_supported_json_features(self, schema_type, request):
-        schema = request.getfixturevalue(schema_type)
-        assert not has_xgrammar_unsupported_json_features(schema), (
-            f"Schema should be supported: {schema}"
-        )
+        schemas = request.getfixturevalue(schema_type)
+        if not isinstance(schemas, list):
+            schemas = [schemas]
+        for schema in schemas:
+            assert not has_xgrammar_unsupported_json_features(schema), (
+                f"Schema should be supported: {schema}"
+            )
 
     class TestPR48416Regressions:
         @pytest.mark.parametrize(
