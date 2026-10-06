@@ -4,6 +4,7 @@
 """SynthID-Text watermark generation primitives."""
 
 import math
+import warnings
 
 import torch
 
@@ -17,6 +18,17 @@ from vllm.v1.watermarking.watermarker import (
 )
 
 
+def _validate_context_width(context_width: int) -> None:
+    if context_width < 1:
+        raise ValueError("context_width must be positive")
+    if context_width > 16:
+        warnings.warn(
+            "context_width values greater than 16 reduce robustness to edits because "
+            "each changed token affects more subsequent watermark contexts",
+            stacklevel=3,
+        )
+
+
 class SynthIDWatermarker(Watermarker):
     def __init__(
         self,
@@ -25,8 +37,7 @@ class SynthIDWatermarker(Watermarker):
         depth: int = 32,
         prf: WatermarkPRFName = "philox",
     ) -> None:
-        if context_width < 1:
-            raise ValueError("context_width must be positive")
+        _validate_context_width(context_width)
         if depth < 1:
             raise ValueError("SynthID-Text depth must be positive")
         selected_prf = create_prf(prf, key)
@@ -157,8 +168,7 @@ class SynthIDWatermarkDetector(WatermarkDetector):
         prf: WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,
     ) -> None:
-        if depth < 1:
-            raise ValueError("SynthID-Text depth must be positive")
+        _validate_context_width(context_width)
         selected_prf = create_prf(prf, key)
         if not isinstance(selected_prf, PhiloxPRF):
             raise ValueError("SynthID-Text requires the Philox PRF")
