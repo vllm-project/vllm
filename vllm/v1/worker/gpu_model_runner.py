@@ -553,12 +553,26 @@ def _temporarily_detach_target_owned_draft_modules(
     for name, module in draft_model.named_modules(remove_duplicate=False):
         if not name or id(module) not in target_module_ids:
             continue
-        # A parameterless shared module (e.g. a rotary embedding returned by
-        # get_rope's instance cache to both target and draft) receives no
-        # checkpoint tensors, so there is nothing to discard -- and the
+        # A shared module that is checkpoint-free -- no parameters and no
+        # persistent buffers anywhere in its subtree -- receives no
+        # checkpoint tensors, so there is nothing to discard, and the
         # draft's load_weights may still need it (DFlash/DSpark read
-        # rotary_emb.head_size while rebuilding fused KV buffers).
-        if next(module.parameters(), None) is None:
+        # rotary_emb.head_size while rebuilding fused KV buffers). This is
+        # the get_rope-cached rotary embedding case. A shared module with a
+        # persistent buffer anywhere in its subtree is NOT checkpoint-free:
+        # AutoWeightsLoader loads persistent registered buffers, so leaving
+        # it attached would let the draft checkpoint write into the
+        # target's buffer -- such modules are detached. Each buffer is
+        # checked against the persistence set of the module that registers
+        # it (a recursive name vs. the top module's set would misclassify
+        # nested non-persistent buffers). Note this covers registered
+        # checkpoint state; a custom load_weights that consumes tensors into
+        # unregistered state is out of scope.
+        if next(module.parameters(), None) is None and not any(
+            buf_name not in getattr(child, "_non_persistent_buffers_set", set())
+            for child in module.modules()
+            for buf_name, _buf in child.named_buffers(recurse=False)
+        ):
             continue
         parent_name, sep, attr = name.rpartition(".")
         parent = draft_model if not sep else draft_model.get_submodule(parent_name)
