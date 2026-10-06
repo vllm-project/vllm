@@ -85,6 +85,7 @@ def test_rocm_backends_do_not_support_mm_prefix():
         "See https://github.com/ROCm/aiter/issues/4168"
     )
 
+
 def test_segmented_attention_uses_dedicated_backend_components():
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionBackend,
