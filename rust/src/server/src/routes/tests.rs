@@ -4453,13 +4453,15 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     assert_eq!(json["choices"][0]["index"], 0);
     assert_eq!(json["choices"][0]["token_ids"], json!([33, 44]));
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    // Output logprobs carry integer token ids and rank, not the OpenAI
+    // "token_id:N" placeholder string; `bytes` is gone.
+    assert_eq!(json["choices"][0]["logprobs"]["content"][0]["token_id"], 33);
+    assert_eq!(json["choices"][0]["logprobs"]["content"][0]["rank"], 1);
+    assert!(json["choices"][0]["logprobs"]["content"][0]["token"].is_null());
+    assert!(json["choices"][0]["logprobs"]["content"][0]["bytes"].is_null());
     assert_eq!(
-        json["choices"][0]["logprobs"]["content"][0]["token"],
-        "token_id:33"
-    );
-    assert_eq!(
-        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"][0]["token"],
-        "token_id:44"
+        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"][0]["token_id"],
+        44
     );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert_eq!(
@@ -4581,9 +4583,11 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(first["choices"][0]["index"], 0);
     assert_eq!(first["choices"][0]["token_ids"], json!([33]));
     assert_eq!(
-        first["choices"][0]["logprobs"]["content"][0]["token"],
-        "token_id:33"
+        first["choices"][0]["logprobs"]["content"][0]["token_id"],
+        33
     );
+    assert_eq!(first["choices"][0]["logprobs"]["content"][0]["rank"], 1);
+    assert!(first["choices"][0]["logprobs"]["content"][0]["token"].is_null());
     assert_eq!(first["usage"]["prompt_tokens"], 2);
     assert_eq!(first["usage"]["completion_tokens"], 1);
 
