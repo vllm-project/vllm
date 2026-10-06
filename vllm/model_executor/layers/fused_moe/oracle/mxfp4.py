@@ -786,7 +786,13 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # b12x plans for the exact model dimensions. B12xExperts validates the
         # required MXFP4 block alignment before selecting the backend.
         return hidden_size, intermediate_size
-    if backend == Mxfp4MoeBackend.EMULATION:
+    if backend == Mxfp4MoeBackend.RDNA3_MXFP4:
+        # The RDNA3 kernels bound-check N and K, so only the MXFP4 block (K) and
+        # the 4-column vector loads (N) constrain them. The generic ROCm 256
+        # round-up below would double the experts at TP4 (512 / 4 = 128).
+        intermediate_size = round_up(intermediate_size, OCP_MX_BLOCK_SIZE)
+        hidden_size = round_up(hidden_size, OCP_MX_BLOCK_SIZE)
+    elif backend == Mxfp4MoeBackend.EMULATION:
         # Emulation has no kernel tile; it only needs OCP MX block alignment so the
         # per-block scale buffers (`dim // OCP_MX_BLOCK_SIZE`) aren't floor-truncated
         # by a non-block-aligned TP/DP shard (e.g. 2880 // 4 = 720).
