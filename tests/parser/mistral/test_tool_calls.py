@@ -582,7 +582,7 @@ _PRE_V11_UNUSUAL_CALLS = [
     ),
     # Mistral-7B-Instruct-v0.3 emits repeated BOT tokens at temperature 0.
     pytest.param(
-        '[TOOL_CALLS][TOOL_CALLS][{"name": "add", "arguments": {"a": 1}}]',
+        '[TOOL_CALLS] [TOOL_CALLS] [{"name": "add", "arguments": {"a": 1}}]',
         [("add", '{"a": 1}')],
         "",
         id="consecutive_bot_tokens",
