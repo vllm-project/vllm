@@ -48,6 +48,8 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
             # Decoder GPU memory is reserved from the startup value.
             runtime_kwargs = dict(runtime_kwargs)
             runtime_kwargs.pop("hw_decoders", None)
+            runtime_kwargs.pop("max_width", None)
+            runtime_kwargs.pop("max_height", None)
             runtime_kwargs.pop("pool_size", None)
             # The decode device determines which device the decoded frames
             # (and thus the processor pipeline) live on; startup-only.
