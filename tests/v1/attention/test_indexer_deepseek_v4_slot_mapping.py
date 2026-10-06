@@ -122,6 +122,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
     builder.dcp_world_size = 1
     builder.compress_ratio = 16
+    builder.kernel_block_size = None
     builder.num_sms = num_sms
     builder.arange_buffer = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
     builder.kv_cache_spec = SimpleNamespace(num_states=64)
@@ -140,6 +141,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
             requires_padding=False,
             schedule_metadata=schedule_metadata,
         ),
+        block_table=block_table,
     )
 
     builder.update_draft_decode_metadata(metadata)
@@ -165,6 +167,65 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
         [1, 2, 4], dtype=torch.int64, device=device
     )
     torch.testing.assert_close(metadata.slot_mapping, expected_slot_mapping)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "block_size,kernel_block_size,compress_ratio", [(64, 64, 1), (256, 64, 4)]
+)
+def test_indexer_draft_decode_refresh_follows_new_batch(
+    monkeypatch, block_size, kernel_block_size, compress_ratio
+):
+    """Without a prior build(), the refresh must not keep the last batch's state."""
+    monkeypatch.setattr(indexer_module, "has_deep_gemm", lambda: False)
+    device = torch.device("cuda")
+    num_reqs, width = 3, 8
+    factor = block_size // kernel_block_size
+
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.dcp_world_size = 1
+    builder.compress_ratio = compress_ratio
+    builder.kernel_block_size = kernel_block_size
+    builder.arange_buffer = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
+    builder.kv_cache_spec = SimpleNamespace(block_size=block_size, num_states=64)
+
+    def stale(*shape: int) -> torch.Tensor:
+        return torch.full(shape, -7, dtype=torch.int32, device=device)
+
+    decode = DeepSeekV32IndexerDecodeMetadata(
+        block_table=stale(num_reqs, width // factor),
+        seq_lens=stale(num_reqs, 1),
+        decode_lens=stale(num_reqs),
+        requires_padding=False,
+        schedule_metadata=stale(1),
+        indices=stale(num_reqs),
+        per_req_decode_lens=stale(num_reqs),
+    )
+    request_block_table = torch.randint(
+        0, 1000, (num_reqs, width), dtype=torch.int32, device=device
+    )
+    seq_lens = torch.tensor([17, 33, 65], dtype=torch.int32, device=device)
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=seq_lens,
+        max_seq_len=128,
+        slot_mapping=torch.zeros(num_reqs, dtype=torch.int64, device=device),
+        num_decodes=num_reqs,
+        num_decode_tokens=num_reqs,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+        block_table=request_block_table,
+    )
+
+    builder.update_draft_decode_metadata(metadata)
+
+    expected_block_table = request_block_table[:, ::factor] // factor
+    torch.testing.assert_close(decode.block_table, expected_block_table)
+    torch.testing.assert_close(decode.indices, builder.arange_buffer[:num_reqs])
+    assert torch.all(decode.per_req_decode_lens == 1)
+    assert torch.all(decode.decode_lens == 1)
+    expected_seq_lens = torch.div(seq_lens, compress_ratio, rounding_mode="floor")
+    torch.testing.assert_close(decode.seq_lens.flatten(), expected_seq_lens)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -315,6 +376,9 @@ def test_compressed_slot_mapping_warmup_includes_index_kpool():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=32)),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1, cp_kv_cache_interleave_size=1
+        ),
     )
 
     keys = CompressedSlotMappingKernel().get_warmup_keys(config)
@@ -341,6 +405,41 @@ def test_compressed_slot_mapping_inherits_padded_token_slots():
         compress_ratio=2,
     )
     assert compressed.tolist() == [-1, -1, -1, -1, -1, 3 * 4 + 2, -1, 3 * 4 + 3]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
+    """Under DCP each rank writes only the states it owns, at the state's
+    rank-local position."""
+    device = torch.device("cuda")
+    dcp, interleave, ratio, block_size = 2, 4, 2, 4
+    num_tokens = 32
+    query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[5, 7]], dtype=torch.int32, device=device)
+    pos = torch.arange(num_tokens)
+    for rank in range(dcp):
+        owned = (pos // interleave) % dcp == rank
+        slot_mapping = torch.where(owned, 0, -1).to(torch.int64).to(device)
+        compressed = get_compressed_slot_mapping(
+            num_tokens,
+            slot_mapping,
+            query_start_loc,
+            seq_lens,
+            block_table,
+            block_size=block_size,
+            compress_ratio=ratio,
+            dcp_world_size=dcp,
+            cp_interleave=interleave,
+        )
+        local_pos = pos // (interleave * dcp) * interleave + pos % interleave
+        state = local_pos // ratio
+        expected = torch.where(
+            owned & ((pos + 1) % ratio == 0),
+            block_table[0].cpu()[state // block_size] * block_size + state % block_size,
+            -1,
+        )
+        assert compressed.tolist() == expected.tolist()
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():
@@ -370,6 +469,8 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     builder.use_pcp = True
     builder.pcp_world_size = 4
     builder.pcp_rank = 0
+    builder.dcp_world_size = 1
+    builder.cp_kv_cache_interleave_size = 1
     builder.kernel_block_size = None
     builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
     builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
@@ -383,8 +484,11 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
         block_size,
         compress_ratio,
         out,
+        dcp_world_size,
+        cp_interleave,
     ):
         assert num_tokens == 0
+        assert dcp_world_size == 1
         assert block_size == 64
         assert compress_ratio == 4
         out.fill_(-1)
