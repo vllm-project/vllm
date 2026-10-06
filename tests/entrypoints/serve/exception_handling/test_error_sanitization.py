@@ -8,6 +8,8 @@ PIL repr addresses leaked via the Anthropic API router and the
 speech-to-text WebSocket paths.
 """
 
+import time
+
 import pytest
 
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
@@ -68,6 +70,14 @@ class TestSanitizeMessageFilePaths:
         result = sanitize_message(msg)
         assert "0x" not in result
         assert "/usr/local/" not in result
+
+    def test_long_segment_run_is_fast(self):
+        """Regression: a client-controlled run of /segments (e.g. the model
+        name) made the generic path regex backtrack for ~1 minute at 20 KB."""
+        msg = "The model `" + "/a" * 10_000 + "` does not exist."
+        start = time.perf_counter()
+        assert sanitize_message(msg) == msg
+        assert time.perf_counter() - start < 1
 
 
 class TestSanitizeMessageCoversLeakPatterns:
