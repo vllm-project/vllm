@@ -245,8 +245,13 @@ class ExaoneMoeAttention(nn.Module):
         else:
             self.sliding_window_size = config.sliding_window
 
-        # apply rotary embeddings to every layer in full attention models
-        self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
+        # Full-attention layers are NoPE when sliding layers are present, except
+        # the MTP layer, which is trained with RoPE.
+        self.use_rope = (
+            bool(self.sliding_window_size)
+            or is_mtp
+            or "sliding_attention" not in config.layer_types
+        )
 
         set_default_rope_theta(config, default_theta=1000000)
         self.rotary_emb = get_rope(
@@ -281,7 +286,7 @@ class ExaoneMoeAttention(nn.Module):
         k = self.k_norm(k)
         k = k.flatten(-2, -1)
 
-        if self.sliding_window_size or self.apply_rope_all_layers:
+        if self.use_rope:
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
