@@ -574,7 +574,9 @@ def test_video_media_io_embedding_gemma2():
 
 
 def test_config_capping_and_explicit_limits():
-    """Verify EmbeddingGemma2ModelConfig sets TRITON_ATTN attention backend."""
+    """Verify EmbeddingGemma2ModelConfig backend selection, default capping,
+    and preservation of explicit limits.
+    """
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -584,23 +586,60 @@ def test_config_capping_and_explicit_limits():
     )
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    # (a) When attention backend is None, default to TRITON_ATTN
+    # (a) When attention backend is None, default to TRITON_ATTN,
+    # and default capping: max_model_len > 8192 without explicit limit capped to 8192
     cfg_default = SimpleNamespace(
         attention_config=SimpleNamespace(backend=None),
+        model_config=SimpleNamespace(
+            max_model_len=262144,
+            original_max_model_len=None,
+        ),
     )
     with patch.object(Gemma4Config, "verify_and_update_config"):
         EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_default)
 
     assert cfg_default.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+    assert cfg_default.model_config.max_model_len == 8192
 
-    # (b) When attention backend is explicitly set, preserve it
-    cfg_explicit = SimpleNamespace(
-        attention_config=SimpleNamespace(backend=AttentionBackendEnum.FLASH_ATTN),
+    # (b) Default capping with original_max_model_len == -1
+    cfg_default_minus1 = SimpleNamespace(
+        attention_config=SimpleNamespace(backend=None),
+        model_config=SimpleNamespace(
+            max_model_len=131072,
+            original_max_model_len=-1,
+        ),
     )
     with patch.object(Gemma4Config, "verify_and_update_config"):
-        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_explicit)
+        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_default_minus1)
 
-    assert cfg_explicit.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+    assert cfg_default_minus1.model_config.max_model_len == 8192
+
+    # (c) Explicit limit 4096 preserved
+    cfg_explicit_4k = SimpleNamespace(
+        attention_config=SimpleNamespace(backend=None),
+        model_config=SimpleNamespace(
+            max_model_len=4096,
+            original_max_model_len=4096,
+        ),
+    )
+    with patch.object(Gemma4Config, "verify_and_update_config"):
+        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_explicit_4k)
+
+    assert cfg_explicit_4k.model_config.max_model_len == 4096
+
+    # (d) Explicit limit 16384 preserved and explicit backend preserved
+    cfg_explicit_16k = SimpleNamespace(
+        attention_config=SimpleNamespace(backend=AttentionBackendEnum.FLASH_ATTN),
+        model_config=SimpleNamespace(
+            max_model_len=16384,
+            original_max_model_len=16384,
+        ),
+    )
+    with patch.object(Gemma4Config, "verify_and_update_config"):
+        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_explicit_16k)
+
+    assert cfg_explicit_16k.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+    assert cfg_explicit_16k.model_config.max_model_len == 16384
 
 
 def test_sentence_transformer_tokenizer_config_max_seq_length(tmp_path):
@@ -619,10 +658,3 @@ def test_sentence_transformer_tokenizer_config_max_seq_length(tmp_path):
     loaded = get_sentence_transformer_tokenizer_config(str(tmp_path))
     assert loaded is not None
     assert loaded["max_seq_length"] == 8192
-
-    # 2. eg2-v2 model directory if present
-    eg2_dir = "/projects/gemma4-vllm/models/eg2-v2"
-    if os.path.exists(eg2_dir):
-        loaded_eg2 = get_sentence_transformer_tokenizer_config(eg2_dir)
-        assert loaded_eg2 is not None
-        assert loaded_eg2["max_seq_length"] == 8192

@@ -300,6 +300,12 @@ class EmbeddingGemma2ModelConfig(Gemma4Config):
                 "EmbeddingGemma2: using attention backend %s", attn_config.backend
             )
 
+        model_config = vllm_config.model_config
+        if model_config.max_model_len > 8192 and getattr(
+            model_config, "original_max_model_len", None
+        ) in (None, -1):
+            model_config.max_model_len = 8192
+
 
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
     @classmethod
