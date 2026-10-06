@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3 DSpark target verify under DCP on gfx942 (MI300/MI325).
+"""Causal target verify under DCP on gfx942 (MI300/MI325).
 
 Reproduces the attention shape of
 
@@ -11,7 +11,9 @@ Reproduces the attention shape of
 96 gathered heads, bf16 KV, qlen 6 and the 768-token blocks the hybrid KDA
 layers impose. Segmented MLA tiles those blocks at 128 tokens and needs 128 KiB
 of LDS (gfx942 has 64 KiB), so the builder must route this shape to the generic
-Triton split-KV kernel. Shapes segmented MLA fits stay on it.
+Triton split-KV kernel. DeepSeek-V3 with MTP and an fp8 KV cache at DCP 8 hits
+the same limit through its 128 gathered heads. Shapes segmented MLA fits stay
+on it.
 
 The real metadata builder and ``forward_mqa`` run on one GPU with the DCP ranks
 simulated one after another. That is sound because this path has no
@@ -24,22 +26,23 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
 from vllm._aiter_ops import is_aiter_found  # noqa: E402
 
-# DeepSeek-R1 supplies the MLA dims, which Kimi-K3 shares; only the head count
-# is overridden.
+# DeepSeek-R1 supplies the MLA dims, which Kimi-K3 and DeepSeek-V3 share; only
+# the head count is overridden.
 MODEL = "deepseek-ai/DeepSeek-R1"
 KV_LORA_RANK, ROPE_DIM, NOPE_DIM = 512, 64, 128
 HEAD_SIZE = KV_LORA_RANK + ROPE_DIM
 SCALE = (NOPE_DIM + ROPE_DIM) ** -0.5
-
-DCP, HEADS_PER_RANK, QLEN = 8, 12, 6
+DCP = 8
 # Each rank holds ~800 tokens per request, so its shard spans several blocks.
 NUM_REQS, CTX = 4, 6400
+FP8_KV_SCALE = 0.05
 
 
 def _on_gfx942() -> bool:
@@ -76,23 +79,25 @@ def fake_dcp_groups(monkeypatch):
     return group
 
 
-def _vllm_config():
+def _vllm_config(heads_per_rank: int, qlen: int, fp8_kv: bool):
     from tests.v1.attention.utils import create_vllm_config
 
     config = create_vllm_config(
         model_name=MODEL,
-        max_model_len=CTX + QLEN,
+        max_model_len=CTX + qlen,
         max_num_seqs=NUM_REQS,
         max_num_batched_tokens=4096,
     )
-    config.model_config.model_arch_config.total_num_attention_heads = HEADS_PER_RANK
-    # The reorder threshold reads only these two fields; without them a qlen-6
-    # row is classified as prefill and never reaches decode.
+    config.model_config.model_arch_config.total_num_attention_heads = heads_per_rank
+    # The reorder threshold reads only these two fields; without them a
+    # multi-token row is classified as prefill and never reaches decode.
     config.speculative_config = SimpleNamespace(
-        num_speculative_tokens=QLEN - 1, parallel_drafting=False
+        num_speculative_tokens=qlen - 1, parallel_drafting=False
     )
     config.parallel_config.decode_context_parallel_size = DCP
     config.parallel_config.cp_kv_cache_interleave_size = 1
+    if fp8_kv:
+        config.cache_config.cache_dtype = "fp8"
     return config
 
 
@@ -117,47 +122,50 @@ def _ctx_layer():
     )
 
 
-def _impl(dcp_rank: int):
+def _impl(dcp_rank: int, heads_per_rank: int, fp8_kv: bool):
     """forward_mqa needs these attributes, not the weight-loading __init__."""
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
 
     impl = object.__new__(AiterMLAImpl)
-    impl.num_heads = HEADS_PER_RANK
+    impl.num_heads = heads_per_rank
     impl.kv_lora_rank = KV_LORA_RANK
     impl.qk_rope_head_dim = ROPE_DIM
     impl.dcp_world_size = DCP
     impl.dcp_rank = dcp_rank
     impl.pcp_world_size = 1
-    impl.kv_cache_dtype = "auto"
+    impl.kv_cache_dtype = "fp8" if fp8_kv else "auto"
     impl.scale = SCALE
     impl._sm_count = current_platform.num_compute_units()
     return impl
 
 
-def _run_rank(config, spec, layer_name, group, rank, q, kv):
+def _run_rank(config, spec, layer_name, group, rank, q, kv_cache_src, k_scale):
     """Shard the KV round-robin onto ``rank`` and run its verify step."""
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAMetadataBuilder
 
     device = q.device
-    seq_len = CTX + QLEN
+    qlen, heads = q.shape[1], q.shape[2] // DCP
+    seq_len = CTX + qlen
     positions = torch.arange(rank, seq_len, DCP, device=device)
     local_len = positions.numel()
-    blocks_per_req = -(-local_len // spec.block_size)
+    # Production block tables span max_model_len, so every rank's table is at
+    # least as wide as the largest shard needs.
+    blocks_per_req = cdiv(cdiv(seq_len, DCP), spec.block_size)
     kv_cache = torch.zeros(
         NUM_REQS * blocks_per_req,
         spec.block_size,
         HEAD_SIZE,
-        dtype=kv.dtype,
+        dtype=kv_cache_src.dtype,
         device=device,
     )
-    kv_cache.view(NUM_REQS, -1, HEAD_SIZE)[:, :local_len] = kv[:, positions]
+    kv_cache.view(NUM_REQS, -1, HEAD_SIZE)[:, :local_len] = kv_cache_src[:, positions]
     block_table = torch.arange(
         NUM_REQS * blocks_per_req, dtype=torch.int32, device=device
     ).view(NUM_REQS, blocks_per_req)
 
     query_start_loc = torch.arange(
-        0, NUM_REQS * QLEN + 1, QLEN, dtype=torch.int32, device=device
+        0, NUM_REQS * qlen + 1, qlen, dtype=torch.int32, device=device
     )
     local_lens = torch.full((NUM_REQS,), local_len, dtype=torch.int32)
     common = CommonAttentionMetadata(
@@ -165,11 +173,11 @@ def _run_rank(config, spec, layer_name, group, rank, q, kv):
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=torch.full((NUM_REQS,), seq_len, dtype=torch.int32, device=device),
         num_reqs=NUM_REQS,
-        num_actual_tokens=NUM_REQS * QLEN,
-        max_query_len=QLEN,
+        num_actual_tokens=NUM_REQS * qlen,
+        max_query_len=qlen,
         max_seq_len=seq_len,
         block_table_tensor=block_table,
-        slot_mapping=torch.arange(NUM_REQS * QLEN, dtype=torch.int64, device=device),
+        slot_mapping=torch.arange(NUM_REQS * qlen, dtype=torch.int64, device=device),
         causal=True,
         dcp_local_seq_lens=local_lens.to(device),
         dcp_local_seq_lens_cpu_upper_bound=local_lens,
@@ -180,19 +188,26 @@ def _run_rank(config, spec, layer_name, group, rank, q, kv):
     metadata = builder.build(0, common)
     layer = SimpleNamespace(
         _q_scale=torch.tensor(1.0, device=device),
-        _k_scale=torch.tensor(1.0, device=device),
+        _k_scale=torch.tensor(k_scale, device=device),
     )
-    output, lse = _impl(rank).forward_mqa(q.flatten(0, 1), kv_cache, metadata, layer)
+    impl = _impl(rank, heads, kv_cache_src.dtype != torch.bfloat16)
+    output, lse = impl.forward_mqa(q.flatten(0, 1), kv_cache, metadata, layer)
     return metadata.decode.dcp_route.name, output, lse
 
 
 @pytest.mark.parametrize(
-    "block_size, route",
-    [(768, "TRITON"), (64, "SEGMENTED")],
-    ids=["hybrid-kda-blocks", "segmented-fits"],
+    "heads_per_rank, qlen, block_size, fp8_kv, route",
+    [
+        (12, 6, 768, False, "TRITON"),
+        (12, 6, 64, False, "SEGMENTED"),
+        (16, 2, 16, True, "TRITON"),
+    ],
+    ids=["kimi-k3-hybrid-kda-blocks", "segmented-fits", "deepseek-v3-mtp-fp8-kv"],
 )
 @torch.inference_mode()
-def test_k3_dspark_verify_matches_attention(fake_dcp_groups, block_size, route):
+def test_dcp_verify_matches_attention(
+    fake_dcp_groups, heads_per_rank, qlen, block_size, fp8_kv, route
+):
     from vllm.config import set_current_vllm_config
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.worker.workspace import (
@@ -204,14 +219,25 @@ def test_k3_dspark_verify_matches_attention(fake_dcp_groups, block_size, route):
     if not is_workspace_manager_initialized():
         init_workspace_manager(device)
     torch.manual_seed(0)
-    num_heads = HEADS_PER_RANK * DCP
-    seq_len = CTX + QLEN
+    seq_len = CTX + qlen
     q = torch.randn(
-        NUM_REQS, QLEN, num_heads, HEAD_SIZE, dtype=torch.bfloat16, device=device
+        NUM_REQS,
+        qlen,
+        heads_per_rank * DCP,
+        HEAD_SIZE,
+        dtype=torch.bfloat16,
+        device=device,
     )
-    kv = torch.randn(NUM_REQS, seq_len, HEAD_SIZE, dtype=torch.bfloat16, device=device)
+    kv = torch.randn(NUM_REQS, seq_len, HEAD_SIZE, device=device).clamp_(-4, 4)
+    if fp8_kv:
+        k_scale = FP8_KV_SCALE
+        kv_cache_src = (kv / k_scale).to(current_platform.fp8_dtype())
+    else:
+        k_scale = 1.0
+        kv_cache_src = kv.to(torch.bfloat16)
+    kv_ref = kv_cache_src.float() * k_scale
 
-    config = _vllm_config()
+    config = _vllm_config(heads_per_rank, qlen, fp8_kv)
     layer_name = "model.layers.0.self_attn.attn"
     with set_current_vllm_config(config):
         config.compilation_config.static_forward_context[layer_name] = _ctx_layer()
@@ -219,11 +245,21 @@ def test_k3_dspark_verify_matches_attention(fake_dcp_groups, block_size, route):
             block_size=block_size,
             num_kv_heads=1,
             head_size=HEAD_SIZE,
-            dtype=torch.bfloat16,
+            dtype=kv_cache_src.dtype,
+            cache_dtype_str="fp8" if fp8_kv else None,
             non_causal_multi_token_decode=False,
         )
         shards = [
-            _run_rank(config, spec, layer_name, fake_dcp_groups, rank, q, kv)
+            _run_rank(
+                config,
+                spec,
+                layer_name,
+                fake_dcp_groups,
+                rank,
+                q,
+                kv_cache_src,
+                k_scale,
+            )
             for rank in range(DCP)
         ]
 
@@ -235,13 +271,13 @@ def test_k3_dspark_verify_matches_attention(fake_dcp_groups, block_size, route):
     ).sum(dim=0) / weights.sum(dim=0).unsqueeze(-1)
 
     # Query token t of a request sees the context plus verify tokens 0..t.
-    scores = torch.einsum("rthd,rld->rthl", q.float(), kv.float()) * SCALE
+    scores = torch.einsum("rthd,rld->rthl", q.float(), kv_ref) * SCALE
     visible = torch.arange(seq_len, device=device) <= CTX + torch.arange(
-        QLEN, device=device
+        qlen, device=device
     ).view(-1, 1)
     scores.masked_fill_(~visible[None, :, None, :], float("-inf"))
     reference = torch.einsum(
-        "rthl,rld->rthd", scores.softmax(dim=-1), kv[..., :KV_LORA_RANK].float()
+        "rthl,rld->rthd", scores.softmax(dim=-1), kv_ref[..., :KV_LORA_RANK]
     )
     torch.testing.assert_close(
         merged.view_as(reference), reference, rtol=2e-2, atol=2e-2
