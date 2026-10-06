@@ -4,10 +4,13 @@
 
 import contextlib
 import json
+import os
 import random
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from math import lcm
+from uuid import uuid4
 
 import pytest
 import requests
@@ -59,6 +62,16 @@ SPEC_CONFIG = {
 }
 
 NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+MOONCAKE = {
+    "kv_connector": "MooncakeStoreConnector",
+    "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
+    "kv_connector_extra_config": {
+        "load_async": True,
+        "lookup_async": True,
+        "enable_cross_layers_blocks": False,
+    },
+}
 # SimpleCPUOffloadConnector as in the Kimi-K3 recipe.
 OFFLOAD = {
     "kv_connector": "SimpleCPUOffloadConnector",
@@ -242,10 +255,16 @@ def _tokens_text_logprobs(response: dict):
 
 
 def _reset_gpu_prefix_cache(url: str) -> None:
-    response = requests.post(
-        f"{url}/reset_prefix_cache", params={"reset_external": "false"}, timeout=60
-    )
-    response.raise_for_status()
+    deadline = time.monotonic() + 60
+    while True:
+        response = requests.post(
+            f"{url}/reset_prefix_cache", params={"reset_external": "false"}, timeout=60
+        )
+        response.raise_for_status()
+        if response.json()["success"]:
+            return
+        assert time.monotonic() < deadline, "GPU cache reset timed out"
+        time.sleep(0.1)
 
 
 @dataclass(frozen=True)
@@ -351,6 +370,43 @@ def _format(turns: list[Turn]) -> str:
         for i, t in enumerate(turns)
     ]
     return "\n".join(rows)
+
+
+@pytest.mark.parametrize(
+    "name,prompt_len", [("plain", 7040), ("plain", 7296), ("mooncake", 7449)]
+)
+def test_dspark_exact_resend_reuses_prompt_checkpoint(
+    name: str, prompt_len: int
+) -> None:
+    """Resends reuse the Mamba checkpoint and its companion EAGLE attention proof."""
+    mode = Mode(128, True)
+    salt = str(uuid4())
+    rng = random.Random(0)
+    prompt = [rng.randint(1000, 150000) for _ in range(prompt_len)]
+    deployment = DEPLOYMENTS["plain"]
+    if name == "mooncake":
+        if not os.getenv("MOONCAKE_CONFIG_PATH"):
+            pytest.skip("Mooncake Store requires MOONCAKE_CONFIG_PATH and a master")
+        deployment = Deployment(Instance(kv_config=MOONCAKE), offload=True)
+    with _serve(deployment, mode) as servers:
+        url = servers[0].url_root
+        cold = _complete(url, prompt, salt, max_tokens=1)
+        if deployment.offload:
+            _reset_gpu_prefix_cache(url)
+        resend = _complete(url, prompt, salt, max_tokens=1)
+        recompute = _complete(url, prompt, f"{salt}-recompute", max_tokens=1)
+
+    # EAGLE's dropped hash unit already leaves tokens to recompute on resend.
+    expected = (prompt_len // 128 - 1) * 128
+    actual = _cached(resend)
+    assert _cached(cold) == _cached(recompute) == 0
+    assert actual == expected, f"{prompt_len=}: {actual=}, {expected=}"
+    check_logprobs_close(
+        outputs_0_lst=[_tokens_text_logprobs(recompute)],
+        outputs_1_lst=[_tokens_text_logprobs(resend)],
+        name_0="recompute",
+        name_1="resend",
+    )
 
 
 @pytest.mark.parametrize(
