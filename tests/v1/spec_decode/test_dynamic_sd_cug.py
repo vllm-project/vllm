@@ -29,6 +29,7 @@ def _create_vllm_config_for_dsd(
     use_dynamic_sd: bool = True,
     num_spec_per_batch_size: list[tuple[int, int, int]] | None = None,
     draft_confidence_threshold: float | None = None,
+    draft_confidence_fallback_depth: int | None = None,
 ) -> MagicMock:
     """Create a minimal config that exercises DSD cudagraph dispatch.
 
@@ -80,6 +81,7 @@ def _create_vllm_config_for_dsd(
     else:
         speculative_config.num_speculative_tokens_per_batch_size = None
     speculative_config.draft_confidence_threshold = draft_confidence_threshold
+    speculative_config.draft_confidence_fallback_depth = draft_confidence_fallback_depth
     vllm_config.speculative_config = speculative_config
 
     return vllm_config
@@ -431,18 +433,25 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("decode_query_len", "expected_query_lens"),
+    ("decode_query_len", "expected"),
     [
-        # Target verification: 1..K drafts plus the bonus token.
-        (5, {2, 3, 4, 5}),
+        # Target verification with K=4, fallback depth 2: the full and fallback
+        # lengths at every batch size, the other stop lengths for one request.
+        (
+            5,
+            {(5, n) for n in range(1, 9)}
+            | {(3, n) for n in range(1, 9)}
+            | {(2, 1), (4, 1)},
+        ),
         # Draft decode steps always run one token per request.
-        (1, {1}),
+        (1, {(1, n) for n in range(1, 9)}),
     ],
 )
-def test_confidence_stop_captures_every_verified_length(
-    monkeypatch, decode_query_len, expected_query_lens
+def test_confidence_stop_captures_verified_lengths(
+    monkeypatch, decode_query_len, expected
 ):
-    """A confidence stop verifies 1..K drafts, so each length gets FULL graphs."""
+    """A stopped single request verifies 1..K drafts; larger batches verify the
+    fallback depth, so only those shapes get FULL graphs."""
     monkeypatch.setattr(
         gpu_cudagraph_utils,
         "get_pp_group",
@@ -453,6 +462,7 @@ def test_confidence_stop_captures_every_verified_length(
         max_spec_tokens=4,
         use_dynamic_sd=False,
         draft_confidence_threshold=0.6,
+        draft_confidence_fallback_depth=2,
     )
     manager = gpu_cudagraph_utils.CudaGraphManager(
         vllm_config=vllm_config,
@@ -460,7 +470,8 @@ def test_confidence_stop_captures_every_verified_length(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
     )
-    full_query_lens = {
-        desc.uniform_token_count for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    shapes = {
+        (desc.uniform_token_count, desc.num_reqs)
+        for desc in manager._capture_descs[CUDAGraphMode.FULL]
     }
-    assert full_query_lens == expected_query_lens
+    assert shapes == expected
