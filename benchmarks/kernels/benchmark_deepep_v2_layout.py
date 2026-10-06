@@ -197,8 +197,13 @@ def main():
     parser.add_argument("--expert-alignment", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.cuda_graph and CASES[args.case][1]:
+        parser.error("CUDA graph capture requires do_cpu_sync=False")
+    if args.cuda_graph and os.environ.get("DEEPEP_LAYOUT_DEBUG") == "1":
+        parser.error("Stage synchronization cannot run inside CUDA graph capture")
     if args.iterations < 1 or args.warmup < 1:
         parser.error("Warmup and measured iteration counts must be positive")
     if min(args.local_experts, args.hidden_size, args.topk, args.expert_alignment) < 1:
@@ -326,21 +331,57 @@ def main():
         del out, counts, handle
         dist.barrier()
         torch.accelerator.synchronize()
+        graph = None
+        replay_checks = []
+        if args.cuda_graph:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                out, received_capacity, counts, handle = step()
+            # Change both activations and routing in-place at static addresses.
+            # Reusing one captured graph must rebuild dispatch metadata on GPU.
+            original_x, original_ids = x.clone(), ids.clone()
+            activation = dispatch_input[0] if grouped is not None else dispatch_input
+            for shift in (1, 3):
+                ids.copy_((original_ids + shift) % num_experts)
+                activation.copy_((-original_x).to(activation.dtype))
+                replay_factor = (((ids % 4).float() + 1) / 4 * weights).sum(dim=1)
+                replay_reference = (
+                    -original_x.float() * replay_factor[:, None]
+                ).bfloat16()
+                graph.replay()
+                torch.testing.assert_close(out, replay_reference, atol=0.01, rtol=0.03)
+                replay_checks.append(f"changed_activations_routing_shift_{shift}")
+            ids.copy_(original_ids)
+            activation.copy_(original_x.to(activation.dtype))
+            graph.replay()
+            torch.testing.assert_close(out, reference, atol=0.01, rtol=0.03)
+            replay_checks.append("restored_inputs")
+            del original_x, original_ids, replay_reference, replay_factor
+            dist.barrier()
+            torch.accelerator.synchronize()
         torch.accelerator.reset_peak_memory_stats()
         samples = []
         for _ in range(args.iterations):
             start = time.perf_counter()
-            out, received_capacity, counts, handle = step()
+            if graph is None:
+                out, received_capacity, counts, handle = step()
+            else:
+                graph.replay()
             # Deliberately includes host waits and per-step completion overhead.
             torch.accelerator.synchronize()
             samples.append((time.perf_counter() - start) * 1000)
-            del out, counts, handle
+            if graph is None:
+                del out, counts, handle
+        if graph is not None:
+            torch.testing.assert_close(out, reference, atol=0.01, rtol=0.03)
         report = {
             "rank": rank,
             "gpu": torch.cuda.get_device_name(),
             "case": args.case,
             "do_expand": expanded,
             "do_cpu_sync": cpu_sync,
+            "cuda_graph": args.cuda_graph,
+            "replay_correctness_checks": replay_checks,
             "gemm_input_permutation": ("skipped" if expanded else "performed")
             if grouped is not None
             else "not_applicable",

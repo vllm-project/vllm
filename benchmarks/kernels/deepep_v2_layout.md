@@ -21,7 +21,8 @@ compare them with rounded GPU counts, not the real counts directly.
 The harness checks dispatch/combine against an expert-dependent scalar reference
 before timing. It masks uninitialized receive rows and weights before arithmetic.
 All ranks verify the same CLI configuration before dispatch. Each invocation
-runs one case in a fresh process, with no graph capture or cached dispatch.
+runs one case in a fresh process. Dispatch always computes fresh routing rather
+than using a cached handle.
 
 ```bash
 .venv/bin/python -m torch.distributed.run --standalone --nproc-per-node=2 \
@@ -34,6 +35,23 @@ For same-node NVLink-only runs, set `EP_DISABLE_GIN=1`, `NCCL_GIN_ENABLE=0`
 and `NCCL_IB_DISABLE=1`. The harness requires the entire process group to be
 one physical NVLink domain when GIN is disabled. No RDMA resource is requested.
 
+Add `--cuda-graph` to either `nonexpanded-nosync` or `expanded-nosync` to capture
+the entire dispatch/expert/combine step. CPU-sync cases are rejected before GPU
+initialization. Warmup/JIT compilation happens before capture. The captured
+graph is replayed with changed activations and two different routing shifts at
+fixed input addresses, then with restored inputs; each output is checked against
+its reference outside capture. Measured iterations replay this same graph, and
+the final output is checked again. Reports include `cuda_graph` and the replay
+correctness checks. Stage debug synchronization is incompatible with capture.
+
+```bash
+.venv/bin/python -m torch.distributed.run --standalone --nproc-per-node=2 \
+  benchmarks/kernels/benchmark_deepep_v2_layout.py \
+  --expert-kernel grouped-fp8 --cuda-graph \
+  --case expanded-nosync --tokens-per-rank 8192,8192 \
+  --output /tmp/expanded-nosync-graph.json
+```
+
 Repeat for all four cases, with matching dimensions, first at `512,512`, then
 `8192,8192`, `8192,512`, and `8192,0`. Run `16384,16384` only after those pass.
 Use the same allocated GPUs for the matrix; repeat in reverse case order before
@@ -45,7 +63,8 @@ The measurement includes allocation, dispatch, GPU metadata, a synthetic expert
 operation, combine, and per-step CUDA completion synchronization. The reported
 latency is the median of per-step maximum rank wall times. Memory reports are
 PyTorch allocator peaks, not total device footprints. Warmup/compilation is
-excluded. Per-step synchronization changes execution cadence, so these numbers
+excluded. Graph capture and correctness replays are also excluded from timing.
+Per-step synchronization changes execution cadence, so these numbers
 are neither serving latency nor steady-state asynchronous throughput.
 
 The default `scalar` expert has no GEMM and cannot establish preparation savings.
