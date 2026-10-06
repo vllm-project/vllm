@@ -523,6 +523,10 @@ def test_attention_owned_rope_preserves_graph_order_and_fallback(
     assert len(attention_nodes) == 1
     if path == "fused":
         assert len(fused_nodes) == 1
+        # Head reshapes belong in the graph, not in the opaque backend hook.
+        assert all(
+            node.meta["example_value"].ndim == 3 for node in fused_nodes[0].args[:4]
+        )
         assert fused_nodes[0].args[-1] is attention_nodes[0].args[4]
         assert attention_nodes[0].args[1:3] == (None, None)
         fused_update.assert_called_once()

@@ -1064,8 +1064,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         Implementations must write rotated K directly to cache; materializing
         K would defeat this interface's ownership boundary. ``query_out`` is a
         fresh contiguous buffer with the same shape as query, owned by the
-        compiled model graph. Inputs may have flattened or explicit head
-        dimensions; the backend owns reshaping them for its kernel.
+        compiled model graph. Inputs have shape [tokens, heads, head_size];
+        reshaping stays in the graph, outside the opaque update operation.
         """
         raise NotImplementedError
 

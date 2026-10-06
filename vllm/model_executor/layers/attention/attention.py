@@ -546,6 +546,9 @@ class Attention(nn.Module, AttentionLayerBase):
             if rotation is None:
                 query, key = rotary_emb(positions, query, key)
             else:
+                query = query.view(-1, self.num_heads, self.head_size)
+                key = key.view(-1, self.num_kv_heads, self.head_size)
+                value = value.view(-1, self.num_kv_heads, self.head_size_v)
                 query_out = torch.empty_like(
                     query, memory_format=torch.contiguous_format
                 )
@@ -703,8 +706,8 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 self,
-                key_out.view(-1, self.num_kv_heads, self.head_size),
-                value.view(-1, self.num_kv_heads, self.head_size_v),
+                key_out,
+                value,
                 kv_cache,
                 layer_slot_mapping,
             )

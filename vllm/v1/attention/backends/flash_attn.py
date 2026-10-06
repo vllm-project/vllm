@@ -1571,11 +1571,6 @@ class FlashAttentionImpl(AttentionImpl):
     ) -> None:
         from vllm import _custom_ops
 
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
-        query_out = query_out.view(-1, self.num_heads, self.head_size)
-
         # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D)).
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
