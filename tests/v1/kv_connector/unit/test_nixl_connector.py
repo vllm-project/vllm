@@ -50,6 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HeartbeatInfo,
     RemoteMeta,
     ReqMeta,
     compute_nixl_compatibility_hash,
@@ -2099,7 +2100,9 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
 
     assert handle == 22
     assert worker._dram_src_handles_by_block_size[worker.block_size] == 11
-    assert [block[2] for block in blocks] == [0, 0, 3, 3]
+    # Must stay an array: P_TP > D_TP splits call .tolist() on it.
+    assert isinstance(blocks, np.ndarray)
+    assert blocks[:, 2].tolist() == [0, 0, 3, 3]
     memory_types = [
         call.args[1] for call in worker.nixl_wrapper.get_xfer_descs.call_args_list
     ]
@@ -2698,6 +2701,51 @@ def test_engine_with_inflight_transfer_is_not_evicted(default_vllm_config, dist_
 
         assert engine_id not in worker._remote_agents
         assert mock_rem.call_count == 2
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_heartbeated_engine_is_not_evicted(default_vllm_config, dist_init, monkeypatch):
+    """Heartbeats keep a remote engine's NIXL state alive.
+
+    Requests waiting in the D scheduler issue no reads, but their engine is
+    heartbeated through its remote agents. If the TTL expires anyway, the
+    next heartbeat evicts the engine and starts a new handshake, which loads
+    every remote agent again.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=10.0)
+    nixl_wrapper = worker.nixl_wrapper
+
+    now = {"t": 1000.0}
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: now["t"])
+    worker._engine_last_active[engine_id] = now["t"]
+
+    metadata = NixlConnectorMetadata()
+    metadata.heartbeat_by_engine = {
+        engine_id: HeartbeatInfo(
+            req_ids={"remote-req"}, host="localhost", port=1234, tp_size=2
+        )
+    }
+
+    with (
+        patch.object(nixl_wrapper, "send_notif") as mock_send,
+        patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem,
+        patch.object(worker, "_handshake_initiation_executor") as mock_executor,
+    ):
+        # One heartbeat every 5 s for twice the TTL, and no reads.
+        for _ in range(4):
+            now["t"] += 5.0
+            worker._send_heartbeats(metadata)
+
+    assert engine_id in worker._remote_agents
+    mock_rem.assert_not_called()
+    mock_executor.submit.assert_not_called()
+    # Every heartbeat reached both remote agents.
+    assert mock_send.call_count == 8
 
 
 @patch(

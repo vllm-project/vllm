@@ -48,7 +48,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import StructuredOutputsParams, check_json_nesting
 from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
@@ -381,6 +381,7 @@ class MistralParser(ParserEngine):
                 json_schema = _DEFAULT_JSON_SCHEMA
             elif request.structured_outputs.json is not None:
                 if isinstance(request.structured_outputs.json, str):
+                    check_json_nesting(request.structured_outputs.json)
                     json_schema = json.loads(request.structured_outputs.json)
                 else:
                     json_schema = request.structured_outputs.json
