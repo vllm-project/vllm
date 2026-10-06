@@ -442,10 +442,11 @@ class Attention(nn.Module, AttentionLayerBase):
 
         compilation_config = vllm_config.compilation_config
         pass_config = compilation_config.pass_config
+        supports_rope_kvcache = self.impl.fused_rope_kvcache_q_out_supported()
         if (
             pass_config.fuse_rope_kvcache
             and current_platform.is_cuda()
-            and not self.impl.fused_rope_kvcache_q_out_supported()
+            and not supports_rope_kvcache
         ):
             logger.warning_once(
                 "fuse_rope_kvcache=True has no effect for the selected %s "
@@ -455,12 +456,11 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         self._fuse_rope_kvcache = bool(
             pass_config.fuse_rope_kvcache
-            and not self.attn_backend.forward_includes_kv_cache_update
+            and supports_rope_kvcache
             and kv_sharing_target_layer_name is None
             and self.head_size_v == self.head_size
             and self.kv_cache_torch_dtype == self.dtype
             and not pass_config.fuse_attn_quant
-            and self.impl.fused_rope_kvcache_q_out_supported()
         )
         self.rope_kvcache_fusion_max_token_num = (
             pass_config.rope_kvcache_fusion_max_token_num
@@ -546,16 +546,16 @@ class Attention(nn.Module, AttentionLayerBase):
             if rotation is None:
                 query, key = rotary_emb(positions, query, key)
             else:
-                q = query.view(-1, self.num_heads, self.head_size)
-                query = torch.empty_like(q, memory_format=torch.contiguous_format)
-                key = key.view(-1, self.num_kv_heads, self.head_size)
-                value = value.view(-1, self.num_kv_heads, self.head_size_v)
+                query_out = torch.empty_like(
+                    query, memory_format=torch.contiguous_format
+                )
                 op = (
                     fused_rope_and_unified_kv_cache_update_q_out
                     if self.use_direct_call
                     else torch.ops.vllm.fused_rope_and_unified_kv_cache_update_q_out
                 )
-                op(q, key, value, query, *rotation, encoded)
+                op(query, key, value, query_out, *rotation, encoded)
+                query = query_out
                 key = value = None
 
         if output_dtype is None:
@@ -666,9 +666,6 @@ class Attention(nn.Module, AttentionLayerBase):
         layer_slot_mapping: torch.Tensor | None,
     ) -> None:
         impl = self.impl
-        assert impl.fused_rope_kvcache_q_out_supported(), (
-            "The attention backend does not support cache-only fused RoPE."
-        )
         if (
             layer_slot_mapping is not None
             and query.shape[0] <= self.rope_kvcache_fusion_max_token_num

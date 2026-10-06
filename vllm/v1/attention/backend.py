@@ -979,7 +979,11 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         return False
 
     def fused_rope_kvcache_q_out_supported(self) -> bool:
-        """Whether the backend can write Q out while caching K/V directly."""
+        """Whether a separate fused RoPE/cache update can precede attention.
+
+        A supporting backend's forward must consume cached K/V when its key
+        and value arguments are None, without updating the cache again.
+        """
         return False
 
     def do_qk_norm_rope_kvcache_update(
@@ -1059,7 +1063,9 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
         Implementations must write rotated K directly to cache; materializing
         K would defeat this interface's ownership boundary. ``query_out`` is a
-        fresh contiguous buffer owned by the compiled model graph.
+        fresh contiguous buffer with the same shape as query, owned by the
+        compiled model graph. Inputs may have flattened or explicit head
+        dimensions; the backend owns reshaping them for its kernel.
         """
         raise NotImplementedError
 
