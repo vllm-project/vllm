@@ -839,27 +839,33 @@ class OutputProcessor:
 
         # Calculate timing metrics
         e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
-        queued_time = metrics.scheduled_ts - metrics.queued_ts
-        prefill_time = metrics.first_token_ts - metrics.scheduled_ts
-        decode_time = metrics.last_token_ts - metrics.first_token_ts
-        inference_time = metrics.last_token_ts - metrics.scheduled_ts
 
         # Build attributes dict
         attributes: dict[str, Any] = {
-            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN: (
-                metrics.first_token_latency
-            ),
             SpanAttributes.GEN_AI_LATENCY_E2E: e2e_time,
-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE: queued_time,
             SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS: prompt_length,
             SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
                 metrics.num_generation_tokens
             ),
-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL: prefill_time,
-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
             SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
         }
+
+        # Phases the request never reached have no latency to report.
+        if metrics.first_token_ts:
+            attributes[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] = (
+                metrics.first_token_latency
+            )
+        for attribute, latency in (
+            (SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE, metrics.queued_time),
+            (SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, metrics.prefill_time),
+            (SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, metrics.decode_time),
+            (
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE,
+                metrics.inference_time,
+            ),
+        ):
+            if latency is not None:
+                attributes[attribute] = latency
 
         # Add optional request parameters
         if req_state.top_p:

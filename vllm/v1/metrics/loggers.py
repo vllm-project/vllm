@@ -1212,28 +1212,34 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_e2e_time_request[engine_idx].observe(
                 finished_request.e2e_latency
             )
-            self.histogram_queue_time_request[engine_idx].observe(
-                finished_request.queued_time
-            )
-            self.histogram_prefill_time_request[engine_idx].observe(
-                finished_request.prefill_time
-            )
-            self.histogram_inference_time_request[engine_idx].observe(
-                finished_request.inference_time
-            )
-            self.histogram_decode_time_request[engine_idx].observe(
-                finished_request.decode_time
-            )
+            # Phases the request never reached are None and not observed.
+            if finished_request.queued_time is not None:
+                self.histogram_queue_time_request[engine_idx].observe(
+                    finished_request.queued_time
+                )
+            if finished_request.prefill_time is not None:
+                self.histogram_prefill_time_request[engine_idx].observe(
+                    finished_request.prefill_time
+                )
+            if finished_request.inference_time is not None:
+                self.histogram_inference_time_request[engine_idx].observe(
+                    finished_request.inference_time
+                )
+            if finished_request.decode_time is not None:
+                self.histogram_decode_time_request[engine_idx].observe(
+                    finished_request.decode_time
+                )
             self.histogram_request_num_preemptions[engine_idx].observe(
                 finished_request.num_preemptions
             )
-            # Calculate prefill KV compute (excludes cached tokens)
-            prefill_kv_computed = finished_request.num_prompt_tokens - max(
-                finished_request.num_cached_tokens, 0
-            )
-            self.histogram_prefill_kv_computed_request[engine_idx].observe(
-                prefill_kv_computed
-            )
+            if finished_request.prefill_time is not None:
+                # Calculate prefill KV compute (excludes cached tokens)
+                prefill_kv_computed = finished_request.num_prompt_tokens - max(
+                    finished_request.num_cached_tokens, 0
+                )
+                self.histogram_prefill_kv_computed_request[engine_idx].observe(
+                    prefill_kv_computed
+                )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
                 finished_request.num_prompt_tokens
             )
