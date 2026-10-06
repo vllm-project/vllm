@@ -26,6 +26,14 @@ CASES = {
 }
 
 
+def debug_stage(name: str, **metadata):
+    if os.environ.get("DEEPEP_LAYOUT_DEBUG") == "1":
+        torch.accelerator.synchronize()
+        print(
+            json.dumps({"rank": dist.get_rank(), "stage": name, **metadata}), flush=True
+        )
+
+
 def expanded_metadata(
     prefix: torch.Tensor, capacity: int, alignment: int, expert_offset: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -141,6 +149,12 @@ class GroupedFp8Experts:
                     expert_tokens_meta=None,
                 )
             )
+        debug_stage(
+            "metadata",
+            input_shape=list(gemm_input.shape),
+            scales_stride=list(gemm_scales.stride()),
+            alignment=alignment,
+        )
         mm = torch.zeros(
             gemm_input.shape[0], hidden, dtype=torch.bfloat16, device=aq.device
         )
@@ -151,6 +165,7 @@ class GroupedFp8Experts:
                 mm,
                 m_indices,
             )
+        debug_stage("gemm")
         weights = torch.where(ids >= 0, recv_weights, 0)
         if expanded:
             safe_mm = torch.where((ids >= 0)[:, None], mm, 0)
@@ -270,6 +285,7 @@ def main():
             do_cpu_sync=cpu_sync,
             async_with_compute_stream=False,
         )
+        debug_stage("dispatch")
         if grouped is not None:
             y, counts = grouped(recv_x, recv_ids, recv_weights, handle, expanded)
             received_rows = recv_x[0].shape[0]
@@ -283,8 +299,10 @@ def main():
                 rank * args.local_experts,
             )
             received_rows = recv_x.shape[0]
+        debug_stage("experts")
         # Expert outputs are already weighted; combine only reverses routing.
         out, _, _ = buffer.combine(x=y, handle=handle, async_with_compute_stream=False)
+        debug_stage("combine")
         return out, received_rows, counts, handle
 
     try:
