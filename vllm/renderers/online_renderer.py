@@ -63,6 +63,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
+from vllm.renderers.metrics import observe_request_render_duration
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
@@ -238,6 +239,7 @@ class OnlineRenderer:
         validation and ``adjust_request`` still run and the output is
         detokenized (text-out).
         """
+        render_start = time.perf_counter()
         tokenizer = self.renderer.tokenizer
 
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
@@ -314,6 +316,11 @@ class OnlineRenderer:
                 request, should_include_tools
             )
 
+        observe_request_render_duration(
+            request.model or self.model_config.model,
+            "chat",
+            time.perf_counter() - render_start,
+        )
         return conversation, engine_inputs
 
     async def render_responses(
@@ -596,6 +603,7 @@ class OnlineRenderer:
         Called directly by render_completion_request and delegated to by
         OpenAIServingCompletion.render_completion_request after its engine-aware checks.
         """
+        render_start = time.perf_counter()
         prompt_input = request.prompt
         if request.suffix is not None:
             if request.echo:
@@ -664,6 +672,11 @@ class OnlineRenderer:
             skip_mm_cache=skip_mm_cache,
         )
 
+        observe_request_render_duration(
+            request.model or self.model_config.model,
+            "completion",
+            time.perf_counter() - render_start,
+        )
         return engine_inputs
 
     def create_error_response(
