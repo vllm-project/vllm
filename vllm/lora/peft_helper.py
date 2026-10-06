@@ -33,6 +33,14 @@ class PEFTHelper:
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
+    # PEFT features that change the adapter's semantics and that vLLM does not
+    # implement. They are read only to reject such adapters.
+    lora_bias: bool = field(default=False)
+    init_lora_weights: bool | str = field(default=True)
+    alora_invocation_tokens: list[int] | None = field(default=None)
+    layer_replication: list[list[int]] | None = field(default=None)
+    use_bdlora: dict | None = field(default=None)
+    use_qalora: bool = field(default=False)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: int | None = field(default=False)
@@ -52,7 +60,37 @@ class PEFTHelper:
                 )
         if self.use_dora:
             error_msg.append("vLLM does not yet support DoRA.")
+        if self.lora_bias:
+            error_msg.append("vLLM does not support LoRA bias (lora_bias).")
+        if self._init_modifies_base_weights():
+            error_msg.append(
+                f"init_lora_weights={self.init_lora_weights!r} modifies the base "
+                "model weights when PEFT loads the adapter, which vLLM does not "
+                "do. Convert it to a regular LoRA adapter with PEFT's "
+                "path_initial_model_for_weight_conversion, or set "
+                "init_lora_weights to true if the served base model already "
+                "contains the modified weights."
+            )
+        if self.alora_invocation_tokens:
+            error_msg.append("vLLM does not support Activated LoRA (aLoRA).")
+        if self.layer_replication:
+            error_msg.append("vLLM does not support layer_replication.")
+        if self.use_bdlora:
+            error_msg.append("vLLM does not support block-diagonal LoRA (BD-LoRA).")
+        if self.use_qalora:
+            error_msg.append("vLLM does not support QALoRA.")
         return error_msg
+
+    def _init_modifies_base_weights(self) -> bool:
+        # Same checks as PEFT's LoraLayer.update_layer
+        init = self.init_lora_weights
+        if not isinstance(init, str):
+            return False
+        return (
+            init.startswith(("pissa", "corda"))
+            or init.lower() == "olora"
+            or init in ("loftq", "lora_ga")
+        )
 
     def __post_init__(self):
         if self.r <= 0:

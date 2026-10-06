@@ -23,6 +23,7 @@ BADREQUEST_CASES = [
         "is greater than max_lora_rank",
     ),
     ("test_dora", {"use_dora": True}, "does not yet support DoRA"),
+    ("test_pissa", {"init_lora_weights": "pissa"}, "modifies the base model"),
     (
         "test_modules_to_save",
         {"modules_to_save": ["lm_head"]},

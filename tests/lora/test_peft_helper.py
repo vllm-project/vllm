@@ -24,6 +24,21 @@ ERROR_CASES = [
     ),
     ("test_rank_zero", {"r": 0}, "must be a positive integer"),
     ("test_rank_negative", {"r": -8}, "must be a positive integer"),
+    ("test_lora_bias", {"lora_bias": True}, "does not support LoRA bias"),
+    ("test_pissa", {"init_lora_weights": "pissa"}, "modifies the base model"),
+    (
+        "test_pissa_niter",
+        {"init_lora_weights": "pissa_niter_4"},
+        "modifies the base model",
+    ),
+    ("test_olora", {"init_lora_weights": "olora"}, "modifies the base model"),
+    ("test_corda", {"init_lora_weights": "corda"}, "modifies the base model"),
+    ("test_loftq", {"init_lora_weights": "loftq"}, "modifies the base model"),
+    ("test_lora_ga", {"init_lora_weights": "lora_ga"}, "modifies the base model"),
+    ("test_alora", {"alora_invocation_tokens": [1, 2]}, "Activated LoRA"),
+    ("test_layer_replication", {"layer_replication": [[0, 2]]}, "layer_replication"),
+    ("test_bdlora", {"use_bdlora": {"nblocks": 2}}, "BD-LoRA"),
+    ("test_qalora", {"use_qalora": True}, "QALoRA"),
 ]
 
 
@@ -114,3 +129,22 @@ def test_peft_helper_invalid_rank_direct(bad_rank: int):
     """
     with pytest.raises(ValueError, match="must be a positive integer"):
         PEFTHelper(r=bad_rank, lora_alpha=16, target_modules=["q_proj"])
+
+
+@pytest.mark.parametrize(
+    "init_lora_weights", [True, False, "gaussian", "eva", "orthogonal", "mica"]
+)
+def test_peft_helper_init_lora_weights_supported(init_lora_weights):
+    """These inits only set the adapter weights and leave the base model as is."""
+    lora_config = LoRAConfig(max_lora_rank=16, max_cpu_loras=3, max_loras=2)
+    PEFTHelper.from_dict(
+        {
+            "r": 8,
+            "lora_alpha": 16,
+            "target_modules": ["q_proj"],
+            "init_lora_weights": init_lora_weights,
+            "alora_invocation_tokens": None,
+            "layer_replication": None,
+            "use_bdlora": None,
+        }
+    ).validate_legal(lora_config)
