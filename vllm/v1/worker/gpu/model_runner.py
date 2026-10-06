@@ -758,6 +758,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
+        self.initialize_kv_cache_tensors(
+            is_profiling=is_profiling,
+            kv_cache_allocation_context=kv_cache_allocation_context,
+        )
+
+    def initialize_kv_cache_tensors(
+        self,
+        *,
+        is_profiling: bool,
+        kv_cache_allocation_context: AbstractContextManager | None,
+    ) -> None:
         # Capture warmup providers that depend on allocated KV-cache strides.
         with self.jit_warmup_registry.activate():
             kv_caches_dict = init_kv_cache(
@@ -780,7 +791,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
                 self.aux_output_connector = get_aux_output_connector(
-                    self.model, self.vllm_config, kv_cache_config
+                    self.model, self.vllm_config, self.kv_cache_config
                 )
 
     def _init_kv_zero_meta(self) -> None:
@@ -1234,6 +1245,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             out=self.req_states.num_computed_prefill_tokens,
         )
 
+        self._apply_kv_cache_memory_updates(scheduler_output)
+
+    def _apply_kv_cache_memory_updates(self, scheduler_output: SchedulerOutput) -> None:
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
