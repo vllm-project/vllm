@@ -29,7 +29,7 @@ from ..token_in_token_out.protocol import (
     DerenderCompletionRequest,
     DerenderCompletionStreamRequest,
     DerenderStreamState,
-    GenerateResponse,
+    GenerateTokensResponse,
     MultiModalFeatures,
 )
 
@@ -54,7 +54,7 @@ class ServingDerender(BaseServing):
 
     def _validate_derender_bounds(
         self,
-        generate_responses: list[GenerateResponse],
+        generate_responses: list[GenerateTokensResponse],
     ) -> ErrorResponse | None:
         """Reject derender payloads that exceed resource bounds.
 

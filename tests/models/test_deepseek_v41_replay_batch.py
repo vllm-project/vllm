@@ -12,6 +12,7 @@ import torch
 
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
@@ -57,7 +58,8 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
-    layers = SimpleNamespace(window=WINDOW, rows=None, forward_context=None)
+    cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
 
@@ -127,13 +129,8 @@ def _prepare(state, batch, cg_mode):
         [],
         GROUPS,
     )
-    layers = state.decoder_replay_layers
-    if layers.rows is None:
-        assert layers.forward_context is None
-        return None, None
-    return SimpleNamespace(
-        rows=layers.rows, forward_context=layers.forward_context
-    ), state.builds[-1]
+    replay = state.decoder_replay_layers.replay_batch
+    return (None, None) if replay is None else (replay, state.builds[-1])
 
 
 def test_replay_batch_keeps_each_request_window(state):
@@ -191,9 +188,9 @@ def test_replay_batch_keeps_adaptive_verification_query_bound(state):
     assert replay is not None and build.batch.max_query_len == 200
 
 
-def test_only_eager_steps_trim(state):
-    """A CUDA graph keeps the layers on its whole batch; an eager step trims a
-    padded batch to its real rows."""
+def test_graph_steps_trim_only_piecewise_at_threshold(state):
+    """A CUDA graph keeps the layers on its whole batch, unless it is a PIECEWISE
+    one at the trim threshold or above; an eager step trims a batch to its rows."""
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING, num_tokens_after_padding=512)
     for cg_mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL):
         assert _prepare(state, batch, cg_mode) == (None, None)
@@ -202,6 +199,10 @@ def test_only_eager_steps_trim(state):
     assert replay.rows.tolist() == REPLAY_ROWS
     assert build.cg_mode == CUDAGraphMode.NONE
     assert build.batch.num_tokens_after_padding == len(REPLAY_ROWS)
+    state._trim_threshold = 256
+    replay, _ = _prepare(state, batch, CUDAGraphMode.PIECEWISE)
+    assert replay is not None and replay.rows.tolist() == REPLAY_ROWS
+    assert _prepare(state, batch, CUDAGraphMode.FULL) == (None, None)
 
 
 def test_whole_batch_forwards_get_no_replay_batch(state):
@@ -251,9 +252,25 @@ def test_dp_ranks_replay_together(dp_state):
 
 
 def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
-    dummy = _input_batch([512], [512], [False])
+    """An idle rank's dummy keeps one row, so peers do not wait on its replay."""
+    dummy = _input_batch([256, 256], [256, 256], [False, False])
     dp_state.other = (True, 129)
     replay, _ = _prepare(dp_state, dummy, CUDAGraphMode.NONE)
-    assert replay is not None and replay.rows.shape[0] == WINDOW
+    assert replay is not None and replay.rows.shape[0] == 1
     dp_metadata = replay.forward_context.dp_metadata
-    assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [WINDOW, 129]
+    assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [1, 129]
+
+
+def test_dp_ranks_pad_to_one_replay_graph(dp_state):
+    """Every rank pads its replay batch to the graph fitting the largest rank's."""
+    dp_state.replay_cudagraphs = MagicMock()
+    dp_state.replay_cudagraphs.dispatch.return_value = BatchExecutionDescriptor(
+        CUDAGraphMode.PIECEWISE, 512, None
+    )
+    dp_state.other = (True, 300)
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    replay, _ = _prepare(dp_state, batch, CUDAGraphMode.NONE)
+    assert dp_state.replay_cudagraphs.dispatch.call_args.args[:2] == (3, 300)
+    assert replay.forward_context.batch_descriptor.num_tokens == 512
+    dp_metadata = replay.forward_context.dp_metadata
+    assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]

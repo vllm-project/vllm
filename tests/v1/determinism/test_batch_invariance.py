@@ -18,6 +18,7 @@ from utils import (
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
 
 
 @skip_unsupported
@@ -778,32 +779,16 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"[Prompt {prompt_idx}] Generated {len(token_ids)} tokens: {token_ids}")
         print(f"[Prompt {prompt_idx}] Decode logprobs: {decode_logprobs.tolist()}")
 
-        # Step 2: For each token position, run prefill and compare
+        # Step 2: For each token position, run prefill and compare.
+        prompt_token_ids = list(decode_output.prompt_token_ids or [])
+
         print(f"\n[Prompt {prompt_idx}] Verifying each token via prefill...")
 
         for token_idx in range(len(token_ids)):
-            # Construct the prefix up to (but not including) this token
+            # Construct the prefix up to (but not including) this token using
+            # token ids directly.
             current_token = token_ids[token_idx]
-
-            # We need to detokenize to get the text prefix
-            # For this, we'll use the tokenizer from the LLM
-            # However, the LLM API doesn't expose tokenizer easily, so we'll
-            # construct the prefix by decoding from the original prompt
-
-            # Get text up to this point by using the output text
-            # This is approximate but should work for verification
-            if token_idx == 0:
-                prefix_prompt = prompt
-            else:
-                # No per-token text, so regenerate with max_tokens = token_idx
-                # to get the prefix text
-                prefix_sp = SamplingParams(
-                    temperature=0.0,
-                    max_tokens=token_idx,
-                    logprobs=1,
-                )
-                prefix_output = llm.generate([prompt], prefix_sp, use_tqdm=False)[0]
-                prefix_prompt = prompt + prefix_output.outputs[0].text
+            prefix_token_ids = prompt_token_ids + list(token_ids[:token_idx])
 
             # Now run prefill with max_tokens=1 to get the logprob of the next token
             prefill_sp = SamplingParams(
@@ -814,19 +799,23 @@ def test_decode_logprobs_match_prefill_logprobs(
 
             print(
                 f"  [Token {token_idx}] Running prefill for prefix "
-                f"(len={len(prefix_prompt)})..."
+                f"(num_tokens={len(prefix_token_ids)})..."
             )
-            prefill_output = llm.generate([prefix_prompt], prefill_sp, use_tqdm=False)[
-                0
-            ]
-            prefill_logprobs, prefill_token_ids = _extract_step_logprobs(prefill_output)
+            prefill_output = llm.generate(
+                [TokensPrompt(prompt_token_ids=prefix_token_ids)],
+                prefill_sp,
+                use_tqdm=False,
+            )[0]
+            prefill_logprobs, prefill_token_ids_out = _extract_step_logprobs(
+                prefill_output
+            )
 
             if prefill_logprobs is None:
                 print(f"  [Token {token_idx}] Warning: No prefill logprobs available")
                 continue
 
             # The first token from prefill should match the current token
-            prefill_token = prefill_token_ids[0]
+            prefill_token = prefill_token_ids_out[0]
             prefill_logprob = prefill_logprobs[0].item()
             decode_logprob = decode_logprobs[token_idx].item()
 
@@ -851,7 +840,7 @@ def test_decode_logprobs_match_prefill_logprobs(
                         "decode_logprob": decode_logprob,
                         "prefill_logprob": prefill_logprob,
                         "prompt_text": prompt[:100],
-                        "prefix_text": prefix_prompt[:100],
+                        "prefix_token_ids": prefix_token_ids[:50],
                     }
                 )
                 print(f"  [Token {token_idx}] ✗ TOKEN MISMATCH!")
@@ -871,7 +860,7 @@ def test_decode_logprobs_match_prefill_logprobs(
                         "prefill_logprob": prefill_logprob,
                         "diff": diff,
                         "prompt_text": prompt[:100],
-                        "prefix_text": prefix_prompt[:100],
+                        "prefix_token_ids": prefix_token_ids[:50],
                         "decode_all_tokens": token_ids,
                         "decode_all_logprobs": decode_logprobs.tolist(),
                     }
@@ -908,7 +897,7 @@ def test_decode_logprobs_match_prefill_logprobs(
             for i, fail in enumerate(failures[:5]):  # Show first 5 failures per prompt
                 print(f"\n  [Failure {i + 1}] Token position {fail['token_idx']}:")
                 print(f"    Reason: {fail['reason']}")
-                print(f"    Prefix text: '{fail['prefix_text']}...'")
+                print(f"    Prefix token ids: {fail['prefix_token_ids']}...")
                 print(
                     f"    Decode:  token={fail['decode_token']}, "
                     f"logprob={fail['decode_logprob']:.10f}"

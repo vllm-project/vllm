@@ -452,6 +452,7 @@ class XPUPlatform(Platform):
         if new_block_size == cache_config.block_size:
             return
 
+        pre_block_size = cache_config.block_size
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = new_block_size
         original_mamba_page_size_padded = cache_config.mamba_page_size_padded
@@ -474,6 +475,10 @@ class XPUPlatform(Platform):
                 original_mamba_page_size_padded,
                 cache_config.mamba_page_size_padded,
             )
+        # This rounding runs after super()'s check, so check its result too.
+        cls._check_aligned_block_size(
+            vllm_config, cls._find_non_ssm_backends(vllm_config), pre_block_size
+        )
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:

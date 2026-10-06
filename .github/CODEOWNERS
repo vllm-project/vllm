@@ -4,6 +4,7 @@
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng
 /vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi @ivanium @wzhao18
+/vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18
@@ -77,6 +78,7 @@
 /vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/simple_kv_offload @ivanium
+/vllm/v1/hisparse @MatthewBonanni @LucasWilkinson
 /vllm/v1/engine @njhill
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill

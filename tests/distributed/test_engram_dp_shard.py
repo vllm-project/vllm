@@ -177,7 +177,9 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
     # Supply the resolved Engram settings without constructing a full model.
     vllm_config.engram_config = EngramConfig()
     vllm_config.model_config = SimpleNamespace(
-        architecture="DeepseekV41ForCausalLM", is_moe=True
+        architecture="DeepseekV41ForCausalLM",
+        is_moe=True,
+        sleep_mode_offload_cudagraph=False,
     )
     try:
         init_distributed_environment()
@@ -511,7 +513,7 @@ def _check_dummy_hash_model_forward(
 
     model = model_ops.DeepseekV4Model.__new__(model_ops.DeepseekV4Model)
     torch.nn.Module.__init__(model)
-    model.use_mega_moe = False
+    model.use_native_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False
     model.engram_hash = state

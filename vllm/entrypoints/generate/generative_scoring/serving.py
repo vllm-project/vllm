@@ -261,6 +261,7 @@ class ServingGenerativeScoring(BaseServing):
             logprobs=len(request.label_token_ids),
             logprob_token_ids=request.label_token_ids,
             n=1,
+            watermarking=False,
         )
 
         # Get trace headers

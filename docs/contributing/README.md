@@ -307,15 +307,23 @@ review process:
 
 - After the PR is submitted, the PR will be assigned to a reviewer. Every
   reviewer will pick up the PRs based on their expertise and availability.
+  Official reviews can be performed by any of the
+  [reviewers](../community/reviewers.md) or
+  [committers](../governance/committers.md); committers perform the final
+  merge. To find someone to review your PR, see the reviewers' and
+  committers' areas of expertise or ask in the `#pr-reviews` channel on
+  [Slack](https://slack.vllm.ai).
 - After the PR is assigned, the reviewer will provide status updates every 2-3
   days. If the PR is not reviewed within 7 days, please feel free to ping the
   reviewer or the vLLM team.
 - After the review, the reviewer will put an `action-required` label on the PR
   if there are changes required. The contributor should address the comments and
   ping the reviewer to re-review the PR.
-- Please respond to all comments within a reasonable time frame. If a comment
+- Please respond to all comments within a reasonable time frame. Address each
+  piece of reviewer feedback with a change or an explanation. If a comment
   isn't clear or you disagree with a suggestion, feel free to ask for
-  clarification or discuss the suggestion.
+  clarification or discuss the suggestion. If you and a reviewer can't reach
+  agreement, a committer can help decide.
 - Note that not all CI checks will be executed due to limited computational
   resources. Reviewers with write access and configured trusted contributors
   can comment `/ci run` for upstream CI or `/amd-ci run` for AMD CI only when

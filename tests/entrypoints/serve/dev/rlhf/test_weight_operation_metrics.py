@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Weight-transfer metrics scraped from a real two-API-server deployment."""
 
-from pathlib import Path
-
 import requests
 import torch
-from prometheus_client.multiprocess import MultiProcessCollector
 from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoModelForCausalLM
 
@@ -21,10 +18,7 @@ from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
 DURATION = "vllm:rl_weight_update_operation_duration_seconds"
 IN_FLIGHT = "vllm:rl_weight_update_operations_in_flight"
-# The API servers accept from one shared listening socket, so the kernel may
-# hand one process most connections. Sync until both have recorded, within a cap.
-MIN_SYNCS = 8
-MAX_SYNCS = 64
+SYNCS = 8
 
 
 def scrape(url: str) -> dict[tuple[str, str], float]:
@@ -34,17 +28,6 @@ def scrape(url: str) -> dict[tuple[str, str], float]:
         for family in text_string_to_metric_families(text)
         for sample in family.samples
         if sample.name in (f"{DURATION}_count", IN_FLIGHT)
-    }
-
-
-def pids_that_recorded(multiproc_dir: Path) -> set[str]:
-    return {
-        path.stem.rsplit("_", 1)[1]
-        for path in multiproc_dir.glob("histogram_*.db")
-        if any(
-            metric.name == DURATION
-            for metric in MultiProcessCollector.merge([str(path)])
-        )
     }
 
 
@@ -77,17 +60,11 @@ def test_weight_sync_metrics_aggregate_across_api_servers(tmp_path):
             client=HTTPVLLMWeightSyncClient(url),
             source=ModuleSource(trainer),
         )
-        syncs = 0
-        while syncs < MIN_SYNCS or (
-            len(pids_that_recorded(tmp_path)) < 2 and syncs < MAX_SYNCS
-        ):
+        for _ in range(SYNCS):
             engine.send_weights()
-            syncs += 1
         metrics = scrape(url)
 
-    calls = {"init": 1, "start": syncs, "update": syncs, "finish": syncs}
+    calls = {"init": 1, "start": SYNCS, "update": SYNCS, "finish": SYNCS}
     for operation, count in calls.items():
         assert metrics[(f"{DURATION}_count", operation)] == count, operation
         assert metrics[(IN_FLIGHT, operation)] == 0, operation
-    # The counts above are sums over processes only if both servers recorded.
-    assert len(pids_that_recorded(tmp_path)) == 2

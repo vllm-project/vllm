@@ -31,7 +31,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
-from typing_extensions import Self, TypeIs, deprecated
+from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -422,17 +422,6 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
             yield
 
-    @deprecated(
-        "get_num_mm_encoder_tokens is deprecated; use get_mm_lora_token_counts instead."
-    )
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int: ...
-
-    @deprecated(
-        "get_num_mm_connector_tokens is deprecated; use "
-        "get_mm_lora_token_counts instead."
-    )
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int: ...
-
     def get_mm_lora_token_counts(
         self,
         *,
@@ -446,12 +435,9 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         connector forwards. Models with multiple modalities can override this
         when each modality has different encoder padding or pooling behavior.
         """
-        del modality, mm_kwargs
-        num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
-        num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
-        return (
-            num_encoder_tokens,
-            num_connector_tokens if isinstance(num_connector_tokens, int) else None,
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement get_mm_lora_token_counts "
+            "to support tower/connector LoRA."
         )
 
     def _embed_text_input_ids(

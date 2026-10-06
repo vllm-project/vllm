@@ -406,6 +406,184 @@ class Qwen3VLVideoBackend(VideoBackend):
 
 
 @VIDEO_LOADER_REGISTRY.register(
+    "embedding_gemma2",
+    video_processor="EmbeddingGemma2VideoProcessor",
+)
+class EmbeddingGemma2VideoBackend(VideoBackend):
+    """Samples frames with the same indices as HF EmbeddingGemma2VideoProcessor."""
+
+    PROCESSOR_NAMES = ("EmbeddingGemma2Processor", "EmbeddingGemma2VideoProcessor")
+
+    _MAX_ALLOWED_FRAMES: ClassVar[int] = 128
+    _MAX_ALLOWED_FPS: ClassVar[float] = 60.0
+
+    @classmethod
+    def _get_processor_defaults(cls, **kwargs) -> tuple[float, int]:
+        """Read default fps and max_frames from video_processor if available."""
+        proc = kwargs.get("video_processor") or kwargs.get("processor")
+        if proc is not None:
+            vp = getattr(proc, "video_processor", proc)
+            fps = getattr(vp, "fps", None)
+            max_frames = getattr(vp, "max_frames", None)
+            if fps is not None and max_frames is not None:
+                return float(fps), int(max_frames)
+        try:
+            from transformers.models.embedding_gemma2 import (
+                EmbeddingGemma2VideoProcessor,
+            )
+
+            vp = EmbeddingGemma2VideoProcessor()
+            return float(getattr(vp, "fps", 1.0)), int(getattr(vp, "max_frames", 32))
+        except Exception:
+            return 1.0, 32
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        # Ignores target.num_frames (EmbeddingGemma2 does not accept num_frames)
+        default_fps, default_max_frames = cls._get_processor_defaults(**kwargs)
+
+        fps = kwargs.get("fps")
+        if fps is None:
+            fps = target.fps if target.fps > 0 else default_fps
+        if fps is not None:
+            if fps <= 0:
+                raise ValueError(f"fps must be positive, got {fps}")
+            if fps > cls._MAX_ALLOWED_FPS:
+                raise ValueError(
+                    f"fps {fps} exceeds maximum allowed {cls._MAX_ALLOWED_FPS}"
+                )
+
+        max_frames = kwargs.get("max_frames", default_max_frames)
+        if max_frames is not None:
+            if max_frames <= 0:
+                raise ValueError(f"max_frames must be positive, got {max_frames}")
+            if max_frames > cls._MAX_ALLOWED_FRAMES:
+                raise ValueError(
+                    f"max_frames {max_frames} exceeds maximum allowed "
+                    f"{cls._MAX_ALLOWED_FRAMES}"
+                )
+
+        overflow_strategy = kwargs.get("overflow_strategy", "uniform")
+
+        total_frames = source.total_frames_num
+        original_fps = source.original_fps
+        duration = source.duration
+
+        if fps is not None and (original_fps <= 0 or duration <= 0):
+            fps = None
+
+        if overflow_strategy is not None:
+            if max_frames is None:
+                raise ValueError(
+                    "You must pass max_frames when requesting an "
+                    f"overflow_strategy={overflow_strategy}!"
+                )
+            if overflow_strategy not in ("truncate", "uniform"):
+                raise ValueError(
+                    f"You passed overflow_strategy={overflow_strategy} but "
+                    "expected one of ['truncate', 'uniform']"
+                )
+
+        if fps is None:
+            if overflow_strategy is None or total_frames <= max_frames:
+                indices = np.arange(total_frames, dtype=int)
+            elif overflow_strategy == "truncate":
+                indices = np.arange(max_frames, dtype=int)
+            elif overflow_strategy == "uniform":
+                indices = np.linspace(0, total_frames - 1, max_frames, dtype=int)
+        else:
+            step = original_fps / fps
+            num_sampled = max(1, int(duration * fps))
+
+            if overflow_strategy is None or num_sampled <= max_frames:
+                i_arr = np.arange(num_sampled, dtype=float)
+                indices = np.minimum(total_frames - 1, (i_arr * step).astype(int))
+            elif overflow_strategy == "truncate":
+                i_arr = np.arange(max_frames, dtype=float)
+                indices = np.minimum(total_frames - 1, (i_arr * step).astype(int))
+            elif overflow_strategy == "uniform":
+                linspace_idx = np.linspace(0, num_sampled - 1, max_frames, dtype=int)
+                indices = np.minimum(
+                    total_frames - 1, (linspace_idx * step).astype(int)
+                )
+
+        return indices.tolist()
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int | float = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: VideoDecoderBackend = "opencv",
+        **kwargs: Any,
+    ) -> tuple[DecodedFrames, dict[str, Any]]:
+        # Accept num_frames as required by VideoLoader interface (VideoMediaIO
+        # passes default num_frames=32), but ignore it since EmbeddingGemma2 uses
+        # fps/max_frames. Force num_frames=-1 so compute_frames_index_to_sample
+        # drives sampling via fps/duration.
+        kwargs.pop("num_frames", None)
+        frames, metadata = super().load_bytes(
+            data,
+            num_frames=-1,
+            fps=fps,  # type: ignore[arg-type]
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
+        source = VideoSourceMetadata(
+            total_frames_num=metadata["total_num_frames"],
+            original_fps=metadata["fps"],
+            duration=metadata["duration"],
+        )
+        target = VideoTargetMetadata(num_frames=-1, fps=fps, max_duration=max_duration)
+        sampling_kwargs, _ = resolve_video_backend_kwargs(backend, kwargs)
+        requested_indices = cls.compute_frames_index_to_sample(
+            source, target, **sampling_kwargs
+        )
+
+        # Expand deduplicated frames back to requested_indices if needed
+        # (e.g., OpenCV deduplicates frame_idx using set(frame_idx))
+        valid_frame_indices = metadata.get("frames_indices")
+        if valid_frame_indices is not None and requested_indices != valid_frame_indices:
+            idx_to_pos = {idx: pos for pos, idx in enumerate(valid_frame_indices)}
+            if all(idx in idx_to_pos for idx in requested_indices):
+                positions = [idx_to_pos[idx] for idx in requested_indices]
+                if isinstance(frames, np.ndarray):
+                    frames = frames[positions]
+                else:
+                    frames = frames[torch.tensor(positions, device=frames.device)]
+                metadata["frames_indices"] = list(requested_indices)
+
+        return frames, metadata
+
+    @classmethod
+    def create_hf_metadata(
+        cls,
+        source: VideoSourceMetadata,
+        valid_frame_indices: list[int],
+        video_backend: str,
+    ) -> dict[str, Any]:
+        meta = super().create_hf_metadata(
+            source=source,
+            valid_frame_indices=valid_frame_indices,
+            video_backend=video_backend,
+        )
+        meta["do_sample_frames"] = False
+        return meta
+
+
+@VIDEO_LOADER_REGISTRY.register(
     "qwen2_vl",
     video_processor="Qwen2VLVideoProcessor",
 )

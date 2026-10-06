@@ -42,7 +42,11 @@ from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    SamplingParams,
+    StructuredOutputsParams,
+    check_json_nesting,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
@@ -50,6 +54,7 @@ from vllm.tool_parsers.streaming import (
     extract_required_tool_call_streaming,
 )
 from vllm.tool_parsers.structural_tag_registry import (
+    get_structural_tag_tools,
     limit_to_single_tool_call,
     resolve_tool_strictness,
 )
@@ -273,6 +278,7 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
     if params.json is not None:
         schema = params.json
         if isinstance(schema, str):
+            check_json_nesting(schema)
             schema = json.loads(schema)
         return JSONSchemaFormat(json_schema=schema)
     if params.regex is not None:
@@ -294,6 +300,7 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
                 raise VLLMValidationError("Invalid grammar specification.") from e
         return GrammarFormat(grammar=grammar)
     if params.structural_tag is not None:
+        check_json_nesting(params.structural_tag, structural_tag=True)
         s_tag = json.loads(params.structural_tag)
         if "structures" in s_tag:
             # LegacyStructuralTagResponseFormat
@@ -506,6 +513,11 @@ class DelegatingParser(Parser):
         is_auto = request.tool_choice == "auto"
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
+        if (
+            strict_level == ToolStrictLevel.AUTO
+            and tool_parser.default_tool_strict_level is not None
+        ):
+            strict_level = tool_parser.default_tool_strict_level
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
             # Auto with structured outputs keeps its format-only grammar, so the
@@ -515,7 +527,11 @@ class DelegatingParser(Parser):
         resolved_tools = None
         if tool_parser.structural_tag_model is not None:
             resolved_tools = resolve_tool_strictness(
-                request.tools,
+                get_structural_tag_tools(
+                    tool_parser.structural_tag_model,
+                    request.tools,
+                    request.tool_choice,
+                ),
                 request.tool_choice,
                 strict_level,
             )

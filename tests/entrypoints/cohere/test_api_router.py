@@ -32,8 +32,14 @@ from vllm.entrypoints.cohere.protocol import (
     AssistantMessageResponse,
     CohereChatV2Response,
 )
-from vllm.entrypoints.cohere.serving import CohereServingChatV2
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+from vllm.entrypoints.cohere.serving import (
+    _API_SERVER_ONLY_TEMPLATE_KWARGS,
+    CohereServingChatV2,
+)
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateRequest,
+    ReasoningParserKwargs,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.handlers.http import (
     http_exception_handler,
@@ -96,6 +102,12 @@ class _RenderChatHandler:
 
     def to_chat_completion_request(self, request):
         return CohereServingChatV2._convert_v2_to_chat_completion(request)
+
+    def _engine_chat_template_kwargs(self, chat_template_kwargs):
+        return CohereServingChatV2._engine_chat_template_kwargs(
+            self,  # type: ignore[arg-type]
+            chat_template_kwargs,
+        )
 
 
 class _RenderHandler:
@@ -458,6 +470,24 @@ class TestRenderEndpoint:
         assert kwargs["documents"][0]["id"] == "doc-1"
         # The conversion lower-cases safety_mode for the renderer.
         assert kwargs["safety_mode"] == "strict"
+
+    def test_api_server_only_kwargs_not_forwarded(self):
+        """As on ``/cohere/v2/chat``, the engine's reasoning parser must not
+        receive the template kwargs that only the API server reads."""
+        result = _generate_request()
+        result.reasoning_parser_kwargs = ReasoningParserKwargs(
+            chat_template_kwargs={
+                "safety_mode": "strict",
+                **dict.fromkeys(_API_SERVER_ONLY_TEMPLATE_KWARGS, "x"),
+            }
+        )
+        app = _build_render_app(_RenderChatHandler(), _RenderHandler(result))
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.OK
+        assert r.json()["reasoning_parser_kwargs"] == {
+            "chat_template_kwargs": {"safety_mode": "strict"}
+        }
 
     def test_501_when_chat_handler_missing(self):
         app = _build_render_app(None, _RenderHandler(_generate_request()))

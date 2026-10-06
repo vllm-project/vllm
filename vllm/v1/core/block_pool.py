@@ -829,7 +829,7 @@ class BlockPool:
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
-        flows to invalid prefix caching after the weights are updated,
+        flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
 
         Returns:

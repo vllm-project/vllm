@@ -207,9 +207,9 @@ class BaseFrontendArgs:
     enable_scale_out: bool = False
     """
     If set to True, register the scale-out endpoints (`/render`, `/derender`,
-    and `/inference/v1/generate`) on `vllm serve`. Has no effect on
-    `vllm launch render` or `vllm serve --tokens-only`, which always register
-    their required endpoints regardless of this flag.
+    `/inference/v1/generate` and `/inference/v1/abort_requests`) on `vllm serve`.
+    Has no effect on `vllm launch render` or `vllm serve --tokens-only` which
+    always register their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.

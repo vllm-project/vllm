@@ -206,7 +206,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`)
+- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`. Use the authenticated `/inference/v1/abort_requests` otherwise)
 
 **Utility endpoints:**
 
@@ -550,6 +550,15 @@ ensure that only trusted principals can submit work to the cluster:
 - Place the Ray cluster on an isolated network segment.
 - Do not expose the Ray client port or dashboard to untrusted networks.
 
+## Multi-Tenant Deployments
+
+vLLM does not provide isolation between tenants that share the same server process. Requests from different callers are scheduled together and share the same caches. Options such as `cache_salt` reduce specific cross-tenant risks, but they are not an isolation boundary.
+
+If tenants must be isolated from each other, enforce it in the deployment architecture:
+
+- Run a dedicated vLLM instance per tenant.
+- Place a gateway in front of vLLM that authenticates callers and scopes client-supplied cache identifiers, such as `cache_salt` and multimodal `uuid` values, per tenant.
+
 ## Prefix Cache Timing Side-Channel Mitigation (Cache Salting)
 
 ### Background
@@ -633,7 +642,7 @@ For additional cross-tenant isolation, set `cache_salt` on each request (see [Pr
 
 - **Multi-tenant deployments**: Always generate cryptographically random UUIDs per media item. Additionally, set `cache_salt` to a per-tenant secret for defense in depth.
 - **Single-tenant deployments**: Ensure UUIDs are unique per distinct media content. `cache_salt` is unnecessary when there is no cross-tenant threat.
-- **Default behavior**: Omitting `uuid` entirely preserves the default content-hash-based identity, which is safe against this class of collision but requires hashing the media bytes on every request.
+- **Default behavior**: Omitting `uuid` uses a hash of the media bytes as the cache identity, which requires hashing the media on every request. This avoids accidental collisions between callers, but it does not isolate tenants from each other. See [Multi-Tenant Deployments](#multi-tenant-deployments).
 
 ## Reporting Security Vulnerabilities
 

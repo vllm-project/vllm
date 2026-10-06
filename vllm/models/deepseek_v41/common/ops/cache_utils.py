@@ -33,7 +33,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 # Per-token byte width of the two paged fp8 records. Both put a page's whole
 # data region ahead of its whole scale region, so ``k_cache.shape[-1]`` -- the
@@ -437,6 +437,95 @@ def _dequantize_and_gather_k_kernel(
 
 
 @triton.jit
+def _dequantize_and_gather_k_one_pass_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    offset,
+    gather_lens_ptr,
+    # Constants
+    max_blocks_per_seq: tl.constexpr,
+    fp8_dim: tl.constexpr,  # 448
+    bf16_dim: tl.constexpr,  # 64
+    scale_dim: tl.constexpr,  # 8
+    quant_block: tl.constexpr,  # 64 (quantization block size)
+    cache_block_size: tl.constexpr,  # 64 or 128 (paged cache block size)
+    token_data_size: tl.constexpr,  # 576 bytes per token data
+    block_stride: tl.constexpr,  # total bytes per block (padded) int32
+    output_dim: tl.constexpr,  # 512
+    fp8_max: tl.constexpr,
+    n_quant_blocks: tl.constexpr,  # 7 real blocks; the per-block form only
+    use_fnuz: tl.constexpr = False,
+):
+    """``_dequantize_and_gather_k_kernel`` with the token read in one tile.
+
+    The seven quantization blocks tile the fp8 region exactly, so the per-block
+    form's bounds never bite and its twenty-two memory operations per token
+    reduce to four. Selected on ROCm; CUDA keeps the per-block kernel.
+    """
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    if gather_lens_ptr is not None:  # noqa: SIM108
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = seq_len
+    start_pos = seq_len - gather_len
+
+    for i in range(worker_id, gather_len, num_workers):
+        pos = start_pos + i
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+
+        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
+        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+
+        token_fp8_ptr = cache_block_ptr + pos_in_block * token_data_size
+        token_bf16_ptr = token_fp8_ptr + fp8_dim
+        token_scale_ptr = (
+            cache_block_ptr
+            + cache_block_size * token_data_size
+            + pos_in_block * scale_dim
+        )
+        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+
+        # The tile is scale_dim * quant_block = 512 against an fp8 region of
+        # 448: the tail reads the token's own bf16 bytes, is scaled by a scale
+        # nothing reads, and is dropped by the store mask.
+        tile_dim: tl.constexpr = scale_dim * quant_block
+        tl.static_assert(tile_dim <= token_data_size, "tile outruns the token")
+        fp8_offsets = tl.arange(0, tile_dim)
+        x_uint8 = tl.load(token_fp8_ptr + fp8_offsets)
+        if use_fnuz:
+            x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+        else:
+            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+
+        encoded_scale = tl.load(token_scale_ptr + tl.arange(0, scale_dim))
+        scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)  # UE8M0
+        tiles = tl.reshape(x_fp8.to(tl.float32), (scale_dim, quant_block))
+        x_dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (tile_dim,))
+        tl.store(
+            output_row_ptr + fp8_offsets,
+            x_dequant.to(tl.bfloat16),
+            mask=fp8_offsets < fp8_dim,
+        )
+
+        bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+        bf16_offsets = tl.arange(0, bf16_dim)
+        tl.store(
+            output_row_ptr + fp8_dim + bf16_offsets,
+            tl.load(bf16_cache_ptr + bf16_offsets),
+        )
+
+
+@triton.jit
 def _dequantize_and_gather_k_mxfp8_kernel(
     out_ptr,
     out_stride0,
@@ -566,6 +655,22 @@ def _dequantize_and_gather_k_nvfp4_kernel(
         tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
 
 
+# The per-token loop is a chain of dependent loads, so the grid has to hold
+# enough chains in flight to cover the latency. The cap binds above 64k tokens,
+# where a worker takes more than the eight steps this aims for.
+_GATHER_STEPS_PER_WORKER = 8
+_GATHER_MIN_WORKERS = 128
+_GATHER_MAX_WORKERS = 8192
+
+
+def gather_num_workers(max_gather_len: int | None) -> int:
+    """Grid width for a gather of at most ``max_gather_len`` tokens."""
+    if max_gather_len is None:
+        return _GATHER_MIN_WORKERS
+    workers = cdiv(max_gather_len, _GATHER_STEPS_PER_WORKER)
+    return max(_GATHER_MIN_WORKERS, min(_GATHER_MAX_WORKERS, workers))
+
+
 def dequantize_and_gather_k_cache_triton(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
@@ -580,6 +685,7 @@ def dequantize_and_gather_k_cache_triton(
     block_size: int,
     offset: int,
     use_fnuz: bool = False,
+    max_gather_len: int | None = None,
 ) -> None:
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
@@ -633,7 +739,13 @@ def dequantize_and_gather_k_cache_triton(
     FP8_MAX = 448.0
     TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
 
-    _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
+    gather_workers = gather_num_workers(max_gather_len)
+    kernel = (
+        _dequantize_and_gather_k_one_pass_kernel
+        if current_platform.is_rocm()
+        else _dequantize_and_gather_k_kernel
+    )
+    kernel[(num_reqs, gather_workers)](
         out,
         out.stride(0),
         out.stride(1),
@@ -671,6 +783,7 @@ def dequantize_and_gather_k_cache(
     block_size: int,
     offset: int,
     use_fnuz: bool = False,
+    max_gather_len: int | None = None,
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
@@ -711,6 +824,7 @@ def dequantize_and_gather_k_cache(
         block_table,
         block_size,
         offset,
+        max_gather_len=max_gather_len,
         use_fnuz=use_fnuz,
     )
 

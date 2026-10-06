@@ -502,6 +502,7 @@ mod tests {
             description: None,
             parameters,
             strict: None,
+            defer_loading: None,
         }
     }
 

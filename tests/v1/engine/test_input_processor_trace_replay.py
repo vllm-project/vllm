@@ -82,7 +82,12 @@ def _validate(enable_trace_replay: bool) -> None:
             enable_trace_replay=enable_trace_replay,
             is_diffusion=False,
         ),
-        vllm_config=SimpleNamespace(reasoning_config=None),
+        vllm_config=SimpleNamespace(
+            reasoning_config=None,
+            # Engine has no watermark configuration.
+            _check_supports_watermarking=lambda params: False,
+        ),
+        resolve_watermarking=lambda params: False,
         speculative_config=None,
         structured_outputs_config=None,
         diffusion_config=None,

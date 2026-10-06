@@ -311,6 +311,7 @@ mod tests {
                     "required": ["query"]
                 }),
                 strict,
+                defer_loading: None,
             }];
             let mut request = ChatRequest {
                 tool_context: ResolvedToolContext::new(&[], tools, Some(choice), true).unwrap(),
@@ -346,6 +347,7 @@ mod tests {
                 description: None,
                 parameters: serde_json::json!({"type": "object"}),
                 strict: Some(true),
+                defer_loading: None,
             }];
             let mut request = ChatRequest {
                 tool_context: ResolvedToolContext::new(

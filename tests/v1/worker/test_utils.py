@@ -92,6 +92,8 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         "cache_hits": [12],
         "cache_misses": [4],
         "host_to_device_bytes": [64],
+        "host_cache_usage_perc": [],
+        "pending_page_transfers": [],
     }
 
 

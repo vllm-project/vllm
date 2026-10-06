@@ -209,6 +209,9 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             head_size_v=0,
             dtype=torch.bfloat16,
             sliding_window=ring,
+            # Tiny per-request ring; every DCP rank keeps the full tail so the
+            # rank owning a pool can compress it.
+            dcp_sharded=False,
         )
 
     def get_attn_backend(self):

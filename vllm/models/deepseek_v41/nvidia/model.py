@@ -11,7 +11,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.config.kernel import MEGA_MOE_BACKENDS
+from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_engram_dp_size,
     get_pp_group,
@@ -174,7 +174,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
 
     def defers_finalize(self, num_tokens: int) -> bool:
         return (
-            not self.use_mega_moe
+            not self.use_native_mega_moe
             and self.experts.moe_config.should_defer_moe_finalize(num_tokens)
         )
 
@@ -244,12 +244,14 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
-    use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+    moe_needs_token_sharded_input = (
+        vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+    )
     return (
         parallel_config.pipeline_parallel_size == 1
         and parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
-        and (use_mega_moe or parallel_config.data_parallel_size > 1)
+        and (moe_needs_token_sharded_input or parallel_config.data_parallel_size > 1)
     )
 
 
@@ -631,9 +633,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+        self.use_native_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
-        if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
+        if (
+            self.use_native_mega_moe
+            and not vllm_config.parallel_config.enable_expert_parallel
+        ):
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
                 "Enable it with --enable-expert-parallel, or pick a different "
@@ -759,6 +766,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):
             self.decoder_replay_start = cut + 1
+            # The attention metadata keys the replay layers read.
+            metadata_prefixes = set()
+            for layer in islice(self.layers, cut + 1, self.end_layer):
+                attn = typing.cast(DeepseekV4DecoderLayer, layer).attn
+                metadata_prefixes.add(attn.swa_cache_layer.prefix)
+                if attn.compressed_cache_prefix is not None:
+                    metadata_prefixes.add(attn.compressed_cache_prefix)
+                if attn.indexer is not None:
+                    metadata_prefixes.add(attn.indexer.k_cache.prefix)
             self.decoder_replay_layers = DecoderReplayLayers(
                 config.sliding_window,
                 self._run_replay_layers,
@@ -767,6 +783,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     for buf in (self.topk_indices_buffer, self.candidate_block_buffer)
                     if buf is not None
                 ],
+                metadata_prefixes,
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layers "
@@ -865,7 +882,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        if self.use_mega_moe:
+        if self.use_native_mega_moe:
             input_ids = input_ids.to(torch.int64)
 
         # Engram n-gram hashes for the whole (flattened) batch, computed once
@@ -1015,7 +1032,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def _mega_gate_metadata(
         self, input_ids: torch.Tensor | None
     ) -> MegaGateRoutingMetadata | None:
-        if not self.use_mega_moe:
+        if not self.use_native_mega_moe:
             return None
         assert input_ids is not None
         return prepare_mega_gate_routing_metadata(
@@ -1331,7 +1348,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
-        if first_layer.ffn.use_mega_moe:
+        if first_layer.ffn.use_native_mega_moe:
             return make_deepseek_v4_expert_params_mapping(self.config.n_routed_experts)
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
@@ -1346,17 +1363,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def finalize_mega_moe_weights(self) -> None:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
-
-    def finalize_mega_attn_weights(self) -> None:
-        """Permute wq_b / wo_a into FlashMLA's mega-attention layouts.
-
-        A no-op for every other attention layer, and idempotent, so a second
-        post-load pass cannot permute twice.
-        """
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
-            if finalize is not None:
-                finalize()
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
@@ -1630,7 +1636,6 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
-        self.model.finalize_mega_attn_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
