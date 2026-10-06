@@ -557,6 +557,7 @@ class CohereServingChatV2(OpenAIServingChat):
             temperature=request.temperature,
             top_p=request.p,
             top_k=request.k,
+            watermarking=request.watermarking,
             seed=request.seed,
             frequency_penalty=request.frequency_penalty,
             presence_penalty=request.presence_penalty,
