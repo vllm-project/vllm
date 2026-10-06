@@ -41,11 +41,13 @@ pub fn generate_prefix_repetition_dataset(
     }
     let total = prompts_per_prefix * num_prefixes;
     if total != num_requests {
-        println!(
-            "prefix_repetition: generating {total} requests \
-             ({num_prefixes} prefixes x {prompts_per_prefix} prompts each; \
-             {} dropped to divide evenly)",
-            num_requests - total
+        tracing::info!(
+            requested = num_requests,
+            generated = total,
+            prefixes = num_prefixes,
+            prompts_per_prefix,
+            dropped = num_requests - total,
+            "adjusted prefix-repetition request count"
         );
     }
 
@@ -105,13 +107,8 @@ pub fn generate_prefix_repetition_dataset(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::test_tokenizer;
     use super::*;
-
-    /// gpt2 via built-in tiktoken encoding — loads without network access.
-    fn test_tokenizer() -> TokenizerKind {
-        crate::tokenizer::load_tokenizer("gpt2", false, None)
-            .expect("gpt2 built-in tiktoken should always load without network")
-    }
 
     #[test]
     fn test_prefix_repetition_structure() {

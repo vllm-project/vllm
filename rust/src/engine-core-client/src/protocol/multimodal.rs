@@ -3,10 +3,31 @@
 
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use super::tensor::WireTensor;
+
+/// Modalities represented by engine-ready multimodal features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MmModality {
+    Image,
+    Audio,
+    Video,
+}
+
+impl MmModality {
+    /// The wire name, matching Python's modality strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
 
 /// Multimodal feature payload accepted from higher-level frontend code.
 ///
@@ -31,7 +52,7 @@ pub struct MmFeatureSpec {
     pub data: Option<MmKwargsItem>,
 
     /// The input modality, e.g., `"image"`, `"audio"`, `"video"`.
-    pub modality: String,
+    pub modality: MmModality,
 
     /// The hash for caching encoder outputs (with LoRA prefix if applicable).
     pub identifier: String,
@@ -103,6 +124,44 @@ pub enum MmKwargValue {
     Int(i64),
     Float(f64),
     List(Vec<MmKwargValue>),
+}
+
+impl MmFeatureSpec {
+    /// Extract large tensor buffers from this feature in serialized field order.
+    pub(crate) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Some(data) = &mut self.data {
+            for elem in data.values_mut() {
+                elem.extract_aux_frames(aux_frames, threshold);
+            }
+        }
+        if let Some(is_embed) = &mut self.mm_position.is_embed {
+            is_embed.extract_aux_frame(aux_frames, threshold);
+        }
+    }
+}
+
+impl MmFieldElem {
+    /// Extract large tensor buffers from this field element.
+    fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Some(data) = &mut self.data {
+            data.extract_aux_frames(aux_frames, threshold);
+        }
+    }
+}
+
+impl MmKwargValue {
+    /// Recursively extract large tensor buffers from this nested value.
+    fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        match self {
+            Self::Tensor(tensor) => tensor.extract_aux_frame(aux_frames, threshold),
+            Self::List(values) => {
+                for value in values {
+                    value.extract_aux_frames(aux_frames, threshold);
+                }
+            }
+            Self::Int(_) | Self::Float(_) => {}
+        }
+    }
 }
 
 /// Defines how to interpret tensor data belonging to a keyword argument for

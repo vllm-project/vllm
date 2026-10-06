@@ -13,16 +13,62 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    swizzle_mxfp8_scale,
+)
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
+    dbo_enabled,
 )
 
 
-class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
+def _quantize_before_dispatch(
+    quant_config: FusedMoEQuantConfig, defer_input_quant: bool
+) -> bool:
+    """Do quantized dispatch for blockfp8 and mxfp8, unless the
+    subsequent moe kernel requires bf16 inputs.
     """
-    Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
+    if defer_input_quant:
+        return False
+    return quant_config.is_block_quantized or quant_config.quant_dtype == "mxfp8"
+
+
+def _pack_mxfp8_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Pack row-major [M, K/32] UE8M0 scales into [M, K/128] int32.
+
+    DeepEP moves scale factors as opaque 4-byte packs (`sf_pack_t` is a
+    float/UE8M0x4 union), so 1-byte UE8M0 scales must be packed 4-per-int32.
+    """
+    assert scale.dtype == torch.uint8 and scale.ndim == 2, (
+        f"expected 2D uint8 mxfp8 scales, got {scale.shape} {scale.dtype}"
+    )
+    assert scale.size(1) % 4 == 0, (
+        f"mxfp8 dispatch needs hidden_size % {MXFP8_BLOCK_SIZE * 4} == 0, "
+        f"got {scale.size(1)} scale columns"
+    )
+    return scale.contiguous().view(torch.int32)
+
+
+def _unpack_mxfp8_scale(
+    scale: torch.Tensor, hidden_size: int, is_scale_swizzled: bool
+) -> torch.Tensor:
+    """Inverse of `_pack_mxfp8_scale`, restoring the expert kernel's layout.
+
+    TRTLLM consumes the row-major [M, K/32] scales as-is; CUTLASS wants them
+    swizzled into F8_128x4, which can only happen here because the swizzle
+    interleaves scales across a 128-row tile (i.e. across tokens).
+    """
+    scale = scale.contiguous().view(torch.uint8)
+    if is_scale_swizzled:
+        scale = swizzle_mxfp8_scale(scale, M=scale.size(0), K=hidden_size)
+    return scale
+
+
+class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
+    """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
     Supports two modes controlled by the `use_cudagraph` constructor arg:
 
@@ -32,7 +78,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
       - Worst-case tensor allocation; padding rows zeroed via
         handle.psum_num_recv_tokens_per_scaleup_rank
       - Fully cudagraph-capturable
-      - Expert kernel sorts internally (expert_tokens_meta=None)
+      - Expert kernel sorts internally (expert_tokens_meta carries no counts)
 
     **Prefill mode (use_cudagraph=False):**
       - do_expand=True, do_cpu_sync=True
@@ -42,8 +88,10 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use cudagraphs anyway
       - Provides expert_tokens_meta for efficient batched expert kernels
 
-    Both modes use async_with_compute_stream=False (synchronous from
-    caller's perspective). The ElasticBuffer handles comm internally.
+    Dispatch always uses async_with_compute_stream=False. finalize_async
+    issues the combine with async_with_compute_stream=True (except under
+    DBO) so the modular kernel can overlap the shared-expert FFN with the
+    combine a2a; the returned receiver joins via a device-side event wait.
     """
 
     @staticmethod
@@ -66,6 +114,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_topk: int,
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
+        sp_size: int = 1,
     ):
         super().__init__()
         self.buffer = buffer
@@ -76,12 +125,27 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
+        self.sp_size = sp_size
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
 
+        # arange(num_local_experts) + rank_expert_offset. Rank-constant, so it
+        # is built once per device instead of once per layer per step.
+        self._global_expert_ids_cache: torch.Tensor | None = None
+
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
+
+    def _global_expert_ids(self, num_local: int, device: torch.device) -> torch.Tensor:
+        ids = self._global_expert_ids_cache
+        if ids is None or ids.numel() != num_local or ids.device != device:
+            ids = (
+                torch.arange(num_local, dtype=torch.int64, device=device)
+                + self.rank_expert_offset
+            )
+            self._global_expert_ids_cache = ids
+        return ids
 
     def output_is_reduced(self) -> bool:
         return True
@@ -130,12 +194,14 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # high concurrency). Round up to a power of 2 instead: this bounds the
         # set to ~log2(max_num_batched_tokens) values (compiled once, then
         # cached) while staying small for decode (e.g. 1 token -> 1) and capped
-        # at the buffer's init capacity for prefill.
+        # at the buffer's init capacity for prefill. With sequence parallelism,
+        # each EP rank holds a ceil(n / sp_size) shard of its DP rank's batch.
         num_max_tokens_per_rank = None
         if not do_expand:
             dp_meta = get_forward_context().dp_metadata
             if dp_meta is not None:
                 n = int(dp_meta.num_tokens_across_dp_cpu.max())
+                n = cdiv(n, self.sp_size)
             else:
                 n = tokens.shape[0]
             num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
@@ -196,23 +262,32 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             expert_x, expert_x_scale = recv_x, None
 
+        if recv_expert_num_tokens:
+            expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+                recv_expert_num_tokens,
+                device=expert_x.device,
+            )
+        else:
+            # Decode/cudagraph path (do_cpu_sync=False) skips the CPU sync and
+            # leaves recv_expert_num_tokens empty. A present-but-empty
+            # ExpertTokensMetadata violates the decode-mode contract above
+            # (expert_tokens_meta must be None) and crashes DeepEP combine
+            # during profile_run when CUDA graphs are enabled.
+            expert_tokens_meta = None
+
         if recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
+            assert expert_tokens_meta is not None
             total_tokens = sum(recv_expert_num_tokens)
             if total_tokens > 0:
-                recv_topk_idx = torch.empty(
-                    total_tokens,
-                    dtype=torch.int64,
-                    device=expert_x.device,
+                recv_topk_idx = torch.repeat_interleave(
+                    self._global_expert_ids(
+                        len(recv_expert_num_tokens), expert_x.device
+                    ),
+                    expert_tokens_meta.expert_num_tokens,
+                    output_size=total_tokens,
                 )
-                offset = 0
-                for i, count in enumerate(recv_expert_num_tokens):
-                    if count > 0:
-                        recv_topk_idx[offset : offset + count].fill_(
-                            i + self.rank_expert_offset
-                        )
-                        offset += count
             else:
                 recv_topk_idx = torch.empty(
                     0,
@@ -243,12 +318,26 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            recv_expert_num_tokens,
-            device=expert_x.device,
-        )
+        if self.use_cudagraph:
+            # Carry the per-rank prefix sum so SiTU can skip padding rows.
+            # expert_num_tokens stays None: count-based consumers (DeepGEMM,
+            # Triton) must treat a None field as "no counts" and derive their
+            # own, exactly as in the meta-absent decode case.
+            if expert_tokens_meta is None:
+                expert_tokens_meta = mk.ExpertTokensMetadata(
+                    expert_num_tokens=None,
+                    expert_num_tokens_cpu=None,
+                )
+            expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
 
-        if not quant_config.is_block_quantized and not defer_input_quant:
+        if _quantize_before_dispatch(quant_config, defer_input_quant):
+            if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:
+                expert_x_scale = _unpack_mxfp8_scale(
+                    expert_x_scale,
+                    hidden_size=expert_x.size(-1),
+                    is_scale_swizzled=quant_config.is_scale_swizzled,
+                )
+        elif not defer_input_quant:
             expert_x_scale = None
             if expert_x.numel() != 0:
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
@@ -289,16 +378,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.is_block_quantized and not defer_input_quant:
+        if _quantize_before_dispatch(quant_config, defer_input_quant):
+            # Scales must be row-major [num_tokens, ...] here so each token's
+            # scales can be shuffled with it; any swizzling the expert kernel
+            # wants is applied post-dispatch in `_receiver`.
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_scale,
                 quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
+                is_scale_swizzled=False,
+                mx_alignment=quant_config.mx_alignment,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
+            if quant_config.quant_dtype == "mxfp8":
+                a1q_scale = _pack_mxfp8_scale(a1q_scale)
             a1_post_scale = None
         else:
             a1q = a1
@@ -374,15 +470,31 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"got {fused_expert_output.dtype}"
             )
 
+        # DBO drives its own hook/receiver schedule; keep the combine
+        # synchronous there (the receiver then only performs the copy).
+        combine_async = do_async and not dbo_enabled()
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
-            async_with_compute_stream=False,
+            async_with_compute_stream=combine_async,
+            allocate_on_comm_stream=combine_async,
         )
 
-        output.copy_(combined_x, non_blocking=True)
-        return None
+        if do_async:
+            # The combine ran on DeepEP's comm stream; the modular kernel
+            # issues the shared-expert FFN before calling the receiver, which
+            # joins via a device-side cudaStreamWaitEvent (no host sync, so
+            # this is safe inside a captured region).
+            def _receiver():
+                if event.event is not None:
+                    event.current_stream_wait()
+                output.copy_(combined_x, non_blocking=True)
+
+            return _receiver
+        else:
+            output.copy_(combined_x, non_blocking=True)
+            return None
 
     def finalize_async(
         self,
@@ -393,16 +505,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
-        self._finalize(
+        receiver = self._finalize(
             output,
             fused_expert_output,
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,
             weight_and_reduce_impl,
-            False,
+            True,
         )
-        return lambda: None
+        assert receiver is not None
+        return receiver
 
     def finalize(
         self,

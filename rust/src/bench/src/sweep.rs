@@ -16,7 +16,7 @@ async fn reset_prefix_cache(base_url: &str) -> Result<()> {
         .await
         .map_err(|e| BenchError::Backend(format!("Failed to reset prefix cache: {e}")))?;
     if resp.status().is_success() {
-        println!("Prefix cache reset successfully.");
+        tracing::info!(url = %url, "reset prefix cache");
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -295,6 +295,7 @@ fn print_sweep_summary(param_name: &str, points: &[SweepPoint], summary_percenti
 fn build_summary_columns(summary_percentiles: &[f64]) -> Vec<SummaryColumn> {
     let mut columns = vec![
         SummaryColumn::new("Req/s", "request_throughput", 10),
+        SummaryColumn::new("Inputs/s", "input_sequence_throughput", 10),
         SummaryColumn::new("Tok/s", "output_throughput", 10),
         SummaryColumn::new("Total tok/s", "total_token_throughput", 12),
         SummaryColumn::new("SS req/s", SS_REQUEST_THROUGHPUT_KEY, 10),
@@ -452,6 +453,7 @@ mod tests {
             headers,
             vec![
                 "Req/s",
+                "Inputs/s",
                 "Tok/s",
                 "Total tok/s",
                 "SS req/s",
@@ -495,6 +497,7 @@ mod tests {
             headers,
             vec![
                 "Req/s",
+                "Inputs/s",
                 "Tok/s",
                 "Total tok/s",
                 "SS req/s",

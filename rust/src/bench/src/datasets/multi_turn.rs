@@ -350,6 +350,27 @@ pub fn load_sharegpt_multi_turn(
         .as_array()
         .ok_or_else(|| BenchError::Config("ShareGPT file must contain a JSON array".into()))?;
 
+    load_sharegpt_multi_turn_from_rows(
+        tokenizer,
+        entries,
+        num_conversations,
+        output_len_override,
+        max_turns,
+        seed,
+        request_id_prefix,
+    )
+}
+
+/// Load multi-turn conversations from deserialized ShareGPT rows.
+pub fn load_sharegpt_multi_turn_from_rows(
+    tokenizer: &TokenizerKind,
+    entries: &[serde_json::Value],
+    num_conversations: usize,
+    output_len_override: Option<usize>,
+    max_turns: Option<usize>,
+    seed: u64,
+    request_id_prefix: &str,
+) -> Result<Vec<MultiTurnConversation>> {
     // Filter entries with at least 4 messages (2 turns: user+assistant+user+assistant)
     let mut filtered: Vec<&serde_json::Value> = entries
         .iter()
@@ -445,9 +466,10 @@ pub fn load_sharegpt_multi_turn(
             conv.conversation_id = format!("{request_id_prefix}conv-{}", original_len + i);
             conversations.push(conv);
         }
-        println!(
-            "Oversampled multi-turn conversations from {original_len} to {} total.",
-            conversations.len()
+        tracing::info!(
+            original_conversations = original_len,
+            conversations = conversations.len(),
+            "oversampled multi-turn conversations"
         );
     }
 
@@ -506,6 +528,42 @@ fn gen_prompt_to_target_len(
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_load_sharegpt_multi_turn_from_hf_rows() {
+        let tokenizer =
+            TokenizerKind::Tiktoken(crate::tiktoken::load_builtin_tiktoken("gpt2").unwrap());
+        let rows = vec![serde_json::json!({
+            "conversations": [
+                {"from": "human", "value": "hello"},
+                {"from": "gpt", "value": "hi"},
+                {"from": "human", "value": "how are you?"},
+                {"from": "gpt", "value": "great"}
+            ]
+        })];
+
+        let conversations =
+            load_sharegpt_multi_turn_from_rows(&tokenizer, &rows, 1, Some(7), None, 42, "hf-")
+                .unwrap();
+        let actual = conversations
+            .iter()
+            .map(|conversation| {
+                (
+                    conversation.conversation_id.as_str(),
+                    conversation
+                        .turns
+                        .iter()
+                        .map(|turn| (turn.user_message.as_ref(), turn.expected_output_len))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![("hf-conv-0", vec![("hello", 7), ("how are you?", 7)])]
+        );
+    }
+
     fn common_prefix_bytes(strings: &[&str]) -> usize {
         if strings.is_empty() {
             return 0;
@@ -525,10 +583,12 @@ mod tests {
         len
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_prefix_sharing_structure() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_prefix_sharing_structure() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 5,
@@ -610,10 +670,12 @@ mod tests {
         println!("All prefix sharing checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_per_turn_input_len_default_mode() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_per_turn_input_len_default_mode() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 4,
@@ -650,10 +712,12 @@ mod tests {
         println!("per_turn_input_len default-mode checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_variable_turns_range() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_variable_turns_range() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 50,
@@ -684,10 +748,12 @@ mod tests {
         println!("variable_turns_range checks passed! counts: {distinct_counts:?}");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_variable_turns_fixed() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_variable_turns_fixed() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 10,
@@ -709,10 +775,12 @@ mod tests {
         println!("variable_turns_fixed checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_per_turn_input_len_prefix_sharing() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_per_turn_input_len_prefix_sharing() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         // Turn 0 input_len=1000, turns 1+ per_turn_input_len=600
         // global_len ≈ 100 (10%), conv_len ≈ 800 (80%), unique ≈ 100

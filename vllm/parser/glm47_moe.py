@@ -20,6 +20,7 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -27,6 +28,8 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -40,6 +43,13 @@ ARG_KEY_START = "<arg_key>"
 ARG_KEY_END = "</arg_key>"
 ARG_VALUE_START = "<arg_value>"
 ARG_VALUE_END = "</arg_value>"
+
+# Special tokens that delimit conversation turns in a rendered GLM prompt.
+# Reasoning markers belonging to earlier turns must not be mistaken for the
+# state of the turn currently being generated.
+GLM_TURN_BOUNDARIES = frozenset(
+    ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")
+)
 
 _ARG_RE = re.compile(
     r"<arg_key>(?P<key>.*?)</arg_key>\s*"
@@ -68,6 +78,23 @@ def _glm47_arg_converter(raw_args: str, partial: bool) -> str:
                 params[key] = match.group("value")
 
     return json.dumps(params, ensure_ascii=False)
+
+
+def _glm53_always_thinks(tokenizer: TokenizerLike) -> bool:
+    # GLM-5.3 keeps the GLM-4.x prompt and tool-call format but replaces the
+    # enable_thinking toggle with an always-on "Reasoning Effort:" header, so
+    # its generation prompt always opens <think> and the model output carries
+    # no opening tag.
+    template = getattr(tokenizer, "chat_template", None)
+    return (
+        isinstance(template, str)
+        and "[gMASK]<sop>" in template
+        and "Reasoning Effort:" in template
+        and "enable_thinking" not in template
+        and "<tool_call>" in template
+        and "<arg_key>" in template
+        and "<arg_value>" in template
+    )
 
 
 @functools.cache
@@ -165,6 +192,7 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
             ),
             **arg_tag_transitions,
         },
+        turn_boundary_tokens=GLM_TURN_BOUNDARIES,
         arg_converter=_glm47_arg_converter,
         stream_arg_deltas=True,
         tool_args_json=False,
@@ -184,6 +212,16 @@ class Glm47MoeParser(ParserEngine):
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         thinking = chat_kwargs.get("thinking", None)
         enable_thinking = chat_kwargs.get("enable_thinking", None)
+        if (thinking is False or enable_thinking is False) and _glm53_always_thinks(
+            tokenizer
+        ):
+            logger.warning_once(
+                "Ignoring enable_thinking/thinking: the GLM-5.3 chat template "
+                "has no thinking switch, so reasoning is always on and "
+                "disabling extraction would leak it into the content."
+            )
+            thinking = None
+            enable_thinking = None
         self.thinking_enabled = (
             True
             if thinking is None and enable_thinking is None
@@ -205,16 +243,6 @@ class Glm47MoeParser(ParserEngine):
         if 0 <= idx < len(self._tool_slots):
             self._tool_slots[idx].name = self._tool_slots[idx].name.strip()
         super()._handle_tool_end(event, deltas)
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if not self.thinking_enabled:
-            return True
-        return super().is_reasoning_end(input_ids)
-
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if not self.thinking_enabled:
-            return input_ids
-        return super().extract_content_ids(input_ids)
 
     def extract_reasoning(
         self,

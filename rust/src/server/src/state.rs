@@ -14,8 +14,10 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
-use crate::config::{ApiServerOptions, CorsConfig};
-use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
+use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::lora::{
+    LoadLoraError, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
+};
 use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -161,41 +163,73 @@ impl AppState {
         self.lora_manager.served_lora_requests().await
     }
 
+    /// Snapshot loaded LoRA adapters for the lifecycle API.
+    ///
+    /// Returns error if the engine was started without LoRA support.
+    pub async fn list_loras(&self) -> Result<Vec<LoraRequest>, LoraDisabledError> {
+        self.ensure_lora_enabled()?;
+        Ok(self.lora_manager.served_lora_requests().await)
+    }
+
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
     pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
         self.lora_manager.resolve_model(&self.served_model_names, model_name).await
     }
 
     /// Load one dynamic LoRA adapter and register it as a public model name.
+    ///
+    /// Returns error if the engine was started without LoRA support.
     pub async fn load_lora(
         &self,
-        lora_name: String,
-        lora_path: String,
+        module: LoraModulePath,
         load_inplace: bool,
-        is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
+        self.ensure_lora_enabled()?;
         self.lora_manager
             .load_lora(
                 self.engine_core_client(),
                 &self.served_model_names,
-                lora_name,
-                lora_path,
+                module,
                 load_inplace,
-                is_3d_lora_weight,
             )
+            .await
+    }
+
+    /// Load one adapter from `--lora-modules` and register it as a public
+    /// model name.
+    ///
+    /// Returns error if the engine was started without LoRA support.
+    pub async fn load_static_lora(
+        &self,
+        module: &LoraModulePath,
+    ) -> Result<LoraRequest, LoadLoraError> {
+        self.ensure_lora_enabled()?;
+        self.lora_manager
+            .load_static_lora(self.engine_core_client(), &self.served_model_names, module)
             .await
     }
 
     /// Remove one dynamic LoRA adapter from the engine and public model
     /// registry.
+    ///
+    /// Returns error if the engine was started without LoRA support.
     pub async fn unload_lora(
         &self,
         lora_name: &str,
         lora_int_id: Option<u64>,
     ) -> Result<LoraRequest, UnloadLoraError> {
+        self.ensure_lora_enabled()?;
         self.lora_manager
             .unload_lora(self.engine_core_client(), lora_name, lora_int_id)
             .await
+    }
+
+    fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {
+        self.engine_core_client()
+            .ready_response()
+            .supports_lora
+            .then_some(())
+            .ok_or(LoraDisabledError)
     }
 
     /// Return a reference to the underlying engine core client for utility
