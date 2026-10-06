@@ -280,6 +280,8 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
 
     // Sampled KV-cache residency histograms.
     if !stats.kv_cache_eviction_events.is_empty() {
+        // The Python core emits these only for actual prefix-cache evictions.
+        // Free/unpin notifications update its idle clock without emitting samples.
         for event in &stats.kv_cache_eviction_events {
             handles.kv_block_lifetime_seconds.observe(event.lifetime_seconds);
             handles.kv_block_idle_before_evict_seconds.observe(event.idle_seconds);

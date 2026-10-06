@@ -1140,6 +1140,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
 
+            # The core filters uncached recycling and measures the final idle
+            # interval; exporters observe only the resulting eviction samples.
             if (
                 self.kv_cache_metrics_enabled
                 and scheduler_stats.kv_cache_eviction_events

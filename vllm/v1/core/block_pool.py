@@ -687,6 +687,8 @@ class BlockPool:
             self._notify_reuse(ret)
 
         # In order to only iterate the list once, we duplicated code a bit
+        # Each allocation restarts sampling, including reuse of never-cached
+        # blocks whose previous lifetime emitted no eviction event.
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
@@ -726,6 +728,8 @@ class BlockPool:
             block.ref_cnt -= 1
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
+                # The final pin release starts idle time; the eviction sample
+                # is deferred until the cached content is actually removed.
                 if self.metrics_collector:
                     self.metrics_collector.on_block_freed(block)
                 released.append(block)
@@ -747,6 +751,8 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        # Only actual prefix-cache evictions belong in residency histograms;
+        # never-cached working blocks return above without an observation.
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
         self._emit_block_removed_events(evicted_hashes)
@@ -770,6 +776,8 @@ class BlockPool:
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
+            # Any new reference ends idle time, including transfer-only pins.
+            # record_access controls whether it also counts as prefix reuse.
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(
                     block, record_access=record_access
@@ -798,6 +806,8 @@ class BlockPool:
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
+                # Zero references starts an idle interval. Cached KV
+                # can still serve prefix hits until it is actually evicted.
                 if self.metrics_collector:
                     self.metrics_collector.on_block_freed(block)
                 if block.block_hash is None or not self.enable_caching:
@@ -865,6 +875,7 @@ class BlockPool:
         for block in self.blocks:
             block.reset_hash()
 
+        # A cache reset discards tracking without emitting per-block evictions.
         if self.metrics_collector:
             self.metrics_collector.reset()
 
