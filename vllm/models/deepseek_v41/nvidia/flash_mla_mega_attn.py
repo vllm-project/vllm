@@ -32,8 +32,10 @@ from vllm.models.deepseek_v41.common.ops import (
 )
 from vllm.models.deepseek_v41.common.ops.fused_layout import (
     WV_GROUP_SIZE,
-    permute_wo_a_,
-    permute_wq_b_,
+    o_fused_chunk_permutation,
+    o_fused_permutation,
+    permute_on_load,
+    q_fused_permutation,
 )
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v41.sparse_mla import (
@@ -182,7 +184,13 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 "wo_a group."
             )
         self.n_wv_group = self.padded_heads // WV_GROUP_SIZE
-        self._fused_layouts_ready = False
+        q_perm = q_fused_permutation(self.n_local_heads, self.head_dim)
+        permute_on_load(self.wq_b.weight, q_perm, dim=0)
+        permute_on_load(self.wq_b.weight_scale, q_perm, dim=0)
+        o_perm = o_fused_permutation(WV_GROUP_SIZE, self.head_dim)
+        permute_on_load(self.wo_a.weight, o_perm, dim=1)
+        o_chunk_perm = o_fused_chunk_permutation(WV_GROUP_SIZE, self.head_dim)
+        permute_on_load(self.wo_a.weight_scale, o_chunk_perm, dim=1)
 
     # ---- interface contract ------------------------------------------------
 
@@ -227,25 +235,6 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         )
         return self._wo_b_proj(z.flatten(1))
 
-    # ---- weights -----------------------------------------------------------
-
-    def finalize_loaded_weights(self) -> None:
-        """Permute wq_b rows / wo_a columns into the kernel's layouts.
-
-        Idempotent: a second post-load pass must not permute twice.
-        """
-        if self._fused_layouts_ready:
-            return
-        permute_wq_b_(
-            self.wq_b.weight.data, self.wq_b.weight_scale.data, self.n_local_heads
-        )
-        permute_wo_a_(
-            self.wo_a.weight.data,
-            self.wo_a.weight_scale.data,
-            self.n_local_heads // self.n_local_groups,
-        )
-        self._fused_layouts_ready = True
-
     # ---- forward -----------------------------------------------------------
 
     def forward_mqa(
@@ -255,11 +244,6 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         positions: torch.Tensor,
         output: QuantizedActivation,
     ) -> None:
-        if not self._fused_layouts_ready:
-            raise RuntimeError(
-                f"{self.prefix}: wq_b / wo_a were never permuted for the mega "
-                "attention kernel; refusing to run with mismatched layouts."
-            )
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:
             # Warmup dummy run: reserve the prefill workspace, produce zeros.
