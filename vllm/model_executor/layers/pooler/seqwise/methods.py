@@ -7,6 +7,7 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config.pooler import SequencePoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
@@ -78,6 +79,12 @@ class MeanPool(SequencePoolingMethod):
         prompt_lens = async_tensor_h2d(
             prompt_lens_cpu, device=hidden_states.device, dtype=torch.int64
         )
+        if envs.VLLM_BATCH_INVARIANT:
+            # index_add_ is nondeterministic on GPUs, so reduce each sequence alone.
+            segments = hidden_states.split(prompt_lens_cpu.tolist())
+            sums = torch.stack([s.sum(dim=0, dtype=torch.float32) for s in segments])
+            return sums / prompt_lens.unsqueeze(1)
+
         # eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
         segment_ids = torch.repeat_interleave(
             torch.arange(num_seqs, device=hidden_states.device, dtype=torch.long),
