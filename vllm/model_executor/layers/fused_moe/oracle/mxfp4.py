@@ -880,7 +880,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     separate gate_proj/up_proj tensors are already contiguous after ``_load_w13``.
     Backends that only ever see GPT-OSS weights ignore it.
     """
-
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,
