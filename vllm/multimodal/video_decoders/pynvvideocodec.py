@@ -31,12 +31,19 @@ def decode_pynvvideocodec(
     sampling_kwargs: dict,
     *,
     hw_decoders: int = PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+    max_width: int | None = None,
+    max_height: int | None = None,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
+    max_width, max_height = validate_pynvvideocodec_max_dimensions(
+        max_width, max_height
+    )
     PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(hw_decoders)
     return PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
         loader_cls,
         data,
         target,
+        max_width=max_width,
+        max_height=max_height,
         **sampling_kwargs,
     )
 
@@ -67,6 +74,25 @@ def validate_pynvvideocodec_hw_decoders(hw_decoders: object) -> int:
     ):
         raise ValueError("hw_decoders must be a positive integer")
     return hw_decoders
+
+
+def validate_pynvvideocodec_max_dimensions(
+    max_width: object,
+    max_height: object,
+) -> tuple[int | None, int | None]:
+    if max_width is None and max_height is None:
+        return None, None
+    if max_width is None or max_height is None:
+        raise ValueError("max_width and max_height must be set together")
+    if isinstance(max_width, bool) or not isinstance(max_width, int) or max_width < 1:
+        raise ValueError("max_width must be a positive integer")
+    if (
+        isinstance(max_height, bool)
+        or not isinstance(max_height, int)
+        or max_height < 1
+    ):
+        raise ValueError("max_height must be a positive integer")
+    return max_width, max_height
 
 
 def _pynvvideocodec_exception_types(nvc) -> tuple[type[Exception], ...]:
@@ -288,7 +314,13 @@ class PyNvVideoCodecVideoBackendMixin:
         return default
 
     @classmethod
-    def _validate_decoder_caps(cls, file_path: str, nvc) -> tuple[int, int]:
+    def _validate_decoder_caps(
+        cls,
+        file_path: str,
+        nvc,
+        max_width: int | None = None,
+        max_height: int | None = None,
+    ) -> tuple[int, int]:
         demuxer = nvc.CreateDemuxer(file_path)
         width = demuxer.Width()
         height = demuxer.Height()
@@ -298,17 +330,40 @@ class PyNvVideoCodecVideoBackendMixin:
             demuxer.ChromaFormat(),
             demuxer.BitDepth(),
         )
+        width_min = int(caps["width_min"])
+        width_max = int(caps["width_max"])
+        height_min = int(caps["height_min"])
+        height_max = int(caps["height_max"])
+        mb_num_max = int(caps["mb_num_max"])
         macroblock_count = ((width + 15) // 16) * ((height + 15) // 16)
         if (
             not caps["supported"]
-            or width < caps["width_min"]
-            or width > caps["width_max"]
-            or height < caps["height_min"]
-            or height > caps["height_max"]
-            or macroblock_count > caps["mb_num_max"]
+            or width < width_min
+            or width > width_max
+            or height < height_min
+            or height > height_max
+            or macroblock_count > mb_num_max
         ):
             raise ValueError("Invalid or unsupported video file.")
-        return int(caps["width_max"]), int(caps["height_max"])
+
+        if max_width is None or max_height is None:
+            return width_max, height_max
+
+        configured_mb_count = ((max_width + 15) // 16) * ((max_height + 15) // 16)
+        if (
+            max_width < width_min
+            or max_width > width_max
+            or max_height < height_min
+            or max_height > height_max
+            or configured_mb_count > mb_num_max
+        ):
+            raise ValueError(
+                "Configured PyNvVideoCodec max_width and max_height are "
+                "outside the hardware decoder limits"
+            )
+        if width > max_width or height > max_height:
+            raise ValueError("Invalid or unsupported video file.")
+        return max_width, max_height
 
     @classmethod
     def _read_source_metadata(
@@ -455,6 +510,8 @@ class PyNvVideoCodecVideoBackendMixin:
         loader_cls,
         data: bytes,
         target: VideoTargetMetadata,
+        max_width: int | None = None,
+        max_height: int | None = None,
         **kwargs,
     ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
         import PyNvVideoCodec as nvc
@@ -468,11 +525,14 @@ class PyNvVideoCodecVideoBackendMixin:
 
             invalid_video = False
             try:
-                max_width, max_height = cls._validate_decoder_caps(temp_path, nvc)
+                max_width, max_height = cls._validate_decoder_caps(
+                    temp_path,
+                    nvc,
+                    max_width=max_width,
+                    max_height=max_height,
+                )
             except Exception as exc:
-                if not isinstance(
-                    exc, _pynvvideocodec_exception_types(nvc) + (ValueError,)
-                ):
+                if not isinstance(exc, _pynvvideocodec_exception_types(nvc)):
                     raise
                 invalid_video = True
             if invalid_video:

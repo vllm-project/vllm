@@ -190,6 +190,17 @@ def test_decode_video_imports_only_selected_backend(
             {"max_frames": 16},
             {"pool_size": 3, "timeout_sec": 10.0},
         ),
+        (
+            PYNVVIDEOCODEC_VIDEO_BACKEND,
+            {
+                "min_frames": 4,
+                "hw_decoders": 3,
+                "max_width": 3840,
+                "max_height": 2160,
+            },
+            {"min_frames": 4},
+            {"hw_decoders": 3, "max_width": 3840, "max_height": 2160},
+        ),
     ],
 )
 def test_video_backend_kwargs_are_separated_from_sampling_kwargs(
@@ -300,7 +311,7 @@ def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
     monkeypatch.setattr(
         PyNvVideoCodecVideoBackendMixin,
         "_validate_decoder_caps",
-        classmethod(lambda cls, file_path, nvc: (8192, 8192)),
+        classmethod(lambda cls, file_path, nvc, **kwargs: (8192, 8192)),
     )
 
     loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
@@ -374,7 +385,7 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
     monkeypatch.setattr(
         PyNvVideoCodecVideoBackendMixin,
         "_validate_decoder_caps",
-        classmethod(lambda cls, file_path, nvc: (8192, 8192)),
+        classmethod(lambda cls, file_path, nvc, **kwargs: (8192, 8192)),
     )
 
     loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
@@ -615,7 +626,7 @@ def test_pynvvideocodec_native_metadata_error_is_not_chained(
     monkeypatch.setattr(
         PyNvVideoCodecVideoBackendMixin,
         "_validate_decoder_caps",
-        classmethod(lambda cls, file_path, nvc: (4096, 4096)),
+        classmethod(lambda cls, file_path, nvc, **kwargs: (4096, 4096)),
     )
 
     with pytest.raises(
@@ -716,6 +727,86 @@ def test_pynvvideocodec_uses_hardware_decoder_bounds():
     assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
         "valid.mp4", FakeNvc
     ) == (8192, 8192)
+
+
+def test_pynvvideocodec_validates_configured_decoder_bounds():
+    class FakeDemuxer:
+        def Width(self):
+            return 1920
+
+        def Height(self):
+            return 1080
+
+        def GetNvCodecId(self):
+            return "h264"
+
+        def ChromaFormat(self):
+            return "420"
+
+        def BitDepth(self):
+            return 8
+
+    class FakeNvc:
+        @staticmethod
+        def CreateDemuxer(file_path):
+            return FakeDemuxer()
+
+        @staticmethod
+        def GetDecoderCaps(device_index, codec, chroma_format, bit_depth):
+            return {
+                "supported": 1,
+                "width_min": 48,
+                "width_max": 8192,
+                "height_min": 16,
+                "height_max": 8192,
+                "mb_num_max": 262144,
+            }
+
+    assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+        "valid.mp4",
+        FakeNvc,
+        max_width=3840,
+        max_height=2160,
+    ) == (3840, 2160)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Invalid or unsupported video file\.$",
+    ):
+        PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+            "valid.mp4",
+            FakeNvc,
+            max_width=1280,
+            max_height=720,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="outside the hardware decoder limits",
+    ):
+        PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+            "valid.mp4",
+            FakeNvc,
+            max_width=16384,
+            max_height=16384,
+        )
+
+
+@pytest.mark.parametrize(
+    ("max_width", "max_height"),
+    [(3840, None), (None, 2160), (0, 2160), (3840, -1), (True, 2160)],
+)
+def test_pynvvideocodec_rejects_invalid_max_dimensions(
+    max_width: object,
+    max_height: object,
+):
+    with pytest.raises(ValueError, match="max_width|max_height"):
+        VideoBackend.load_bytes(
+            b"fake video",
+            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+            max_width=max_width,
+            max_height=max_height,
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
