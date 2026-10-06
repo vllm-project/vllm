@@ -181,7 +181,7 @@ mod tests {
         let request: GenerateRequest = serde_json::from_value(json!({
             "token_ids": [11, 22],
             "stream": true,
-            "sampling_params": {"prompt_logprob_token_ids": [1, 2]}
+            "sampling_params": {"prompt_logprob_token_ids": [[1, 2]]}
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["test-model"])).is_err());
