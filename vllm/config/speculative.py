@@ -473,7 +473,9 @@ class SpeculativeConfig:
     cuts its cost per draft token; the target still verifies with the full
     vocabulary, so outputs follow the usual speculative decoding guarantees.
     Accepts SGLang's `--speculative-token-map` file (`.pt`) or a JSON list.
-    EOS ids are always included. Requires an MTP drafter with an unquantized
+    EOS ids are always included. A quantized lm_head keeps its checkpoint
+    format for the listed rows (any format indexed by output row) and, for
+    dynamic rows, must be ModelOpt NVFP4. Requires an MTP drafter with a
     full-vocabulary lm_head, and Model Runner V2."""
 
     draft_token_map_dynamic_rows: int = Field(default=0, ge=0)
@@ -490,7 +492,8 @@ class SpeculativeConfig:
     """Weight-only quantization of the draft vocabulary's lm_head rows, both
     the listed and the dynamic ones: "fp8" keeps one scale per row, "nvfp4" one
     E4M3 scale per 16 weights. The dynamic rows' scorer is then stored in fp8.
-    Only the acceptance length can change. Requires `draft_token_map`."""
+    Only the acceptance length can change. Requires `draft_token_map` and an
+    lm_head that is not quantized in the checkpoint."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
