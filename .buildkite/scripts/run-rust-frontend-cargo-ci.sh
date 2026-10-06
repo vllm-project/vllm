@@ -60,12 +60,12 @@ install_cargo_binstall() {
 
 install_cargo_sort() {
   log_section "Installing cargo-sort ${CARGO_SORT_VERSION_REQ}"
-  cargo binstall --no-confirm --force "cargo-sort@${CARGO_SORT_VERSION_REQ}"
+  cargo binstall --no-confirm --force --locked "cargo-sort@${CARGO_SORT_VERSION_REQ}"
 }
 
 install_cargo_deny() {
   log_section "Installing cargo-deny ${CARGO_DENY_VERSION_REQ}"
-  cargo binstall --no-confirm --force "cargo-deny@${CARGO_DENY_VERSION_REQ}"
+  cargo binstall --no-confirm --force --locked "cargo-deny@${CARGO_DENY_VERSION_REQ}"
 }
 
 install_cargo_nextest() {
@@ -74,6 +74,7 @@ install_cargo_nextest() {
     --no-confirm \
     --force \
     --secure \
+    --locked \
     "cargo-nextest@${CARGO_NEXTEST_VERSION_REQ}"
 }
 
