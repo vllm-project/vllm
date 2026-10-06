@@ -87,6 +87,15 @@ bool on_gfx1151() {
   return result;
 }
 
+bool on_gfx1100() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx1100") != std::string::npos;
+  }();
+  return result;
+}
+
 #if defined(NDEBUG)
   #undef NDEBUG
   #include <assert.h>
@@ -1190,12 +1199,15 @@ __global__ void wvSplitK_hf_big_(const int K, const int Kbp, const int Kap,
 // Find the min val of div2 that doesn't increase N/(div1*div2)
 int mindiv(int N, int div1, int div2) {
   int nPrRnd = div1 * div2;
+  // At most 13 candidates (div2 .. div2-12 waves), never fewer than one wave:
+  // for div2 < 13, more candidates would divide by zero or negative counts.
+  const int nCand = std::min(13, div2);
   int rnds[13];
-  for (int i = 0; i < 13; i++) {
+  for (int i = 0; i < nCand; i++) {
     rnds[i] = (N + nPrRnd - 1) / nPrRnd;
     nPrRnd -= div1;
   }
-  for (int i = 12; i >= 0; i--)
+  for (int i = nCand - 1; i >= 0; i--)
     if (rnds[0] == rnds[i]) return (div2 - i);
   return 0;
 }
@@ -1299,6 +1311,18 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                      __N)                                                   \
       else                                                                  \
         WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/1, \
+                     __N)                                                   \
+    } else if (on_gfx1100() && std::is_same_v<fptype, __hip_bfloat16>) {    \
+      /* tuned with the native bf16 DOT2C: fewer, deeper waves */           \
+      /* once each CU has more rows to stream (larger sYT) */               \
+      if (__N == 1 && _sYT > 43)                                            \
+        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/2, /*YTILE=*/4, /*UNRL=*/4,  \
+                     __N)                                                   \
+      else if (_sYT > 43 || (__N == 1 && _sYT > 11))                        \
+        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/4, /*YTILE=*/2, /*UNRL=*/4,  \
+                     __N)                                                   \
+      else                                                                  \
+        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/4, \
                      __N)                                                   \
     } else if (on_gfx1x()) { /* gfx1100/gfx1150/GFX12, wave32 */            \
       WVSPLIT_TILE_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, _sYT, __N)             \
