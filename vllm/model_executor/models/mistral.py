@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import LlamaConfig, PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -74,6 +74,24 @@ class MistralMLP(nn.Module):
         return x
 
 
+def _get_llama_4_scaling_config(
+    config: PreTrainedConfig,
+) -> dict[str, int | float | str] | None:
+    scaling_config = getattr(config, "llama_4_scaling", None)
+    if scaling_config is not None:
+        return scaling_config
+
+    rope_parameters = getattr(config, "rope_parameters", None) or {}
+    beta = rope_parameters.get("llama_4_scaling_beta")
+    original_max_position = rope_parameters.get("original_max_position_embeddings")
+    if beta is None or original_max_position is None:
+        return None
+    return {
+        "beta": beta,
+        "original_max_position_embeddings": original_max_position,
+    }
+
+
 class MistralAttention(LlamaAttention):
     def __init__(
         self,
@@ -103,9 +121,7 @@ class MistralAttention(LlamaAttention):
             attn_type=attn_type,
         )
 
-        llama_4_scaling_config: dict[str, int | float | str] | None = getattr(
-            config, "llama_4_scaling", None
-        )
+        llama_4_scaling_config = _get_llama_4_scaling_config(config)
         self.do_llama_4_scaling = llama_4_scaling_config is not None
         if self.do_llama_4_scaling:
             assert llama_4_scaling_config is not None
