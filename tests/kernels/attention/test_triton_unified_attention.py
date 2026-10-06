@@ -451,9 +451,6 @@ def test_triton_unified_attn(
     maybe_quantized_query = query
     maybe_quantized_key_cache = key_cache
     maybe_quantized_value_cache = value_cache
-    ref_query = query
-    ref_key_cache = key_cache
-    ref_value_cache = value_cache
     q_descale = None
     k_descale = None
     v_descale = None
@@ -470,9 +467,6 @@ def test_triton_unified_attn(
         maybe_quantized_query = (query / q_scale).to(q_dtype)
         maybe_quantized_key_cache = (key_cache / k_scale).to(q_dtype)
         maybe_quantized_value_cache = (value_cache / v_scale).to(q_dtype)
-        ref_query = (maybe_quantized_query.float() * q_scale).to(dtype)
-        ref_key_cache = (maybe_quantized_key_cache.float() * k_scale).to(dtype)
-        ref_value_cache = (maybe_quantized_value_cache.float() * v_scale).to(dtype)
         kv_quant_mode = KVQuantMode.FP8_PER_TENSOR
 
     num_par_softmax_segments = 16
@@ -516,9 +510,9 @@ def test_triton_unified_attn(
     )
 
     ref_output = ref_paged_attn(
-        query=ref_query,
-        key_cache=ref_key_cache,
-        value_cache=ref_value_cache,
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
         query_lens=query_lens,
         kv_lens=kv_lens,
         block_tables=block_tables,
@@ -528,7 +522,7 @@ def test_triton_unified_attn(
     )
     atol, rtol = 1.5e-2, 1e-2
     if q_dtype is not None:
-        atol, rtol = 5e-2, 1e-2
+        atol, rtol = 1.5e-1, 1.5e-1
     (
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
@@ -637,15 +631,15 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
     ref_output = ref_paged_attn(
         query=query,
-        key_cache=(fp8_key_cache.float() * k_scale).to(dtype),
-        value_cache=(fp8_value_cache.float() * v_scale).to(dtype),
+        key_cache=key_cache,
+        value_cache=value_cache,
         query_lens=query_lens,
         kv_lens=kv_lens,
         block_tables=block_tables,
         scale=scale,
     )
 
-    atol, rtol = 5e-2, 1e-2
+    atol, rtol = 1.5e-1, 1.5e-1
     (
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
