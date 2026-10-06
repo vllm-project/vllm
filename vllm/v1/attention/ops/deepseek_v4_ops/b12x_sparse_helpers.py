@@ -94,6 +94,7 @@ def b12x_glm_mla_attention(
     Returns:
         (out [batch, seq, heads, 512], lse [batch, heads, seq]) or None when the
         optional B12x package/path is unavailable or the shape is unsupported.
+
     """
     if not b12x_mla_enabled():
         return None

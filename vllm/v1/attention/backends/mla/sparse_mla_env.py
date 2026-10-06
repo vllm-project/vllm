@@ -57,7 +57,6 @@ def triton_sparse_mla_prefill_topk_chunk_size(
     overhead, but keeps a smaller chunk for the multi-request shape that is
     unstable near 128K context.
     """
-
     configured_topk = triton_sparse_mla_topk_chunk_size()
     if os.getenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE") is not None:
         return min(combined_topk_size, configured_topk)

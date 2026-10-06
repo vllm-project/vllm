@@ -18,7 +18,6 @@ def sparse_mla_decode_head_block_size(num_decode_tokens: int) -> int:
     program. Once there are enough query tokens, grouping heads lets the kernel
     reuse each dequantized KV row across multiple heads.
     """
-
     configured_head_block_size = triton_sparse_mla_head_block_size()
     if configured_head_block_size is not None:
         return configured_head_block_size
