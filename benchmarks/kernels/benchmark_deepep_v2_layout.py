@@ -4,7 +4,8 @@
 
 Run each case in a fresh process with torchrun --nproc-per-node=2. This measures
 fresh dispatch, GPU metadata, a synthetic expert operation, and combine. It
-has no expert GEMM and does not establish a grouped-GEMM preparation benefit.
+defaults to a synthetic scalar expert. Select --expert-kernel grouped-fp8 to
+compare the existing input permutation with direct grouped FP8 GEMM inputs.
 """
 
 import argparse
@@ -81,11 +82,99 @@ def synthetic_experts(recv_x, recv_ids, recv_weights, handle, expanded, offset):
     return (safe_x.float() * factors[:, None]).to(recv_x.dtype), counts
 
 
+class GroupedFp8Experts:
+    """Compare input permutation with direct DeepEP grouped GEMM input."""
+
+    def __init__(self, local_experts: int, hidden: int, offset: int):
+        from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+
+        self.alignment = get_mk_alignment_for_contiguous_layout()[0]
+        self.offset = offset
+        self.local_experts = local_experts
+        factors = ((torch.arange(local_experts, device="cuda") + offset) % 4 + 1) / 4
+        self.weight = (
+            torch.eye(hidden, device="cuda")[None] * factors[:, None, None]
+        ).to(torch.float8_e4m3fn)
+        self.weight_scale = torch.ones(
+            local_experts, hidden // 128, hidden // 128, device="cuda"
+        )
+
+    def __call__(self, recv_x, recv_ids, recv_weights, handle, expanded):
+        from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+            deepgemm_moe_permute,
+            deepgemm_unpermute_and_reduce,
+        )
+        from vllm.utils.deep_gemm import (
+            m_grouped_fp8_gemm_nt_contiguous,
+            mk_alignment_scope,
+        )
+
+        aq, scales = recv_x
+        rows, hidden = aq.shape
+        counts = None
+        if expanded:
+            if handle.expert_alignment != self.alignment:
+                raise ValueError("DeepEP and DeepGEMM expert alignment must match")
+            ids, counts = expanded_metadata(
+                handle.psum_num_recv_tokens_per_expert,
+                rows,
+                self.alignment,
+                self.offset,
+            )
+            m_indices = torch.where(ids >= 0, ids - self.offset, -1).int()
+            # DeepEP has already duplicated and grouped the activation rows.
+            gemm_input, gemm_scales = aq, scales
+            alignment = self.alignment
+        else:
+            valid_rows = (
+                torch.arange(rows, device=aq.device)
+                < handle.psum_num_recv_tokens_per_scaleup_rank[-1]
+            )
+            ids = torch.where(valid_rows[:, None] & (recv_ids >= 0), recv_ids, -1)
+            gemm_input, gemm_scales, m_indices, inverse, alignment = (
+                deepgemm_moe_permute(
+                    aq=aq,
+                    aq_scale=scales,
+                    topk_ids=ids,
+                    local_num_experts=self.local_experts,
+                    expert_map=None,
+                    expert_tokens_meta=None,
+                )
+            )
+        mm = torch.zeros(
+            gemm_input.shape[0], hidden, dtype=torch.bfloat16, device=aq.device
+        )
+        with mk_alignment_scope(alignment):
+            m_grouped_fp8_gemm_nt_contiguous(
+                (gemm_input, gemm_scales),
+                (self.weight, self.weight_scale),
+                mm,
+                m_indices,
+            )
+        weights = torch.where(ids >= 0, recv_weights, 0)
+        if expanded:
+            safe_mm = torch.where((ids >= 0)[:, None], mm, 0)
+            return (safe_mm.float() * weights[:, None]).bfloat16(), counts
+        out = torch.empty(rows, hidden, dtype=torch.bfloat16, device=aq.device)
+        deepgemm_unpermute_and_reduce(
+            a=mm,
+            topk_ids=ids,
+            topk_weights=weights,
+            inv_perm=inverse,
+            expert_map=None,
+            output=out,
+        )
+        return out, counts
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=CASES, required=True)
     parser.add_argument("--tokens-per-rank", default="8192,8192")
     parser.add_argument("--hidden-size", type=int, default=2048)
+    parser.add_argument(
+        "--expert-kernel", choices=["scalar", "grouped-fp8"], default="scalar"
+    )
     parser.add_argument("--local-experts", type=int, default=16)
     parser.add_argument("--topk", type=int, default=4)
     parser.add_argument("--expert-alignment", type=int, default=128)
@@ -129,7 +218,8 @@ def main():
 
     torch.manual_seed(42 + rank)
     tokens = token_counts[rank]
-    x = (torch.randn(tokens, args.hidden_size, device="cuda") / 8).bfloat16()
+    # Values are exactly representable in BF16 and FP8 for the GEMM reference.
+    x = (torch.randint(-8, 9, (tokens, args.hidden_size), device="cuda") / 8).bfloat16()
     ids = torch.rand(tokens, num_experts, device="cuda").argsort(dim=1)
     ids = ids[:, : args.topk].contiguous().to(torch.int64)
     weights = torch.full((tokens, args.topk), 1 / args.topk, device="cuda")
@@ -137,11 +227,27 @@ def main():
     reference = (x.float() * factor[:, None]).bfloat16()
     capacity = 1 << max(max(token_counts) - 1, 0).bit_length()
     expanded, cpu_sync = CASES[args.case]
+    grouped = (
+        GroupedFp8Experts(
+            args.local_experts, args.hidden_size, rank * args.local_experts
+        )
+        if args.expert_kernel == "grouped-fp8"
+        else None
+    )
+    if grouped is not None:
+        args.expert_alignment = grouped.alignment
+        dispatch_input = (
+            x.to(torch.float8_e4m3fn),
+            torch.ones(tokens, args.hidden_size // 128, device="cuda"),
+        )
+    else:
+        dispatch_input = x
     buffer = deep_ep.ElasticBuffer(
         group=dist.group.WORLD,
         num_max_tokens_per_rank=capacity,
         hidden=args.hidden_size,
         num_topk=args.topk,
+        use_fp8_dispatch=grouped is not None,
         allow_hybrid_mode=False,
         explicitly_destroy=True,
     )
@@ -154,7 +260,7 @@ def main():
 
     def step():
         recv_x, recv_ids, recv_weights, handle, _ = buffer.dispatch(
-            x=x,
+            x=dispatch_input,
             topk_idx=ids,
             topk_weights=weights,
             num_experts=num_experts,
@@ -164,17 +270,22 @@ def main():
             do_cpu_sync=cpu_sync,
             async_with_compute_stream=False,
         )
-        y, counts = synthetic_experts(
-            recv_x,
-            recv_ids,
-            recv_weights,
-            handle,
-            expanded,
-            rank * args.local_experts,
-        )
+        if grouped is not None:
+            y, counts = grouped(recv_x, recv_ids, recv_weights, handle, expanded)
+            received_rows = recv_x[0].shape[0]
+        else:
+            y, counts = synthetic_experts(
+                recv_x,
+                recv_ids,
+                recv_weights,
+                handle,
+                expanded,
+                rank * args.local_experts,
+            )
+            received_rows = recv_x.shape[0]
         # Expert outputs are already weighted; combine only reverses routing.
         out, _, _ = buffer.combine(x=y, handle=handle, async_with_compute_stream=False)
-        return out, recv_x.shape[0], counts, handle
+        return out, received_rows, counts, handle
 
     try:
         for _ in range(args.warmup):
@@ -210,6 +321,9 @@ def main():
             "case": args.case,
             "do_expand": expanded,
             "do_cpu_sync": cpu_sync,
+            "gemm_input_permutation": ("skipped" if expanded else "performed")
+            if grouped is not None
+            else "not_applicable",
             "input_tokens": tokens,
             "receive_capacity_rows": received_capacity,
             "wall_ms_per_step": statistics.mean(samples),
