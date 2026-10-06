@@ -36,13 +36,18 @@ SCALE = 1.0 / math.sqrt(QK_HEAD_DIM)
 # repeat_interleave. Both pad to exactly 16 and round-trip.
 NON_DIVISOR_HEADS = [3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15]
 DIVISOR_HEADS = [1, 2, 4, 8]
+# The autouse fixture below patches the module attribute; keep the real one.
+_NATIVE_H12_SUPPORTED = rocm_aiter_mla._aiter_mla_native_h12_supported
 
 
 @pytest.fixture(autouse=True)
-def _disable_native_h24(monkeypatch):
-    """Exercise the padding fallback unless a test explicitly enables H24."""
+def _disable_native_heads(monkeypatch):
+    """Exercise the padding fallback unless a test enables native H12/H24."""
     monkeypatch.setattr(
         rocm_aiter_mla, "_aiter_mla_native_h24_supported", lambda: False
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h12_supported", lambda: False
     )
 
 
@@ -355,3 +360,69 @@ def test_h12_aiter_mla_decode_matches_reference():
         atol=1e-2,
         rtol=1e-2,
     )
+
+
+def _decide_native_h12(
+    monkeypatch,
+    *,
+    cache_dtype: str = "fp8",
+    num_speculative_tokens: int | None = 7,
+    gfx950: bool = True,
+    kernels: bool = True,
+    has_config: bool = True,
+) -> bool:
+    import vllm.config
+    import vllm.platforms.rocm
+
+    spec_config = (
+        None
+        if num_speculative_tokens is None
+        else types.SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
+    )
+    config = types.SimpleNamespace(
+        cache_config=types.SimpleNamespace(cache_dtype=cache_dtype),
+        speculative_config=spec_config,
+    )
+    monkeypatch.setattr(
+        vllm.config,
+        "get_current_vllm_config_or_none",
+        lambda: config if has_config else None,
+    )
+    monkeypatch.setattr(vllm.platforms.rocm, "on_gfx950", lambda: gfx950)
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h12_kernels", lambda: kernels
+    )
+    monkeypatch.setattr(rocm_aiter_mla, "_AITER_MLA_NATIVE_H12", None)
+    return _NATIVE_H12_SUPPORTED()
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [None, 0, 7, 9])
+def test_native_h12_on_gfx950_fp8(monkeypatch, num_speculative_tokens):
+    assert _decide_native_h12(
+        monkeypatch, num_speculative_tokens=num_speculative_tokens
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"cache_dtype": "auto"}, id="bf16-kv"),
+        pytest.param({"num_speculative_tokens": 10}, id="qlen-11"),
+        pytest.param({"gfx950": False}, id="gfx942"),
+        pytest.param({"kernels": False}, id="old-aiter"),
+    ],
+)
+def test_native_h12_falls_back_to_h16(monkeypatch, overrides):
+    assert not _decide_native_h12(monkeypatch, **overrides)
+
+
+def test_native_h12_decision_waits_for_config_then_sticks(monkeypatch):
+    import vllm.config
+
+    assert not _decide_native_h12(monkeypatch, has_config=False)
+    assert rocm_aiter_mla._AITER_MLA_NATIVE_H12 is None
+
+    assert _decide_native_h12(monkeypatch)
+    # Forward runs without a current config; the setup-time answer holds.
+    monkeypatch.setattr(vllm.config, "get_current_vllm_config_or_none", lambda: None)
+    assert _NATIVE_H12_SUPPORTED()
