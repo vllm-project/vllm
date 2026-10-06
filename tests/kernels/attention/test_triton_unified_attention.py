@@ -181,6 +181,53 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
+@torch.inference_mode()
+def test_fp8_softmax_preserves_small_probabilities() -> None:
+    """Keep exp(-8) contributions that underflow when cast directly to E4M3."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens = block_size = 32
+    head_size = 128
+
+    query = torch.zeros(1, 1, head_size, dtype=FP8_DTYPE, device=device)
+    query[..., 0] = 1
+    key_cache = torch.zeros(1, block_size, 1, head_size, dtype=FP8_DTYPE, device=device)
+    key_cache[:, 1:, :, 0] = -8
+    value_cache = torch.ones_like(key_cache)
+    value_cache[:, 0] = 0
+    output = torch.empty(1, 1, head_size, dtype=torch.bfloat16, device=device)
+
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    seqused_k = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=1,
+        seqused_k=seqused_k,
+        max_seqlen_k=num_tokens,
+        softmax_scale=1.0,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=scale,
+        k_descale=scale,
+        v_descale=scale,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+
+    scores = torch.einsum("qhd,thd->qht", query.float(), key_cache[0].float())
+    probabilities = torch.softmax(scores, dim=-1)
+    expected = torch.einsum("qht,thd->qhd", probabilities, value_cache[0].float())
+
+    torch.testing.assert_close(output.float(), expected, atol=5e-5, rtol=1e-2)
+
+
 def ref_paged_clamped_mm_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -404,6 +451,9 @@ def test_triton_unified_attn(
     maybe_quantized_query = query
     maybe_quantized_key_cache = key_cache
     maybe_quantized_value_cache = value_cache
+    ref_query = query
+    ref_key_cache = key_cache
+    ref_value_cache = value_cache
     q_descale = None
     k_descale = None
     v_descale = None
@@ -420,6 +470,9 @@ def test_triton_unified_attn(
         maybe_quantized_query = (query / q_scale).to(q_dtype)
         maybe_quantized_key_cache = (key_cache / k_scale).to(q_dtype)
         maybe_quantized_value_cache = (value_cache / v_scale).to(q_dtype)
+        ref_query = (maybe_quantized_query.float() * q_scale).to(dtype)
+        ref_key_cache = (maybe_quantized_key_cache.float() * k_scale).to(dtype)
+        ref_value_cache = (maybe_quantized_value_cache.float() * v_scale).to(dtype)
         kv_quant_mode = KVQuantMode.FP8_PER_TENSOR
 
     num_par_softmax_segments = 16
@@ -463,9 +516,9 @@ def test_triton_unified_attn(
     )
 
     ref_output = ref_paged_attn(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
+        query=ref_query,
+        key_cache=ref_key_cache,
+        value_cache=ref_value_cache,
         query_lens=query_lens,
         kv_lens=kv_lens,
         block_tables=block_tables,
@@ -475,7 +528,7 @@ def test_triton_unified_attn(
     )
     atol, rtol = 1.5e-2, 1e-2
     if q_dtype is not None:
-        atol, rtol = 1.5e-1, 1.5e-1
+        atol, rtol = 5e-2, 1e-2
     (
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
@@ -584,15 +637,15 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
     ref_output = ref_paged_attn(
         query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
+        key_cache=(fp8_key_cache.float() * k_scale).to(dtype),
+        value_cache=(fp8_value_cache.float() * v_scale).to(dtype),
         query_lens=query_lens,
         kv_lens=kv_lens,
         block_tables=block_tables,
         scale=scale,
     )
 
-    atol, rtol = 1.5e-1, 1.5e-1
+    atol, rtol = 5e-2, 1e-2
     (
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
