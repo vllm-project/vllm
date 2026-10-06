@@ -901,11 +901,16 @@ class TestNixlHandshake:
 
         vllm_config = create_vllm_config()
 
-        connector = NixlConnector(
-            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
-        )
+        # num_blocks=1 keeps the fake handshake's region_num_blocks consistent
+        # with the minimal single-block registration below (num_descs == 1);
+        # _fa_desc_replicated cross-checks the two.
+        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=1)
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
         connector.connector_worker = FakeNixlConnectorWorker(
-            vllm_config, connector.engine_id, hand_shake_latency=0
+            vllm_config,
+            connector.engine_id,
+            hand_shake_latency=0,
+            kv_cache_config=kv_cache_config,
         )
         worker = connector.connector_worker
 
