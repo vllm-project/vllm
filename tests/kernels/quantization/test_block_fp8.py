@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    CUTLASS_BLOCK_FP8_SUPPORTED,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
@@ -163,6 +166,10 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
+@pytest.mark.skipif(
+    not CUTLASS_BLOCK_FP8_SUPPORTED,
+    reason="CUTLASS block FP8 is not supported on this GPU.",
+)
 @pytest.mark.parametrize(
     # 65/66/67 cover all M%4 residue classes above the SM100 swapAB
     # threshold (m <= 64); 1026 crosses multiple 128-row SF atoms.
@@ -280,6 +287,10 @@ def test_w8a8_block_fp8_torch_scaled_mm_matmul():
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
 )
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGemm kernels not available.")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90),
+    reason="DeepGemm requires compute capability 9.0 or higher.",
+)
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     torch.manual_seed(seed)
