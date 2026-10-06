@@ -7,11 +7,16 @@ activations are MXFP8-quantized per token. Uses the CDNA4 hardware microscaling
 matrix cores. ``dot_scaled`` tiles K by 128; a weight whose K is not a multiple
 of that is dequantized to BF16 once at load and served by a plain linear
 instead, since ``can_implement`` does not filter on K.
+
+Weights with 32x32 scale blocks (DeepSeek V4.1) run a block-scaled Triton GEMM,
+or AITER's FlyDSL GEMM on gfx950 when AITER is enabled. FlyDSL reads the weight
+(16, 16)-preshuffled, so those weights are shuffled once at load.
 """
 
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -219,10 +224,26 @@ def _as_block32_scale(weight_scale: torch.Tensor) -> torch.Tensor | None:
     return blocks[:, 0].contiguous()
 
 
+_FLYDSL_K_ALIGN = 64  # AITER's FlyDSL GEMM needs K % 64 == 0
+
+
+def _flydsl_enabled() -> bool:
+    """AITER is enabled for linears; its FlyDSL MXFP8 GEMM is gfx950-only."""
+    from vllm.platforms.rocm import on_gfx950
+
+    return bool(rocm_aiter_ops.is_linear_enabled()) and on_gfx950()
+
+
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
     """Native CDNA4 (gfx950) MXFP8 linear via Triton ``tl.dot_scaled``."""
 
     supports_pre_processed_weights = True
+
+    def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
+        super().__init__(c)
+        self.flydsl_enabled = (
+            torch.get_default_dtype() == torch.bfloat16 and _flydsl_enabled()
+        )
 
     @classmethod
     def is_supported(
@@ -241,6 +262,18 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    def _use_flydsl(self, layer: torch.nn.Module) -> bool:
+        """Whether a loaded layer runs AITER's FlyDSL GEMM: 32x32 scale blocks
+        and K % 64 == 0."""
+        return (
+            self.flydsl_enabled
+            and layer.weight_scale.shape[0] != layer.weight.shape[0]
+            and layer.weight.shape[1] % _FLYDSL_K_ALIGN == 0
+            # A batched layer (DeepSeek V4.1's wo_a) runs on rocm_mxfp8_wo_a_bmm,
+            # which reads the loaded weight.
+            and getattr(layer, "bmm_batch_size", None) is None
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K] fp8
         N, K = weight.shape
@@ -256,6 +289,11 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        if self._use_flydsl(layer):
+            layer.weight = Parameter(
+                rocm_aiter_ops.shuffle_weight(layer.weight.data, layout=(16, 16)),
+                requires_grad=False,
+            )
 
     def apply_weights(
         self,
@@ -273,9 +311,20 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         if layer.weight_scale.shape[0] != layer.weight.shape[0]:
             # One scale row per 32 weight rows (see process_weights_after_loading).
             x_q, x_scale = mxfp8_e4m3_quantize(x2d)
-            out = rocm_mxfp8_block32_gemm(
-                x_q, x_scale, layer.weight, layer.weight_scale, x.dtype
-            )
+            if self._use_flydsl(layer):
+                # MXFP8 scales are stored as uint8; AITER takes its FlyDSL path
+                # only for E8M0-typed scales.
+                out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                    x_q,
+                    layer.weight,
+                    x_scale.view(torch.float8_e8m0fnu),
+                    layer.weight_scale.view(torch.float8_e8m0fnu),
+                    output_dtype=x.dtype,
+                )
+            else:
+                out = rocm_mxfp8_block32_gemm(
+                    x_q, x_scale, layer.weight, layer.weight_scale, x.dtype
+                )
         elif layer.weight.element_size() >= 2:
             out = torch.nn.functional.linear(x2d, layer.weight.to(x.dtype))
         elif x2d.shape[-1] % _DOT_SCALED_K_ALIGN == 0:
