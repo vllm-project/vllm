@@ -470,6 +470,112 @@ async fn responses_length_finish_only_marks_the_last_tool_incomplete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn responses_streaming_length_finish_emits_incomplete_event() {
+    let (app, engine_task) = test_app_with_stream_output_specs(vec![
+        (vec![b'h' as u32], None),
+        (vec![b'i' as u32], Some(EngineCoreFinishReason::Length)),
+    ])
+    .await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "max_output_tokens": 2,
+            "stream": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read streaming body");
+    engine_task.await.expect("mock engine task");
+    let stream = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    let payloads = sse_json_payloads(&stream);
+    let event_names: Vec<&str> =
+        stream.lines().filter_map(|line| line.strip_prefix("event: ")).collect();
+    let terminal = payloads.last().expect("terminal event");
+
+    assert_eq!(event_names.last(), Some(&"response.incomplete"), "{stream}");
+    assert_eq!(terminal["type"], "response.incomplete");
+    assert_eq!(terminal["response"]["status"], "incomplete");
+    assert_eq!(
+        terminal["response"]["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_streaming_abort_keeps_cancelled_status() {
+    let (app, engine_task) = test_app_with_stream_output_specs(vec![
+        (vec![b'h' as u32], None),
+        (vec![b'i' as u32], Some(EngineCoreFinishReason::Abort)),
+    ])
+    .await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "stream": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read streaming body");
+    engine_task.await.expect("mock engine task");
+    let stream = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let terminal = sse_json_payloads(&stream).pop().expect("terminal event");
+
+    assert_eq!(terminal["type"], "response.completed");
+    assert_eq!(terminal["response"]["status"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_streaming_error_includes_failed_response_error() {
+    let (app, engine_task) = test_app_with_stream_output_specs(vec![
+        (vec![b'h' as u32], None),
+        (vec![], Some(EngineCoreFinishReason::Error)),
+    ])
+    .await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "stream": true
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let payloads = sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"));
+
+    let failed = payloads.last().expect("response.failed event");
+    assert_eq!(failed["type"], "response.failed");
+    assert_eq!(failed["response"]["status"], "failed");
+    assert_eq!(failed["response"]["error"]["code"], "server_error");
+    assert_eq!(
+        failed["response"]["error"]["message"],
+        "The model failed to generate a response."
+    );
+    assert_eq!(failed["response"]["output"][0]["content"][0]["text"], "h");
+    assert_eq!(failed["response"]["usage"]["input_tokens"], 22);
+    assert_eq!(failed["response"]["usage"]["output_tokens"], 1);
+    assert_eq!(failed["response"]["usage"]["total_tokens"], 23);
+    assert!(payloads.iter().any(|event| {
+        event["type"] == "response.output_item.done" && event["item"]["content"][0]["text"] == "h"
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn responses_non_streaming_includes_reasoning_item() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
@@ -532,6 +638,44 @@ async fn responses_include_reasoning_false_excludes_reasoning_item() {
     assert_eq!(output.len(), 1, "{text}");
     assert_eq!(output[0]["type"], "message");
     assert_eq!(output[0]["content"][0]["text"], "answer");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_streaming_hides_reasoning_when_requested() {
+    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+        reasoning_answer_output_specs(),
+    )
+    .await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "stream": true,
+            "include_reasoning": false
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let payloads = sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"));
+    assert!(
+        payloads
+            .iter()
+            .all(|payload| !payload["type"].as_str().unwrap().contains("reasoning"))
+    );
+
+    let message_added = payloads
+        .iter()
+        .find(|payload| payload["type"] == "response.output_item.added")
+        .expect("message added");
+    assert_eq!(message_added["output_index"], 0);
+    let completed = &payloads.last().expect("completed event")["response"];
+    assert_eq!(completed["output"][0]["id"], message_added["item"]["id"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -606,6 +750,182 @@ async fn responses_function_call_roundtrip_across_turns() {
     let json: serde_json::Value = serde_json::from_str(&text).expect("decode json");
     assert_eq!(json["status"], "completed", "{text}");
     assert_eq!(json["output"][0]["content"][0]["text"], "hi");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_streaming_emits_ordered_event_sequence() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "stream": true,
+            "input": "hello"
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    let payloads = sse_json_payloads(&text);
+    let types: Vec<&str> =
+        payloads.iter().map(|payload| payload["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        [
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed"
+        ],
+        "{text}"
+    );
+
+    // Every `data:` payload carries a globally increasing sequence number,
+    // and the matching `event:` line names the same event type.
+    let event_names: Vec<&str> =
+        text.lines().filter_map(|line| line.strip_prefix("event: ")).collect();
+    assert_eq!(event_names.len(), payloads.len(), "{text}");
+    for (index, (event_name, payload)) in event_names.iter().zip(&payloads).enumerate() {
+        assert_eq!(*event_name, payload["type"].as_str().unwrap(), "{text}");
+        assert_eq!(payload["sequence_number"], index as u64, "{text}");
+    }
+
+    let created = &payloads[0]["response"];
+    assert_eq!(created["status"], "in_progress");
+    assert_eq!(created["output"], json!([]));
+    assert!(created.get("usage").is_none(), "{text}");
+    assert!(
+        created["id"].as_str().expect("id").starts_with("resp_"),
+        "{text}"
+    );
+
+    // Deltas join to the final message text ('!' is the fake tokenizer's
+    // stop token and is suppressed).
+    let deltas: String = payloads
+        .iter()
+        .filter(|payload| payload["type"] == "response.output_text.delta")
+        .map(|payload| payload["delta"].as_str().unwrap())
+        .collect();
+    assert_eq!(deltas, "hi");
+
+    // The streamed item ID matches the terminal response payload.
+    let added = payloads
+        .iter()
+        .find(|payload| payload["type"] == "response.output_item.added")
+        .expect("added event");
+    let item_id = added["item"]["id"].as_str().expect("item id");
+    assert!(item_id.starts_with("msg_"), "{text}");
+    assert_eq!(payloads[4]["item_id"], item_id);
+
+    let completed = &payloads.last().expect("completed event")["response"];
+    assert_eq!(completed["id"], created["id"]);
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["output"][0]["id"], item_id);
+    assert_eq!(completed["output"][0]["content"][0]["text"], "hi");
+    assert_eq!(completed["usage"]["input_tokens"], 22);
+    assert_eq!(completed["usage"]["output_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_streaming_emits_function_call_events() {
+    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+        weather_tool_call_output_specs(),
+    )
+    .await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "stream": true,
+            "input": "weather in Paris?",
+            "tools": [weather_function_tool()]
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_json_payloads(&text);
+
+    let types: Vec<&str> =
+        payloads.iter().map(|payload| payload["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        [
+            "response.created",
+            "response.in_progress",
+            // Reasoning item ("Need tool.").
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.reasoning_text.delta",
+            "response.reasoning_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            // Function call item.
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            // Trailing message item: the tool parser leaks the final
+            // `}\n</tool_call` chunk as visible text (the same leak is
+            // visible on /v1/chat/completions).
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed"
+        ],
+        "{text}"
+    );
+
+    let completed = &payloads.last().expect("completed event")["response"];
+    let output = completed["output"].as_array().expect("output items");
+    assert_eq!(output.len(), 3, "{text}");
+    assert_eq!(output[0]["type"], "reasoning");
+    assert_eq!(output[0]["content"][0]["text"], "Need tool.");
+    for index in [3, 6] {
+        assert_eq!(payloads[index]["item_id"], output[0]["id"]);
+        assert_eq!(payloads[index]["output_index"], 0);
+        assert_eq!(payloads[index]["content_index"], 0);
+        assert_eq!(payloads[index]["part"]["type"], "reasoning_text");
+    }
+    let call = &output[1];
+    assert_eq!(call["type"], "function_call");
+    assert_eq!(call["name"], "get_weather");
+    assert_eq!(call["arguments"], "{\"city\":\"Paris\"}");
+
+    // The streamed function-call item ID matches the terminal payload.
+    let call_added = payloads
+        .iter()
+        .filter(|payload| payload["type"] == "response.output_item.added")
+        .nth(1)
+        .expect("function call added event");
+    assert_eq!(call_added["item"]["id"], call["id"]);
+    assert_eq!(call_added["output_index"], 1);
+    assert_eq!(call_added["item"]["call_id"], call["call_id"]);
+    let arguments: String = payloads
+        .iter()
+        .filter(|payload| payload["type"] == "response.function_call_arguments.delta")
+        .map(|payload| payload["delta"].as_str().unwrap())
+        .collect();
+    assert_eq!(arguments, "{\"city\":\"Paris\"}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -695,15 +1015,4 @@ async fn responses_store_dependent_features_are_rejected() {
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["status"], "completed");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn responses_streaming_is_rejected_until_supported() {
-    let (app, _engine_task) = test_app_with_engine_handle().await;
-    let response = responses_call(&app, json!({"input": "hello", "stream": true})).await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(error["error"]["param"], "stream");
 }
