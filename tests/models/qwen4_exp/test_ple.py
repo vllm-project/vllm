@@ -10,6 +10,7 @@ import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
+from transformers import Qwen4ExpTextConfig
 
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
@@ -19,11 +20,13 @@ from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -33,7 +36,6 @@ from vllm.models.qwen4_exp.common.ple import (
     compute_ple_shard_overlap,
     copy_ple_embedding_shard_,
 )
-from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
@@ -559,6 +561,34 @@ def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
 def test_ple_embedding_respects_modelopt_exclusion() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
     quant_config = ModelOptNvFp4Config(exclude_modules=[prefix])
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def test_ple_embedding_respects_inc_layer_config() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = INCConfig(
+        weight_bits=4,
+        group_size=128,
+        block_name_to_quantize="model.layers",
+        extra_config={".*ple.*": {"bits": 16, "data_type": "float"}},
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+    quant_config.extra_config = None
+    with pytest.raises(NotImplementedError, match="INCConfig"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix)
+
+
+def test_ple_embedding_is_unquantized_under_quark() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = QuarkConfig({"exclude": [], "global_quant_config": {}})
 
     assert isinstance(
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),

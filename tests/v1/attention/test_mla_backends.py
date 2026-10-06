@@ -538,10 +538,9 @@ def create_and_prepopulate_kv_cache(
     if fp8_attention:
         if use_fp8_ds_mla:
             kv_lora_rank = kv_c_contexts[0].shape[-1]
-            rope_dim = k_pe_contexts[0].shape[-1]
             # 4 * 4: 4 float32 scale values for 128-element tiles
-            # 2 * rope_dim: 16-bit RoPE values
-            kv_entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+            # 2 * 64: 16-bit RoPE values (zero-filled for NoPE models)
+            kv_entry_size = kv_lora_rank + 4 * 4 + 2 * 64
         elif use_nvfp4_ds_mla:
             kv_lora_rank = kv_c_contexts[0].shape[-1]
             rope_dim = k_pe_contexts[0].shape[-1]
@@ -1098,8 +1097,14 @@ def test_flashinfer_mla_dspark_dcp_supports_target_and_draft(monkeypatch):
         pytest.param(False, 3, 1, 0, id="noncausal-multi-token"),
     ],
 )
+@pytest.mark.parametrize("cp_interleave_size", [1, 16, 896])
 def test_tokenspeed_mla_decode_contract(
-    monkeypatch, causal, tokens_per_decode, dcp_world_size, dcp_rank
+    monkeypatch,
+    causal,
+    tokens_per_decode,
+    dcp_world_size,
+    dcp_rank,
+    cp_interleave_size,
 ):
     decode_call = None
     num_decodes = 2
@@ -1135,7 +1140,7 @@ def test_tokenspeed_mla_decode_contract(
     impl = object.__new__(tokenspeed_mla_module.TokenspeedMLAImpl)
     impl.dcp_world_size = dcp_world_size
     impl.dcp_rank = dcp_rank
-    impl.cp_kv_cache_interleave_size = 1
+    impl._parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
     impl.need_to_return_lse_for_decode = True
     impl.kv_lora_rank = kv_lora_rank
     impl.qk_rope_head_dim = qk_rope_head_dim
@@ -1164,6 +1169,8 @@ def test_tokenspeed_mla_decode_contract(
         dtype=torch.float8_e4m3fn,
     )
 
+    # NIXL may resolve the interleave size after the implementation is created.
+    impl._parallel_config.cp_kv_cache_interleave_size = cp_interleave_size
     out, lse = impl.forward_mqa(
         q,
         kv_cache,
@@ -1194,6 +1201,142 @@ def test_tokenspeed_mla_decode_contract(
     assert decode_call["return_lse"] is True
     assert decode_call["cp_world"] == dcp_world_size
     assert decode_call["cp_rank"] == dcp_rank
+    assert decode_call.get("cp_interleave_size", 1) == cp_interleave_size
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.TOKENSPEED_MLA not in BACKENDS_TO_TEST,
+    reason="TokenSpeed MLA requires an SM100-family GPU and tokenspeed-mla",
+)
+@pytest.mark.parametrize(
+    ("cp_interleave_size", "seq_len"),
+    [
+        pytest.param(1, 5, id="token-interleave-empty-local-ranks"),
+        pytest.param(1, 8 + 17, id="token-interleave-full-cycle"),
+        pytest.param(896, 5, id="block-interleave-empty-local-ranks"),
+        pytest.param(896, 8 * 896 + 17, id="block-interleave-full-cycle"),
+    ],
+)
+def test_tokenspeed_mla_dcp_matches_unsharded_decode(cp_interleave_size, seq_len):
+    from tokenspeed_mla import tokenspeed_mla_decode
+
+    from vllm.v1.attention.ops.dcp import (
+        _lse_weighted_combine,
+        mask_dcp_empty_shards_,
+    )
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    dcp_world_size = 8
+    kernel_block_size = 64
+    num_heads = 128
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    head_size = kv_lora_rank + qk_rope_head_dim
+
+    def make_paged_cache(tokens: torch.Tensor):
+        # Empty DCP ranks still have the null block in vLLM's physical cache.
+        num_pages = max(1, cdiv(tokens.shape[0], kernel_block_size))
+        cache = torch.zeros(
+            num_pages,
+            kernel_block_size,
+            head_size,
+            dtype=tokens.dtype,
+            device=device,
+        )
+        cache.view(-1, head_size)[: tokens.shape[0]].copy_(tokens)
+        block_table = torch.arange(
+            num_pages, dtype=torch.int32, device=device
+        ).unsqueeze(0)
+        return cache, block_table
+
+    # Four query positions exercise the MTP/DSpark causal-mask path.
+    query = (torch.randn(1, 4, num_heads, head_size, device=device) * 0.1).to(
+        torch.float8_e4m3fn
+    )
+    global_tokens = (torch.randn(seq_len, head_size, device=device) * 0.1).to(
+        torch.float8_e4m3fn
+    )
+    workspace = tokenspeed_mla_module._get_workspace(device, num_heads, kv_lora_rank)
+    global_cache, global_block_table = make_paged_cache(global_tokens)
+    global_seq_len = torch.tensor([seq_len], dtype=torch.int32, device=device)
+    reference, _ = tokenspeed_mla_decode(
+        query=query,
+        kv_cache=global_cache,
+        workspace_buffer=workspace,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        block_tables=global_block_table,
+        seq_lens=global_seq_len,
+        max_seq_len=seq_len,
+        softmax_scale=head_size**-0.5,
+        return_lse=True,
+    )
+
+    positions = torch.arange(seq_len, device=device)
+    owners = positions.div(cp_interleave_size, rounding_mode="floor").remainder(
+        dcp_world_size
+    )
+    max_local_seq_len = (
+        cdiv(seq_len, dcp_world_size * cp_interleave_size) * cp_interleave_size
+    )
+    partial_outputs = []
+    partial_lses = []
+    for dcp_rank in range(dcp_world_size):
+        local_tokens = global_tokens[owners == dcp_rank]
+        local_cache, local_block_table = make_paged_cache(local_tokens)
+        local_seq_len = torch.tensor(
+            [local_tokens.shape[0]], dtype=torch.int32, device=device
+        )
+        impl = object.__new__(tokenspeed_mla_module.TokenspeedMLAImpl)
+        impl.dcp_world_size = dcp_world_size
+        impl.dcp_rank = dcp_rank
+        impl._parallel_config = SimpleNamespace(
+            cp_kv_cache_interleave_size=cp_interleave_size
+        )
+        impl.need_to_return_lse_for_decode = True
+        impl.kv_lora_rank = kv_lora_rank
+        impl.qk_rope_head_dim = qk_rope_head_dim
+        impl.num_heads = num_heads
+        impl.scale = head_size**-0.5
+        impl.softmax_scale = None
+        impl.output_scale = None
+        impl._workspace_buffer = workspace
+        metadata = SimpleNamespace(
+            num_decodes=1,
+            num_decode_tokens=query.shape[1],
+            max_seq_len=max_local_seq_len,
+            causal=True,
+            decode=SimpleNamespace(
+                block_table=local_block_table,
+                seq_lens=local_seq_len,
+                dcp_tot_seq_lens=global_seq_len,
+            ),
+        )
+        output, lse = impl.forward_mqa(
+            query.view(-1, num_heads, head_size),
+            local_cache,
+            metadata,
+            SimpleNamespace(_q_scale_float=1.0, _k_scale_float=1.0),
+        )
+        # Empty-shard normalization belongs to the downstream DCP combine path.
+        mask_dcp_empty_shards_(
+            lse,
+            local_seq_len,
+            torch.tensor([0, query.shape[1]], dtype=torch.int32, device=device),
+        )
+        partial_outputs.append(
+            output.view(query.shape[1], num_heads, kv_lora_rank).float()
+        )
+        partial_lses.append(lse.view(query.shape[1], num_heads).float())
+
+    # TokenSpeed returns base-2 LSE. Merge the per-rank partial attention states
+    # the same way MLADCPManager does before comparing to the unsharded result.
+    merged = _lse_weighted_combine(
+        torch.stack(partial_outputs), torch.stack(partial_lses), is_lse_base_on_e=False
+    ).unsqueeze(0)
+    # FP8 attention rounds differently when KV is partitioned across DCP ranks.
+    torch.testing.assert_close(merged, reference.float(), atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("is_fp8_kvcache", [False, True], ids=["bf16", "fp8"])
