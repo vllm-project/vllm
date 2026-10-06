@@ -8,7 +8,8 @@ expert routing + W4A16 dequant + dot product with atomic output accumulation.
 Weight format (per expert, same as the dense RDNA3 W4A16 kernel):
   - Packed int32 ``[E, K/8, N]`` with exllama shuffle
   - Scales ``[E, groups, N]`` in activation dtype
-  - Zero points ``[E, groups, N/8]`` packed int32 (synthesized, symmetric only)
+  - Zero points ``[E, groups, N/8]`` packed int32, GPTQ v2 format (from the
+    checkpoint, or synthesized for symmetric weights)
 """
 
 import torch
@@ -34,6 +35,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static,
     kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
 )
 from vllm.platforms import current_platform
 
@@ -98,9 +101,12 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # Symmetric int4 weights only: the kernel consumes synthesized zero
-        # points and has no path for checkpoint zero points.
-        return activation_key is None and weight_key in (kInt4Static, kInt4Static32)
+        return activation_key is None and weight_key in (
+            kInt4Static,
+            kInt4Static32,
+            kInt4StaticAsym,
+            kInt4Static32Asym,
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -211,6 +217,7 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             top_k,
             block_size_m,
             apply_router_weight_on_input,
+            use_v2_format=True,
         )
 
         self.activation(activation, act_out, gate_up_out)
@@ -232,4 +239,5 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             block_size_m,
             not apply_router_weight_on_input,
             output_topk=top_k,
+            use_v2_format=True,
         )
