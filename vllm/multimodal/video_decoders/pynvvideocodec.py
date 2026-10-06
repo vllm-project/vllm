@@ -525,7 +525,7 @@ class PyNvVideoCodecVideoBackendMixin:
 
             invalid_video = False
             try:
-                max_width, max_height = cls._validate_decoder_caps(
+                decoder_max_width, decoder_max_height = cls._validate_decoder_caps(
                     temp_path,
                     nvc,
                     max_width=max_width,
@@ -540,7 +540,7 @@ class PyNvVideoCodecVideoBackendMixin:
 
             try:
                 gpu_source = cls._read_source_metadata(
-                    temp_path, nvc, max_width, max_height
+                    temp_path, nvc, decoder_max_width, decoder_max_height
                 )
             except Exception as exc:
                 if not isinstance(exc, _pynvvideocodec_exception_types(nvc)):
@@ -557,12 +557,20 @@ class PyNvVideoCodecVideoBackendMixin:
             pool = get_mm_gpu_ipc_pool()
             if pool is None or raw_frame_bytes == 0:
                 frames = cls._decode_to_pinned_host(
-                    temp_path, frame_idx, nvc, max_width, max_height
+                    temp_path,
+                    frame_idx,
+                    nvc,
+                    decoder_max_width,
+                    decoder_max_height,
                 )
             else:
                 with pool.acquire(raw_frame_bytes):
                     frames = cls._decode_to_pinned_host(
-                        temp_path, frame_idx, nvc, max_width, max_height
+                        temp_path,
+                        frame_idx,
+                        nvc,
+                        decoder_max_width,
+                        decoder_max_height,
                     )
         finally:
             with suppress(FileNotFoundError):
