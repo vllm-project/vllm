@@ -31,6 +31,9 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.model_executor.layers.fusion.quant_activation import (
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -55,6 +58,13 @@ TOLERANCES = {
     torch.float32: (5e-3, 5e-3),
     torch.bfloat16: (3e-2, 2e-2),
 }
+
+
+def test_lora_linear_requires_unquantized_input() -> None:
+    layer = RowParallelLinearWithLoRA.__new__(RowParallelLinearWithLoRA)
+    layer._input_quant_key = object()
+    assert get_input_quant_key(layer) is None
+
 
 pytestmark = [
     pytest.mark.skipif(
@@ -116,8 +126,7 @@ def clean_cache_reset_device(reset_default_device):
 
 @pytest.fixture(autouse=True)
 def skip_cuda_with_stage_false(request):
-    """
-    On cuda-like platforms, we use the same kernels for prefill and decode
+    """On cuda-like platforms, we use the same kernels for prefill and decode
     stage, and 'stage' is generally ignored, so we only need to test once.
     """
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
@@ -143,8 +152,8 @@ def get_random_id_to_index(
         num_slots: The number of slots in the mapping. Must be larger
             than num_loras.
         log: Whether to log the output.
-    """
 
+    """
     if num_loras > num_slots:
         raise ValueError(
             f"num_loras is higher than num_slots: {num_loras} > {num_slots}. "
@@ -180,8 +189,8 @@ def populate_loras(
         repeats: must only be set for column parallel packed
             layers. Indicates the number of loras to compose
             together to create a single lora layer.
-    """
 
+    """
     # Dictionary that maps the lora ID to the
     # corresponding lora weights.
     lora_dict: dict[int, LoRALayerWeights] = dict()
@@ -236,8 +245,8 @@ def create_random_inputs(
         input_range: the range of values to include in the input.
             input_range[0] <= possible input values < input_range[1]
         input_type: the type of values in the input.
-    """
 
+    """
     low, high = input_range
 
     inputs: list[torch.Tensor] = []

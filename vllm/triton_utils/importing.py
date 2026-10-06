@@ -124,10 +124,12 @@ class TritonPlaceholder(types.ModuleType):
 class TritonLanguagePlaceholder(types.ModuleType):
     def __init__(self):
         super().__init__("triton.language")
-        self.constexpr = None
+        self.constexpr = lambda value: value
         self.dtype = None
         self.int64 = None
         self.int32 = None
+        self.uint8 = None
+        self.pointer_type = lambda element_ty: None
         self.tensor = None
         self.exp = None
         self.exp2 = None
