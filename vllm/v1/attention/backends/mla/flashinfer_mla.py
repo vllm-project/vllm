@@ -22,7 +22,14 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.cake_routes import (
+    KIMI_K3_MLA_ROUTE,
+    cake_route_enabled,
+    kimi_k3_mla_decode_admits,
+)
+from vllm.utils.flashinfer import has_flashinfer_cake_kimi_k3_mla
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -293,6 +300,22 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 "alibi_slopes, sliding_window, logits_soft_cap"
             )
 
+        # Opt-in Cake Kimi-K3 MLA decode route (VLLM_CAKE_ROUTES=kimi_k3_mla);
+        # admission is decided per decode-call shape in forward_mqa.
+        self._cake_kimi_k3_mla = cake_route_enabled(KIMI_K3_MLA_ROUTE)
+        self._cake_kimi_k3_mla_decision: tuple[tuple[Any, ...], bool] | None = None
+        self._compute_capability: tuple[int, int] | None = None
+        if self._cake_kimi_k3_mla and not has_flashinfer_cake_kimi_k3_mla():
+            logger.warning_once(
+                "VLLM_CAKE_ROUTES=kimi_k3_mla: the installed FlashInfer has no "
+                "Cake Kimi-K3 MLA decode backend; keeping the default backend."
+            )
+            self._cake_kimi_k3_mla = False
+        if self._cake_kimi_k3_mla:
+            capability = current_platform.get_device_capability()
+            if capability is not None:
+                self._compute_capability = (capability.major, capability.minor)
+
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
                 "Encoder self-attention and "
@@ -400,6 +423,40 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
             # fall back to cute-dsl for those.
             decode_backend = _select_mla_decode_backend(runtime_num_heads)
+        if self._cake_kimi_k3_mla and decode_backend is None and not return_lse:
+            # Decided once per call-shape signature (no batch dimension).
+            signature = (
+                cum_seq_lens_q is None,
+                tuple(q.shape[1:]),
+                q.dtype,
+                tuple(kv_c_and_k_pe_cache.shape[-2:]),
+                kv_c_and_k_pe_cache.dtype,
+            )
+            decision = self._cake_kimi_k3_mla_decision
+            if not isinstance(decision, tuple) or decision[0] != signature:
+                admitted = cum_seq_lens_q is None and kimi_k3_mla_decode_admits(
+                    q,
+                    kv_c_and_k_pe_cache,
+                    kv_lora_rank=self.kv_lora_rank,
+                    qk_rope_head_dim=self.qk_rope_head_dim,
+                    compute_capability=self._compute_capability,
+                )
+                logger.info_once(
+                    "Cake Kimi-K3 MLA decode route %s: query %s %s, kv_cache %s "
+                    "page %d%s",
+                    "taken"
+                    if admitted
+                    else "not admitted (keeping the FlashInfer default backend)",
+                    tuple(q.shape[1:]),
+                    q.dtype,
+                    kv_c_and_k_pe_cache.dtype,
+                    int(kv_c_and_k_pe_cache.shape[-2]),
+                    ", ragged query lengths" if cum_seq_lens_q is not None else "",
+                )
+                decision = (signature, admitted)
+                self._cake_kimi_k3_mla_decision = decision
+            if decision[1]:
+                decode_backend = "cake"
         if cum_seq_lens_q is not None:
             # Neither decode backend returns LSE on the ragged path
             # (flashinfer #3238); DCP, the only LSE consumer, took the uniform

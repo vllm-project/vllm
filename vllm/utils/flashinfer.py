@@ -490,6 +490,41 @@ def has_flashinfer_fused_kda_decode() -> bool:
     )
 
 
+def _fused_kda_decode_has_cake_signature(fn: Callable[..., Any]) -> bool:
+    """``fused_kda_decode`` accepts ``backend`` and ``state_indices_mode``, i.e.
+    the FlashInfer build carries the Cake fused KDA decode backend."""
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "backend" in params and "state_indices_mode" in params
+
+
+@functools.cache
+def has_flashinfer_cake_fused_kda_decode() -> bool:
+    """Return whether FlashInfer fused KDA decode offers ``backend="cake"``."""
+    if not has_flashinfer_fused_kda_decode():
+        return False
+    mod = _get_submodule("flashinfer.kda_decode")
+    return mod is not None and _fused_kda_decode_has_cake_signature(
+        mod.fused_kda_decode
+    )
+
+
+@functools.cache
+def has_flashinfer_cake_kimi_k3_mla() -> bool:
+    """Return whether FlashInfer carries the Cake Kimi-K3 MLA decode backend
+    (``trtllm_batch_decode_with_kv_cache_mla(..., backend="cake")``)."""
+    if not has_flashinfer():
+        return False
+    try:
+        return importlib.util.find_spec("flashinfer.mla.cake_kimi_k3_mla") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 @functools.cache
 def has_flashinfer_trtllm_fused_moe() -> bool:
     """Return `True` if FlashInfer TRTLLM fused MoE is available."""
@@ -1325,6 +1360,8 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_recurrent_kda",
+    "has_flashinfer_cake_fused_kda_decode",
+    "has_flashinfer_cake_kimi_k3_mla",
     "has_flashinfer_fused_kda_decode",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_bf16_fp4",
