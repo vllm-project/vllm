@@ -43,22 +43,20 @@ class TestGreedyArgmax:
 
 
 class TestFusedGumbelArgmax:
-    @pytest.mark.parametrize("vocab_size", VOCAB_SIZES)
-    def test_distribution_chi_squared(self, vocab_size: int):
+    def test_distribution_chi_squared(self):
         """Verify sampling distribution via chi-squared goodness of fit."""
         # Small support is enough for chi-squared power; large-vocab bias
         # is covered by test_noise_not_sliding_window (#59786).
-        small_vocab = min(vocab_size, 100)
+        small_vocab = 100
         logits = torch.randn(1, small_vocab, dtype=torch.float32)
         probs = logits.softmax(dim=-1).squeeze(0)
 
         n_samples = 100_000
-        counts = torch.zeros(small_vocab)
-        for trial in range(n_samples):
-            seed = torch.tensor([trial * 7 + 13], dtype=torch.long)
-            tile = logits.expand(1, -1).contiguous()
-            idx = torch.ops._C.fused_gumbel_argmax(tile, seed)
-            counts[idx.item()] += 1
+        seeds = torch.arange(n_samples, dtype=torch.long) * 7 + 13
+        idx = torch.ops._C.fused_gumbel_argmax(
+            logits.expand(n_samples, -1).contiguous(), seeds
+        )
+        counts = torch.bincount(idx, minlength=small_vocab).float()
 
         expected = probs * n_samples
         mask = expected > 5
@@ -155,6 +153,18 @@ class TestFusedGumbelArgmax:
             logits, torch.arange(256, dtype=torch.long)
         )
         assert (tokens == 0).all()
+
+    def test_tied_huge_logits_not_index_biased(self):
+        """Noise must still break ties when logits sit at float32 max."""
+        logits = torch.full(
+            (4096, 2), torch.finfo(torch.float32).max, dtype=torch.float32
+        )
+        tokens = torch.ops._C.fused_gumbel_argmax(
+            logits, torch.arange(4096, dtype=torch.long)
+        )
+        frac0 = (tokens == 0).float().mean().item()
+        assert set(tokens.tolist()) == {0, 1}, tokens.unique().tolist()
+        assert 0.35 < frac0 < 0.65, f"P(index 0)={frac0:.3f} expected ~0.5"
 
     def test_serial_batch1_matches_batched(self):
         """OpenMP rows must match the batch=1 serial path."""
