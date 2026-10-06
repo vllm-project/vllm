@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.mamba_utils import (
     MambaCopyBuffers,
     MambaSpecDecodeGPUContext,
-    _reinterpret_u64_as_i64,
     batch_memcpy,
     collect_mamba_copy_meta,
     do_mamba_copy_block,
@@ -232,7 +231,7 @@ class _FakeDataPtrTensor:
         return self._tensor[item]
 
 
-def test_reinterpret_u64_as_i64_preserves_pointer_bits():
+def test_store_device_ptr_preserves_pointer_bits():
     ptrs = [
         0,
         1,
@@ -241,15 +240,15 @@ def test_reinterpret_u64_as_i64_preserves_pointer_bits():
         (1 << 63) + 1234,
         (1 << 64) - 1,
     ]
-    ptr_tensor = torch.zeros(len(ptrs), dtype=torch.int64)
+    ptr_tensor = torch.zeros(len(ptrs), dtype=torch.uint64)
 
     for idx, ptr in enumerate(ptrs):
-        ptr_tensor[idx] = _reinterpret_u64_as_i64(ptr)
+        ptr_tensor[idx] = ptr
 
     assert ptr_tensor.numpy().view(np.uint64).tolist() == ptrs
 
 
-def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
+def test_gpu_context_stores_high_data_ptrs_in_uint64_metadata():
     cfg = _TestConfig(num_layers=1)
     device = torch.device("cpu")
     kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
@@ -281,13 +280,8 @@ def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
         kv_cache_config, forward_context, _COPY_FUNCS, [block_table]
     )
 
-    assert gpu_ctx.state_base_addrs.tolist() == [
-        _reinterpret_u64_as_i64(conv_ptr),
-        _reinterpret_u64_as_i64(temporal_ptr),
-    ]
-    assert gpu_ctx.block_table_ptrs.tolist() == [
-        _reinterpret_u64_as_i64(block_table_ptr)
-    ]
+    assert gpu_ctx.state_base_addrs.tolist() == [conv_ptr, temporal_ptr]
+    assert gpu_ctx.block_table_ptrs.tolist() == [block_table_ptr]
 
 
 def _make_postprocess_scheduler_output(
