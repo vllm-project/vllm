@@ -43,15 +43,28 @@ class SynthIDWatermarker(Watermarker):
     @staticmethod
     def _update_scores(
         scores: torch.Tensor,
-        g_values: torch.Tensor,
+        words: torch.Tensor,
+        depth: int,
     ) -> torch.Tensor:
-        """Reweight [batch, vocab] scores with [batch, vocab, depth] bits."""
+        """Reweight [batch, vocab] scores using bits from Philox words.
+
+        Each Philox word provides up to 32 binary g-values for a candidate token.
+        The SynthID reweighting is applied sequentially across these bits.
+
+        Extract each bit plane lazily instead of materializing a
+        [batch, vocab, depth] tensor. This keeps temporary memory proportional to
+        [batch, vocab] while preserving the same depth-ordered reweighting.
+        """
         probs = torch.softmax(scores, dim=1)
-        for depth in range(g_values.shape[-1]):
-            g = g_values[:, :, depth]
+
+        for bit in range(depth):
+            # Extract one binary g-value per candidate from the word: [B, V] -> [B, V].
+            g = ((words >> bit) & 1).to(scores.dtype)
             # Sum each row's probability mass on g=1 candidates: [B, V] -> [B, 1].
             g_mass = (g * probs).sum(dim=1, keepdim=True)
+            # Apply one SynthID reweighting step.
             probs = probs * (1 + g - g_mass)
+
         log_probs = torch.log(probs)
         return torch.where(
             torch.isfinite(log_probs),
@@ -66,12 +79,13 @@ class SynthIDWatermarker(Watermarker):
     ) -> torch.Tensor:
         """Reweight logits using bits of one Philox word per candidate."""
         vocabulary = torch.arange(logits.shape[-1], device=logits.device)
-        # [B, context_width] and [V] produce one word per candidate: [B, V].
+
+        # [B, context_width] and [V] produce one Philox word per candidate:
+        # [B, V]. The individual SynthID bits are extracted lazily during
+        # reweighting to avoid a [B, V, depth] intermediate tensor.
         words = self.prf.uint32(contexts, vocabulary)
-        bit_positions = torch.arange(self.depth, device=logits.device)
-        # Broadcast [B, V, 1] against [depth] to get [B, V, depth] g values.
-        g_values = ((words.unsqueeze(-1) >> bit_positions) & 1).to(logits.dtype)
-        return self._update_scores(logits, g_values)
+
+        return self._update_scores(logits, words, self.depth)
 
     def sample(
         self,
