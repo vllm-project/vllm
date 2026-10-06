@@ -398,7 +398,9 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 
 ### For NVIDIA GB-series GPUs
 
-GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set `--enable-cumem-allocator` or `--enable-sleep-mode` flags, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
+GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set the `--enable-cumem-allocator` flag, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
+
+With `--enable-sleep-mode`, NIXL sets `UCX_RCACHE_ENABLE=n` and `UCX_TLS=^cuda_ipc` for the whole worker process (other UCX users and child processes inherit them) unless they are already set: UCX's registration cache and a peer's cuda_ipc import would keep the slept KV cache resident. Without cuda_ipc, P/D on one node transfers through the NIC (RDMA loopback) instead of NVLink. Routers must forward `kv_transfer_params` unchanged, including `remote_registration_epoch`, which tells decoders to handshake again after the prefiller woke up.
 
 ## Experimental Feature
 

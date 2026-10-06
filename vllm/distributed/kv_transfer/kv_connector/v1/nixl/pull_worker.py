@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -48,6 +49,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        deferred: list[tuple[ReqId, ReqMeta]] = []
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
@@ -72,26 +74,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Aborted cleanup requests have already been removed from the scheduler.
             if meta.awaiting_kvs or any(meta.local_block_ids):
                 self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_nixl_handshake(req_id, remote_engine_id, meta)
-                        continue
-
-            # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
+            if not self._start_read(req_id, meta):
+                deferred.append((req_id, meta))
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
             req_id, meta = self._ready_requests.get_nowait()
-            assert meta.remote is not None
-            if meta.remote.engine_id not in self._remote_agents:
-                # The engine was released after its handshake completed, so
-                # handshake again. This fails if the engine is gone.
-                self._background_nixl_handshake(req_id, meta.remote.engine_id, meta)
-                continue
-            self._read_blocks_for_req(req_id, meta)
+            if not self._start_read(req_id, meta):
+                deferred.append((req_id, meta))
+        for entry in deferred:
+            self._ready_requests.put(entry)
 
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
@@ -136,6 +128,26 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Send heartbeats to P-side engines to keep KV blocks alive while
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
+
+    def _start_read(self, req_id: ReqId, meta: ReqMeta) -> bool:
+        """Read, or handshake first if the agent is missing or older than the
+        request's registration; False while reads through the old agent run."""
+        assert meta.remote is not None
+        engine_id = meta.remote.engine_id
+        loaded = engine_id in self._remote_agents  # read once: handshakes install
+        if loaded and (
+            self._remote_registration_epochs.get(engine_id, 0)
+            < meta.remote.registration_epoch
+        ):
+            if engine_id in self._engines_with_inflight_transfers():
+                return False
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            loaded = False
+        if loaded:
+            self._read_blocks_for_req(req_id, meta)
+        else:
+            self._background_nixl_handshake(req_id, engine_id, meta)
+        return True
 
     def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
         """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""

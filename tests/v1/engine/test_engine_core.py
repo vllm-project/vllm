@@ -724,6 +724,32 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
     core.model_executor.discard.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("tags", "published"),
+    [(None, True), (["kv_cache"], True), (["weights"], False)],
+    ids=["all", "kv_cache", "weights"],
+)
+def test_wake_up_republishes_kv_connector_handshake_metadata(tags, published):
+    """A wake-up that re-registers the KV cache hands the workers' new handshake
+    metadata to the scheduler's connector, after the executor woke up."""
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = False
+    calls: list[str] = []
+    core.model_executor.wake_up.side_effect = lambda tags: calls.append("wake_up")
+    core.model_executor.get_kv_connector_handshake_metadata.return_value = [
+        {(0, 0): "metadata"},
+        None,
+    ]
+    kv_connector = core.scheduler.get_kv_connector.return_value
+    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = (
+        lambda metadata: calls.append(f"publish {metadata}")
+    )
+
+    assert EngineCore.wake_up(core, tags)
+    publish = ["publish {(0, 0): 'metadata'}"] if published else []
+    assert calls == ["wake_up", *publish]
+
+
 @pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
