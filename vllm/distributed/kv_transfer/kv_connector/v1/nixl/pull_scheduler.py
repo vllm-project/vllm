@@ -226,7 +226,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             if group.role is KVCacheGroupRole.HISPARSE_SOURCE
         )
         num_prefix_pages = num_computed_blocks[indexer_group_id]
-        self._reqs_alias_block_ids[request_id] = {
+        alias_block_ids = {
             group_id: [
                 block.block_id
                 for block in blocks.blocks[group_id][num_prefix_pages:]
@@ -235,6 +235,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             for group_id, group in enumerate(groups)
             if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
         }
+        self._reqs_alias_block_ids[request_id] = alias_block_ids
+        assert self.hisparse is not None
+        self.hisparse.record_gpu_import(
+            request_id,
+            num_prefix_pages + max(map(len, alias_block_ids.values()), default=0),
+        )
         computed = list(num_computed_blocks)
         computed[source_group_id] = num_prefix_pages
         return tuple(computed)

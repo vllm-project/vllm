@@ -686,6 +686,53 @@ def test_nixl_hisparse_gpu_landing_skips_local_prefix_pages():
     assert num_computed[:2] == (2, 2)
 
 
+def test_nixl_hisparse_gpu_landed_pages_are_written_back_unmirrored():
+    """No forward mirrors rows NIXL wrote into resident pages."""
+    manager = make_hisparse_kv_cache_manager(
+        32, 16, enable_caching=True, transfer_device_cache=True
+    )
+    connector = make_nixl_hisparse_scheduler(manager)
+    tokens = list(range(3 * HISPARSE_BLOCK_SIZE))
+    request = make_request("landed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "remote_block_ids": ([0, 1, 2], [3, 4, 5]),
+        "remote_engine_id": "prefill",
+        "remote_request_id": "prefill-request",
+        "remote_host": "localhost",
+        "remote_port": 1234,
+    }
+    num_imported = len(tokens)
+    assert connector.get_num_new_matched_tokens(request, 0) == (num_imported, True)
+    assert (
+        allocate_external_prefix(manager, request, num_imported, gpu_landing=False)
+        is not None
+    )
+    connector.update_state_after_alloc(
+        request, manager.get_blocks(request.request_id), num_imported
+    )
+    request.num_computed_tokens = num_imported
+    for _ in range(HISPARSE_BLOCK_SIZE):
+        request.append_output_token_ids(0)
+    assert (
+        _allocate_scheduled(manager, request, num_new_tokens=HISPARSE_BLOCK_SIZE)
+        is not None
+    )
+
+    transfers = get_hisparse_coordinator(manager).build_offload_command()
+    unmirrored = {
+        transfer.host_block_id: transfer.unmirrored
+        for transfer in transfers.page_transfers
+    }
+    source = manager.get_blocks("landed").blocks[0]
+    assert unmirrored == {
+        source[0].block_id: True,
+        source[1].block_id: True,
+        source[2].block_id: True,
+        source[3].block_id: False,
+    }
+
+
 def test_nixl_hisparse_host_fallback_pulls_into_host_pages():
     """After a failed GPU admission, the retry must pull into host source pages."""
     manager = make_hisparse_kv_cache_manager(32, 16, transfer_device_cache=True)

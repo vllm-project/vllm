@@ -69,6 +69,8 @@ class _HiSparseRequestState:
     host_import: bool | None = None
     # Prefix pages whose GPU copies are adopted after the admitting allocation.
     pages_to_adopt: int = 0
+    # Leading pages a connector wrote straight into resident pages.
+    num_unmirrored_pages: int = 0
 
 
 @dataclass
@@ -550,6 +552,10 @@ class HiSparseCoordinator:
         """Note a prefix an external load is populating in host pages."""
         self._pending_imports[request_id] = num_tokens
 
+    def record_gpu_import(self, request_id: str, num_pages: int) -> None:
+        """Note leading pages an external load writes into resident pages."""
+        self._get_request_state(request_id).num_unmirrored_pages = num_pages
+
     def finish_host_import(self, request_id: str, *, failed: bool) -> None:
         num_tokens = self._pending_imports.pop(request_id, None)
         if num_tokens is not None and not failed:
@@ -610,6 +616,7 @@ class HiSparseCoordinator:
             resident_block_ids=tuple(block.block_id for block in blocks),
             after_forward=after_forward,
             restore=restore,
+            unmirrored=not restore and page_idx < state.num_unmirrored_pages,
         )
         self.pending_spills[spill_id] = _PendingSpill(
             transfer_id=spill_id,

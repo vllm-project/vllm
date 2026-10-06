@@ -536,6 +536,22 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy():
     worker._enqueue_transfers.assert_not_called()
 
 
+def test_hisparse_eager_mirror_copies_unmirrored_pages():
+    worker = _make_hisparse_worker()
+    worker.cache_handles = [
+        SimpleNamespace(runtime=SimpleNamespace(eager_host_mirror=True))
+    ]
+    worker._record_transfer_completion = MagicMock()
+    worker._enqueue_transfers = MagicMock()
+    mirrored = SparseKVPageTransfer(7, 2, (1,), after_forward=True)
+    landed = SparseKVPageTransfer(8, 3, (4,), after_forward=True, unmirrored=True)
+
+    worker._submit_transfers([mirrored, landed])
+
+    worker._record_transfer_completion.assert_called_once_with([mirrored])
+    worker._enqueue_transfers.assert_called_once_with([landed])
+
+
 @pytest.mark.parametrize("is_host_writer", [False, True])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_hisparse_tail_restore_preserves_imported_rows(
