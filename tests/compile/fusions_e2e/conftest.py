@@ -6,13 +6,18 @@ from collections import defaultdict
 import pytest
 import regex as re
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
 
 
-def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+def run_model(
+    vllm_runner,
+    compile_config: CompilationMode | CompilationConfig,
+    model: str,
+    **model_kwargs,
+):
     """Run a model with the given compilation config for E2E fusion tests."""
     compilation_config = (
         compile_config
@@ -34,38 +39,48 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     # No cudagraphs by default
     if compilation_config.cudagraph_mode is None:
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    llm = LLM(
-        model=model,
+
+    # trust_remote_code/enable_chunked_prefill/block_size/kernel_config are
+    # pinned to LLM()'s own defaults since VllmRunner overrides them for
+    # other test needs (e.g. it forces block_size=16, which some attention
+    # backends like FLASHINFER_MLA reject, and disables JIT warmup).
+    model_kwargs.setdefault("kernel_config", {"enable_jit_warmup": True})
+    with vllm_runner(
+        model,
         compilation_config=compilation_config,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        block_size=None,
         **model_kwargs,
-    )
-    outputs = llm.generate(prompts, sampling_params)
+    ) as vllm_model:
+        llm = vllm_model.llm
+        outputs = llm.generate(prompts, sampling_params)
 
-    # Print the outputs.
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        # Print the outputs.
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
-    # Get the compile ranges endpoints after vllm config post init
-    # in order to compute compile ranges correctly
-    compilation_config.compile_ranges_endpoints = (
-        llm.llm_engine.vllm_config.compilation_config.compile_ranges_endpoints
-    )
+        # Get the compile ranges endpoints after vllm config post init
+        # in order to compute compile ranges correctly
+        compilation_config.compile_ranges_endpoints = (
+            llm.llm_engine.vllm_config.compilation_config.compile_ranges_endpoints
+        )
 
-    # Fetch match table from each worker via RPC and sum across workers.
-    worker_tables = llm.llm_engine.engine_core.collective_rpc(
-        "get_compilation_match_table"
-    )
-    combined: defaultdict[str, int] = defaultdict(int)
-    for table in worker_tables:
-        for k, v in table.items():
-            combined[k] += v
-    return dict(combined)
+        # Fetch match table from each worker via RPC and sum across workers.
+        worker_tables: list[dict[str, int]] = llm.llm_engine.engine_core.collective_rpc(
+            "get_compilation_match_table"
+        )
+        combined: defaultdict[str, int] = defaultdict(int)
+        for table in worker_tables:
+            for k, v in table.items():
+                combined[k] += v
+        return dict(combined)
 
 
 @pytest.fixture
-def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
+def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn, vllm_runner):
     def run(
         model_name: str,
         matches: Matches,
@@ -88,11 +103,8 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         backend_name = attn_backend.backend.name.lower()
         requires_mla = "deepseek" in model_name.lower()
         is_mla = "mla" in backend_name
-        # DeepSeek V3.2 uses sparse MLA
-        requires_sparse = "v3.2" in model_name.lower()
-        is_sparse = "sparse" in backend_name
 
-        if requires_mla != is_mla or requires_sparse != is_sparse:
+        if requires_mla != is_mla:
             pytest.skip(
                 f"Incompatible model '{model_name}' and "
                 f"attention backend '{attn_backend.backend.name}'"
@@ -126,22 +138,6 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         # models (e.g. Llama-4-Scout-FP8) at 16384 tokens may trigger OOM.
         model_kwargs.setdefault("max_num_batched_tokens", 8192)
 
-        # Sparse MLA models (DSv3.2) hit an over-strict inductor assertion in
-        # decompose_auto_functionalized when +rotary_embedding is forced into
-        # the compile graph. Disable qk_norm+rope fusion (which auto-enables
-        # +rotary_embedding) for this combo to avoid the known torch bug.
-        # TODO: remove once upstream torch fix lands.
-        if requires_sparse:
-            if "pass_config" in compilation_config:
-                compilation_config["pass_config"].enable_qk_norm_rope_fusion = False
-                matches_check = [m for m in matches_check if m != "norm_rope_fusion"]
-            # DSv3.2 sparse indexer uses persistent_topk with k=config.index_topk
-            # (2048 for the default config). max_model_len must be >= index_topk
-            # or the topk kernel raises "k out of range" at runtime.
-            model_kwargs["max_model_len"] = max(
-                model_kwargs.get("max_model_len", 0), 2048
-            )
-
         # Always compile the full graph instead of piecewise
         if not compilation_config["use_inductor_graph_partition"]:
             compilation_config["splitting_ops"] = []
@@ -154,7 +150,9 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         )
 
         with caplog_mp_spawn(logging.DEBUG) as log_holder:
-            match_table = run_model(full_compilation_config, model_name, **model_kwargs)
+            match_table = run_model(
+                vllm_runner, full_compilation_config, model_name, **model_kwargs
+            )
 
         num_compile_ranges = len(full_compilation_config.get_compile_ranges())
         assert num_compile_ranges in [1, 2, 3]
@@ -199,7 +197,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             # TODO: Remove log counting in unit tests
             # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            if match_name not in ("attn_quant_fusion", "act_quant_fusion"):
+            if match_name not in (
+                "attn_quant_fusion",
+                "act_quant_fusion",
+                "norm_rope_fusion",
+            ):
                 assert len(log_matches) == n_expected, (
                     f"Could not find {n_expected} {match_name} "
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"
@@ -207,7 +209,16 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
             expected_matches = getattr(matches, match_name)
 
-            if match_name == "rms_quant_fusion" and "ar_rms_fusion" in matches_check:
+            if match_name == "norm_rope_fusion":
+                # Opaque LayerName lets the combined pass consume short-range
+                # sites before the standalone pass; count either owner.
+                assert len(log_matches) >= n_expected
+                assert all(m in (0, expected_matches) for m in log_matches)
+                assert sum(log_matches) == expected_matches * n_expected, (
+                    f"{match_name} expected {expected_matches * n_expected} "
+                    f"sites across both passes, found: {log_matches}"
+                )
+            elif match_name == "rms_quant_fusion" and "ar_rms_fusion" in matches_check:
                 # AR+rms+quant takes precedence over rms+quant if activated.
                 # That means we get full matching where ar+rms+quant was not
                 # activated, and less where it was (only the smallest range).

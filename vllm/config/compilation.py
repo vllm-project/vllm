@@ -77,6 +77,13 @@ class CUDAGraphMode(enum.Enum):
     def requires_piecewise_compilation(self) -> bool:
         return self.has_mode(CUDAGraphMode.PIECEWISE)
 
+    def without_piecewise(self) -> "CUDAGraphMode":
+        if self == CUDAGraphMode.PIECEWISE:
+            return CUDAGraphMode.NONE
+        if self == CUDAGraphMode.FULL_AND_PIECEWISE:
+            return CUDAGraphMode.FULL_DECODE_ONLY
+        return self
+
     def max_cudagraph_mode(self) -> "CUDAGraphMode":
         return CUDAGraphMode(max(self.value)) if self.separate_routine() else self
 
@@ -146,10 +153,16 @@ class PassConfig:
     """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
+    fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
+    """Fuse QK RMSNorm + RoPE/MRoPE + KV cache update into an AITER HIP
+    kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
+    for layers that support it. Auto-enabled at O2+ on ROCm for models
+    with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
+    Also applies to the fused QK-Norm+RoPE/MRoPE+KVCache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -179,12 +192,10 @@ class PassConfig:
     # TODO(luka) better pass enabling system.
 
     def flashinfer_max_size(self, world_size: int) -> int | None:
-        """
-        Returns the max communication size in bytes for flashinfer
+        """Returns the max communication size in bytes for flashinfer
         allreduce fusion for the given world size. Returns None if world size
         is not supported by configs as it's not supported by flashinfer.
         """
-
         MiB = 1024 * 1024
         FI_SUPPORTED_WORLD_SIZES = [2, 4, 8, 16]
         if world_size not in FI_SUPPORTED_WORLD_SIZES:
@@ -210,12 +221,10 @@ class PassConfig:
         return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-
         return hash_factors(get_hash_factors(self, set()))
 
     @field_validator(
@@ -228,6 +237,8 @@ class PassConfig:
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
+        "fuse_qk_norm_rope_kvcache",
+        "enable_qk_norm_rope_fusion",
         "fuse_rope_kvcache_cat_mla",
         mode="wrap",
     )
@@ -288,6 +299,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
+        if self.fuse_qk_norm_rope_kvcache and not current_platform.is_rocm():
+            logger.warning_once(
+                "QK-Norm+RoPE+KVCache fusion requires ROCm with AITER. "
+                "The fusion will be disabled."
+            )
+            self.fuse_qk_norm_rope_kvcache = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "
@@ -296,16 +313,18 @@ class PassConfig:
             self.fuse_rope_kvcache_cat_mla = False
 
     def log_enabled_passes(self) -> None:
-        """
-        Log the enabled custom fusion passes.
+        """Log the enabled custom fusion passes.
         This is called at the end of VLLMConfig post_init,
         after all defaults are finalized.
         TODO also log the compile ranges for which this is enabled.
         """
+        fusion_prefixes = ("fuse_", "enable_")
         enabled_fusions = [
-            f.name[len("fuse_") :]
+            f.name[len(prefix) :]
             for f in fields(self)  # type: ignore[arg-type]
-            if getattr(self, f.name) and f.name.startswith("fuse_")
+            if getattr(self, f.name)
+            for prefix in fusion_prefixes
+            if f.name.startswith(prefix)
         ]
 
         if enabled_fusions:
@@ -367,10 +386,7 @@ class DynamicShapesConfig:
     """
 
     def compute_hash(self) -> str:
-        """
-        Provide a hash for DynamicShapesConfig
-        """
-
+        """Provide a hash for DynamicShapesConfig."""
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, set())
@@ -683,10 +699,11 @@ class CompilationConfig:
         [1, 2, 4] + list(range(8, 256, 8)) + list(
         range(256, max_cudagraph_capture_size + 1, 16))
 
-    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
-    512) by default. This voids OOM in tight memory scenarios with small
-    max_num_seqs, and prevents capture of many large graphs (>512) that would
-    greatly increase startup time with limited performance benefit.
+    If not specified, max_cudagraph_capture_size is capped at 512 by default,
+    or 1024 on data center Blackwell GPUs. This avoids OOM in tight memory
+    scenarios with small max_num_seqs, and limits capture of large graphs that
+    increase startup time and memory usage. Uniform decode sizes are appended
+    only within this default ceiling.
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
@@ -750,12 +767,14 @@ class CompilationConfig:
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
+        # Qwen4Exp's AMD backend still uses these splitting ops.
+        "vllm::qwen4_exp_ple_short_conv",
+        "vllm::qwen4_exp_qsa_with_output",
         "vllm::linear_attention",
-        "vllm::plamo2_mamba_mixer",
         "vllm::qwen_gdn_attention_core",
+        "vllm::qwen_gdn_attention_core_fused_norm_packed",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
-        "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
@@ -763,8 +782,7 @@ class CompilationConfig:
     ]
 
     def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
@@ -782,6 +800,8 @@ class CompilationConfig:
             "traced_files",
             "compilation_time",
             "encoder_compilation_time",
+            "enabled_custom_ops",
+            "disabled_custom_ops",
             "static_forward_context",
             "pass_config",  # handled separately below
             "dynamic_shapes_config",  # handled separately below
@@ -827,8 +847,7 @@ class CompilationConfig:
     @field_validator("mode", mode="before")
     @classmethod
     def validate_mode_before(cls, value: Any) -> Any:
-        """
-        Enable parsing the `mode` field from string mode names.
+        """Enable parsing the `mode` field from string mode names.
         Accepts both integers (0-3) and string names, like NONE, STOCK_TORCH_COMPILE,
         DYNAMO_TRACE_ONCE, VLLM_COMPILE.
         """
@@ -888,10 +907,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        count_none = self.custom_ops.count("none")
-        count_all = self.custom_ops.count("all")
-        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924
@@ -947,12 +962,19 @@ class CompilationConfig:
             # TODO(zhuhaoran): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
+
         if (
             self.pass_config.fuse_rope_kvcache
             and "+rotary_embedding" not in self.custom_ops
         ):
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+
+        if (
+            self.pass_config.fuse_qk_norm_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
             self.custom_ops.append("+rotary_embedding")
 
         if (
@@ -977,12 +999,27 @@ class CompilationConfig:
             )
 
         for op in self.custom_ops:
-            if op[0] not in {"+", "-"} and op not in {"all", "none"}:
+            if op not in {"all", "none"} and (len(op) < 2 or op[0] not in {"+", "-"}):
                 raise ValueError(
                     f"Invalid syntax '{op}' for custom op, "
                     "must be 'all', 'none', '+op' or '-op' "
                     "(where 'op' is the registered op name)"
                 )
+
+        base_modes = [op for op in self.custom_ops if op in {"all", "none"}]
+        if len(base_modes) > 1:
+            raise ValueError(
+                "custom_ops can contain only one base mode: 'all' or 'none'"
+            )
+
+        enabled_ops = {op[1:] for op in self.custom_ops if op.startswith("+")}
+        disabled_ops = {op[1:] for op in self.custom_ops if op.startswith("-")}
+        conflicting_ops = sorted(enabled_ops & disabled_ops)
+        if conflicting_ops:
+            raise ValueError(
+                "custom_ops cannot both enable and disable the same operation(s): "
+                f"{', '.join(conflicting_ops)}. Remove either the '+' or '-' directive"
+            )
 
         # Currently only eager and inductor backend are supported.
         # for piecewise compilation. Custom backends are not supported for
@@ -1032,15 +1069,17 @@ class CompilationConfig:
         prefix: str = "",
         is_encoder: bool = False,
     ) -> str | Callable:
-        """
-        Initialize the backend for the compilation config from a vllm config.
+        """Initialize the backend for the compilation config from a vllm config.
+
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
             prefix: Cache directory prefix for this compiled module.
             is_encoder: Whether this module is used in an encoder (as
                 opposed to a text backbone).
+
         Returns:
             The backend for the compilation config.
+
         """
         if self.mode is None:
             raise ValueError(
@@ -1075,7 +1114,6 @@ class CompilationConfig:
         configs are set. This includes:
         - initialize compile_sizes
         """
-
         computed_compile_sizes: list[int] = []
         if self.compile_sizes is not None:
             # de-duplicate the sizes provided by the config
@@ -1137,6 +1175,16 @@ class CompilationConfig:
                             "to enable RoPE+KV cache fusion."
                         )
                         self.pass_config.fuse_rope_kvcache = False
+                    if self.pass_config.fuse_qk_norm_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_qk_norm_rope_kvcache is enabled, but "
+                            "splitting_ops is None and Inductor graph partition "
+                            "is not enabled. Disabling fuse_qk_norm_rope_kvcache. "
+                            "Please either set splitting_ops to an empty list [] "
+                            "or set use_inductor_graph_partition to True "
+                            "to enable QK-Norm+RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_qk_norm_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
@@ -1264,13 +1312,11 @@ class CompilationConfig:
         return self.backend == "inductor" and self.mode != CompilationMode.NONE
 
     def custom_op_log_check(self):
-        """
-        This method logs the enabled/disabled custom ops and checks that the
+        """This method logs the enabled/disabled custom ops and checks that the
         passed custom_ops field only contains relevant ops.
         It is called at the end of set_current_vllm_config,
         after the custom ops have been instantiated.
         """
-
         if len(self.enabled_custom_ops) + len(self.disabled_custom_ops) == 0:
             logger.debug("No custom ops found in model.")
             return
@@ -1310,10 +1356,16 @@ class CompilationConfig:
                 )
 
     def is_custom_op_enabled(self, op: str) -> bool:
-        if "all" in self.custom_ops:
+        count_all = self.custom_ops.count("all")
+        count_none = self.custom_ops.count("none")
+        if count_all + count_none != 1:
+            raise ValueError(
+                "custom_ops must contain exactly one base mode: 'all' or 'none'"
+            )
+
+        if count_all:
             return f"-{op}" not in self.custom_ops
 
-        assert "none" in self.custom_ops
         return f"+{op}" in self.custom_ops
 
     def resolve_cudagraph_mode_and_sizes(
@@ -1326,6 +1378,7 @@ class CompilationConfig:
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
+        piecewise_capture_available: bool = True,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1407,6 +1460,20 @@ class CompilationConfig:
                 msg += "; setting cudagraph_mode=NONE"
                 cudagraph_mode = CUDAGraphMode.NONE
             logger.warning(msg)
+
+        if (
+            not piecewise_capture_available
+            and cudagraph_mode.requires_piecewise_compilation()
+        ):
+            fallback_mode = cudagraph_mode.without_piecewise()
+            logger.warning_once(
+                "Cudagraph mode %s requires piecewise capture, but the loaded "
+                "model provides neither a compiled submodule nor breakable CUDA "
+                "graphs. Overriding to %s.",
+                cudagraph_mode,
+                fallback_mode,
+            )
+            cudagraph_mode = fallback_mode
 
         # double check that we can support full cudagraph if they are requested
         # even after automatic downgrades
