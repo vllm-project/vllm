@@ -194,6 +194,9 @@ class SimpleContext(ConversationContext):
         self._accumulated_text: str = ""
         self._accumulated_token_ids: list[int] = []
         self._accumulated_logprobs: list = []
+        # Items already sent as output_item.done events; the final
+        # streaming response reuses them instead of reparsing.
+        self.streamed_output_items: list[ResponseOutputItem] | None = None
 
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -653,6 +656,11 @@ class HarmonyContext(ConversationContext):
 
         self.last_append_segments: list[Segment] = []
         self.last_append_flush_status: bool = False
+        # Each completed message with the items sent for it in
+        # output_item.done events, so the final response can reuse their ids.
+        self.streamed_items_by_message: list[
+            tuple[Message, list[ResponseOutputItem]]
+        ] = []
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
