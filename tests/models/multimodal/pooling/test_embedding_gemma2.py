@@ -9,9 +9,18 @@ import textwrap
 import pytest
 import torch
 
+from tests.models.registry import HF_EXAMPLE_MODELS
+
 MODEL = os.environ.get("EG2_MODEL_PATH")
 needs_model = pytest.mark.skipif(not MODEL, reason="EG2_MODEL_PATH not set")
 TEXT_COS, MM_COS = 0.999, 0.999
+
+
+@pytest.fixture
+def needs_hf_embedding_gemma2():
+    """Skip when the installed transformers has no `embedding_gemma2` module."""
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("EmbeddingGemma2Model")
+    model_info.check_transformers_version(on_fail="skip")
 
 
 def _cos(a, b):
@@ -239,7 +248,7 @@ def test_tower_skip(vllm_runner, monkeypatch):
         )
 
 
-def test_encoder_contract():
+def test_encoder_contract(needs_hf_embedding_gemma2):
     from vllm.model_executor.models.embedding_gemma2 import EmbeddingGemma2Model
     from vllm.model_executor.models.gemma4_mm import (
         Gemma4ForConditionalGeneration as G,
@@ -423,7 +432,7 @@ def test_video_loader_duplicate_expansion_e2e(vllm_runner, st_model):
     assert len(out[0]) == 768
 
 
-def test_video_loader_indices():
+def test_video_loader_indices(needs_hf_embedding_gemma2):
     from transformers.models.embedding_gemma2.video_processing_embedding_gemma2 import (
         EmbeddingGemma2VideoProcessor,
     )
@@ -508,7 +517,7 @@ def test_video_loader_indices():
     assert v_4h == h_4h, f"1fps/4h mismatch: {v_4h[-2:]} vs {h_4h[-2:]}"
 
 
-def test_video_loader_duplicate_expansion():
+def test_video_loader_duplicate_expansion(needs_hf_embedding_gemma2):
     from transformers.models.embedding_gemma2.video_processing_embedding_gemma2 import (
         EmbeddingGemma2VideoProcessor,
     )
