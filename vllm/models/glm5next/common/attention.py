@@ -90,8 +90,8 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
     The indexer shares one block with the co-located MLA (a single
     ``MLAAttentionSpec`` / block_table), so ``block_size`` is the model-wide
     ``cache_config.block_size``. DeepGEMM's paged-MQA kernel takes 32- or
-    64-state pages, which ``Glm5NextIndexerBackend`` declares as its kernel
-    block sizes.
+    64-state pages (only 64 on SM120), which ``Glm5NextIndexerBackend``
+    declares as its kernel block sizes.
     """
 
     def __init__(
@@ -267,7 +267,7 @@ class Indexer(nn.Module):
         # Paged tail cache (in-progress pool's raw K + gate score). Written by
         # prefill (seeds the boundary pool) and decode (per-step stash); read by
         # the decode kernel to compress the boundary pool. Transferred across PD
-        # so the decode side sees the prefill tail. See CircularBufferSpec/Manager.
+        # so the decode side sees the prefill tail. See CircularBufferManager.
         self.tail_cache = Glm5NextTailCache(
             head_dim=self.head_dim,
             dtype=torch.bfloat16,
