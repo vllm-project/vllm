@@ -201,6 +201,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_global_scale,
             layer.params_dtype,
             group_size=self.group_size,
+            invert_global_scales=True,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:

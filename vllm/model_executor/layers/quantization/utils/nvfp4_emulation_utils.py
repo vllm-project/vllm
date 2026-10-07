@@ -623,8 +623,19 @@ def dequantize_nvfp4_moe_weights(
     w2_weight_global_scale: torch.Tensor,
     dtype: torch.dtype,
     group_size: int = 16,
+    *,
+    invert_global_scales: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Materialize serialized NVFP4 MoE weights for requantization."""
+    """Materialize serialized NVFP4 MoE weights for requantization.
+
+    Compressed-tensors stores global encode scales, while ModelOpt stores
+    ``weight_scale_2`` as the corresponding decode multiplier. Set
+    ``invert_global_scales`` according to the source checkpoint convention.
+    """
+    if invert_global_scales:
+        w13_weight_global_scale = 1.0 / w13_weight_global_scale
+        w2_weight_global_scale = 1.0 / w2_weight_global_scale
+
     w13_num_shards = w13_weight_global_scale.shape[1]
     w13_weights = torch.chunk(w13_weight_packed, w13_num_shards, dim=1)
     w13_scales = torch.chunk(w13_weight_scale, w13_num_shards, dim=1)
@@ -633,7 +644,7 @@ def dequantize_nvfp4_moe_weights(
             dequantize_to_dtype(
                 weight,
                 scale,
-                1.0 / w13_weight_global_scale[:, shard_idx],
+                w13_weight_global_scale[:, shard_idx].contiguous(),
                 dtype,
                 block_size=group_size,
                 swizzle=False,
@@ -647,7 +658,7 @@ def dequantize_nvfp4_moe_weights(
     w2 = dequantize_to_dtype(
         w2_weight_packed,
         w2_weight_scale,
-        1.0 / w2_weight_global_scale,
+        w2_weight_global_scale,
         dtype,
         block_size=group_size,
         swizzle=False,
