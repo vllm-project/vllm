@@ -386,6 +386,7 @@ def test_sbw_gpu_sampler_biases_raw_logits_before_super(monkeypatch):
         torch.zeros(1, dtype=torch.int64),
         torch.zeros(1, dtype=torch.int64),
         torch.zeros(1, dtype=torch.int64),
+        np.array([1]),
     )
 
     assert len(received) == 1
@@ -415,6 +416,7 @@ def test_sbw_gpu_sampler_does_not_bias_when_no_watermarked_rows(monkeypatch):
         torch.zeros(2, dtype=torch.int64),
         torch.zeros(2, dtype=torch.int64),
         torch.zeros(2, dtype=torch.int64),
+        np.array([1, 1]),
     )
 
     assert len(received) == 1
@@ -443,6 +445,7 @@ def test_sbw_gpu_sampler_mixed_batch_non_watermarked_rows_unchanged(monkeypatch)
         torch.zeros(4, dtype=torch.int64),
         torch.zeros(4, dtype=torch.int64),
         torch.zeros(4, dtype=torch.int64),
+        np.array([1, 1, 1, 1]),
     )
 
     assert len(received) == 1
@@ -479,6 +482,7 @@ def test_sbw_gpu_sampler_biases_greedy_requests(monkeypatch):
         torch.zeros(1, dtype=torch.int64),
         torch.zeros(1, dtype=torch.int64),
         torch.zeros(1, dtype=torch.int64),
+        np.array([1]),
     )
 
     assert len(received) == 1

@@ -63,6 +63,7 @@ class GPUWatermarkSampler(Sampler):
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        seq_lens_upper_bound_np: np.ndarray,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply SBW bias on raw logits before sampling-param processing.
@@ -104,6 +105,7 @@ class GPUWatermarkSampler(Sampler):
             pos,
             input_ids,
             expanded_local_pos,
+            seq_lens_upper_bound_np,
             return_logprobs,
         )
 
