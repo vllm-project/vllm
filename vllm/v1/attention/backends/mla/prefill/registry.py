@@ -52,6 +52,10 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         "vllm.v1.attention.backends.mla.prefill.aiter_flash_attn."
         "AiterFlashAttnPrefillBackend"
     )
+    ROCM_AITER_FLYDSL_FP8 = (
+        "vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8."
+        "AiterFlyDSLFP8PrefillBackend"
+    )
     CPU = "vllm.v1.attention.backends.mla.prefill.cpu_sdpa.CPUSDPAMLAPrefillBackend"
     ZEN_CPU = (
         "vllm.v1.attention.backends.mla.prefill.zen_cpu_sdpa."
