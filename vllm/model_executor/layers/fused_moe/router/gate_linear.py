@@ -23,14 +23,17 @@ class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
     1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
-       K divisible by 8)
-    2. fp32 specialized kernel (SM90+ or gfx950, bf16/fp32 in, fp32 out,
-       M<=32, model-specific shapes)
-    3. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
-    4. ROCm bf16x3 router GEMM (gfx950, bf16 in, fp32 weight, fp32 out,
+       any shape w/ K divisible by 8)
+    2. fp32 specialized kernel (bf16/fp32 in, fp32 out; SM90+
+       model-specific shapes and batch limits, gfx950 any shape with M<=32)
+    3. cuteDSL ll_fp32w_gemm (SM90+, M<=32, bf16/fp32 in, fp32 out,
+       any shape)
+    4. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
+    5. ROCm bf16x3 router GEMM (gfx950, bf16 in, fp32 weight, fp32 out,
        M>=2048)
-    5. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
-    6. F.linear via ReplicatedLinear (ultimate fallback)
+    6. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype); gfx950
+       routes low M through the tier 2 kernel
+    7. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
     (e.g. when the required dtype depends on the expert quantization
@@ -38,11 +41,19 @@ class GateLinear(ReplicatedLinear):
 
     A ``quant_config`` that actually quantizes the gate disables every
     specialized tier, leaving plain ``ReplicatedLinear`` behavior.
+
+    ``VLLM_BATCH_INVARIANT`` also disables tiers 1-5: they pick kernels and
+    split-K from the token count and skip the batch-invariant linear path.
     """
 
-    # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
-    #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
+    # (hidden_size, num_experts) pairs with an instantiated fp32 kernel.
+    FP32_SUPPORTED_SHAPES = {
+        (3072, 256),
+        (6144, 128),
+        (5120, 256),
+        (4096, 352),
+        (8192, 256),
+    }
     FP32_MAX_TOKENS = 32
     # Largest batch for which tier 1 beats the cuBLAS epilogue. Subclasses
     # whose router shape stays ahead further up the range may raise it.
@@ -68,18 +79,12 @@ class GateLinear(ReplicatedLinear):
             from vllm.platforms.rocm import on_gfx950
 
             is_gfx950 = on_gfx950()
-        is_rocm_fp32_shape = False
-        if is_gfx950:
-            from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
-                ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES,
-            )
-
-            is_rocm_fp32_shape = (
-                input_size,
-                output_size,
-            ) in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
+        batch_invariant = envs.VLLM_BATCH_INVARIANT
         can_use_specialized_kernels = (
-            current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
+            current_platform.is_cuda()
+            and (is_hopper or is_blackwell)
+            and not bias
+            and not batch_invariant
         )
 
         # If fp32 compute is required and no specialized kernel is available,
@@ -98,6 +103,7 @@ class GateLinear(ReplicatedLinear):
             return_bias=return_bias,
         )
         self.out_dtype = out_dtype
+        self.is_gfx950 = is_gfx950
 
         # A quantized gate exposes no plain ``weight``, so every specialized
         # tier below is disabled and forward falls back to ReplicatedLinear.
@@ -109,6 +115,7 @@ class GateLinear(ReplicatedLinear):
         # fp32 specialized kernel eligibility (exact dims, fp32 weight)
         self.allow_fp32_router_gemm = (
             self.is_unquantized
+            and not batch_invariant
             and not bias
             and self.weight.dtype == torch.float32
             and (
@@ -117,11 +124,12 @@ class GateLinear(ReplicatedLinear):
                     and (is_hopper or is_blackwell)
                     and (input_size, output_size) in self.FP32_SUPPORTED_SHAPES
                 )
-                or (is_gfx950 and is_rocm_fp32_shape)
+                or is_gfx950
             )
         )
         self.allow_bf16x3_router_gemm = (
             self.is_unquantized
+            and not batch_invariant
             and not bias
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
@@ -138,8 +146,10 @@ class GateLinear(ReplicatedLinear):
         # (GB10 / DGX Spark), which this tier still covers. See #49921.
         self._router_gemm_no_bias = self.is_unquantized and not bias
         self._router_gemm_cublas_capable = (
-            current_platform.is_cuda() or current_platform.is_rocm()
-        ) and self._router_gemm_no_bias
+            (current_platform.is_cuda() or current_platform.is_rocm())
+            and self._router_gemm_no_bias
+            and not batch_invariant
+        )
         self.allow_cublas_router_gemm = (
             self._router_gemm_cublas_capable
             and self.weight.dtype == torch.bfloat16
@@ -155,6 +165,7 @@ class GateLinear(ReplicatedLinear):
 
         self._rocm_bf16x3_weight_eligible = (
             self._router_gemm_no_bias
+            and not batch_invariant
             and self.weight.dtype == torch.float32
             and bf16x3_router_gemm_rocm.platform_supported()
         )
@@ -173,20 +184,50 @@ class GateLinear(ReplicatedLinear):
             self.quant_method = _GateLinearMethod()
             logger.info_once("Enabled ROCm BF16x3 router GEMM.")
 
-        # cuteDSL ll_bf16_gemm eligibility. Any dims supported, but SM90+ required bc:
+        # cuteDSL ll_bf16_gemm/ll_fp32w_gemm eligibility. Any dims supported, but
+        # SM90+ required because:
         # 1. PDL support. Both dot-product and split-K kernels.
         # 2. Thread Block Clusters. Split-K kernel for cross-CTA reduction.
         self.allow_ll_bf16_gemm = False
+        self.allow_ll_fp32w_gemm = False
         if can_use_specialized_kernels:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                is_available,
+                is_available as is_ll_bf16_gemm_available,
+            )
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+                is_available as is_ll_fp32w_gemm_available,
             )
 
             self.allow_ll_bf16_gemm = (
-                self.weight.dtype == torch.bfloat16
+                is_ll_bf16_gemm_available()
+                and self.weight.dtype == torch.bfloat16
                 and self.out_dtype == torch.float32
-                and is_available()
             )
+            self.allow_ll_fp32w_gemm = (
+                is_ll_fp32w_gemm_available()
+                and self.weight.dtype == torch.float32
+                and self.out_dtype == torch.float32
+            )
+
+        self._register_ll_fp32w_warmup()
+
+    def _register_ll_fp32w_warmup(self) -> None:
+        # Based on multi-tier GEMM dispatch. See above.
+        # This avoids compiling LL_FP32W_GEMM_KERNEL if not used.
+        if not self.allow_ll_fp32w_gemm or self.allow_fp32_router_gemm:
+            return
+
+        from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+            LL_FP32W_GEMM_KERNEL,
+        )
+
+        # FP16 remains runtime-supported; JIT monitoring reports unexpected use.
+        # The kernel supports it, but there is no FP16 activation use case yet.
+        LL_FP32W_GEMM_KERNEL.register_warmup(
+            shapes=((self.weight.shape[1], self.weight.shape[0]),),
+            m_values=range(1, self.FP32_MAX_TOKENS + 1),
+            a_dtypes=(torch.bfloat16, torch.float32),
+        )
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
@@ -212,14 +253,23 @@ class GateLinear(ReplicatedLinear):
 
         if self.allow_specialized_router_gemm:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                is_available,
+                is_available as is_ll_bf16_gemm_available,
+            )
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+                is_available as is_ll_fp32w_gemm_available,
             )
 
             self.allow_ll_bf16_gemm = (
-                self.weight.dtype == torch.bfloat16
+                is_ll_bf16_gemm_available()
+                and self.weight.dtype == torch.bfloat16
                 and out_dtype == torch.float32
-                and is_available()
             )
+            self.allow_ll_fp32w_gemm = (
+                is_ll_fp32w_gemm_available()
+                and self.weight.dtype == torch.float32
+                and out_dtype == torch.float32
+            )
+            self._register_ll_fp32w_warmup()
 
     def _return(
         self, output: torch.Tensor
@@ -229,26 +279,19 @@ class GateLinear(ReplicatedLinear):
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        # The low-latency router kernels select different K-reduction schemes
-        # as M changes.  That is desirable for normal decode latency, but it
-        # breaks the process-wide batch-invariant contract: the same token can
-        # get different FP32 router logits in decode (typically M=1) and
-        # prefill.  In BI mode use one GEMM family for every M.  Hopper and
-        # Blackwell configure cuBLAS for non-split-K execution in
-        # enable_batch_invariant_mode(); other platforms retain the stable
-        # ReplicatedLinear fallback.
-        if envs.VLLM_BATCH_INVARIANT:
-            if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
-                output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
-                return output, None
-            if self.out_dtype is not None and x.dtype != self.weight.dtype:
-                x = x.to(self.weight.dtype)
-            output, output_bias = super().forward(x)
-            if self.out_dtype is not None and output.dtype != self.out_dtype:
-                output = output.to(self.out_dtype)
-            return output, output_bias
+        # Keep the BI router on one GEMM family across decode and prefill.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda()
+            and self._router_gemm_no_bias
+            and self.weight.dtype == torch.bfloat16
+            and self.out_dtype == torch.float32
+            and x.dtype == torch.bfloat16
+        ):
+            return self._return(torch.mm(x, self.weight.T, out_dtype=torch.float32))
 
-        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
+        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 out,
+        # any dims w/ K divisible by 8)
         if (
             self.allow_ll_bf16_gemm
             and x.shape[0] <= self.LL_BF16_MAX_TOKENS
@@ -261,7 +304,7 @@ class GateLinear(ReplicatedLinear):
             output = ll_bf16_gemm(x, self.weight)
             return self._return(output)
 
-        # Tier 4: ROCm bf16x3 router GEMM. Checked before tier 2 because both
+        # Tier 5: ROCm bf16x3 router GEMM. Checked before tier 2 because both
         # tiers claim the same gfx950 shapes and tier 2 returns
         # unconditionally; the custom op below picks between them on the
         # runtime num_tokens.
@@ -290,7 +333,20 @@ class GateLinear(ReplicatedLinear):
             )
             return self._return(output)
 
-        # Tier 3: bf16x3 CuteDSL kernel for fp32 router weights
+        # Tier 3: cuteDSL ll_fp32w_gemm (SM90+, bf16/fp32 in, fp32 out)
+        if (
+            self.allow_ll_fp32w_gemm
+            and x.shape[0] <= 32
+            and x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        ):
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+                LL_FP32W_GEMM_KERNEL,
+            )
+
+            output = LL_FP32W_GEMM_KERNEL(x, self.weight)
+            return self._return(output)
+
+        # Tier 4: bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
             from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
                 bf16x3_router_gemm,
@@ -299,12 +355,15 @@ class GateLinear(ReplicatedLinear):
             output = bf16x3_router_gemm(x, self.weight)
             return self._return(output)
 
-        # Tier 5: cuBLAS bf16→fp32
+        # Tier 6: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
-            output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
+            if self.is_gfx950:
+                output = torch.ops.vllm.fp32_router_gemm_dispatch(x, self.weight, False)
+            else:
+                output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
             return self._return(output)
 
-        # Tier 6: F.linear (ReplicatedLinear)
+        # Tier 7: F.linear (ReplicatedLinear)
         if (
             self.out_dtype is not None
             and self.is_unquantized
@@ -411,23 +470,41 @@ def fp32_router_gemm_dispatch_impl(
     weight: torch.Tensor,
     allow_bf16x3_router_gemm: bool,
 ) -> torch.Tensor:
-    """Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
-    otherwise optionally run the experimental BF16x3 kernel for medium/large
-    SM100 router batches, then fall back to F.linear.
+    """Run the FP32 kernel for small batches, with shape-specific limits.
+
+    Larger SM100 BF16 batches use BF16x3; other inputs fall back to F.linear.
     This must be wrapped in a custom op because our torch.compile integration
     does not support runtime dispatching on num_tokens.
     """
-    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
-        if current_platform.is_rocm():
-            from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
-                can_use_rocm_fp32_router_gemm,
-                rocm_fp32_router_gemm,
-            )
+    if current_platform.is_rocm():
+        from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
+            can_use_rocm_fp32_router_gemm,
+            rocm_fp32_router_gemm,
+        )
 
+        if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
             x = x.contiguous()
             if can_use_rocm_fp32_router_gemm(x, weight):
                 return rocm_fp32_router_gemm(x, weight)
-            return torch.nn.functional.linear(x.float(), weight)
+        if weight.dtype == torch.bfloat16:
+            return torch.mm(x, weight.T, out_dtype=torch.float32)
+        return torch.nn.functional.linear(x.float(), weight)
+    max_tokens = _FP32_ROUTER_GEMM_MAX_TOKENS
+    if (
+        allow_bf16x3_router_gemm
+        and x.dtype == torch.bfloat16
+        and weight.shape == (256, 5120)
+    ):
+        # GB200: four token groups win through 48 for multiples of eight.
+        max_tokens = 48 if x.shape[0] % 8 == 0 else 16
+    elif (
+        allow_bf16x3_router_gemm
+        and x.dtype == torch.bfloat16
+        and weight.shape == (352, 4096)
+    ):
+        # Step-5 on B300: BF16x3 becomes competitive at M=12.
+        max_tokens = 11
+    if x.shape[0] <= max_tokens:
         return ops.fp32_router_gemm(x, weight)
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:

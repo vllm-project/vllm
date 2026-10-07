@@ -27,7 +27,8 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import ModelConfig
+from vllm.config import CacheConfig, ModelConfig
+from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
     format_socket_role_suffix,
@@ -227,12 +228,39 @@ def verify_peer_is_owner(conn: socket.socket) -> None:
         raise PermissionError(f"Rejecting weight cache connection from uid {peer_uid}")
 
 
-def _hash_quant_config(quant_config: Any) -> str:
-    if quant_config is None:
-        return ""
+def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> str:
     if hasattr(quant_config, "to_dict"):
         quant_config = quant_config.to_dict()
-    payload = json.dumps(quant_config, sort_keys=True, default=str)
+    payload = json.dumps(
+        {
+            "checkpoint": quant_config,
+            "runtime": normalize_value(runtime_quant_config),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
+
+
+def hash_rope_parameters(model_config: ModelConfig) -> str:
+    """Fingerprint the text RoPE parameters used to construct cached buffers."""
+
+    def normalize_numbers(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: normalize_numbers(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize_numbers(item) for item in value]
+        # JSON distinguishes 10000 from 10000.0, but RoPE does not.
+        return int(value) if isinstance(value, float) and value.is_integer() else value
+
+    text_config = model_config.hf_text_config
+    parameters = {
+        "rope_parameters": getattr(text_config, "rope_parameters", None),
+        "max_position_embeddings": getattr(
+            text_config, "max_position_embeddings", None
+        ),
+    }
+    payload = json.dumps(normalize_numbers(parameters), sort_keys=True)
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
@@ -287,6 +315,9 @@ class WeightCacheKey:
     dtype: str
     quantization: str | None
     quant_config_hash: str
+    rope_parameters_hash: str
+    kv_cache_dtype: str
+    kv_cache_dtype_skip_layers: tuple[str, ...]
     revision: str | None
     vllm_version: str
     pp_size: int = 1
@@ -295,6 +326,8 @@ class WeightCacheKey:
     """Daemon group the weights come from; False is the target model."""
     dp_size: int = 1
     dp_rank: int = 0
+    enable_expert_parallel: bool = False
+    expert_placement_strategy: str = "linear"
 
     @classmethod
     def from_model_config(
@@ -303,11 +336,14 @@ class WeightCacheKey:
         tp_size: int,
         tp_rank: int,
         *,
+        cache_config: CacheConfig,
         pp_size: int = 1,
         pp_rank: int = 0,
         is_draft: bool = False,
         dp_size: int = 1,
         dp_rank: int = 0,
+        enable_expert_parallel: bool = False,
+        expert_placement_strategy: str = "linear",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -333,12 +369,22 @@ class WeightCacheKey:
             pp_rank=pp_rank,
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
-            quant_config_hash=_hash_quant_config(quant_config),
+            quant_config_hash=_hash_quant_config(
+                quant_config=quant_config,
+                runtime_quant_config=model_config.quantization_config,
+            ),
+            rope_parameters_hash=hash_rope_parameters(model_config),
+            kv_cache_dtype=cache_config.cache_dtype,
+            kv_cache_dtype_skip_layers=tuple(
+                sorted(set(cache_config.kv_cache_dtype_skip_layers))
+            ),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
             is_draft=is_draft,
             dp_size=dp_size,
             dp_rank=dp_rank,
+            enable_expert_parallel=enable_expert_parallel,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:

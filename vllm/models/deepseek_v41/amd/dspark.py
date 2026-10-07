@@ -11,6 +11,7 @@ include the future query tokens in the top-k indices for each query token.
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import regex as re
 import torch
@@ -18,10 +19,6 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.torch import mhc_post_torch
@@ -53,6 +50,10 @@ from .model import (
     _linear_scale_param_name,
     _use_sequence_parallel,
 )
+from .ops import draft_lm_head
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 logger = init_logger(__name__)
 
@@ -358,7 +359,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
-        return self.logits_processor(self.lm_head, self.model.norm(hidden_states))
+        # On gfx942 with --monokernel, the 5 rows of one request take the
+        # torch GEMM instead of wvSplitK (ops/draft_lm_head.py).
+        return draft_lm_head.compute_logits(
+            self.logits_processor, self.lm_head, self.model.norm(hidden_states)
+        )
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Full-vocab draft: base logits, no d2t scatter.
@@ -379,6 +384,21 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         """Per-position acceptance probability for each drafted token."""
         assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+
+    def sample_sequential(
+        self,
+        speculator: "DSparkSpeculator",
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+    ) -> bool:
+        """DSparkSpeculator._sample_sequential asks this first. With
+        --monokernel on gfx942 each Markov step is one launch
+        (ops/fused_markov.py), and this returns True. For a step that the
+        fused launches do not take, it returns False, having done nothing,
+        and the speculator runs its own loop."""
+        from .ops import fused_markov
+
+        return fused_markov.sample_sequential(speculator, num_reqs, head_hidden)
 
     # --- Weight loading ----------------------------------------------------
 
@@ -419,12 +439,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         loaded_confidence_head = False
-
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // tp_size
-        head_start = n_local_head * tp_rank
-        head_end = n_local_head * (tp_rank + 1)
 
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
@@ -487,11 +501,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
                 break
             else:
-                if "attn_sink" in name:
-                    narrow = loaded_weight[head_start:head_end]
-                    params_dict[name][: narrow.shape[0]].copy_(narrow)
-                    loaded_params.add(name)
-                    continue
                 if name.endswith(".ffn.gate.bias"):
                     name = name.replace(
                         ".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"

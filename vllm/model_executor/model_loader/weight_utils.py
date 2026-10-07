@@ -9,6 +9,7 @@ import glob
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -33,7 +34,11 @@ from vllm.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     LoadConfig,
 )
-from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    get_world_group,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
@@ -200,6 +205,9 @@ def get_quant_config(
         QuantizationConfigArgs,
         resolve_quantization_config,
     )
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptQuantConfigBase,
+    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -219,6 +227,14 @@ def get_quant_config(
             online_args
         )
         return checkpoint_config
+
+    def make_checkpoint_config(config: dict[str, Any]) -> QuantizationConfig:
+        if issubclass(quant_cls, ModelOptQuantConfigBase):
+            assert online_args is None or isinstance(
+                online_args, QuantizationConfigArgs
+            )
+            config = {**config, "_online_quantization_args": online_args}
+        return maybe_compose_online_quantization(quant_cls.from_config(config))
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -260,9 +276,7 @@ def get_quant_config(
         ):
             pass  # fall through to file-based loading below
         else:
-            return maybe_compose_online_quantization(
-                quant_cls.from_config(hf_quant_config)
-            )
+            return make_checkpoint_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
@@ -376,14 +390,14 @@ def get_quant_config(
 
         if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
-                return maybe_compose_online_quantization(quant_cls.from_config(config))
+                return make_checkpoint_config(config)
             else:
                 raise ValueError(
                     f"Unsupported quantization config"
                     f" found for {model_config.quantization} in {f}."
                 )
 
-    return maybe_compose_online_quantization(quant_cls.from_config(config))
+    return make_checkpoint_config(config)
 
 
 def get_sparse_attention_config(
@@ -785,6 +799,42 @@ def filter_mm_encoder_only_safetensors_files(
     return kept
 
 
+def filter_safetensors_files_by_weight_name(
+    hf_weights_files: list[str],
+    is_unused_weight: Callable[[str], bool],
+) -> list[str]:
+    """Drop safetensors shards in which `is_unused_weight` accepts every tensor.
+
+    Loaders that read whole files (InstantTensor, fastsafetensors, multi-thread,
+    eager, prefetch) cannot skip single tensors, so dropping shards is their
+    only way to avoid reading weights the model does not load.
+
+    Args:
+        hf_weights_files: Safetensors shard paths.
+        is_unused_weight: Returns True for checkpoint weight names the model does
+            not load.
+
+    Returns:
+        The shards holding at least one wanted tensor, or `hf_weights_files`
+        unchanged when no shard does.
+
+    """
+    kept: list[str] = []
+    for st_file in hf_weights_files:
+        with safe_open(st_file, framework="pt") as f:
+            if not all(is_unused_weight(name) for name in f.keys()):  # noqa: SIM118
+                kept.append(st_file)
+    if not kept:
+        return hf_weights_files
+    if len(kept) < len(hf_weights_files):
+        logger.info_once(
+            "Skipped %d/%d safetensors shard(s) holding no weights the model loads",
+            len(hf_weights_files) - len(kept),
+            len(hf_weights_files),
+        )
+    return kept
+
+
 # explicitly use pure text format, with a newline at the end
 # this makes it impossible to see the animation in the progress bar
 # but will avoid messing up with ray or multiprocessing, which wraps
@@ -844,38 +894,69 @@ def np_cache_weights_iterator(
         yield name, torch.from_numpy(param)
 
 
+def _local_snapshot_dirs(model_name_or_path: str, cache_dir: str | None) -> list[Path]:
+    """Snapshot directories of a cached repo, found from the cache layout alone.
+
+    Offline, snapshot_download() resolves a revision only through refs/<revision>,
+    which a cache seeded at a pinned commit does not have.
+    """
+    snapshots = (
+        Path(cache_dir or huggingface_hub.constants.HF_HUB_CACHE)
+        / f"models--{model_name_or_path.replace('/', '--')}"
+        / "snapshots"
+    )
+    if not snapshots.is_dir():
+        return []
+    return [path for path in snapshots.iterdir() if path.is_dir()]
+
+
 def drop_checkpoint_cache(
     model_name_or_path: str,
     revision: str | None = None,
     cache_dir: str | None = None,
 ) -> None:
-    checkpoint_dir: Path | None = None
+    if sys.platform != "linux":
+        return
+    checkpoint_dirs: list[Path] = []
     if os.path.isdir(model_name_or_path):
-        checkpoint_dir = Path(model_name_or_path)
+        checkpoint_dirs = [Path(model_name_or_path)]
     else:
         with suppress(OSError, ValueError):
-            checkpoint_dir = Path(
-                hf_api().snapshot_download(
-                    model_name_or_path,
-                    revision=revision,
-                    cache_dir=cache_dir,
-                    local_files_only=True,
+            checkpoint_dirs = [
+                Path(
+                    hf_api().snapshot_download(
+                        model_name_or_path,
+                        revision=revision,
+                        cache_dir=cache_dir,
+                        local_files_only=True,
+                    )
                 )
-            )
-    if checkpoint_dir is None:
+            ]
+        if not checkpoint_dirs:
+            checkpoint_dirs = _local_snapshot_dirs(model_name_or_path, cache_dir)
+    if not checkpoint_dirs:
         logger.info_once(
             "No local checkpoint found for %s; skipping page-cache eviction",
             model_name_or_path,
         )
         return
-    for path in checkpoint_dir.glob("*.safetensors"):
-        try:
-            with path.open("rb") as file:
-                os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-        except OSError as exc:
-            logger.warning(
-                "Could not release checkpoint page cache for %s: %s", path, exc
-            )
+    for checkpoint_dir in checkpoint_dirs:
+        dropped_bytes = 0
+        for path in checkpoint_dir.glob("*.safetensors"):
+            try:
+                with path.open("rb") as file:
+                    os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            except OSError as exc:
+                logger.warning(
+                    "Could not release checkpoint page cache for %s: %s", path, exc
+                )
+            else:
+                dropped_bytes += path.stat().st_size
+        logger.info(
+            "Released %.2f GiB of checkpoint page cache in %s",
+            dropped_bytes / 1024**3,
+            checkpoint_dir,
+        )
 
 
 def _get_checkpoints_size_bytes(files: list[str]) -> int:
@@ -1304,12 +1385,20 @@ def fastsafetensors_weights_iterator(
             pl.close()
 
 
+_ENGRAM_WEIGHT_RE = re.compile(
+    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"
+    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"
+)
+
+
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    local_expert_ids: set[int] | None = None,
+    *,
+    load_engram_on_cpu: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files
-    using instanttensor library."""
+    """Load with InstantTensor, optionally mapping Engram tables on CPU."""
     try:
         import instanttensor
     except ImportError as e:
@@ -1328,35 +1417,63 @@ def instanttensor_weights_iterator(
     else:
         process_group = world_group.device_group if world_group.world_size > 1 else None
 
-    device = current_platform.current_device()
+    gpu_weight_names: list[str] = []
+    cpu_weights: dict[str, list[str]] = {}
+    for path in hf_weights_files:
+        with safe_open(path, framework="pt") as metadata:
+            for name in metadata.keys():  # noqa: SIM118
+                # Engram tables can exceed device memory before TP sharding.
+                if load_engram_on_cpu and _ENGRAM_WEIGHT_RE.search(name) is not None:
+                    cpu_weights.setdefault(path, []).append(name)
+                else:
+                    gpu_weight_names.append(name)
 
-    # copy=True yields tensors that own their memory, staying valid after the
-    # context exits or InstantTensor reuses its buffer.
-    with instanttensor.safe_open(
-        hf_weights_files,
-        framework="pt",
-        device=device,
-        process_group=process_group,
-        copy=True,
-    ) as f:
-        # Track bytes so the bar reports load throughput (GB/s).
-        pbar = tqdm(
-            total=f.total_tensor_size,
-            desc="Loading safetensors using InstantTensor loader",
-            disable=not enable_tqdm(use_tqdm_on_load),
-            bar_format=_BAR_FORMAT,
-            position=tqdm._get_free_pos(),
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            mininterval=1.0,
-        )
-        try:
+    # Every rank must make the same decision about collective loading.
+    empty_expert_ids: set[int] = set()
+    filter_experts = local_expert_ids is not None and any(
+        should_skip_weight(name, empty_expert_ids) for name in gpu_weight_names
+    )
+    tensor_filter: list[str] | None = None
+    if cpu_weights or filter_experts:
+        process_group = None
+        tensor_filter = [
+            name
+            for name in gpu_weight_names
+            if not should_skip_weight(name, local_expert_ids)
+        ]
+
+    if gpu_weight_names:
+        # copy=True keeps tensors valid after InstantTensor reuses its buffer.
+        with (
+            instanttensor.safe_open(
+                hf_weights_files,
+                framework="pt",
+                device=current_platform.current_device(),
+                process_group=process_group,
+                copy=True,
+                tensor_filter=tensor_filter,
+                tensor_name_match_mode="exact",
+            ) as f,
+            tqdm(
+                total=f.total_tensor_size,
+                desc="Loading safetensors using InstantTensor loader",
+                disable=not enable_tqdm(use_tqdm_on_load),
+                bar_format=_BAR_FORMAT,
+                position=tqdm._get_free_pos(),
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                mininterval=1.0,
+            ) as pbar,
+        ):
             for name, tensor in f.tensors():
                 pbar.update(tensor.numel() * tensor.element_size())
                 yield name, tensor
-        finally:
-            pbar.close()
+
+    for path, names in cpu_weights.items():
+        with safe_open(path, framework="pt", device="cpu") as f:
+            for name in names:
+                yield name, f.get_tensor(name)
 
 
 def pt_weights_iterator(
@@ -1448,6 +1565,33 @@ def row_parallel_weight_loader(
 LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
 
 
+def load_attention_sink(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+    """Load this rank's heads of a global sink; padded heads are set to -inf."""
+    tp_size = get_tensor_model_parallel_world_size()
+    heads = loaded_weight.numel()
+    if heads % tp_size:
+        raise ValueError(
+            f"Attention sink heads ({heads}) must be divisible by tp_size ({tp_size})"
+        )
+    local_heads = heads // tp_size
+    start = get_tensor_model_parallel_rank() * local_heads
+    default_weight_loader(
+        param[:local_heads], loaded_weight.narrow(0, start, local_heads)
+    )
+    param.data[local_heads:].fill_(-float("inf"))
+
+
+def make_attention_sink(
+    num_heads: int, dtype: torch.dtype | None = None
+) -> torch.nn.Parameter:
+    """Create a sink with -inf padding and register its TP weight loader."""
+    sink = torch.nn.Parameter(
+        torch.full((num_heads,), -float("inf"), dtype=dtype), requires_grad=False
+    )
+    sink.weight_loader = load_attention_sink
+    return sink
+
+
 def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
     """Create a weight loader that shards the weights along the given axis"""
 
@@ -1476,18 +1620,54 @@ def composed_weight_loader(
     return composed_loader
 
 
+# E8M0 byte 120 encodes 2**-7: with packed FP4 (|x| <= 6) or the FP8 dummy
+# range below, the dequantized weights stay small and finite.
+_DUMMY_E8M0_SCALE_BYTE = 120
+# Default dummy range of 8-bit floats. +-1e-3 is below FP8 E4M3's smallest
+# normal (2**-6), so it would mostly round to zero or subnormals.
+_DUMMY_FP8_RANGE = 1.0
+
+
 @torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
-    low: float = -1e-3,
-    high: float = 1e-3,
+    low: float | None = None,
+    high: float | None = None,
     seed: int = 1234,
+    name: str = "",
 ) -> None:
+    """Fill `param` with deterministic dummy values suited to its dtype.
+
+    8-bit integer and packed FP4 params get random bytes (every FP4 code is
+    finite), except uint8 params named like a scale, which hold E8M0 scales
+    and get a fixed exponent. Other integer params (e.g. indices) are left
+    untouched. Float params are sampled from `[low, high]`, which defaults to
+    +-1e-3, or +-1 for 8-bit floats.
+    """
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)
 
     if (dummy_weight_value := getattr(param, "dummy_weight_value", None)) is not None:
         param.fill_(dummy_weight_value)
+        return
+
+    is_e8m0 = param.dtype == torch.float8_e8m0fnu or (
+        param.dtype == torch.uint8 and "scale" in name
+    )
+    if is_e8m0:
+        param.view(torch.uint8).fill_(_DUMMY_E8M0_SCALE_BYTE)
+        return
+
+    if (
+        param.dtype in (torch.uint8, torch.int8, torch.float4_e2m1fn_x2)
+        and not current_platform.is_tpu()
+    ):
+        generator = torch.Generator(device=param.device)
+        generator.manual_seed(seed)
+        if param.dtype == torch.int8:
+            param.random_(-128, 128, generator=generator)
+        else:
+            param.view(torch.uint8).random_(0, 256, generator=generator)
         return
 
     if not torch.is_floating_point(param):
@@ -1497,6 +1677,13 @@ def initialize_single_dummy_weight(
             # across processes. Zero them for reproducibility.
             param.zero_()
         return
+
+    if low is None or high is None:
+        dummy_range = 1e-3
+        if torch.finfo(param.dtype).bits < 16:
+            dummy_range = _DUMMY_FP8_RANGE
+        low = -dummy_range if low is None else low
+        high = dummy_range if high is None else high
 
     if current_platform.is_tpu():
         generator = torch.Generator(device="cpu")
