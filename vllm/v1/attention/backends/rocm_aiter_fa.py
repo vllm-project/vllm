@@ -492,36 +492,43 @@ class AiterFlashAttentionMetadataBuilder(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
 
-    def _ensure_kv_scale_buffers(self) -> None:
-        # Only for fp8 shuffle kv cache: the asm decode kernel indexes a dense
-        # [num_blocks, num_kv_heads, block_size] scale buffer per layer, so fill
-        # one per distinct per-tensor scale, once the KV cache is bound.
+    def _build_asm_kv_scale_tables(self) -> None:
+        # Only for fp8 shuffle kv cache: the asm decode kernel reads a dense
+        # [num_blocks, num_kv_heads, block_size] scale table per layer, so build
+        # one per distinct per-tensor scale once the KV cache is bound (no-op after).
         if (
             self.k_scale is not None
             or not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
             or not is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
         ):
             return
-        layers = self.vllm_config.compilation_config.static_forward_context
-        dense: dict[tuple[int, float], torch.Tensor] = {}
-        k_scales: dict[str, torch.Tensor] = {}
-        v_scales: dict[str, torch.Tensor] = {}
-        for name in self.layer_names:
-            layer = layers[name]
+        attn_layers = self.vllm_config.compilation_config.static_forward_context
+        tables_by_scale: dict[tuple[int, float], torch.Tensor] = {}
+
+        def shared_scale_table(num_blocks: int, scale: float) -> torch.Tensor:
+            # Layers with the same scale share one table.
+            key = (num_blocks, scale)
+            if key not in tables_by_scale:
+                tables_by_scale[key] = torch.full(
+                    (num_blocks, self.num_heads_kv, self.block_size),
+                    scale,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            return tables_by_scale[key]
+
+        k_scale_tables: dict[str, torch.Tensor] = {}
+        v_scale_tables: dict[str, torch.Tensor] = {}
+        for layer_name in self.layer_names:
+            layer = attn_layers[layer_name]
             num_blocks = layer.kv_cache.shape[0]
-            for scales, value in (
-                (k_scales, layer._k_scale_float),
-                (v_scales, layer._v_scale_float),
-            ):
-                if (num_blocks, value) not in dense:
-                    dense[num_blocks, value] = torch.full(
-                        (num_blocks, self.num_heads_kv, self.block_size),
-                        value,
-                        dtype=torch.float32,
-                        device=self.device,
-                    )
-                scales[name] = dense[num_blocks, value]
-        self.k_scale, self.v_scale = k_scales, v_scales
+            k_scale_tables[layer_name] = shared_scale_table(
+                num_blocks, layer._k_scale_float
+            )
+            v_scale_tables[layer_name] = shared_scale_table(
+                num_blocks, layer._v_scale_float
+            )
+        self.k_scale, self.v_scale = k_scale_tables, v_scale_tables
 
     def build(
         self,
@@ -534,7 +541,7 @@ class AiterFlashAttentionMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
         )
-        self._ensure_kv_scale_buffers()
+        self._build_asm_kv_scale_tables()
         (
             num_decodes,
             num_extends,
@@ -747,7 +754,7 @@ class AiterFlashAttentionMetadataBuilder(
         skip split_decodes_prefills_and_extends() and avoid all .cpu() /
         .item() calls that would otherwise break CUDA graph capture.
         """
-        self._ensure_kv_scale_buffers()
+        self._build_asm_kv_scale_tables()
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
 
