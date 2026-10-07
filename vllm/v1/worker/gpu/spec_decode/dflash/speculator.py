@@ -833,7 +833,12 @@ def prepare_dflash_inputs(
         max_num_tokens - last_query_end,
     )
     if pad_span > 0:
-        PAD_BLOCK_SIZE = 1024
+        # Sized the same way as the main kernel above, which rounds the
+        # actual work up to a power of two rather than hardcoding a width.
+        # A bare 1024 launched a 1024-wide block even when pad_span was 3.
+        # The cap is higher than the main kernel's 256 because this kernel
+        # only does contiguous fills, with no per-element index arithmetic.
+        PAD_BLOCK_SIZE = min(1024, triton.next_power_of_2(max(1, pad_span)))
         _pad_dflash_buffers_kernel[(triton.cdiv(pad_span, PAD_BLOCK_SIZE),)](
             input_buffers.query_start_loc,
             input_buffers.seq_lens,

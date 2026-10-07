@@ -26,7 +26,10 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     _pad_dflash_buffers_kernel,
 )
 
-PAD_BLOCK_SIZE = 1024
+# Mirror the production sizing rule rather than a fixed width, so the
+# test exercises the block size the speculator would actually launch.
+def _pad_block_size(pad_span):
+    return min(1024, triton.next_power_of_2(max(1, pad_span)))
 SENTINEL = -12345
 
 
@@ -63,7 +66,7 @@ def _launch(bufs, num_reqs, num_query_per_req, num_spec, max_num_reqs, max_num_t
     )
     if pad_span <= 0:
         return
-    _pad_dflash_buffers_kernel[(triton.cdiv(pad_span, PAD_BLOCK_SIZE),)](
+    _pad_dflash_buffers_kernel[(triton.cdiv(pad_span, _pad_block_size(pad_span)),)](
         bufs["query_start_loc"],
         bufs["seq_lens"],
         bufs["sample_indices"],
@@ -76,7 +79,7 @@ def _launch(bufs, num_reqs, num_query_per_req, num_spec, max_num_reqs, max_num_t
         max_num_reqs,
         max_num_tokens,
         PAD_SLOT_ID=PAD_SLOT_ID,
-        BLOCK_SIZE=PAD_BLOCK_SIZE,
+        BLOCK_SIZE=_pad_block_size(pad_span),
     )
 
 
