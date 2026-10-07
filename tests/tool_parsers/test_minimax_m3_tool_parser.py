@@ -8,15 +8,12 @@ import pytest
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.minimax_m3_tool_parser import MinimaxM3ToolParser
-
-# MinimaxM3ToolParser extends RustToolParser; skip when the PyO3 extension
-# is absent (mirrors the guard in test_rust_tool_parser.py).
-pytest.importorskip("vllm._rust_tool_parser")
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -108,6 +105,23 @@ def build_order_call() -> str:
     )
 
 
+ORDER_ARGUMENTS = {
+    "user_id": 42,
+    "urgent": True,
+    "note": "Please leave at front desk.",
+    "shipping": {"city": "Singapore", "zip": 18956},
+    "items": [
+        {"sku": "book-001", "qty": 2},
+        {"sku": "pen-007", "qty": 5},
+    ],
+    "metadata": {
+        "source": "mobile",
+        "campaign": "may-launch",
+    },
+    "duplicate_demo": {"tag": ["a", "b"]},
+}
+
+
 def build_order_invocation(user_id: int) -> str:
     return (
         f'{NS}<invoke name="create_order">'
@@ -181,6 +195,20 @@ def test_minimax_m3_parser_registered():
     assert ToolParserManager.get_tool_parser("minimax_m3") is MinimaxM3ToolParser
 
 
+def test_required_tool_choice_keeps_native_syntax(parser):
+    request = ChatCompletionRequest(
+        model="minimax-m3",
+        messages=[{"role": "user", "content": "order"}],
+        tools=sample_tools(),
+        tool_choice="required",
+    )
+
+    adjusted = parser.adjust_request(request)
+
+    assert adjusted.structured_outputs is None
+    assert adjusted.skip_special_tokens
+
+
 def test_non_streaming_nested_tool_call(parser):
     result = parser.extract_tool_calls(
         "I will create it.\n" + build_order_call(),
@@ -192,21 +220,7 @@ def test_non_streaming_nested_tool_call(parser):
     assert len(result.tool_calls) == 1
     tool_call = result.tool_calls[0]
     assert tool_call.function.name == "create_order"
-    assert json.loads(tool_call.function.arguments) == {
-        "user_id": 42,
-        "urgent": True,
-        "note": "Please leave at front desk.",
-        "shipping": {"city": "Singapore", "zip": 18956},
-        "items": [
-            {"sku": "book-001", "qty": 2},
-            {"sku": "pen-007", "qty": 5},
-        ],
-        "metadata": {
-            "source": "mobile",
-            "campaign": "may-launch",
-        },
-        "duplicate_demo": {"tag": ["a", "b"]},
-    }
+    assert json.loads(tool_call.function.arguments) == ORDER_ARGUMENTS
 
 
 def test_non_streaming_without_tool_call_keeps_content(parser):
@@ -258,8 +272,5 @@ def test_streaming_nested_tool_call(parser):
     assert len(tool_calls) == 1
     assert tool_calls[0]["name"] == "create_order"
     assert tool_calls[0]["id"] is not None
-    assert json.loads(tool_calls[0]["arguments"]) == json.loads(
-        parser.streamed_args_for_tool[0]
-    )
-    assert json.loads(parser.prev_tool_call_arr[0]["arguments"])["items"][1]["qty"] == 5
+    assert json.loads(tool_calls[0]["arguments"]) == ORDER_ARGUMENTS
     assert results[-1].content is None
