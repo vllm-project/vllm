@@ -31,6 +31,11 @@ from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
 )
+from vllm.models.qwen4_exp.common.ngram_embedding import (
+    NF4_PLE_LEVELS,
+    Qwen4ExpPLENf4EmbeddingMethod,
+    quantize_ple_nf4,
+)
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     compute_ple_shard_overlap,
@@ -666,7 +671,49 @@ def test_pinned_embedding_finalize_requires_prior_start_prefetch() -> None:
         embedding._finalize_prefetch(torch.empty(4, 2, 3), output)
 
 
-def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
+def test_ple_embedding_dtype_selects_nf4() -> None:
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(None, "ple", "nf4"),
+        Qwen4ExpPLENf4EmbeddingMethod,
+    )
+
+
+def test_ple_nf4_round_trip() -> None:
+    """The packed layout decodes as documented; Gaussian rows lose little."""
+    method = Qwen4ExpPLENf4EmbeddingMethod()
+    layer = SimpleNamespace(embedding_dim=160)
+    levels = torch.tensor(NF4_PLE_LEVELS)
+    codes = torch.randint(0, 16, (64, 160), dtype=torch.uint8)
+    scale = torch.rand(64, 1).half() + 0.5
+    packed = torch.cat(
+        (
+            codes[:, 0::2] | (codes[:, 1::2] << 4),
+            scale.view(torch.uint8),
+            torch.zeros(64, 2, dtype=torch.uint8),
+        ),
+        dim=-1,
+    )
+    assert packed.shape == (64, method.row_bytes(160))
+    torch.testing.assert_close(
+        method.dequantize(layer, packed, torch.float32),
+        levels[codes.long()] * scale.float(),
+        rtol=0,
+        atol=0,
+    )
+    assert quantize_ple_nf4(levels[codes.long()] * scale.float()).dtype == torch.uint8
+
+    torch.manual_seed(0)
+    rows = torch.randn(4096, 160)
+    restored = method.dequantize(layer, quantize_ple_nf4(rows), torch.float32)
+    rel = (restored - rows).square().sum() / rows.square().sum()
+    # Lloyd-Max 16 levels on a Gaussian: 0.0095; uniform int4 per row: ~0.012.
+    assert rel < 0.0097
+
+
+@pytest.mark.parametrize("storage_dtype", [torch.float8_e4m3fn, torch.uint8])
+def test_pinned_byte_embedding_uses_int8_for_parallel_reduce(
+    storage_dtype: torch.dtype,
+) -> None:
     embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
     embedding.tp_size = 2
@@ -677,7 +724,7 @@ def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
         return tensor.clone()
 
     embedding.parallel_group = SimpleNamespace(all_reduce=all_reduce)
-    embeddings = torch.arange(8).reshape(2, 4).to(torch.float8_e4m3fn)
+    embeddings = torch.arange(8).reshape(2, 4).to(storage_dtype)
 
     output = embedding._reduce_etp_embeddings(embeddings)
 
@@ -712,6 +759,51 @@ def test_ple_device_embedding_allocates_on_active_device(
         )
 
     assert embedding.weight.device == torch.device("cuda:0")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_ple_pinned_nf4_embedding_looks_up_packed_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_etp_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    method = Qwen4ExpPLENf4EmbeddingMethod()
+    with torch.device("cuda:0"):
+        embedding = Qwen4ExpPLEPinnedHostEmbedding(
+            4,
+            8,
+            params_dtype=torch.float16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=method,
+            num_ngram_heads=2,
+        )
+    rows = torch.randn(4, 8)
+    packed = quantize_ple_nf4(rows)
+    copy_ple_embedding_shard_(
+        embedding.weight, packed, checkpoint_start=0, tp_start=0, tp_end=4
+    )
+    input_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+
+    output = embedding._lookup(input_ids)
+    dequantized = embedding.dequantize(output.flatten(-2), torch.float16)
+
+    assert embedding.weight.shape == (4, method.row_bytes(8))
+    assert torch.equal(output.cpu(), packed[input_ids.cpu()])
+    expected = method.dequantize(embedding, packed, torch.float32)
+    torch.testing.assert_close(
+        dequantized.cpu(),
+        expected[input_ids.cpu()].flatten(-2).half(),
+        rtol=0,
+        atol=0,
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
