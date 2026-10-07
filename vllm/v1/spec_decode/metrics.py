@@ -64,16 +64,24 @@ class SpecDecodingLogging:
     before resetting to zero.
     """
 
-    def __init__(self, is_diffusion: bool = False):
+    def __init__(
+        self,
+        is_diffusion: bool = False,
+        enable_adaptive_verification: bool = False,
+    ):
         # Diffusion (dLLM) models reuse the spec-decode data path with
         # overloaded semantics, so the raw spec-decode framing (drafts, bonus
         # token, per-position vector) is logged with diffusion-native terms.
         self.is_diffusion = is_diffusion
+        # Without adaptive verification every drafted token is verified, so
+        # the verified count would only duplicate the drafted count.
+        self.enable_adaptive_verification = enable_adaptive_verification
         self.reset()
 
     def reset(self):
         self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
+        self.num_verified_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
@@ -81,6 +89,9 @@ class SpecDecodingLogging:
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
+        self.num_verified_draft_tokens.append(
+            spec_decoding_stats.num_verified_draft_tokens
+        )
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
@@ -91,6 +102,7 @@ class SpecDecodingLogging:
             return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
+        num_verified_draft_tokens = np.sum(self.num_verified_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
         if num_drafts == 0:
             self.reset()
@@ -127,6 +139,12 @@ class SpecDecodingLogging:
         acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
         rates_str = ", ".join(f"{p:.3f}" for p in acceptance_rates)
 
+        verified_part = (
+            f"Verified: {num_verified_draft_tokens} tokens, "
+            if self.enable_adaptive_verification
+            else ""
+        )
+
         log_fn(
             "SpecDecoding metrics: "
             "Mean acceptance length: %.2f, "
@@ -134,7 +152,8 @@ class SpecDecodingLogging:
             "Drafted throughput: %.2f tokens/s, "
             "Accepted: %d tokens, "
             "Drafted: %d tokens, "
-            "Per-position acceptance rate: %s, "
+            + verified_part
+            + "Per-position acceptance rate: %s, "
             "Avg Draft acceptance rate: %.1f%%",
             mean_acceptance_length,
             accepted_throughput,
