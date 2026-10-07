@@ -1015,6 +1015,36 @@ def test_reload_weights_before_load_model(model_runner):
         model_runner.reload_weights()
 
 
+def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
+    # An engine started from an object-storage URI keeps that URI in
+    # model_config.model_weights, which the runai_streamer loader prefers over
+    # model_config.model. A new weights_path must replace it, or the loader
+    # silently re-streams the original checkpoint.
+    loader = Mock()
+    loader.get_all_weights.return_value = iter(())
+    monkeypatch.setattr(gpu_model_runner_module, "get_model_loader", lambda _: loader)
+    monkeypatch.setattr(gpu_model_runner_module, "initialize_layerwise_reload", Mock())
+    monkeypatch.setattr(gpu_model_runner_module, "finalize_layerwise_reload", Mock())
+
+    runner = Mock(lora_config=None)
+    runner.model_config = SimpleNamespace(
+        model="/tmp/pulled-config-files",
+        model_weights="s3://bucket/original",
+        revision="abc123",
+        quantization=None,
+    )
+    runner.get_model.return_value.named_parameters.return_value = []
+    runner.get_model.return_value.load_weights.return_value = None
+
+    GPUModelRunner.reload_weights(runner, weights_path="org/new-model")
+
+    loader.get_all_weights.assert_called_once_with(
+        runner.model_config, runner.get_model.return_value
+    )
+    cfg = runner.model_config
+    assert (cfg.model, cfg.model_weights, cfg.revision) == ("org/new-model", "", None)
+
+
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     runner = object.__new__(GPUModelRunner)
     runner.use_async_scheduling = False
