@@ -13,6 +13,10 @@ this tree.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import pytest
 import torch
 
@@ -78,8 +82,7 @@ def _packed_cache(latent: torch.Tensor) -> torch.Tensor:
     return cache
 
 
-@pytest.mark.parametrize("seed", [0, 1])
-def test_packed_cache_matches_dequantized_bf16_cache(seed: int):
+def _assert_packed_matches_dequantized(seed: int):
     q, latent, indices, indptr = _fixture(seed)
 
     packed = _packed_cache(latent)
@@ -92,6 +95,34 @@ def test_packed_cache_matches_dequantized_bf16_cache(seed: int):
     assert torch.equal(got, want), (
         "attention over the packed cache disagrees with attention over the "
         "same values in bf16 -- this is a wiring bug, not quantization"
+    )
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_packed_cache_matches_dequantized_bf16_cache(seed: int):
+    _assert_packed_matches_dequantized(seed)
+
+
+def test_software_unpack_matches_dequantized_bf16_cache():
+    """Force the software unpack used off gfx950 through the full kernel.
+
+    Triton reads _HW_UNPACK at compile time and refuses to relaunch a kernel
+    after it changes, so it is set in a fresh process before the first launch.
+    """
+    script = (
+        "from vllm.triton_utils import tl\n"
+        "from vllm.v1.attention.ops import mxfp4_mla_read\n"
+        "mxfp4_mla_read._HW_UNPACK = tl.constexpr(False)\n"
+        "import test_mxfp4_mla_e2e\n"
+        "test_mxfp4_mla_e2e._assert_packed_matches_dequantized(seed=0)\n"
+    )
+    path = os.pathsep.join(
+        [os.path.dirname(__file__), os.environ.get("PYTHONPATH", "")]
+    )
+    subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": path},
+        check=True,
     )
 
 
