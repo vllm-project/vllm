@@ -380,7 +380,7 @@ def test_online_quantization(
     logged_warnings: list[str] = []
 
     def record_info(message: str, *args: object, **_kwargs: object) -> None:
-        if "Quantized " in message and "of types" in message:
+        if "Quantizing " in message and "of types" in message:
             logged_messages.append(message % args)
 
     def record_warning(message: str, *args: object, **_kwargs: object) -> None:
@@ -451,7 +451,7 @@ def test_online_quantization(
         for warning in logged_warnings
     )
     assert logged_messages == [
-        "Quantized 2 layers of types: "
+        "Quantizing 2 layers of types: "
         f"mlp.{shared_expert_name}.down_proj: 1 "
         f"(from targets: {target_pattern}, mxfp4); "
         f"mlp.{shared_expert_name}.gate_up_proj: 1 "
