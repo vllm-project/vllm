@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -42,13 +42,11 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
+    BeforeValidator,
     Field,
     ValidationError,
     field_serializer,
@@ -60,7 +58,12 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.protocol import StopParam
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    StopParam,
+    TopLogprobsParam,
+    validate_cache_salt,
+)
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -80,6 +83,7 @@ _INT64_MAX = 2**63 - 1
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    cache_write_tokens: int
     input_tokens_per_turn: list[int] = Field(default_factory=list)
     cached_tokens_per_turn: list[int] = Field(default_factory=list)
 
@@ -100,9 +104,7 @@ class ResponseUsage(OpenAIBaseModel):
 
 
 def serialize_message(msg):
-    """
-    Serializes a single message
-    """
+    """Serializes a single message."""
     if isinstance(msg, dict):
         return msg
     elif hasattr(msg, "to_dict"):
@@ -113,9 +115,7 @@ def serialize_message(msg):
 
 
 def serialize_messages(msgs):
-    """
-    Serializes multiple messages
-    """
+    """Serializes multiple messages."""
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
@@ -132,6 +132,31 @@ ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+
+
+def _default_input_image_details(value: Any) -> Any:
+    """Set the API default for input images before SDK type validation."""
+    if not isinstance(value, dict):
+        return value
+
+    content = value.get("content")
+    if not isinstance(content, list):
+        return value
+
+    new_content = []
+    changed = False
+    for part in content:
+        new_part = part
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "input_image"
+            and "detail" not in part
+        ):
+            new_part = {**part, "detail": "auto"}
+            changed = True
+        new_content.append(new_part)
+
+    return {**value, "content": new_content} if changed else value
 
 
 class ResponsesRequest(OpenAIBaseModel):
@@ -151,7 +176,15 @@ class ResponsesRequest(OpenAIBaseModel):
         ]
         | None
     ) = None
-    input: str | list[ResponseInputOutputItem]
+    input: (
+        str
+        | list[
+            Annotated[
+                ResponseInputOutputItem,
+                BeforeValidator(_default_input_image_details),
+            ]
+        ]
+    )
     instructions: str | None = None
     max_output_tokens: int | None = None
     max_tool_calls: int | None = None
@@ -178,7 +211,7 @@ class ResponsesRequest(OpenAIBaseModel):
     text: ResponseTextConfig | None = None
     tool_choice: ToolChoice = "auto"
     tools: list[Tool] = Field(default_factory=list)
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
     top_k: int | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
@@ -213,6 +246,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
+    watermarking: bool | None = None
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(
@@ -436,6 +470,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
             max_tokens=max_tokens,
@@ -465,6 +500,14 @@ class ResponsesRequest(OpenAIBaseModel):
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -677,6 +720,11 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: ResponseUsage | None = None
     user: str | None = None
 
+    # vLLM-specific per-request metrics. Omitted unless enabled server-side.
+    metrics: PerRequestMetrics | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
     presence_penalty: float | None = Field(
         default=None,
         ge=-2.0,
@@ -745,6 +793,7 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: ResponseUsage | None = None,
+        metrics: PerRequestMetrics | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
@@ -788,53 +837,10 @@ class ResponsesResponse(OpenAIBaseModel):
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            metrics=metrics,
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
         )
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.done"]
-    """The type of the event. Always `response.reasoning_part.done`."""
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.added"]
-    """The type of the event. Always `response.reasoning_part.added`."""
 
 
 # vLLM Streaming Events
@@ -861,8 +867,6 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseContentPartDoneEvent
     | ResponseReasoningTextDeltaEvent
     | ResponseReasoningTextDoneEvent
-    | ResponseReasoningPartAddedEvent
-    | ResponseReasoningPartDoneEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent

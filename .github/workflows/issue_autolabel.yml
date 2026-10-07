@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   add-labels:
+    if: github.repository_owner == 'vllm-project'
     runs-on: ubuntu-latest
     steps:
       - name: Label issues based on keywords
@@ -196,9 +197,12 @@ jobs:
               deepseek: {
                 keywords: [{ term: "DeepSeek", searchIn: "title" }],
               },
+              // DSv4 and DSv4.1 are distinct architectures; these keep them exclusive.
               DSv4: {
-                keywords: [{ term: "DSv4", searchIn: "title" }],
-                substrings: [{ term: "deepseek-v4", searchIn: "title" }],
+                regexPatterns: [{ pattern: "(?:\\bDSv4\\b|deepseek[-\\s_]?v4)(?![._]?1)", flags: "gi", searchIn: "title" }],
+              },
+              "DSv4.1": {
+                regexPatterns: [{ pattern: "(?:\\bDSv4[._]?1\\b|deepseek[-\\s_]?v4[._]?1)", flags: "gi", searchIn: "title" }],
               },
               llama: {
                 keywords: [{ term: "Llama", searchIn: "title" }],
@@ -251,6 +255,27 @@ jobs:
               // phrases go in `substrings`: they are specific enough on their
               // own, and a boundary match would miss ordinary variations --
               // "structured outputs", "tool parsers", "prefix caching".
+              pooling: {
+                keywords: [
+                  { term: "pooling",   searchIn: "title" },
+                  { term: "pooler",    searchIn: "title" },
+                  { term: "rerank",    searchIn: "title" },
+                  { term: "reranker",  searchIn: "title" },
+                  { term: "reranking", searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "embedding model",         searchIn: "title" },
+                  { term: "embedding API",           searchIn: "title" },
+                  { term: "embeddings API",          searchIn: "title" },
+                  { term: "sentence embedding",      searchIn: "title" },
+                  { term: "sequence classification", searchIn: "title" },
+                  { term: "token classification",    searchIn: "title" },
+                  { term: "cross-encoder",           searchIn: "title" },
+                  { term: "late interaction",        searchIn: "title" },
+                  { term: "late-interaction",        searchIn: "title" },
+                  { term: "reward model",            searchIn: "title" },
+                ],
+              },
               "speculative-decoding": {
                 keywords: [
                   { term: "eagle",  searchIn: "title" },

@@ -91,11 +91,9 @@ def break_fp4_bytes(a, dtype):
 def generate_balanced_routing(
     hidden_states: torch.Tensor, num_experts: int, top_k: int
 ):
-    """
-    Generate routing weights and topk indices such that every expert is active.
+    """Generate routing weights and topk indices such that every expert is active.
     Returns routing_weights, topk_idx
     """
-
     num_tokens, hidden_dim = hidden_states.shape
     #   num_tokens = batch_size * seq_len
 
@@ -232,13 +230,13 @@ def grouped_gemm_ref(
     *,
     block_size: int = 16,
 ) -> torch.Tensor:
-    """
-    Computes the reference grouped GEMM (fp4 quantized per-expert loop),
+    """Computes the reference grouped GEMM (fp4 quantized per-expert loop),
     computes flashinfer grouped GEMM (for scale consistency),
     and returns ONLY the repacked reference output: out_ref.
 
     Returns:
         out_ref: Tensor [num_experts, max_m, n_out]
+
     """
     device_hs = hidden_states_expanded.device
     device_w = weights.device

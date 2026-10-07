@@ -26,7 +26,7 @@ from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -37,12 +37,12 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_rope_parameters_nested,
+    iter_rope_parameters,
+    mrope_num_dims,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
     uses_mrope,
-    uses_xdrope_dim,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
@@ -55,7 +55,7 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
 else:
-    PretrainedConfig = Any
+    PreTrainedConfig = Any
 
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
@@ -89,7 +89,6 @@ ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
     "auto",
     "hf",
-    "slow",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -105,15 +104,43 @@ PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
     "processed_logits",
     "processed_logprobs",
 )
-HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
+HfOverrides = dict[str, Any] | Callable[[PreTrainedConfig], PreTrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
+
+_ATTENTION_LAYER_TYPES = frozenset(
+    {
+        "full_attention",
+        "indexed_attention",
+        # TODO: Delete below once Transformers 5.18.0 is the minimum required version.
+        "deepseek_sparse_attention",
+        "qwen_sparse_attention",
+    }
+)
+"""`layer_types` spellings that consume a full attention KV cache. Sparse
+attention still caches every token, so it counts as attention here."""
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
     "pooling": ["embed", "classify"],
     "draft": [],
 }
+
+
+def _modelopt_mixed_has_nvfp4(quant_config: dict[str, Any] | None) -> bool:
+    """Whether a ModelOpt MIXED_PRECISION checkpoint quantizes any layer to NVFP4.
+
+    ``W4A16_NVFP4`` is excluded on purpose: it quantizes weights only, so there
+    is no activation quantization for the fusion passes to act on.
+    """
+    layers = (quant_config or {}).get("quantized_layers")
+    if not isinstance(layers, dict):
+        return False
+    return any(
+        isinstance(info, dict) and info.get("quant_algo") == "NVFP4"
+        for info in layers.values()
+    )
+
 
 AttnTypeStr = Literal[
     "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
@@ -148,10 +175,10 @@ class ModelConfig:
     - "auto" will use the tokenizer from `mistral_common` for Mistral models
       if available, otherwise it will use the "hf" tokenizer.
     - "hf" will use the fast tokenizer if available.
-    - "slow" will always use the slow tokenizer.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
+    - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
     - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
       with Kimi K3's Python XTML encoding instead of a Jinja template.
     - "cohere" uses the standard HF tokenizer but renders the chat template
@@ -182,10 +209,14 @@ class ModelConfig:
     We must set the global seed because otherwise,
     different tensor parallel workers would sample different tokens,
     leading to inconsistent results."""
-    hf_config: PretrainedConfig = field(init=False)
+    hf_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the model."""
-    hf_text_config: PretrainedConfig = field(init=False)
+    hf_text_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
+    is_submodel_config: bool = field(default=False, init=False)
+    """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
+    (e.g. a multimodal model's text stack). Its architecture list is empty, so
+    deployment-level validation must not run against it."""
     word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
     """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
     contains an `lm_head` of its own. The two may still turn out to be identical, in
@@ -242,9 +273,10 @@ class ModelConfig:
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
-    flexibility."""
-    enable_return_routed_experts: bool = False
-    """Whether to return routed experts."""
+    flexibility.
+
+    NOTE: This disables both `torch.compile` and CUDA graphs, and is
+    equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
@@ -338,11 +370,17 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_preserve_parameter_names: list[str] = field(default_factory=list)
+    """Parameter-name globs to preserve across level-2 sleep.
+    The sender must omit these parameters; loaders must preserve their storage."""
     sleep_mode_backend: str = "cumem"
     """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    sleep_mode_offload_cudagraph: bool = False
+    """Back up CUDA graph memory to CPU during sleep, restored in place on wake.
+    Takes effect with enable_sleep_mode, the cumem backend and CUDA graphs."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
     (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
@@ -414,8 +452,7 @@ class ModelConfig:
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -475,7 +512,7 @@ class ModelConfig:
 
     def _update_nested(
         self,
-        target: PretrainedConfig | dict[str, Any],
+        target: PreTrainedConfig | dict[str, Any],
         updates: dict[str, Any],
     ) -> None:
         """Recursively updates a config or dict with nested updates."""
@@ -503,15 +540,15 @@ class ModelConfig:
 
     def _apply_dict_overrides(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
         """Apply dict overrides, handling both nested configs and dict values."""
-        from transformers import PretrainedConfig
+        from transformers import PreTrainedConfig
 
         for key, value in overrides.items():
             attr = getattr(config, key, None)
-            if attr is not None and isinstance(attr, PretrainedConfig):
+            if attr is not None and isinstance(attr, PreTrainedConfig):
                 # It's a nested config - recursively update it
                 self._update_nested(attr, value)
             else:
@@ -581,22 +618,27 @@ class ModelConfig:
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
-        # to prevent resolving it multiple times downstream.
-        # If the weights come from a different repo, we cannot eagerly resolve revision
-        weights_from_model = not self.model_weights or self.model_weights == self.model
-        # If the config comes from a different repo, we cannot eagerly resolve revision
-        config_from_model = not self.hf_config_path or self.hf_config_path == self.model
-        can_resolve_model_revision = config_from_model and weights_from_model
-        if can_resolve_model_revision:
-            self.revision = resolve_revision(
-                self.model,
+        # to prevent resolving it multiple times downstream. A resolved revision
+        # only pins the repo it was resolved for, so each repo needs its own call.
+        self.revision = resolve_revision(
+            self.model,
+            self.revision,
+            self.hf_token,
+        )
+
+        # The config can live in another repo, which `self.revision` does not pin.
+        # It stays `None` if the config comes from `self.model`, so that call sites
+        # fall back to `self.revision` the same way they fall back to `self.model`.
+        self._hf_config_revision = None
+        if self.hf_config_path and self.hf_config_path != self.model:
+            self._hf_config_revision = resolve_revision(
+                self.hf_config_path,
                 self.revision,
                 self.hf_token,
             )
 
         if (
-            can_resolve_model_revision
-            and self.tokenizer == self.model
+            self.tokenizer == self.model
             and self.tokenizer_revision == requested_revision
         ):
             self.tokenizer_revision = self.revision
@@ -624,7 +666,7 @@ class ModelConfig:
         hf_config = get_config(
             self.hf_config_path or self.model,
             self.trust_remote_code,
-            self.revision,
+            self._hf_config_revision or self.revision,
             self.code_revision,
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
@@ -702,6 +744,8 @@ class ModelConfig:
                 "DeepseekV4ForConditionalGeneration",
             ):
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch == "DeepseekV41ForCausalLM":
+                self.tokenizer_mode = "deepseek_v41"
             elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
                 self.tokenizer_mode = "inkling"
 
@@ -862,6 +906,80 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
 
+    def _supports_multimodal_inputs(self) -> bool:
+        """Checks if the model supports multimodal inputs.
+        Returns True if the model is multimodal with any non-zero supported
+        modalities, otherwise returns False, effectively running in
+        text-only mode.
+        """
+        if not self.is_multimodal_model:
+            return False
+
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        mm_config = self.get_multimodal_config()
+        try:
+            info = MULTIMODAL_REGISTRY.get_processing_info(self)
+        except ValueError:
+            # Speculative drafters for multimodal targets (e.g. Qwen3_5MTP,
+            # Exaone4_5_MTP, MiMoV2OmniMTP) declare `SupportsMultiModal` so
+            # that they can consume the embeddings merged by the target model,
+            # but they never run a multi-modal processor of their own. Running
+            # in text-only mode is the expected outcome for them, not a
+            # misconfiguration worth warning about.
+            if self.runner_type != "draft":
+                logger.warning_once(
+                    "Model %s is treated as multimodal but has no registered "
+                    "multimodal processor; running in text-only mode.",
+                    self.model,
+                )
+            return False
+
+        # Check if all supported modalities have limit == 0
+        if all(
+            mm_config.get_limit_per_prompt(modality) == 0
+            for modality in info.supported_mm_limits
+        ):
+            # If enable_mm_embeds is True, we still need MM infrastructure
+            # to process pre-computed embeddings even though encoder won't run
+            if mm_config.enable_mm_embeds:
+                return True
+
+            logger.info_once(
+                "All limits of multimodal modalities supported by the model "
+                "are set to 0, running in text-only mode."
+            )
+            return False
+
+        return True
+
+    def _cached_supports_multimodal_inputs(self) -> bool:
+        cache = getattr(self, "_supports_multimodal_inputs_cache", None)
+        if cache is None:
+            self._supports_multimodal_inputs_cache = cache = {}
+
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            mm_cache_key = None
+        else:
+            limits_per_prompt = {
+                modality: mm_config.get_limit_per_prompt(modality)
+                for modality in mm_config.limit_per_prompt
+            }
+            mm_cache_key = (
+                mm_config.language_model_only,
+                tuple(limits_per_prompt.items()),
+                mm_config.enable_mm_embeds,
+            )
+
+        cache_key = (self.is_multimodal_model, self.runner_type, mm_cache_key)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        supports_mm = self._supports_multimodal_inputs()
+        cache[cache_key] = supports_mm
+        return supports_mm
+
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
 
@@ -878,24 +996,18 @@ class ModelConfig:
         vision modality is still enabled (e.g. ``image=0`` but video allowed).
         The deep-copied cache preserves the top-level decision instead.
         """
-        cached = getattr(self, "_supports_multimodal_inputs_cached", None)
-        if cached is not None:
-            return cached
-
         if self.multimodal_config is None:
             # Early call before multimodal init — do not clear mm_prefix yet.
             return True
 
-        from vllm.multimodal import MULTIMODAL_REGISTRY
-
-        supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(self)
-        self._supports_multimodal_inputs_cached = supports_mm
+        supports_mm = self._cached_supports_multimodal_inputs()
         if not supports_mm:
             logger.info_once(
                 "Disabled mm_prefix attention mode because multimodal inputs "
                 "are configuration-disabled. Attention backends without "
                 "mm_prefix support may now be selected."
             )
+
         return supports_mm
 
     def get_model_arch_config(self) -> ModelArchitectureConfig:
@@ -932,7 +1044,7 @@ class ModelConfig:
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
-        """Called after __post_init__"""
+        """Called after __post_init__."""
         if not isinstance(self.tokenizer, str):
             raise ValueError(
                 f"tokenizer must be a string, got "
@@ -1008,7 +1120,10 @@ class ModelConfig:
         # Check if the architecture we're wrapping has defaults
         runner = None
         task = None
-        if defaults := try_match_architecture_defaults(self.architectures[0]):
+        # architectures is empty for with_hf_config() submodel views.
+        if self.architectures and (
+            defaults := try_match_architecture_defaults(self.architectures[0])
+        ):
             _, (runner, task) = defaults
         # User specified value take precedence
         if self.runner != "auto":
@@ -1077,8 +1192,8 @@ class ModelConfig:
         Args:
             model: Model name or path
             tokenizer: Tokenizer name or path
-        """
 
+        """
         # Skip if model_weights is already set (model already pulled)
         if self.model_weights:
             return
@@ -1634,7 +1749,8 @@ class ModelConfig:
             if layer_types_value is not None:
                 if block_type == "attention":
                     return sum(
-                        t == "full_attention" for t in layer_types_value[start:end]
+                        t in _ATTENTION_LAYER_TYPES
+                        for t in layer_types_value[start:end]
                     )
                 elif block_type == "linear_attention":
                     return sum(
@@ -1656,9 +1772,7 @@ class ModelConfig:
             raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int:
-        """
-        Returns the mamba chunk size if it exists
-        """
+        """Returns the mamba chunk size if it exists."""
         # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:
@@ -1673,11 +1787,11 @@ class ModelConfig:
         return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:
-        """
-        Get the multimodal configuration of the model.
+        """Get the multimodal configuration of the model.
 
         Raises:
             ValueError: If the model is not multimodal.
+
         """
         if self.multimodal_config is None:
             raise ValueError("The model is not multimodal.")
@@ -1685,8 +1799,7 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        """
-        This method attempts to retrieve the non-default values of the
+        """This method attempts to retrieve the non-default values of the
         generation config for this model.
 
         The generation config can contain information about special tokens, as
@@ -1695,12 +1808,13 @@ class ModelConfig:
 
         Returns:
             A dictionary containing the non-default generation config.
+
         """
         if self.generation_config in {"auto", "vllm"}:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
-                revision=self.revision,
+                revision=self._hf_config_revision or self.revision,
                 code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
@@ -1720,8 +1834,7 @@ class ModelConfig:
         return config.to_diff_dict()
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
-        """
-        This method returns a dictionary containing the non-default sampling
+        """This method returns a dictionary containing the non-default sampling
         parameters with `override_generation_config` applied.
 
         The default sampling parameters are:
@@ -1733,6 +1846,7 @@ class ModelConfig:
 
         Returns:
             A dictionary containing the non-default sampling parameters.
+
         """
         src = self.generation_config
 
@@ -1743,6 +1857,8 @@ class ModelConfig:
 
         available_params = [
             "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
             "temperature",
             "top_k",
             "top_p",
@@ -1847,12 +1963,8 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
-    def uses_xdrope_dim(self) -> int:
-        return uses_xdrope_dim(self.hf_config)
-
-    @property
-    def uses_xdrope(self) -> bool:
-        return self.uses_xdrope_dim > 0
+    def mrope_num_dims(self) -> int:
+        return mrope_num_dims(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -1863,13 +1975,16 @@ class ModelConfig:
         return self._model_info.supports_multimodal_raw_input_only
 
     @property
+    def supports_multimodal_inputs(self) -> bool:
+        return self._cached_supports_multimodal_inputs()
+
+    @property
     def requires_raw_input_tokens(self) -> bool:
         return self._model_info.requires_raw_input_tokens
 
     @property
     def score_type(self) -> ScoreType:
-        """
-        Scoring API handles score/rerank for:
+        """Scoring API handles score/rerank for:
 
         - "classify" task (score_type: cross-encoder models)
         - "embed" task (score_type: bi-encoder models)
@@ -1962,8 +2077,7 @@ class ModelConfig:
 
     @property
     def head_dtype(self) -> torch.dtype:
-        """
-        "head" refers to the last Linear layer(s) of an LLM,
+        """The "head" refers to the last Linear layer(s) of an LLM,
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
@@ -1974,7 +2088,6 @@ class ModelConfig:
           fp32, which is required for RL training-inference consistency
           (the trainer computes logits in fp32).
         """
-
         head_dtype = _get_head_dtype(
             config=self.hf_config, dtype=self.dtype, runner_type=self.runner_type
         )
@@ -2157,13 +2270,20 @@ class ModelConfig:
         return getattr(self.hf_config, "quantization_config", None) is not None
 
     def is_nvfp4_quantized(self) -> bool:
+        quant_config = self.model_arch_config.quantization_config
+
         # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
         if self.quantization in ("modelopt_fp4",):
             return True
 
+        # A checkpoint mixing NVFP4 with another algorithm declares
+        # quant_algo MIXED_PRECISION and resolves to modelopt_mixed, so the
+        # per-layer algorithms decide.
+        if self.quantization == "modelopt_mixed":
+            return _modelopt_mixed_has_nvfp4(quant_config)
+
         # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
         # in the quantization config
-        quant_config = self.model_arch_config.quantization_config
         return (
             self.quantization == "compressed-tensors"
             and quant_config is not None
@@ -2172,8 +2292,7 @@ class ModelConfig:
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
-    """
-    If the input is a non-empty list, the first model_name in
+    """If the input is a non-empty list, the first model_name in
     `served_model_name` is taken.
     If the input is a non-empty string, it is used directly.
     For cases where the input is either an empty string or an
@@ -2318,7 +2437,7 @@ def _resolve_auto_dtype(
 
 def _get_and_verify_dtype(
     model_id: str,
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     dtype: str | torch.dtype,
     *,
     is_pooling_model: bool,
@@ -2339,6 +2458,12 @@ def _get_and_verify_dtype(
                 config_dtype,
                 is_pooling_model=is_pooling_model,
             )
+            if (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+                and torch_dtype in (torch.float16, torch.float32)
+            ):
+                torch_dtype = torch.bfloat16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype!r}")
@@ -2365,7 +2490,7 @@ def _get_and_verify_dtype(
 
 
 def _get_head_dtype(
-    config: PretrainedConfig, dtype: torch.dtype, runner_type: str
+    config: PreTrainedConfig, dtype: torch.dtype, runner_type: str
 ) -> torch.dtype:
     head_dtype: str | torch.dtype | None = getattr(config, "head_dtype", None)
 
@@ -2389,7 +2514,7 @@ def _get_head_dtype(
 
 
 def _get_and_verify_max_len(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     model_arch_config: ModelArchitectureConfig,
     tokenizer_config: dict | None,
     max_model_len: int | None,
@@ -2441,28 +2566,32 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
-    # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
-    # To simplify the verification, we convert it to dict[str, TypedDict].
-    rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
-        rope_parameters = {"": rope_parameters}
+    # Layers without RoPE do not contribute to context length scaling.
+    rope_parameters = list(iter_rope_parameters(hf_config))
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
-    if rope_parameters is not None and "gemma3" not in hf_config.model_type:
+    if rope_parameters and "gemma3" not in hf_config.model_type:
         scaling_factor = 1.0
-        for rp in rope_parameters.values():
+        for rp in rope_parameters:
             # No need to consider "type" key because of patch_rope_parameters when
             # loading HF config
             rope_type = rp["rope_type"]
 
-            if rope_type not in ("su", "longrope", "llama3"):
+            # YaRN variants leave max_position_embeddings already scaled, as
+            # Transformers' _compute_yarn_parameters assumes, so `factor` must
+            # not be applied to it again.
+            if rope_type not in (
+                "su",
+                "longrope",
+                "llama3",
+                "yarn",
+                "deepseek_yarn",
+                "deepseek_llama_scaling",
+            ):
                 # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
                 # NOTE: This assumes all layer types have the same scaling factor.
                 scaling_factor = rp.get("factor", scaling_factor)
-
-                if rope_type == "yarn":
-                    derived_max_model_len = rp["original_max_position_embeddings"]
         if scaling_factor is None:
             # Fallback the factor to 1.0 if a user assigned `null`
             logger.warning_once(
@@ -2484,9 +2613,7 @@ def _get_and_verify_max_len(
     if max_model_len is None or max_model_len == -1:
         # For LongRoPE, default to original_max_position_embeddings to avoid
         # performance degradation for shorter sequences
-        if rope_parameters is not None and any(
-            rp["rope_type"] == "longrope" for rp in rope_parameters.values()
-        ):
+        if any(rp["rope_type"] == "longrope" for rp in rope_parameters):
             max_model_len = int(
                 getattr(
                     hf_config, "original_max_position_embeddings", derived_max_model_len

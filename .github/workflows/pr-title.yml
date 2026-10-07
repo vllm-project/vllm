@@ -20,6 +20,7 @@ jobs:
     # - A draft PR with the `ready` label is marked ready for review.
     # - New commits are pushed to a ready PR (so its latest commit has a title check status).
     if: >-
+      github.repository_owner == 'vllm-project' &&
       github.event.pull_request.draft == false &&
       contains(github.event.pull_request.labels.*.name, 'ready') &&
       (github.event.action != 'labeled' || github.event.label.name == 'ready') &&
