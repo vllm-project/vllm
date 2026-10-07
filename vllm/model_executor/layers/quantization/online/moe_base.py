@@ -12,14 +12,16 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.online.requantization import (
+    OnlineMoERequantizationMixin,
+)
 from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
 from vllm.model_executor.utils import set_weight_attrs
 
 
-class OnlineMoEMethodBase(FusedMoEMethodBase):
+class OnlineMoEMethodBase(OnlineMoERequantizationMixin, FusedMoEMethodBase):
     """Base for MoE methods that load full-precision weights on meta device
     and quantize them after loading via the QeRL layerwise processing system.
     """
@@ -28,13 +30,6 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.requantization_source: QuantizeMethodBase | None = None
-        self.requantization_source_parameters: dict[str, torch.nn.Parameter] = {}
-
-    def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
-        """Configure serialized-weight conversion before online quantization."""
-        self.requantization_source = source_method
-        self.uses_meta_device = False
 
     def create_weights(
         self,
@@ -45,21 +40,14 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        if self.requantization_source is not None:
-            existing_parameter_names = set(layer._parameters)
-            self.requantization_source.create_weights(
-                layer,
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                params_dtype,
-                **extra_weight_attrs,
-            )
-            self.requantization_source_parameters = {
-                name: parameter
-                for name, parameter in layer._parameters.items()
-                if name not in existing_parameter_names and parameter is not None
-            }
+        if self.create_requantization_source_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        ):
             return
 
         layer.num_experts = num_experts
@@ -125,13 +113,6 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
 
         initialize_online_processing(layer)
 
-    def release_requantization_source_weights(self, layer: torch.nn.Module) -> None:
-        """Release checkpoint parameters after successful requantization."""
-        for name, source_parameter in self.requantization_source_parameters.items():
-            if layer._parameters.get(name) is source_parameter:
-                delattr(layer, name)
-        self.requantization_source_parameters.clear()
-
     def _zero_padding(
         self,
         layer: torch.nn.Module,
@@ -172,16 +153,6 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
-
-    def get_weights_for_quantization(
-        self, layer: torch.nn.Module
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return checkpoint weights materialized for online quantization."""
-        if self.requantization_source is None:
-            return layer.w13_weight, layer.w2_weight
-        weights = self.requantization_source.dequantize_weight(layer)
-        assert isinstance(weights, tuple)
-        return weights
 
     @property
     def supports_eplb(self) -> bool:

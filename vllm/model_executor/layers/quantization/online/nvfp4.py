@@ -110,7 +110,6 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         w13_weight, w2_weight = self.get_weights_for_quantization(layer)
         self._quantize_weights(layer, w13_weight, w2_weight)
         self._setup_kernel(layer)
-
         self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
