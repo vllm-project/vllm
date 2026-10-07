@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import types
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
@@ -15,6 +17,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
+from vllm.model_executor.models.interfaces import LocalArgmaxMixin
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.spec_decode import (
@@ -100,6 +103,113 @@ class BaseSpeculator(ABC):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
+
+
+def _attach_reduced_draft_vocab(speculator: "DraftModelSpeculator") -> None:
+    """Build a reduced-vocabulary ``get_top_tokens`` from
+    ``VLLM_SPEC_DRAFT_VOCAB`` (a path to a file of token ids, one per line)
+    and attach it to ``speculator.model`` as an instance method.
+
+    This is the FR-Spec idea (Zhao et al., ACL 2025) generalized to every
+    speculator built on :class:`DraftModelSpeculator`: an MTP head or an
+    auxiliary drafter (EAGLE and friends) reads the target's full
+    ``lm_head`` for every draft token even though greedy drafting only
+    needs the argmax, so most of that read is wasted on tokens the current
+    text will never need. Restricting the drafter's OWN projection to a
+    frequency-ranked subset turns that read (and the matmul behind it) into
+    a smaller one; the target still verifies every draft with its own full
+    ``lm_head``, so a token outside the subset is simply drafted worse,
+    never answered wrong.
+
+    No-op, and logged at the level that explains why, when:
+      - the env var is unset (the default -- every existing deployment is
+        unaffected);
+      - ``speculator.model``'s own class already overrides
+        ``LocalArgmaxMixin.get_top_tokens`` with something of its own
+        (e.g. Gemma4's centroid-projection head) -- that model has its own
+        restriction mechanism already and this generic one is not a fit;
+      - the model has no plain top-level ``lm_head`` with a 2-D weight
+        (the nested-head MTP classes, e.g. GLM-4 MoE's
+        ``shared_head.head``, are not yet covered by this generic patch);
+      - ``lm_head.tp_size != 1`` (the reduced head built here is a plain
+        matmul, not a vocab-parallel one).
+
+    Safety: the reduced weight is built with ``index_select``, which always
+    allocates a new tensor -- this never mutates ``lm_head.weight`` in
+    place, which matters because an EAGLE-style draft model commonly
+    shares that exact weight object with the target
+    (``load_eagle_model`` in ``eagle/utils.py``). The target's own
+    verification path (``compute_logits`` / the rejection sampler) never
+    calls ``get_top_tokens`` -- only ``_greedy_sample_draft`` and
+    ``sample_draft`` on this speculator do -- so it cannot be reached by
+    this change either way.
+    """
+    path = os.environ.get("VLLM_SPEC_DRAFT_VOCAB", "").strip()
+    if not path:
+        return
+    model = speculator.model
+    existing = getattr(type(model), "get_top_tokens", None)
+    if existing is not None and existing is not LocalArgmaxMixin.get_top_tokens:
+        logger.info(
+            "VLLM_SPEC_DRAFT_VOCAB is set but %s already defines its own "
+            "get_top_tokens() (not the generic LocalArgmaxMixin default); "
+            "not overriding it.",
+            model.__class__.__name__,
+        )
+        return
+    lm_head = getattr(model, "lm_head", None)
+    weight = getattr(lm_head, "weight", None)
+    if weight is None or weight.dim() != 2:
+        logger.warning(
+            "VLLM_SPEC_DRAFT_VOCAB is set but %s has no plain top-level "
+            "lm_head with a 2-D weight; skipping.",
+            model.__class__.__name__,
+        )
+        return
+    if getattr(lm_head, "tp_size", 1) != 1:
+        logger.warning(
+            "VLLM_SPEC_DRAFT_VOCAB is set but tp_size > 1 is not yet "
+            "supported by this reduced head; skipping."
+        )
+        return
+
+    org_vocab = int(getattr(lm_head, "org_vocab_size", weight.shape[0]))
+    with open(path) as handle:
+        ids = sorted({int(line) for line in handle if line.strip()})
+    ids = [i for i in ids if 0 <= i < org_vocab]
+    if not ids or len(ids) >= org_vocab:
+        logger.warning(
+            "VLLM_SPEC_DRAFT_VOCAB has %d usable ids against a %d "
+            "vocabulary; skipping.",
+            len(ids),
+            org_vocab,
+        )
+        return
+
+    index = torch.tensor(ids, dtype=torch.long, device=weight.device)
+    reduced_weight = weight.data.index_select(0, index).contiguous()
+    id_map = index.to(torch.int32)
+
+    def _get_top_tokens(self: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = torch.nn.functional.linear(
+            hidden_states.to(reduced_weight.dtype), reduced_weight
+        )
+        return id_map[logits.argmax(dim=-1)].to(torch.long)
+
+    model.get_top_tokens = types.MethodType(_get_top_tokens, model)
+    full_mib = weight.numel() * weight.element_size() / 2**20
+    cut_mib = reduced_weight.numel() * weight.element_size() / 2**20
+    logger.info(
+        "VLLM_SPEC_DRAFT_VOCAB: %d of %d tokens (%.1f%%) kept; "
+        "get_top_tokens() attached to this %s instance "
+        "(lm_head %.1f -> %.1f MiB per draft step).",
+        len(ids),
+        org_vocab,
+        100.0 * len(ids) / org_vocab,
+        model.__class__.__name__,
+        full_mib,
+        cut_mib,
+    )
 
 
 class DraftModelSpeculator(BaseSpeculator):
@@ -223,6 +333,7 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
+        _attach_reduced_draft_vocab(self)
         self._validate_local_argmax_reduction()
 
         all_attn_layers = get_layers_from_vllm_config(
