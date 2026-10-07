@@ -4,7 +4,8 @@
 
 import mmap
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from functools import partial
 
 import torch
 from torch import nn
@@ -26,10 +27,14 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
+    Qwen4ExpPLEFileSharedHostEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
+    Qwen4ExpPLESharedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    can_share_ple_table,
+    shared_ple_table_path,
 )
 from ..common.ops.ple import ple_ngram_ids
 
@@ -43,6 +48,9 @@ __all__ = [
     "Qwen4ExpPLEFp8EmbeddingMethod",
     "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
+    "Qwen4ExpPLEFileSharedHostEmbedding",
+    "Qwen4ExpPLESharedHostEmbedding",
+    "select_ple_embedding_cls",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
     "Qwen4ExpNGramEmbedding",
 ]
@@ -261,6 +269,32 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         raise RuntimeError("PLE disk offload does not support prefetch")
 
 
+def select_ple_embedding_cls(
+    engram_config,
+    *,
+    table_bytes: int,
+    table_path: str | None = None,
+) -> Callable[..., Qwen4ExpPLEEmbedding]:
+    """Device-resident, disk-offloaded, pinned per rank, one table shared by
+    the node-local Engram DP group, or one table shared through a host file by
+    independent processes (`EngramConfig.shared_host_table_dir`, `table_path`
+    names the file). DP sharing is taken only when the group exists and
+    /dev/shm can hold the table (`can_share_ple_table`), so a request to share
+    falls back to per-rank tables with a logged reason rather than an
+    OOM-killed boot."""
+    if engram_config is None:
+        return Qwen4ExpPLEDeviceEmbedding
+    if engram_config.disk_offload:
+        return Qwen4ExpPLEDiskOffloadEmbedding
+    if not engram_config.cpu_offload:
+        return Qwen4ExpPLEDeviceEmbedding
+    if table_path is not None:
+        return partial(Qwen4ExpPLEFileSharedHostEmbedding, table_path=table_path)
+    if engram_config.dp_shared_memory and can_share_ple_table(table_bytes):
+        return Qwen4ExpPLESharedHostEmbedding
+    return Qwen4ExpPLEPinnedHostEmbedding
+
+
 class Qwen4ExpNGramEmbedding(nn.Module):
     _MASK64 = (1 << 64) - 1
     _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
@@ -430,13 +464,28 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         )
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
-        engram_config = get_current_vllm_config().engram_config
-        embedding_cls = (
-            Qwen4ExpPLEDiskOffloadEmbedding
-            if engram_config is not None and engram_config.disk_offload
-            else Qwen4ExpPLEPinnedHostEmbedding
-            if engram_config is not None and engram_config.cpu_offload
-            else Qwen4ExpPLEDeviceEmbedding
+        vllm_config = get_current_vllm_config()
+        engram_config = vllm_config.engram_config
+        storage_dtype = (
+            torch.float8_e4m3fn
+            if isinstance(embedding_quant_method, Qwen4ExpPLEFp8EmbeddingMethod)
+            else params_dtype
+        )
+        table_path = None
+        if engram_config is not None and engram_config.shared_host_table_dir:
+            model_config = vllm_config.model_config
+            table_path = shared_ple_table_path(
+                engram_config.shared_host_table_dir,
+                model_config.model,
+                model_config.revision,
+                embedding_prefix,
+                (padded_vocab_size, self.head_dim),
+                storage_dtype,
+            )
+        embedding_cls = select_ple_embedding_cls(
+            engram_config,
+            table_bytes=padded_vocab_size * self.head_dim * storage_dtype.itemsize,
+            table_path=table_path,
         )
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
         # Disk-offload ranks hold full rows, so they only shard tokens.

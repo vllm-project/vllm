@@ -112,7 +112,10 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
             [0, 1, 2, 3],
             [0, 1, 2, 3],
         ),
-        ("Qwen4ExpForCausalLM", {}, 2, None, [0, 1]),
+        # The offloaded Qwen4Exp PLE table is shared across co-located
+        # replicas the same way, so the group exists...
+        ("Qwen4ExpForCausalLM", {}, 2, [0, 2], [0, 1]),
+        # ...unless the table is spread over the DP ranks already...
         (
             "Qwen4ExpForCausalLM",
             {"embedding_across_dp": True},
@@ -120,7 +123,9 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
             None,
             [0, 1, 2, 3],
         ),
-        ("Qwen4ExpForConditionalGeneration", {}, 2, None, [0, 1]),
+        # ...or resident on the GPU.
+        ("Qwen4ExpForCausalLM", {"cpu_offload": False}, 2, None, [0, 1]),
+        ("Qwen4ExpForConditionalGeneration", {}, 2, [0, 2], [0, 1]),
     ],
 )
 def test_engram_group_creation_honors_model_and_options(
