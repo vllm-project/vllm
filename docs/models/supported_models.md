@@ -471,7 +471,16 @@ th {
 | `TeleChat2ForCausalLM` | TeleChat2 | `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc. | ✅︎ | ✅︎ |
 | `TeleChat3ForCausalLM` | TeleChat3 | `Tele-AI/TeleChat3-36B-Thinking`, `Tele-AI/TeleChat3-Coder-36B-Thinking`, etc. | ✅︎ | ✅︎ |
 | `TeleFLMForCausalLM` | TeleFLM | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc. | ✅︎ | ✅︎ |
+| `TRHashForCausalLM` | TR-HASH | `AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT` | | |
 | `Zamba2ForCausalLM` | Zamba2 | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc. | | |
+
+TR-HASH requires `--trust-remote-code` to load its configuration. Its native implementation supports unquantized checkpoints and uses the saved token-to-expert routing tables. Routing requires token IDs, so prompt embeddings are unsupported. Expert and pipeline parallelism are currently unsupported. For example:
+
+```bash
+vllm serve AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT --trust-remote-code
+```
+
+AutoRound W4A16 exports are not supported yet. Supporting them requires a quantized expert checkpoint format compatible with vLLM's MoE weight loader; routing tables must remain unquantized and unchanged.
 
 Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 

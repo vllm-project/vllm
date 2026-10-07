@@ -556,6 +556,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
+    "TRHashForCausalLM": _HfExamplesInfo(
+        "AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT",
+        trust_remote_code=True,
+        revision="0c6d56faae27e29eda9b7bd55e20297e2c0d0abe",
+    ),
     "VaultGemmaForCausalLM": _HfExamplesInfo("google/vaultgemma-1b"),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
