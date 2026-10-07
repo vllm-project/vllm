@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for MiniMax M3 sparse prefill attention kernels."""
 
+from functools import partial
+
 import pytest
 import torch
 
@@ -614,14 +616,22 @@ def _reference_decode_index_score(
     return out
 
 
-def test_prefill_index_topk_correctness():
+# 3600: 29 blocks over 12 splits of 3, so the last busy split has 2 blocks.
+@pytest.mark.parametrize("prefix_len", [1024, 3600])
+@pytest.mark.parametrize("force_split_k", [False, True])
+def test_prefill_index_topk_correctness(monkeypatch, prefix_len, force_split_k):
+    if force_split_k:
+        # Take the SM12.0-only split-K launch on any CUDA GPU.
+        monkeypatch.setattr(
+            current_platform, "is_device_capability", lambda cap, *_: cap == (12, 0)
+        )
     topk = 6
     init_blocks = 0
     local_blocks = 1
     num_idx_heads = 2
     head_dim = 16
     q_lens = torch.tensor((4, 3), device="cuda", dtype=torch.int32)
-    prefix_lens = torch.tensor((0, 1024), device="cuda", dtype=torch.int32)
+    prefix_lens = torch.tensor((0, prefix_len), device="cuda", dtype=torch.int32)
     seq_lens = prefix_lens + q_lens
     batch = q_lens.numel()
     max_seq_len = seq_lens.max().item()
@@ -1436,19 +1446,21 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
     reason="CuteDSL index decode score requires Blackwell.",
 )
 @pytest.mark.parametrize(
-    ("dtype", "decode_query_len", "max_decode_query_len"),
+    ("dtype", "decode_query_len", "max_decode_query_len", "concurrent_writes"),
     [
-        (torch.bfloat16, 1, 1),
-        (torch.bfloat16, 3, 8),
-        (torch.float8_e4m3fn, 1, 1),
-        (torch.float8_e4m3fn, 3, 8),
-        (torch.float8_e4m3fn, 8, 8),
+        (torch.bfloat16, 1, 1, False),
+        (torch.bfloat16, 3, 8, False),
+        (torch.float8_e4m3fn, 1, 1, False),
+        (torch.float8_e4m3fn, 3, 8, False),
+        (torch.float8_e4m3fn, 8, 8, False),
+        pytest.param(torch.float8_e4m3fn, 1, 1, True, id="concurrent-writes"),
     ],
 )
 def test_decode_index_score_cutedsl_correctness(
     dtype: torch.dtype,
     decode_query_len: int,
     max_decode_query_len: int,
+    concurrent_writes: bool,
 ):
     pytest.importorskip("cutlass")
     from vllm.models.minimax_m3.nvidia.ops import (
@@ -1458,7 +1470,8 @@ def test_decode_index_score_cutedsl_correctness(
     torch.manual_seed(0)
     init_blocks, local_blocks = 0, 0
     num_idx_heads, head_dim = 4, 128
-    active_seq_lens = torch.tensor((1025, 4097), device="cuda", dtype=torch.int32)
+    lengths = (131326, 131289, 131252, 131215) if concurrent_writes else (1025, 4097)
+    active_seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
     batch = active_seq_lens.numel()
     total_q = batch * decode_query_len
     max_seq_len = int(active_seq_lens.max())
@@ -1480,7 +1493,8 @@ def test_decode_index_score_cutedsl_correctness(
     )
     score = unified_score.transpose(0, 1)
 
-    minimax_m3_index_decode_score_cutedsl(
+    launch = partial(
+        minimax_m3_index_decode_score_cutedsl,
         idx_q,
         index_kv_cache,
         block_table,
@@ -1493,6 +1507,7 @@ def test_decode_index_score_cutedsl_correctness(
         max_decode_query_len=max_decode_query_len,
         score_out=score,
     )
+    launch()
     expected = _reference_decode_index_score(
         idx_q,
         index_kv_cache,
@@ -1502,6 +1517,23 @@ def test_decode_index_score_cutedsl_correctness(
         score_block_stride,
     )
     torch.testing.assert_close(score, expected)
+
+    if concurrent_writes:
+        # Concurrent stores expose shared-memory reuse before ldmatrix reads finish.
+        quiet = score.clone()
+        noise = torch.zeros(1 << 26, device="cuda")
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        try:
+            for _ in range(20):
+                with torch.cuda.stream(side):
+                    for _ in range(40):
+                        noise.mul_(1.0)
+                launch()
+                torch.testing.assert_close(score, quiet, atol=0, rtol=0)
+                side.synchronize()
+        finally:
+            side.synchronize()
 
 
 # Sparse attention kernels.
@@ -1689,8 +1721,10 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
     )
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
-    assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
-    assert KVCacheLayout.LBHNC in backend.supported_kv_cache_layouts()
+    layouts = backend.supported_kv_cache_layouts()
+    assert layouts is not None
+    assert KVCacheLayout.LHBNC in layouts
+    assert KVCacheLayout.LBHNC in layouts
 
     nb, h = 3, 1
     cache_dtype = current_platform.fp8_dtype()
@@ -1772,19 +1806,22 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
 
     monkeypatch.setattr(indexer_aiter_mod.current_platform, "is_rocm", lambda: True)
-    kwargs = dict(
-        topk_blocks=TOPK,
-        sparse_block_size=BLOCK_SIZE,
-        num_index_heads=1,
-        index_head_dim=HEAD_DIM,
-        indexer_kv_dtype="fp8_e4m3",
-        max_model_len=8192,
-    )
+
+    def unsupported_reason() -> str | None:
+        return indexer_aiter_mod.aiter_indexer_unsupported_reason(
+            topk_blocks=TOPK,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=1,
+            index_head_dim=HEAD_DIM,
+            # The implementation also accepts this legacy fp8 alias.
+            indexer_kv_dtype="fp8_e4m3",
+            max_model_len=8192,
+        )
 
     monkeypatch.setattr(
         indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
     )
-    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    reason = unsupported_reason()
     assert reason is not None and "AITER sparse PA attend" in reason
 
     # With the attend asked for, the gate moves on to the kernel-contract
@@ -1792,7 +1829,7 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     monkeypatch.setattr(
         indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
     )
-    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    reason = unsupported_reason()
     assert reason is None or "AITER sparse PA attend" not in reason
 
 

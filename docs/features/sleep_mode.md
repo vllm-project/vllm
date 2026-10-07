@@ -74,6 +74,21 @@ llm.wake_up(tags=["weights"])
 llm.wake_up(tags=["kv_cache"])
 ```
 
+#### Retaining frozen weights during RLHF updates
+
+Set `sleep_preserve_parameter_names` (CLI: `--sleep-preserve-parameter-names`)
+to runtime parameter-name glob
+patterns for weights that stay frozen during training. Each pattern must match
+`model.named_parameters()`; checkpoint names and `requires_grad` are not used.
+
+Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
+wake-up restores them in place and releases the backups. CPU parameters need no
+copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
+
+The trainer must omit these parameters from updates, and reload/post-processing
+must preserve their values and storage (including avoiding replacement with meta
+tensors). This option does not filter updates and applies only to the target model.
+
 #### Release only KV cache memory
 
 `LLM.release_kv_cache_memory()` discards KV cache physical memory while keeping model weights resident. It requires a completed pause and all executor memory to be resident: full sleep, partial wake-up, and repeated release without restoring memory are rejected. Requests retained with `mode="keep"` are recomputed after wake-up.
@@ -85,6 +100,41 @@ llm.sleep(level=0, mode="keep")  # Wait for the pause to complete.
 llm.release_kv_cache_memory()
 llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
 ```
+
+#### Offloading CUDA graph memory
+
+By default, CUDA graph memory stays on the GPU while asleep. With
+`sleep_mode_offload_cudagraph=True` (off by default), CUDA graphs are captured
+into a cuMem pool that sleep backs up to CPU memory at both levels and any wake
+restores in place, so graphs are replayed, not recaptured. It needs the default
+`cumem` backend, CUDA and CUDA graphs; otherwise it has no effect.
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_offload_cudagraph=True)
+```
+
+or `vllm serve <model> --enable-sleep-mode --sleep-mode-offload-cudagraph`.
+
+The cost is pinned host memory for the pool's backup, also at level 2, and one
+extra copy per captured custom allreduce (about 3% decode latency at batch
+size 1). `NCCL_GRAPH_REGISTER` defaults to `0`, since NCCL graph registration
+would pin the pool; an explicit value is kept with a warning. Graph executables
+outside PyTorch pools stay resident.
+
+#### Releasing NCCL communicator memory
+
+By default, NCCL communicators keep their GPU buffers while asleep. With
+`enable_nccl_comm_suspend=True` (off by default, experimental), sleep releases
+them with `ncclCommSuspend` and wake restores them with `ncclCommResume`. The
+communicators keep their topology, so they are not re-created. It needs NCCL
+2.29.7 or newer; with an older library, a warning is logged and the memory stays
+on the GPU.
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, enable_nccl_comm_suspend=True)
+```
+
+or `vllm serve <model> --enable-sleep-mode --enable-nccl-comm-suspend`.
 
 ### Online Serving
 
