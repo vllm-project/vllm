@@ -2907,11 +2907,9 @@ class NixlBaseConnectorWorker:
         rank would otherwise register the same pages on every NIC and READ the
         same host KV into them. Private pools are unaffected.
         """
-        if not self._mixed_mem_types:
-            return False
-        from vllm.v1.hisparse.runtime import use_shared_hisparse_host_pool
-
-        if not use_shared_hisparse_host_pool(self.vllm_config):
+        if not (
+            self._mixed_mem_types and self.kv_cache_config.hisparse_shared_host_pool
+        ):
             return False
         skip = self.tp_rank != 0
         logger.info(
