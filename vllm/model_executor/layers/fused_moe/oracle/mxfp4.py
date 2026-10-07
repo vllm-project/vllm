@@ -1186,7 +1186,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_data = w2_data.transpose(1, 2)
 
             # Scales are [E, N, K_scale]; both kernels index them as
-            # [E, K_scale, N] with K innermost, so transpose(1, 2) 
+            # [E, K_scale, N] with K innermost, so transpose(1, 2)
             # Keep them uint8: Triton moe_gemm_a4w4 takes e8m0 scales
             w13_scale = w13_scale_data.transpose(1, 2)
             w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
@@ -1206,13 +1206,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 scale_kwidth=4,
             )
 
-            return (w13_data, w2_data, w13_scale, w2_scale,
-                    w13_bias, w2_bias)
-
-        from vllm._aiter_ops import rocm_aiter_ops
+            return (w13_data, w2_data, w13_scale, w2_scale, w13_bias, w2_bias)
 
         # e8m0_shuffle on weight scales (GFX950 swizzle layout)
         from aiter.utility.fp4_utils import e8m0_shuffle
+
+        from vllm._aiter_ops import rocm_aiter_ops
 
         s0, s1, _ = w13_weight_scale.shape
         w13_weight_scale.data = e8m0_shuffle(w13_weight_scale.view(s0 * s1, -1)).view(

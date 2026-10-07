@@ -85,15 +85,11 @@ def aiter_triton_kernel_w4a4_moe_forward(
             score_mode=score_mode or "sqrtsoftplus",
             renorm=renormalize,
             routed_scaling_factor=(
-                routed_scaling_factor
-                if routed_scaling_factor is not None
-                else 1.0
+                routed_scaling_factor if routed_scaling_factor is not None else 1.0
             ),
         )
     elif score_mode is not None:
-        use_grouped_topk = (
-            num_expert_group is not None and num_expert_group > 1
-        )
+        use_grouped_topk = num_expert_group is not None and num_expert_group > 1
         routing_data, gather_idx, scatter_idx = aiter_routing(
             gating_output,
             topk,
@@ -105,9 +101,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
             ),
             renorm=renormalize,
             routed_scaling_factor=(
-                routed_scaling_factor
-                if routed_scaling_factor is not None
-                else 1.0
+                routed_scaling_factor if routed_scaling_factor is not None else 1.0
             ),
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
@@ -156,9 +150,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
             "limit": swiglu_limit,
             "swiglu_add_residual": quant_config.gemm1_beta == 1.0,
         }
-    swizzle_mx_scale = (
-        "GFX1250_SCALE" if on_gfx1250() else None
-    )
+    swizzle_mx_scale = "GFX1250_SCALE" if on_gfx1250() else None
 
     x_q, x_scale = mxfp4_quant(hidden_states.to(torch.bfloat16))
 
@@ -193,7 +185,8 @@ def aiter_triton_kernel_w4a4_moe_forward(
 
         half_n = raw_intermediate.shape[-1] // 2
         intermediate = torch.empty(
-            raw_intermediate.shape[0], half_n,
+            raw_intermediate.shape[0],
+            half_n,
             dtype=raw_intermediate.dtype,
             device=raw_intermediate.device,
         )
@@ -366,9 +359,7 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             ),
             unpadded_K_w1=self.moe_config.hidden_dim_unpadded,
             unpadded_N_w2=self.moe_config.hidden_dim_unpadded,
-            unpadded_K_w2=(
-                self.moe_config.intermediate_size_per_partition_unpadded
-            ),
+            unpadded_K_w2=(self.moe_config.intermediate_size_per_partition_unpadded),
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             e_score_correction_bias=e_score_correction_bias,

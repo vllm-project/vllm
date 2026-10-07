@@ -3983,10 +3983,9 @@ class rocm_aiter_ops:
         from aiter.ops.triton.utils.gemm_config_utils import (
             get_gemm_config,
         )
+
         # Fake M value for now
-        _, is_tuned = get_gemm_config(
-            "GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 1, n, k
-        )
+        _, is_tuned = get_gemm_config("GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 1, n, k)
         return is_tuned
 
     @staticmethod
