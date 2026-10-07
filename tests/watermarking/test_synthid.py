@@ -8,6 +8,7 @@ import torch
 from pydantic import ValidationError
 
 from vllm.config.watermarking import WatermarkConfig
+from vllm.platforms import current_platform
 from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
@@ -101,6 +102,27 @@ def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
     ).watermark_logits(logits, contexts)
 
     torch.testing.assert_close(actual.exp(), expected_probs)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("depth", [1, 32, 65])
+def test_synthid_accelerator_matches_cpu(depth):
+    logits = torch.randn(4, 3000, generator=torch.Generator().manual_seed(0))
+    logits[0] *= 30  # peaked row
+    logits[1, 100:] = float("-inf")  # masked tokens
+    contexts = torch.tensor([[-1, -1, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]])
+    watermarker = SynthIDWatermarker(42, context_width=3, depth=depth)
+
+    expected = watermarker.watermark_logits(logits.double(), contexts)
+    actual = watermarker.watermark_logits(logits.cuda(), contexts.cuda()).cpu()
+
+    assert actual.dtype == torch.float32
+    assert torch.equal(torch.isneginf(actual), torch.isneginf(expected))
+    torch.testing.assert_close(
+        actual.exp().double(), expected.exp().double(), rtol=1e-5, atol=1e-7
+    )
 
 
 def test_synthid_native_partial_context_changes_stream():
