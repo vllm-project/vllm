@@ -1195,9 +1195,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
 
             self.model_state.add_request(req_index, new_req_data)
-            self.block_tables.append_block_ids(
-                req_index, new_req_data.block_ids, overwrite=True
-            )
+            table_updates = scheduler_output.block_table_updates or {}
+            if req_id not in table_updates:
+                self.block_tables.append_block_ids(
+                    req_index, new_req_data.block_ids, overwrite=True
+                )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
             if self.is_last_pp_rank and new_req_data.sampling_params is not None:
