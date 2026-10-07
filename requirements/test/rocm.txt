@@ -773,7 +773,7 @@ pathvalidate==3.3.1
     # via pytablewriter
 patsy==1.0.2
     # via statsmodels
-peft==0.19.1
+peft==0.21.1
     # via -r requirements/test/rocm.in
 perceptron==0.1.4
     # via -r requirements/test/rocm.in
@@ -1282,7 +1282,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.18.0
+transformers==5.19.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
