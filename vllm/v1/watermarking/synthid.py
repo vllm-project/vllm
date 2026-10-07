@@ -17,6 +17,9 @@ from vllm.v1.watermarking.watermarker import (
     WatermarkSample,
 )
 
+# High stream word ("SYNT") keeps SynthID-Text off Gumbel-max's Philox streams.
+_STREAM_DOMAIN = 0x53594E54 << 32
+
 
 def _validate_context_width(context_width: int) -> None:
     if context_width < 1:
@@ -75,10 +78,10 @@ class SynthIDWatermarker(Watermarker):
         contexts: torch.Tensor,
     ) -> torch.Tensor:
         vocabulary = torch.arange(logits.shape[-1], device=logits.device)
-        probs = torch.softmax(logits, dim=1)  # [B, V]
+        probs = torch.softmax(logits, dim=1, dtype=torch.float32)  # [B, V]
 
         for start in range(0, self.depth, 32):
-            stream = start // 32
+            stream = _STREAM_DOMAIN | start // 32
             num_bits = min(32, self.depth - start)
 
             # [B, C] and [V] -> [B, V]
@@ -96,7 +99,7 @@ class SynthIDWatermarker(Watermarker):
 
         log_probs = torch.log(probs)
         return torch.where(
-            torch.isfinite(log_probs),
+            torch.isfinite(log_probs) | torch.isneginf(logits),
             log_probs,
             torch.finfo(log_probs.dtype).min,
         )
@@ -118,7 +121,7 @@ class SynthIDWatermarker(Watermarker):
             )
         return WatermarkSample(
             token_ids=random_sampler(watermarked_logits),
-            logits=watermarked_logits,
+            logits=logits,
         )
 
     def _sample_watermarked(
@@ -182,7 +185,7 @@ class SynthIDWatermarkDetector(WatermarkDetector):
         blocks = []
 
         for start in range(0, self.depth, 32):
-            stream = start // 32
+            stream = _STREAM_DOMAIN | start // 32
             num_bits = min(32, self.depth - start)
 
             # [N, C] and [N, 1] -> [N, 1] -> [N]

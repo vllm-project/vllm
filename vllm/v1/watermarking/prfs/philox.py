@@ -60,10 +60,9 @@ def _philox_uint32(
     key_1_value: int,
     contexts: torch.Tensor,
     token_ids: torch.Tensor,
-    stream: int = 0,
+    stream_0: int = 0,
+    stream_1: int = 0,
 ) -> torch.Tensor:
-    stream_0 = stream & _UINT32_MASK
-    stream_1 = (stream >> 32) & _UINT32_MASK
     contexts = contexts.to(torch.int64) & _UINT32_MASK
     prefix_shape = contexts.shape[:-1]
     device = contexts.device
@@ -176,6 +175,10 @@ class PhiloxPRF(WatermarkPRF):
             raise ValueError("Philox streams must fit in 64 bits")
 
         key_words = self.key & _UINT32_MASK, self.key >> 32
+        # Split outside torch.compile: Inductor miscompiles 64-bit shifts on CUDA.
+        stream_words = stream & _UINT32_MASK, stream >> 32
         if contexts.device.type == "cuda":
-            return _compiled_philox_uint32(*key_words, contexts, token_ids, stream)
-        return _philox_uint32(*key_words, contexts, token_ids, stream)
+            return _compiled_philox_uint32(
+                *key_words, contexts, token_ids, *stream_words
+            )
+        return _philox_uint32(*key_words, contexts, token_ids, *stream_words)
