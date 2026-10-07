@@ -34,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
@@ -244,6 +245,18 @@ def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
         match="Multiple connectors provide a KV cache memory pool",
     ):
         mc.get_mem_pool_context()
+
+
+def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
+    request = MagicMock(request_id="request")
+    mc._requests_to_connector[request.request_id] = 1
+    sources = {CacheHitSource.DISK: 32}
+    mc._connectors[1].get_external_cache_hit_sources.return_value = sources
+
+    assert mc.get_external_cache_hit_sources(request, 32) is sources
+    mc._connectors[1].get_external_cache_hit_sources.assert_called_once_with(
+        request, 32
+    )
 
 
 # Helper function to compare directories recursively
