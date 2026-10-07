@@ -218,10 +218,11 @@ def test_flashinfer_sm120_fp8_paged_mqa_logits(
     diff = calc_diff(logits_valid, ref_valid)
     assert diff < 1e-3, f"{diff=}"
 
-    # DeepGEMM's SM120 kernel takes block_kv 64 and, per vLLM's gate, native
-    # next_n 1 and 2; both kernels read identical FP8 inputs (DeepGEMM also
-    # addresses pages through the view's block stride).
-    if has_deep_gemm() and page_kv == 64 and next_n in (1, 2):
+    # DeepGEMM's SM120 kernel takes block_kv 64 and, templated on next_n, every
+    # depth (vLLM passes them all natively on SM120); both kernels read
+    # identical FP8 inputs (DeepGEMM also addresses pages through the view's
+    # block stride).
+    if has_deep_gemm() and page_kv == 64:
         deep_gemm_schedule = get_paged_mqa_logits_metadata(
             context_lens_2d, page_kv, num_sms
         )

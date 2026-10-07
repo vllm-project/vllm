@@ -1079,6 +1079,11 @@ def _supports_native_decode(next_n: int, mqa_logits_backend: str = "deep_gemm") 
         return next_n in (1, 2)
     if current_platform.is_device_capability_family(100):
         return True
+    if current_platform.is_device_capability_family(120):
+        # DeepGEMM's SM120 paged MQA-logits kernel is templated on next_n
+        # (kNextN, scheduled as two-token Q atoms), so it takes every depth
+        # natively like SM100; only SM90 ships a fixed set.
+        return True
     if current_platform.is_device_capability_family(90):
         return native_next_n_supported(next_n)
     return next_n in (1, 2)

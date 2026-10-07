@@ -422,15 +422,39 @@ def test_unresolved_spec_keeps_deep_gemm(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.cpu_test
-def test_flashinfer_route_widens_native_decode_depths(monkeypatch):
+def test_both_sm120_backends_take_native_rows(monkeypatch):
     """FlashInfer ships the catalog's depths natively on SM120 (1, 2 and 4 at
-    the pinned package); DeepGEMM on SM120 keeps its conservative {1, 2} gate."""
+    the pinned package); DeepGEMM's SM120 kernel is templated on next_n and
+    takes every depth, like SM100."""
     _set_arch(monkeypatch, 12)
     for next_n in (1, 2, 3, 4, 5, 8):
         assert indexer._supports_native_decode(next_n, "flashinfer_sm120") == (
             next_n in EXPORTED_NEXT_N
         ), f"next_n={next_n}"
-        assert indexer._supports_native_decode(next_n) == (next_n in (1, 2)), (
+        assert indexer._supports_native_decode(next_n), f"next_n={next_n}"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "family,deep_gemm,native",
+    [
+        (12, True, (1, 2, 3, 4, 5, 6, 7, 8)),
+        # Without DeepGEMM the conservative gate stays.
+        (12, False, (1, 2)),
+        (10, True, (1, 2, 3, 4, 5, 6, 7, 8)),
+        # SM90 ships 1, 2 and 4 only.
+        (9, True, (1, 2, 4)),
+    ],
+)
+def test_deep_gemm_native_depths_per_device_family(
+    monkeypatch: pytest.MonkeyPatch,
+    family: int,
+    deep_gemm: bool,
+    native: tuple[int, ...],
+) -> None:
+    _set_arch(monkeypatch, family, deep_gemm=deep_gemm)
+    for next_n in range(1, 9):
+        assert indexer._supports_native_decode(next_n) == (next_n in native), (
             f"next_n={next_n}"
         )
 
@@ -457,27 +481,32 @@ def test_flashinfer_route_runs_native_rows_under_uniform_batch_graphs(
 
 
 @pytest.mark.cpu_test
-def test_unshipped_next_n_keeps_the_deep_gemm_flattening_path(monkeypatch):
-    """next_n=3 has no FlashInfer kernel: "auto" stays on DeepGEMM, which
-    flattens MTP batches on SM120 and so supports graphs for any batch."""
+def test_unexported_next_n_runs_native_rows_on_deep_gemm(monkeypatch):
+    """next_n=3 has no kernel in the pinned catalog: "auto" stays on DeepGEMM,
+    whose SM120 kernel takes the native (B, next_n) rows, so the batch is not
+    flattened and graphs stay UNIFORM_BATCH like every native path."""
     _set_arch(monkeypatch, 12)
     config = _config(num_speculative_tokens=2)
     assert _resolve(config, _indexer_spec(64)) == "deep_gemm"
-    assert indexer._use_flattening(config, "deep_gemm")
+    assert not indexer._use_flattening(config, "deep_gemm")
     assert (
         indexer.DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(
             config, _indexer_spec(64)
         )
-        == AttentionCGSupport.ALWAYS
+        == AttentionCGSupport.UNIFORM_BATCH
     )
 
 
 @pytest.mark.cpu_test
-def test_mtp4_flattens_on_deep_gemm_but_runs_native_on_flashinfer(monkeypatch):
+def test_mtp4_runs_native_on_both_sm120_backends_but_flattens_on_sm90(monkeypatch):
     _set_arch(monkeypatch, 12)
     config = _config(num_speculative_tokens=3)
-    assert indexer._use_flattening(config, "deep_gemm")
+    assert not indexer._use_flattening(config, "deep_gemm")
     assert not indexer._use_flattening(config, "flashinfer_sm120")
+    # SM90 DeepGEMM ships next_n 1, 2 and 4: a 3-deep model flattens there.
+    _set_arch(monkeypatch, 9)
+    assert not indexer._use_flattening(config, "deep_gemm")
+    assert indexer._use_flattening(_config(num_speculative_tokens=2), "deep_gemm")
 
 
 @pytest.mark.cpu_test
@@ -518,23 +547,36 @@ def test_cudagraph_support_agrees_with_the_builder_across_a_kernel_split(
     """--block-size 128 with the 64-token indexer kernel block: the runner's
     manager spec has page 128 ((64, 128) is unshipped) while the builder's
     kernel copy has page 64 ((64, 64) is shipped). Both must land on the
-    FlashInfer route, else MTP-3 batches would be replayed through full graphs
-    the native builder never captured."""
+    FlashInfer route, so the runner's support answer describes the builder
+    it creates."""
     _set_arch(monkeypatch, 12)
     config = _config(num_speculative_tokens=3, index_n_heads=64)
     manager = _indexer_spec(128)
     kernel = manager.copy_with_new_block_size(64)
     assert _resolve(config, kernel) == "flashinfer_sm120"
     assert (
+        indexer.resolve_sparse_indexer_mqa_logits_backend(
+            config, manager, raise_on_unmet=False
+        )
+        == "flashinfer_sm120"
+    )
+    assert (
         indexer.DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(config, manager)
         == AttentionCGSupport.UNIFORM_BATCH
     )
-    # An unshipped head count fails for every possible split at both sites.
+    # An unshipped head count fails for every possible split at both sites;
+    # DeepGEMM takes the native rows on SM120 too, so graphs stay uniform.
     config = _config(num_speculative_tokens=3, index_n_heads=16)
     assert _resolve(config, kernel) == "deep_gemm"
     assert (
+        indexer.resolve_sparse_indexer_mqa_logits_backend(
+            config, manager, raise_on_unmet=False
+        )
+        == "deep_gemm"
+    )
+    assert (
         indexer.DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(config, manager)
-        == AttentionCGSupport.ALWAYS
+        == AttentionCGSupport.UNIFORM_BATCH
     )
 
 
@@ -544,9 +586,11 @@ def test_cudagraph_support_agrees_with_the_builder_across_a_kernel_split(
     [
         (12, 0, AttentionCGSupport.UNIFORM_BATCH),
         (12, 3, AttentionCGSupport.UNIFORM_BATCH),
-        # next_n=3: DeepGEMM flattens on SM120.
-        (12, 2, AttentionCGSupport.ALWAYS),
+        # next_n=3: no FlashInfer kernel; DeepGEMM runs it natively on SM120.
+        (12, 2, AttentionCGSupport.UNIFORM_BATCH),
         (9, 0, AttentionCGSupport.UNIFORM_BATCH),
+        # next_n=3: DeepGEMM has no SM90 kernel and flattens.
+        (9, 2, AttentionCGSupport.ALWAYS),
     ],
 )
 def test_cudagraph_support_accepts_the_uniform_type_group_spec(

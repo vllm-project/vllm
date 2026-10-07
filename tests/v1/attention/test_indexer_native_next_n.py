@@ -33,9 +33,9 @@ def _set_arch(monkeypatch, family: int, *, cuda: bool = True, deep_gemm: bool = 
         (9, {1, 2, 4}),
         # SM100 schedules any next_n with multi-atom tiles.
         (10, {1, 2, 3, 4, 5, 8}),
-        # SM120 advertises multi-atom too but is unvalidated on hardware, so
-        # it stays on the conservative gate. Loosen it only with measurements.
-        (12, {1, 2}),
+        # SM120: DeepGEMM's paged kernel is templated on next_n (two-token Q
+        # atoms) and takes every depth, like SM100.
+        (12, {1, 2, 3, 4, 5, 8}),
     ],
 )
 def test_native_decode_gate_per_architecture(monkeypatch, family, expected_native):
