@@ -3,13 +3,19 @@
 """Tests for the engine-based Llama 3.x/4 JSON parser (llama3_json /
 llama4_json).
 
-Staged commit 1/7: minimal envelope-balance core, Granite-equivalent scope.
-Later commits grow both llama_json.py and this file together.
+Staged commit 2/7: full format-shape coverage (bare arguments, phantom-JSON
+retraction, envelope-aware name resolution). Later commits grow both
+llama_json.py and this file together.
 """
+
+import json
+
+import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.llama_json import LlamaJsonParser
+from vllm.parser.parser_manager import ParserManager
 
 PYTHON_TAG = "<|python_tag|>"
 
@@ -119,3 +125,126 @@ class TestBasicCall:
         assert len(calls) == 1
         assert calls[0]["name"] == "f"
         assert calls[0]["args"] == '{"x": 1}'
+
+
+def _function_tool(name, parameters=None):
+    function = {"name": name}
+    if parameters is not None:
+        function["parameters"] = parameters
+    return {"type": "function", "function": function}
+
+
+def _delegating_parser_cls():
+    cls = ParserManager.get_parser(
+        tool_parser_name="llama3_json",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert cls is not None
+    return cls
+
+
+class TestNestedNameDisambiguation:
+    """The engine's default name extraction is a naive regex matching the
+    first ``"name"`` key anywhere; envelope-aware scanning must not."""
+
+    def test_nested_name_key_does_not_misfire(self):
+        text = '{"parameters": {"name": "Alice"}, "name": "rename_user"}'
+        result = LlamaJsonParser(_mock_tokenizer()).extract_tool_calls_from_content(
+            text, _request()
+        )
+        assert result.tool_calls[0].function.name == "rename_user"
+        assert json.loads(result.tool_calls[0].function.arguments) == {"name": "Alice"}
+
+    def test_prose_json_with_a_name_field_is_not_a_call(self):
+        text = '{"name": "John", "age": 30}'
+        result = LlamaJsonParser(_mock_tokenizer()).extract_tool_calls_from_content(
+            text, _request()
+        )
+        assert result.tools_called is False
+        assert text in (result.content or "")
+
+
+class TestPhantomRetraction:
+    """A balanced ``{...}`` with no top-level ``"name"`` is prose, not a
+    call, and must be restored as content -- not dropped."""
+
+    def test_prose_before_a_real_call_is_kept_as_content(self):
+        text = 'Sure, let me check. {"name": "f", "parameters": {}}'
+        results = _stream(_parser(), _request(), text, chunk_size=4)
+        content, calls = _accumulate(results)
+        assert "Sure, let me check." in content
+        assert len(calls) == 1
+        assert calls[0]["name"] == "f"
+
+    def test_prose_json_streamed_is_restored_as_content(self):
+        text = '{"a": 1, "b": 2}'
+        results = _stream(_parser(), _request(), text, chunk_size=3)
+        content, calls = _accumulate(results)
+        assert calls == []
+        assert content == text
+
+
+class TestMultipleCalls:
+    def test_two_sequential_envelopes(self):
+        text = '{"name": "f", "parameters": {}}{"name": "g", "parameters": {}}'
+        result = LlamaJsonParser(_mock_tokenizer()).extract_tool_calls_from_content(
+            text, _request()
+        )
+        names = [tc.function.name for tc in result.tool_calls]
+        assert names == ["f", "g"]
+
+
+class TestToolChoiceNone:
+    def test_none_choice_returns_envelope_as_content(self):
+        text = '{"name": "f", "parameters": {"x": 1}}'
+        req = _request(
+            tools=[_function_tool("f", {"type": "object", "properties": {}})],
+            tool_choice="none",
+        )
+        result = LlamaJsonParser(_mock_tokenizer()).extract_tool_calls_from_content(
+            text, req
+        )
+        assert result.tools_called is False
+        assert text in (result.content or "")
+
+
+class TestNamedChoiceBareArguments:
+    """A named tool choice with a structural-constraining schema makes the
+    model emit bare parameters, with no envelope at all -- ``_bare_args_tool_name``
+    must detect this from the request and switch converters.
+    """
+
+    PARAMETERS = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    }
+
+    @pytest.fixture
+    def parser_cls(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+        return _delegating_parser_cls()
+
+    def test_named_choice_returns_a_call_not_bare_parameters(self, parser_cls):
+        from vllm.sampling_params import StructuredOutputsParams
+
+        tokenizer = _mock_tokenizer()
+        parser = parser_cls(tokenizer)
+        request = ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "weather in SF?"}],
+            tools=[_function_tool("get_weather", self.PARAMETERS)],
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+        )
+        # adjust_request is normally what installs this from tool_choice;
+        # set it directly here rather than chasing the full server-side
+        # request-processing pipeline that isn't part of llama_json itself.
+        request.structured_outputs = StructuredOutputsParams(json=self.PARAMETERS)
+        _, content, tool_calls = parser.parse(
+            '{"city": "SF"}', request, enable_auto_tools=True
+        )
+        assert [(tc.name, json.loads(tc.arguments)) for tc in tool_calls or []] == [
+            ("get_weather", {"city": "SF"})
+        ]
+        assert content is None
