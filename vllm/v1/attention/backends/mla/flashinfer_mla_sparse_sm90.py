@@ -102,7 +102,9 @@ def _pack_topk_indices(
     values = tl.load(slots + row * WIDTH + cols, mask=mask, other=0)
     first_slot = tl.load(slots + row * WIDTH)
     tl.store(
-        indices + start + cols, tl.where(values >= 0, values, first_slot), mask=mask
+        indices + start + cols,
+        tl.where(values >= 0, values, tl.maximum(first_slot, 0)),
+        mask=mask,
     )
 
 
