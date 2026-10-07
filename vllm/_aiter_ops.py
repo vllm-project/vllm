@@ -956,7 +956,7 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
         As,
         Bs,
         dtype=output_dtype,
-        is_x_scale_tranposed=False,
+        is_x_scale_transposed=False,
     )
 
 
