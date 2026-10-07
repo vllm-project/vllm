@@ -1138,6 +1138,15 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         elif not prefers_humming(compute_capability):
             force_kernel = MarlinNvFp4LinearKernel
 
+    if linear_backend == "nvfp4_dynamic":
+        from .nvfp4.dynamic import DynamicNvFp4LinearKernel
+
+        if use_a16:
+            raise ValueError("Dynamic NVFP4 requires a calibrated W4A4 checkpoint")
+        if envs.VLLM_BATCH_INVARIANT:
+            raise ValueError("Dynamic NVFP4 does not support VLLM_BATCH_INVARIANT")
+        force_kernel = DynamicNvFp4LinearKernel
+
     if force_kernel is not None:
         if use_a16 and force_kernel not in a16_kernels:
             raise ValueError(f"{force_kernel.__name__} does not support W4A16")
