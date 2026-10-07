@@ -331,6 +331,7 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
