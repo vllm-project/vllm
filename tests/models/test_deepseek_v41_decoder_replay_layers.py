@@ -21,7 +21,6 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
-from vllm.platforms import current_platform
 from vllm.v1.worker.gpu import cudagraph_utils
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -126,9 +125,6 @@ def _graph_context(num_tokens):
     )
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="decoder replay CUDA graphs are NVIDIA-only"
-)
 def test_replay_graph_matches_eager(monkeypatch):
     """The replay graph of the next captured size pads and runs the rows."""
     monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
@@ -136,6 +132,8 @@ def test_replay_graph_matches_eager(monkeypatch):
     monkeypatch.setattr(cudagraph_utils, "graph_capture", lambda device: capture)
     compilation = CompilationConfig(decoder_replay_cudagraph_capture_sizes=[4])
     cfg = MagicMock(compilation_config=compilation, speculative_config=None)
+    # Mocking it true would capture into the cuMem pool, which breaks on ROCm.
+    cfg.use_cumem_cudagraph_pool = False
     cfg.scheduler_config = MagicMock(max_num_seqs=2, max_num_batched_tokens=64)
     cfg.cache_config.use_kda_recoverssm = False
     cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
