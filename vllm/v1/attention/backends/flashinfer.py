@@ -595,6 +595,35 @@ class FlashInferBackend(AttentionBackend):
             )
         return invalid_reasons
 
+    @staticmethod
+    def get_impl_cls() -> type["FlashInferImpl"]:
+        return FlashInferImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
+        return FlashInferMetadataBuilder
+
+    @staticmethod
+    def get_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            return torch.float8_e4m3fn
+        elif kv_cache_dtype == "fp8_e5m2":
+            return torch.float8_e5m2
+        elif kv_cache_dtype.startswith("nvfp4"):
+            return torch.uint8
+        else:
+            raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("nvfp4"):
+            return (
+                current_platform.is_device_capability_family(100)
+                and supports_trtllm_attention(is_prefill=True)
+                and supports_trtllm_attention(is_prefill=False)
+            )
+        return super().supports_kv_cache_dtype(kv_cache_dtype)
+
     @classmethod
     def supports_combination(
         cls,
@@ -624,35 +653,6 @@ class FlashInferBackend(AttentionBackend):
                     f"page size {block_size} only runs on trtllm-gen"
                 )
         return None
-
-    @staticmethod
-    def get_impl_cls() -> type["FlashInferImpl"]:
-        return FlashInferImpl
-
-    @staticmethod
-    def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
-        return FlashInferMetadataBuilder
-
-    @staticmethod
-    def get_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            return torch.float8_e4m3fn
-        elif kv_cache_dtype == "fp8_e5m2":
-            return torch.float8_e5m2
-        elif kv_cache_dtype.startswith("nvfp4"):
-            return torch.uint8
-        else:
-            raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
-
-    @classmethod
-    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
-        if kv_cache_dtype is not None and kv_cache_dtype.startswith("nvfp4"):
-            return (
-                current_platform.is_device_capability_family(100)
-                and supports_trtllm_attention(is_prefill=True)
-                and supports_trtllm_attention(is_prefill=False)
-            )
-        return super().supports_kv_cache_dtype(kv_cache_dtype)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
