@@ -115,7 +115,7 @@ class DeepseekV4FP8Config(Fp8Config):
         if match is None or not self._modelopt_ignore:
             return True
         # MTP/draft layers are built as layers.{num_hidden_layers + k} but are
-        # named mtp.{k} in the checkpoint.
+        # named mtp.{k} in some checkpoints.
         model_config = get_current_vllm_config().model_config
         num_layers = model_config.hf_text_config.num_hidden_layers
         idx = int(match.group(1))
