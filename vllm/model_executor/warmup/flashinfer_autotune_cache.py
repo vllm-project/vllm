@@ -45,7 +45,7 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
-    from vllm.distributed.parallel_state import get_node_count
+    from vllm.distributed.parallel_state import get_node_count, get_world_group
     from vllm.utils.flashinfer import has_flashinfer_autotune_v2
 
     # Elastic EP transfers tuning state to joining workers with v1
@@ -66,6 +66,14 @@ def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
             "Using legacy FlashInfer autotune cache synchronization for "
             "multi-node deployments; managed-cache synchronization is "
             "currently supported only within one node."
+        )
+        return False
+    # The pinned FlashInfer does not coordinate cache hits before profiling.
+    # Shared storage can still yield mixed hits after a partial or concurrent run.
+    if get_world_group().world_size > 1:
+        logger.info_once(
+            "Using legacy FlashInfer autotune cache synchronization for "
+            "multi-rank deployments until FlashInfer coordinates cache hits."
         )
         return False
     return True

@@ -206,7 +206,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`)
+- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`. Use the authenticated `/inference/v1/abort_requests` otherwise)
 
 **Utility endpoints:**
 
@@ -282,6 +282,8 @@ The most effective approach is to deploy vLLM behind a reverse proxy (such as ng
 Certain API request parameters can have a large impact on resource consumption and may be abused to exhaust server resources. The `n` parameter in the `/v1/completions` and `/v1/chat/completions` endpoints controls how many independent output sequences are generated per request. A very large value causes the engine to allocate memory, CPU, and GPU time proportional to `n`, which can lead to out-of-memory conditions on the host and block the server from processing other requests.
 
 To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter via the `VLLM_MAX_N_SEQUENCES` environment variable (default: **16384**). Requests exceeding this limit are rejected before reaching the engine.
+
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
 
 ### Recommendations
 
@@ -377,6 +379,8 @@ An attacker who can reach the gRPC port can:
 3. **Consume GPU and compute resources** by submitting unbounded generation requests
 4. **Stop a managed engine** through `Control.Shutdown`, or cause denial of service by exploiting bugs in the gRPC interface.
 
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
+
 ### Recommendations
 
 - Only enable `--grpc-port` when you have a specific need for gRPC-based inference
@@ -403,9 +407,11 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
 
-Single-node deployments with PP=1 and Elastic EP disabled use FlashInfer's managed autotune cache when available. Without a vLLM override, FlashInfer uses `FLASHINFER_AUTOTUNE_CACHE_DIR`, or its default `~/.cache/flashinfer/autotune` (relocated by `FLASHINFER_WORKSPACE_BASE`). `VLLM_CACHE_ROOT` does not relocate this managed store. Participating ranks must see the same store and compatible environment namespace.
+Single-rank deployments with Elastic EP disabled use FlashInfer's managed autotune cache when available. Multi-rank deployments retain legacy cache synchronization until the pinned FlashInfer coordinates cache-hit decisions before profiling. Without a vLLM override, FlashInfer uses `FLASHINFER_AUTOTUNE_CACHE_DIR`, or its default `~/.cache/flashinfer/autotune` (relocated by `FLASHINFER_WORKSPACE_BASE`). `VLLM_CACHE_ROOT` does not relocate this managed store. Use a separate store root for each independently tuning deployment, including separate prefill and decode instances. Directory sharing alone does not synchronize cache-hit decisions. After interrupted tuning, use a fresh store root when diagnosing incomplete caches.
 
-The legacy fallback retains `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/`. With PP>1, each stage's TP group uses a separate file in that directory.
+The legacy fallback retains `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/`. Each rank saves its own `autotune_configs_dp<dp>_rank<rank>.json`. With PP>1, each stage's TP group coordinates cache loading and profiling independently.
+
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
 
 ### Recommendations
 
@@ -554,6 +560,15 @@ ensure that only trusted principals can submit work to the cluster:
 - Place the Ray cluster on an isolated network segment.
 - Do not expose the Ray client port or dashboard to untrusted networks.
 
+## Multi-Tenant Deployments
+
+vLLM does not provide isolation between tenants that share the same server process. Requests from different callers are scheduled together and share the same caches. Options such as `cache_salt` reduce specific cross-tenant risks, but they are not an isolation boundary.
+
+If tenants must be isolated from each other, enforce it in the deployment architecture:
+
+- Run a dedicated vLLM instance per tenant.
+- Place a gateway in front of vLLM that authenticates callers and scopes client-supplied cache identifiers, such as `cache_salt` and multimodal `uuid` values, per tenant.
+
 ## Prefix Cache Timing Side-Channel Mitigation (Cache Salting)
 
 ### Background
@@ -602,6 +617,8 @@ Scope the salt to the isolation boundary you need:
 - **Per-group sharing**: A shared random salt for users who are allowed to benefit from each other's cached prefixes, such as users within the same organization.
 - **No salt**: Omitting `cache_salt` preserves the default behavior where all requests can share cached prefixes. This is appropriate for single-tenant deployments or when prefix privacy is not a concern.
 
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
+
 ### Recommendations
 
 - **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce.
@@ -633,11 +650,13 @@ For additional cross-tenant isolation, set `cache_salt` on each request (see [Pr
 
 `cache_salt` is opt-in and not passed by default.
 
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
+
 ### Recommendations
 
 - **Multi-tenant deployments**: Always generate cryptographically random UUIDs per media item. Additionally, set `cache_salt` to a per-tenant secret for defense in depth.
 - **Single-tenant deployments**: Ensure UUIDs are unique per distinct media content. `cache_salt` is unnecessary when there is no cross-tenant threat.
-- **Default behavior**: Omitting `uuid` entirely preserves the default content-hash-based identity, which is safe against this class of collision but requires hashing the media bytes on every request.
+- **Default behavior**: Omitting `uuid` uses a hash of the media bytes as the cache identity, which requires hashing the media on every request. This avoids accidental collisions between callers, but it does not isolate tenants from each other. See [Multi-Tenant Deployments](#multi-tenant-deployments).
 
 ## Reporting Security Vulnerabilities
 
