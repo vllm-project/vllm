@@ -26,22 +26,22 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
-class PlainDraftModelSpeculator(DraftModelSpeculator):
-    """Speculative decoding using a separate smaller draft LM.
+class StandaloneARSpeculator(DraftModelSpeculator):
+    """Standalone autoregressive (AR) drafting with a separate smaller LM.
 
     Unlike Eagle, the draft model runs fully independently of the target model.
     Step 0 builds an expanded buffer (accepted + correction token + rejected
     slots) via a Triton kernel; steps 1..k-1 are single-token decode steps.
     """
 
-    # Plain draft model needs one extra slot per request for correction.
+    # Standalone AR drafting needs one extra slot per request for correction.
     num_extra_query_per_req = 1
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
         # draft_max_seq_len is read by the parent's attention metadata builder.
-        # Plain draft model doesn't do per-batch adjustment; cap at max.
+        # Standalone AR drafting doesn't do per-batch adjustment; cap at max.
         self.draft_max_seq_len = self.max_model_len
 
         self.last_token_indices = torch.zeros(
@@ -65,10 +65,10 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
         self.supports_mm_inputs = False
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        pass  # CUDA graph not yet supported for plain draft model speculator.
+        pass  # CUDA graph not yet supported for standalone AR speculator.
 
     def capture(self) -> None:
-        pass  # CUDA graph not yet supported for plain draft model speculator.
+        pass  # CUDA graph not yet supported for standalone AR speculator.
 
     def set_attn(
         self,
@@ -415,7 +415,7 @@ def _prepare_prefill_inputs_kernel(
     max_model_len,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Per-request step-0 input preparation for the plain draft-model speculator.
+    """Per-request step-0 input preparation for the standalone AR speculator.
 
     Output layout for request i (out_start = query_start_loc[i] + i):
         [out_start,              out_start + num_valid)      accepted tokens
