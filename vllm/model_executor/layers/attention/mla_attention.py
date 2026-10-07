@@ -2968,8 +2968,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     seq_starts=chunk.starts,
                 )
             elif self.kv_cache_dtype == "nvfp4_ds_mla":
-                # The NVFP4 gather always reads from a request's first token, so
-                # a continuation chunk advances its block-table row instead.
+                # NVFP4 gather has no seq_starts; shift the block table so a
+                # continuation reads from its block-aligned start instead of token zero.
                 if chunk.is_continuation:
                     chunk_block_table = shift_block_table_to_starts(
                         chunk_block_table, chunk.starts, kv_c_and_k_pe_cache.shape[1]
