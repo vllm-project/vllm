@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import itertools
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -22,6 +23,7 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
+    chat_top_logprobs_limit,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -1260,10 +1262,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 logprob=max(p[1].logprob, -9999.0),
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
-            for i, p in enumerate(logprobs.items())
-            if return_all
-            or top_logprobs == -1
-            or (top_logprobs is not None and i < top_logprobs)
+            for p in itertools.islice(
+                logprobs.items(), chat_top_logprobs_limit(top_logprobs, return_all)
+            )
         ]
 
     def _create_chat_logprobs(
