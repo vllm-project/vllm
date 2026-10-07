@@ -1632,7 +1632,7 @@ def _derender_hermes_chat(
         )
     )
 
-    (choice,) = derenderer._derender_chat(response, request)
+    (choice,), _ = derenderer._derender_chat(response, request)
     return choice
 
 
@@ -1764,7 +1764,7 @@ def test_derender_batch_trims_stop_like_engine(
             messages=[{"role": "user", "content": "Count"}],
             **request_kwargs,
         )
-        (choice,) = derenderer._derender_chat(response, request)
+        (choice,), _ = derenderer._derender_chat(response, request)
         output_text = choice.message.content
     else:
         request = CompletionRequest(model=MODEL_NAME, prompt="Count", **request_kwargs)
