@@ -115,8 +115,8 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
 
     assert get_buckets.call_args_list == [call(8192), call(128)]
     assert autotune.call_args_list == [
-        call(tuning_buckets=max_buckets),
-        call(tuning_buckets=deferred_buckets),
+        call(tuning_buckets=max_buckets, round_up=True),
+        call(tuning_buckets=deferred_buckets, round_up=True),
     ]
     assert runner._dummy_run.call_args_list == [
         call(
@@ -133,6 +133,33 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
             randomize_inputs=True,
             **({"skip_attn": True} if skip_attn else {}),
         ),
+    ]
+
+
+def test_flashinfer_autotune_buckets_cover_drafter_tokens():
+    """The drafter's M can exceed the pass size; buckets must include it."""
+    runner = _make_runner([])
+    runner.max_num_reqs = 256
+    runner.max_num_tokens = 8192
+    runner.speculator = SimpleNamespace(num_query_per_req=6)
+
+    with (
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(8192, 128),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets"
+        ) as get_buckets,
+        patch("vllm.utils.flashinfer.autotune"),
+    ):
+        _run_flashinfer_autotune_dummy_runs(runner)
+
+    assert get_buckets.call_args_list == [call(8192), call(128 * 6)]
+    assert [c.kwargs["num_tokens"] for c in runner._dummy_run.call_args_list] == [
+        8192,
+        128,
     ]
 
 
