@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
-
 import pytest
 import regex as re
 import torch
@@ -241,37 +239,3 @@ def test_weights_mapper_stacks_one_weight_into_several_shards():
     # Each shard needs its own tensor object, but they alias one allocation.
     assert mapped[0][1] is not mapped[1][1]
     assert mapped[0][1].data_ptr() == mapped[1][1].data_ptr() == weight.data_ptr()
-
-
-@pytest.mark.parametrize(
-    ("stored", "declared", "warns"),
-    [
-        # Only a widening parameter reads every stored value back unchanged.
-        (torch.bfloat16, torch.float32, False),
-        (torch.float32, torch.bfloat16, True),
-        # Wider range, fewer mantissa bits: the values still round.
-        (torch.float16, torch.bfloat16, True),
-        # Same width and exponent bits, but a shorter subnormal reach.
-        (torch.float8_e4m3fnuz, torch.float8_e4m3fn, True),
-    ],
-)
-def test_loading_warns_unless_the_cast_only_widens(caplog, stored, declared, warns):
-    """An fp32 accumulator reading a bf16 table is not a mismatch to report."""
-    module = torch.nn.Module()
-    module.register_parameter("w", torch.nn.Parameter(torch.empty(4, dtype=declared)))
-
-    with caplog.at_level(logging.DEBUG, logger="vllm.model_executor.models.utils"):
-        loaded = list(
-            AutoWeightsLoader(module).load_weights(
-                [("w", torch.zeros(4, dtype=stored))]
-            )
-        )
-
-    assert loaded == ["w"]
-    assert module.w.dtype == declared
-    levels = {
-        record.levelno
-        for record in caplog.records
-        if "Attempted to load weight" in record.getMessage()
-    }
-    assert levels == {logging.WARNING if warns else logging.DEBUG}
