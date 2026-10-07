@@ -1243,9 +1243,7 @@ def mamba_get_block_table_tensor(
             # shared utility cannot, because its callers legitimately pass CPU.
             start_indices = (seq_lens - 1) // kv_cache_spec.block_size
             start_indices = start_indices.clamp(min=0)
-            offsets = torch.arange(
-                n_out, device=block_table.device, dtype=torch.int32
-            )
+            offsets = torch.arange(n_out, device=block_table.device, dtype=torch.int32)
             return torch.gather(
                 block_table, 1, (start_indices.unsqueeze(1) + offsets).to(torch.int64)
             )
