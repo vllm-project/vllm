@@ -3,7 +3,7 @@
 import dataclasses
 from concurrent.futures import Future
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -35,10 +35,12 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
@@ -59,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -275,6 +278,24 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     assert len(scheduler.running) == len(requests)
     for i, request in enumerate(requests):
         assert scheduler.running[i] == request
+
+
+def test_pooling_chunked_prefill_can_finish_at_max_model_len():
+    scheduler = create_scheduler(
+        max_num_seqs=1, max_model_len=8, max_num_batched_tokens=4, runner="pooling"
+    )
+    assert scheduler.max_model_len == 8
+    request = Request(
+        request_id="pool",
+        prompt_token_ids=[1] * 8,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    scheduler.add_request(request)
+
+    scheduler.schedule()
+    # The final chunk must reach max_model_len, not stop one token short.
+    assert scheduler.schedule().num_scheduled_tokens == {"pool": 4}
 
 
 def test_scheduler_stats_route_to_existing_output_client():
@@ -685,6 +706,33 @@ def test_throttle_capacity_bound_guard_admits():
     # off and `b` is admitted rather than stalling the backlog.
     output = scheduler.schedule(throttle_prefills=True)
     assert "b" in output.num_scheduled_tokens
+
+
+def test_same_step_duplicate_encoder_input_stays_cached():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+    )
+    request = create_requests(
+        1,
+        num_tokens=2000,
+        req_ids=["repeated"],
+        mm_hashes_list=[["image", "image", "image"]],
+        mm_positions=[
+            [PlaceholderRange(offset=offset, length=576) for offset in (0, 600, 1300)]
+        ],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs == {request.request_id: [0]}
+    _model_output(scheduler, output, [[]])
+
+    # The second occurrence is partially consumed; the third is not scheduled.
+    cache = scheduler.encoder_cache_manager
+    assert cache.get_cached_input_ids(request) == {1}
+    assert "image" not in cache.freeable
 
 
 def test_no_mm_input_chunking():
@@ -2583,6 +2631,65 @@ def test_kv_connector_honors_skip_reading_prefix_cache():
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
     assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
+    block_size = 16
+    num_matched_tokens = 2 * block_size
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(
+            matched_tokens=num_matched_tokens,
+            is_async=is_async,
+        ),
+        block_size=block_size,
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=2 * num_matched_tokens,
+        block_size=block_size,
+    )[0]
+    assert scheduler.connector is not None
+    get_sources = Mock(
+        return_value={CacheHitSource.P2P: block_size, CacheHitSource.HOST: block_size}
+    )
+    update_state = Mock(wraps=scheduler.connector.update_state_after_alloc)
+    calls = Mock()
+    calls.attach_mock(update_state, "allocated")
+    calls.attach_mock(get_sources, "sources")
+    monkeypatch.setattr(scheduler.connector, "update_state_after_alloc", update_state)
+    monkeypatch.setattr(
+        scheduler.connector, "get_external_cache_hit_sources", get_sources
+    )
+
+    scheduler.add_request(request)
+    # A failed allocation is not an admission: nothing is attributed.
+    with patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None):
+        scheduler.schedule()
+    get_sources.assert_not_called()
+    update_state.assert_not_called()
+
+    scheduler.schedule()
+    # Attribution runs once, after the connector has built its load plan.
+    get_sources.assert_called_once_with(request, num_matched_tokens)
+    assert [c[0] for c in calls.mock_calls] == ["allocated", "sources"]
+    connector_stats = scheduler.connector_prefix_cache_stats
+    assert connector_stats is not None
+    assert connector_stats.hits == num_matched_tokens
+    assert connector_stats.hits_by_source == {
+        CacheHitSource.P2P: block_size,
+        CacheHitSource.HOST: block_size,
+    }
+
+    if is_async:
+        # Re-admission after the async load completes is not a new hit.
+        scheduler.make_stats()
+        _step_until_kv_transfer_finished(scheduler, [request.request_id])
+        get_sources.assert_called_once()
+        connector_stats = scheduler.connector_prefix_cache_stats
+        assert connector_stats is not None
+        assert connector_stats.hits_by_source == {}
 
 
 @pytest.mark.parametrize("is_async", [False, True])
@@ -6751,7 +6858,7 @@ def _create_hybrid_mamba_connector_scheduler(
     num_blocks: int = 100,
     supports_divergent_hits: bool = True,
 ) -> Scheduler:
-    """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
+    """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
         model="facebook/opt-125m",
         trust_remote_code=True,
@@ -6772,7 +6879,7 @@ def _create_hybrid_mamba_connector_scheduler(
         cache_config=CacheConfig(
             block_size=block_size,
             enable_prefix_caching=True,
-            mamba_cache_mode="all",
+            mamba_cache_mode="align",
         ),
         kv_transfer_config=KVTransferConfig(
             kv_connector="MockKVConnector",
@@ -6804,7 +6911,7 @@ def _create_hybrid_mamba_connector_scheduler(
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="all",
+                    mamba_cache_mode="align",
                 ),
             ),
         ],
@@ -6818,6 +6925,33 @@ def _create_hybrid_mamba_connector_scheduler(
         hash_block_size=block_size,
         log_stats=True,
     )
+
+
+def _seed_hybrid_prefix(
+    manager: KVCacheManager, num_blocks: int, block_size: int
+) -> tuple[list[int], list[int]]:
+    """Prefill a prefix one block per step so that align-mode Mamba caches
+    the state at every block boundary. Returns the FA and Mamba block ids."""
+    [fill] = create_requests(
+        num_requests=1,
+        num_tokens=num_blocks * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["fill"],
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    assert num_computed == 0
+    mamba_ids = []
+    for i in range(num_blocks):
+        manager.allocate_slots(
+            fill, block_size, new_computed_blocks=computed_blocks if i == 0 else None
+        )
+        fill.num_computed_tokens += block_size
+        fa_ids, group_mamba_ids = manager.get_block_ids(fill.request_id)
+        mamba_ids.append(group_mamba_ids[i])
+    manager.free(fill)
+    return fa_ids, mamba_ids
 
 
 @pytest.mark.parametrize(
@@ -6845,23 +6979,8 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
-    # Seed a 4-block prefix so both groups cache all four boundaries
-    # (mamba cache mode "all" caches every block's state densely).
-    [fill] = create_requests(
-        num_requests=1,
-        num_tokens=4 * block_size,
-        max_tokens=1,
-        same_prompt=True,
-        block_size=block_size,
-        req_ids=["fill"],
-    )
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
-    blocks = manager.allocate_slots(
-        fill, fill.num_tokens, num_computed, computed_blocks
-    )
-    fa_ids = [b.block_id for b in blocks.blocks[0]]
-    mamba_ids = [b.block_id for b in blocks.blocks[1]]
-    manager.free(fill)
+    # Seed a 4-block prefix so both groups cache all four boundaries.
+    fa_ids, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
 
     # Evict the FA tail and the middle mamba states; block 0 (both groups)
     # and the deep mamba state at block 3 survive.
@@ -6885,8 +7004,8 @@ def test_hybrid_per_group_hit_divergence_with_connector(
 
     scheduler.add_request(replay)
     output = scheduler.schedule()
-    num_scheduled = output.num_scheduled_tokens[replay.request_id]
-    assert replay.num_tokens - num_scheduled == expected_num_computed
+    [new_req] = output.scheduled_new_reqs
+    assert new_req.num_computed_tokens == expected_num_computed
 
 
 @pytest.mark.parametrize(
@@ -6921,20 +7040,7 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
     # Seed a 4-block prefix in both groups.
-    [fill] = create_requests(
-        num_requests=1,
-        num_tokens=4 * block_size,
-        max_tokens=1,
-        same_prompt=True,
-        block_size=block_size,
-        req_ids=["fill"],
-    )
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
-    blocks = manager.allocate_slots(
-        fill, fill.num_tokens, num_computed, computed_blocks
-    )
-    mamba_ids = [b.block_id for b in blocks.blocks[1]]
-    manager.free(fill)
+    _, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
 
     # Keep all FA blocks; evict every mamba state but block 0. FA reaches 4
     # blocks, the mamba hit only reaches 1 -> diverged (FA > Mamba).
@@ -6955,8 +7061,8 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
 
     scheduler.add_request(replay)
     output = scheduler.schedule()
-    num_scheduled = output.num_scheduled_tokens[replay.request_id]
-    assert replay.num_tokens - num_scheduled == expected_num_computed
+    [new_req] = output.scheduled_new_reqs
+    assert new_req.num_computed_tokens == expected_num_computed
 
 
 def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
