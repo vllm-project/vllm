@@ -22,7 +22,11 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mhc import MHCPostOp, MHCPreDelayedOp
+from vllm.model_executor.layers.mhc import (
+    HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
+    MHCPostOp,
+    MHCPreDelayedOp,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -247,6 +251,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
+        # Where aiter's fused seam kernel runs (gfx950), it folds the following
+        # attn_norm / ffn_norm into its collapse, so the separate norms are
+        # skipped for the seams it takes.
+        self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -265,6 +273,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Layer 0's attention seam projects the 2-D embedding with the folded
+        # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
+        # The fused kernel only takes the latter, so that seam keeps the
+        # separate attn_norm.
+        fuse_attn_norm = self.fuse_seam_norm and not (residual is None and x.dim() == 2)
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -274,7 +287,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
                     self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
@@ -288,7 +301,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
-                post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -299,20 +312,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
                     pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
                 )
         else:
-            residual = self.mhc_post(x, residual, post_mix, res_mix)
-            if self.engram is not None and engram_hashes is not None:
-                # Engram injection happens between the previous sublayer's
-                # post and this block's pre, on the full hc stream, so the
-                # mix coefficients see the injected stream.
-                residual = self.engram(
-                    residual,
-                    engram_hashes[:, self.engram.layer_hash_index],
-                    engram_mask,
-                )
-            post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
-                residual,
+            pre_args = (
                 self.hc_attn_fn,
                 self.hc_attn_scale,
                 self.hc_attn_base,
@@ -321,9 +325,45 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_eps,
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
-                pre_mix=pre_mix,
             )
-        x = self.attn_norm(x)
+            if self.engram is not None and engram_hashes is not None:
+                # Engram injection happens between the previous sublayer's
+                # post and this block's pre, on the full hc stream, so the
+                # mix coefficients see the injected stream. That read of the
+                # residual is what stops the post from fusing into the pre
+                # here, unlike the attention seam below.
+                residual = self.mhc_post(x, residual, post_mix, res_mix)
+                residual = self.engram(
+                    residual,
+                    engram_hashes[:, self.engram.layer_hash_index],
+                    engram_mask,
+                )
+                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                    residual,
+                    *pre_args,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                )
+            else:
+                (
+                    residual,
+                    post_mix,
+                    res_mix,
+                    x,
+                    attn_pre,
+                ) = self.mhc_pre_delayed(
+                    residual,
+                    *pre_args,
+                    pre_mix=pre_mix,
+                    sublayer_out=x,
+                    post_layer_mix=post_mix,
+                    comb_res_mix=res_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                )
+        if not fuse_attn_norm:
+            x = self.attn_norm(x)
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -332,8 +372,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual = self.mhc_post(x, residual, post_mix, res_mix)
-        post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
+        residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -344,8 +383,14 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
             pre_mix=attn_pre,
+            sublayer_out=x,
+            post_layer_mix=post_mix,
+            comb_res_mix=res_mix,
+            norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
+            norm_eps=self.ffn_norm.variance_epsilon,
         )
-        x = self.ffn_norm(x)
+        if not self.fuse_seam_norm:
+            x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre
 
@@ -871,6 +916,11 @@ def _make_deepseek_v4_weights_mapper(
             # renames the engram fp8 table but not its scale; route the
             # scale explicitly to the same module.
             re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            # Quark exports spell the same tensor ``embed.weight_scale``,
+            # which the ``\.scale$`` rules never match.
+            re.compile(
+                r"(engram\.embed)\.weight_scale$"
+            ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
     else:
@@ -884,6 +934,11 @@ def _make_deepseek_v4_weights_mapper(
             ): r"\1.weight_scale_inv",
             # Same engram reroute as the fp4 branch above.
             re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            # Quark exports spell the same tensor ``embed.weight_scale``,
+            # which the ``\.scale$`` rules never match.
+            re.compile(
+                r"(engram\.embed)\.weight_scale$"
+            ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
     return WeightsMapper(

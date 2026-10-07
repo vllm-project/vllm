@@ -15,6 +15,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
+
 @triton.heuristics(
     {
         "STORE_RESIDUAL_OUT": lambda args: args["residual_out"] is not None,

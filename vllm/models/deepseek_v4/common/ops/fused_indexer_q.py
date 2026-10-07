@@ -309,12 +309,22 @@ class FusedIndexerQRopeQuantTritonKernel(
         )
 
 
+def _indexer_weights_out_dtypes(vllm_config: Any) -> tuple[torch.dtype, ...]:
+    """Weights dtypes the model's indexer layers ask for: fp32 for the dense
+    scoring kernels, plus bf16 when the DeepSeek V4.1 sparse-logits indexer
+    (`SparseMQAIndexer`) is enabled."""
+    if vllm_config.attention_config.indexer_sparse_logits:
+        return (torch.float32, torch.bfloat16)
+    return (torch.float32,)
+
+
 class FusedIndexerQRopeMxFp4TritonKernel(
     VllmTritonJitKernel["FusedIndexerQRopeMxFp4TritonKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
+        weights_out_dtype: torch.dtype
         num_heads: int
         index_q_half_rot_dim: int
         index_q_head_dim: int
@@ -434,12 +444,14 @@ class FusedIndexerQRopeMxFp4TritonKernel(
         self,
         *,
         dtype: torch.dtype,
+        weights_out_dtype: torch.dtype,
         num_heads: int,
         head_dim: int,
         rope_dim: int,
     ) -> CompileKey:
         return self.CompileKey(
             dtype=dtype,
+            weights_out_dtype=weights_out_dtype,
             num_heads=num_heads,
             index_q_half_rot_dim=rope_dim // 2,
             index_q_head_dim=head_dim,
@@ -456,6 +468,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
 
         return self._trace_dispatch(self.dispatch)(
             dtype=vllm_config.model_config.dtype,
+            weights_out_dtype=_indexer_weights_out_dtypes(vllm_config),
             num_heads=num_heads,
             head_dim=head_dim,
             rope_dim=rope_dim,
@@ -491,7 +504,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
                 shape=(1, compile_key.num_heads, scale_head_dim),
             ),
             index_weights_out=TritonWarmupTensor(
-                torch.float32,
+                compile_key.weights_out_dtype,
                 shape=(1, compile_key.num_heads),
             ),
         )
@@ -540,11 +553,16 @@ def fused_indexer_q_rope_quant(
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
     use_fp4: bool = False,
+    weights_out_dtype: torch.dtype = torch.float32,
 ) -> tuple[
     torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     torch.Tensor,
 ]:
     """Fused RoPE + quantize Q for the sparse indexer.
+
+    ``weights_out_dtype`` is the dtype the downstream scoring kernel takes:
+    fp32 for the dense MQA-logits kernels, bf16 for DeepGEMM's sparse
+    MQA-logits kernels (CUDA MXFP4 path only).
 
     Weight-fold semantics (important — the two paths differ):
 
@@ -577,7 +595,7 @@ def fused_indexer_q_rope_quant(
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
 
-    index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+    index_weights_out = torch.empty_like(index_weights, dtype=weights_out_dtype)
 
     if use_fp4:
         assert index_q_head_dim % MXFP4_BLOCK_SIZE == 0, (
@@ -613,6 +631,7 @@ def fused_indexer_q_rope_quant(
                 weights_out=index_weights_out,
             )
         elif current_platform.is_xpu():
+            assert weights_out_dtype == torch.float32, weights_out_dtype
             torch.ops.vllm.xpu_deepseek_fused_indexer_q_rope_mxfp4(
                 index_q,
                 positions,
@@ -647,6 +666,7 @@ def fused_indexer_q_rope_quant(
             index_q_scale.view(torch.int32).squeeze(-1),
         ), index_weights_out
 
+    assert weights_out_dtype == torch.float32, weights_out_dtype
     fp8_dtype = current_platform.fp8_dtype()
     use_fnuz = fp8_dtype == torch.float8_e4m3fnuz
     fp8_max = 224.0 if use_fnuz else 448.0
