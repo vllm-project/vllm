@@ -777,6 +777,7 @@ def _attention(compress_ratio: int) -> DeepseekV4FlashMLAAttention:
     attention = DeepseekV4FlashMLAAttention.__new__(DeepseekV4FlashMLAAttention)
     nn.Module.__init__(attention)
     attention.compress_ratio = compress_ratio
+    attention.max_model_len = 1024
     attention.window_size = 4
     attention.scale = 0.125
     attention.attn_sink = torch.zeros(2, dtype=torch.float32)
