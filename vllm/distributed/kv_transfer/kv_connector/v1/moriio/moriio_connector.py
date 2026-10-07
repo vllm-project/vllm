@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import math
-import os
 import queue
 import threading
 import time
@@ -30,7 +29,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
-    _positive_finite_timeout,
     EngineId,
     HandshakeError,
     MoRIIOAgentMetadata,
@@ -46,6 +44,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferError,
     TransferId,
     WriteTask,
+    _positive_finite_timeout,
     fold_local_rank,
     get_moriio_mode,
     get_peer_zmq_from_request_id,
@@ -662,8 +661,10 @@ class MoRIIOConnectorScheduler:
         self._write_recv_orphaned: set[ReqId] = set()
         self._write_load_failed_block_ids: list[int] = []
         self._write_recv_timeout = _positive_finite_timeout(
-            "VLLM_MORIIO_WRITE_TIMEOUT_S",
-            os.environ.get("VLLM_MORIIO_WRITE_TIMEOUT_S", "540"),
+            "kv_connector_extra_config.write_recv_timeout",
+            self.kv_transfer_config.kv_connector_extra_config.get(
+                "write_recv_timeout", MoRIIOConstants.DEFAULT_WRITE_RECV_TIMEOUT
+            ),
         )
 
         if self.is_producer:
@@ -1343,7 +1344,7 @@ class MoRIIOConnectorScheduler:
                 self._write_recv_orphaned.discard(req_id)
                 logger.warning(
                     "WRITE-mode KV recv for finished req %s still incomplete "
-                    "after %.0fs (VLLM_MORIIO_WRITE_TIMEOUT_S); its %d block(s) "
+                    "after %.0fs (write_recv_timeout); its %d block(s) "
                     "stay allocated because the producer may still write them.",
                     req_id,
                     self._write_recv_timeout,
@@ -1353,7 +1354,7 @@ class MoRIIOConnectorScheduler:
             self._write_load_failed_block_ids.extend(block_ids)
             logger.error(
                 "WRITE-mode KV recv TIMED OUT for req %s after %.0fs "
-                "(VLLM_MORIIO_WRITE_TIMEOUT_S); producer write_done never "
+                "(write_recv_timeout); producer write_done never "
                 "arrived. Failing the request; its %d block(s) stay allocated "
                 "because the producer may still write them.",
                 req_id,
