@@ -5,9 +5,11 @@ import weakref
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
+from vllm.config import ParallelConfig
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
 from vllm.v1.outputs import DraftTokenIds
 
@@ -93,3 +95,72 @@ def test_take_draft_token_ids_uses_execute_model_timeout(monkeypatch, stalled):
             executor.take_draft_token_ids()
     else:
         assert executor.take_draft_token_ids() is draft
+
+
+@pytest.mark.parametrize("non_block", [False, True])
+@pytest.mark.parametrize("fault_tolerance", [False, True])
+def test_failed_rpc_does_not_leave_stale_responses(fault_tolerance, non_block):
+    executor = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.parallel_config = ParallelConfig(enable_fault_tolerance=fault_tolerance)
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = Mock()
+    success = WorkerProc.ResponseStatus.SUCCESS
+    failure = WorkerProc.ResponseStatus.FAILURE
+    executor.response_mqs = [
+        Mock(
+            dequeue=Mock(side_effect=[(failure, "device error"), (success, "retry 0")])
+        ),
+        Mock(dequeue=Mock(side_effect=[(failure, "peer error"), (success, "retry 1")])),
+    ]
+
+    with pytest.raises(RuntimeError, match="device error") as exc:
+        result = executor.collective_rpc("execute_model", non_block=non_block)
+        if non_block:
+            result.result()
+
+    if fault_tolerance:
+        assert executor.collective_rpc("handle_ft_command") == ["retry 0", "retry 1"]
+        assert "rank 0" in str(exc.value) and "rank 1" in str(exc.value)
+        assert "peer error" in str(exc.value)
+    else:
+        executor.response_mqs[1].dequeue.assert_not_called()
+
+
+def test_failed_rpc_drain_respects_deadline():
+    executor = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.parallel_config = ParallelConfig(enable_fault_tolerance=True)
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = Mock()
+    executor.response_mqs = [
+        Mock(
+            dequeue=Mock(
+                return_value=(WorkerProc.ResponseStatus.FAILURE, "device error")
+            )
+        ),
+        Mock(dequeue=Mock(side_effect=TimeoutError)),
+    ]
+
+    with pytest.raises(TimeoutError, match="RPC call to execute_model timed out"):
+        executor.collective_rpc("execute_model", timeout=1)
+
+    timeout = executor.response_mqs[1].dequeue.call_args.kwargs["timeout"]
+    assert 0 <= timeout <= 1
+
+
+def test_failed_executor_does_not_drain_dead_worker():
+    executor = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.parallel_config = ParallelConfig(enable_fault_tolerance=True)
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = Mock()
+
+    def fail(**kwargs):
+        executor.is_failed = True
+        return WorkerProc.ResponseStatus.FAILURE, "worker exited"
+
+    executor.response_mqs = [Mock(dequeue=Mock(side_effect=fail)), Mock()]
+    with pytest.raises(RuntimeError, match="worker exited"):
+        executor.collective_rpc("execute_model")
+    executor.response_mqs[1].dequeue.assert_not_called()
