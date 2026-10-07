@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -249,3 +250,63 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize(
+    "model_output, name, arguments",
+    [
+        pytest.param(
+            '<function_calls>write_file(path="a.py", content="""def f():\n'
+            "    return 1\n"
+            '""")</function_calls>',
+            "write_file",
+            {"path": "a.py", "content": "def f():\n    return 1\n"},
+            id="triple_quoted_newlines",
+        ),
+        pytest.param(
+            '<function_calls>write_file(path="a.py", content="""import os\n'
+            "\n"
+            'print(1)""")</function_calls>',
+            "write_file",
+            {"path": "a.py", "content": "import os\n\nprint(1)"},
+            id="triple_quoted_blank_line",
+        ),
+        pytest.param(
+            '<function_calls>write_file(path="a.py", content="def f():\\n'
+            '    return 1\\n")</function_calls>',
+            "write_file",
+            {"path": "a.py", "content": "def f():\n    return 1\n"},
+            id="escaped_newline_unchanged",
+        ),
+        pytest.param(
+            "<function_calls>get_weather(\n"
+            "    city='SF',\n"
+            "    metric='celsius'\n"
+            ")</function_calls>",
+            "get_weather",
+            {"city": "SF", "metric": "celsius"},
+            id="call_split_across_lines",
+        ),
+    ],
+)
+def test_newlines_inside_strings_and_calls(
+    streaming: bool,
+    model_output: str,
+    name: str,
+    arguments: dict[str, str],
+    default_tokenizer: TokenizerLike,
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=streaming
+    )
+    assert content is None
+    assert [call.function for call in tool_calls] == [
+        FunctionCall(
+            name=name,
+            arguments=json.dumps(arguments, ensure_ascii=False),
+        )
+    ]
