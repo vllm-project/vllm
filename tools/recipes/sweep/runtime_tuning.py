@@ -338,9 +338,12 @@ def _resolve_data_parallel_size(
 DEFAULT_POLICIES: tuple[Policy, ...] = (
     _resolve_tensor_parallel_size,
     _resolve_gpu_memory_utilization,
+    _resolve_data_parallel_size,
+)
+
+SCHEDULER_TUNING_POLICIES: tuple[Policy, ...] = (
     _resolve_max_num_seqs,
     _resolve_max_num_batched_tokens,
-    _resolve_data_parallel_size,
 )
 
 # Select tuning behavior from the hardware requested by the Recipes rendering,
@@ -354,6 +357,8 @@ HARDWARE_TUNING_POLICIES: dict[str, tuple[Policy, ...]] = {
 
 def get_runtime_tuning_policies(
     recipe_hardware: object,
+    *,
+    tune_scheduler: bool = False,
 ) -> tuple[Policy, ...]:
     if not isinstance(recipe_hardware, str) or not recipe_hardware:
         raise ValueError(
@@ -368,6 +373,8 @@ def get_runtime_tuning_policies(
             "Runtime tuning is not supported for recipe hardware "
             f"{recipe_hardware!r}. Currently supported: {supported}."
         )
+    if tune_scheduler:
+        policies = (*policies, *SCHEDULER_TUNING_POLICIES)
     return policies
 
 

@@ -189,6 +189,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         help="Optional capacity target for future DP/capacity tuning.",
     )
+    tuning.add_argument(
+        "--tune-scheduler",
+        action="store_true",
+        help=(
+            "Opt in to workload-derived max-num-seqs and "
+            "max-num-batched-tokens. By default scheduler parameters remain "
+            "at recipe/vLLM defaults."
+        ),
+    )
 
     sweep = p.add_argument_group(
         "optional performance sweep",
@@ -897,6 +906,7 @@ def main() -> int:
 
         tuning_requested = (
             args.detect_hardware
+            or args.tune_scheduler
             or bool(selected_sweep_modes)
             or any(
                 value is not None
@@ -946,7 +956,15 @@ def main() -> int:
                 sweep_writer = write_sweep_files
 
             recipe_hardware = recipe.get("hardware")
-            policies = get_runtime_tuning_policies(recipe_hardware)
+            scheduler_tuning_requested = bool(
+                args.tune_scheduler
+                or args.generate_sweep
+                or args.generate_scheduler_sweep
+            )
+            policies = get_runtime_tuning_policies(
+                recipe_hardware,
+                tune_scheduler=scheduler_tuning_requested,
+            )
 
             if args.detect_hardware:
                 from hardware_detection import (
@@ -988,6 +1006,8 @@ def main() -> int:
                 policies=policies,
             )
             config.update(tuning.overrides)
+            if args.tune_scheduler:
+                config.update(tuning.sweep_overrides)
             sweep_config = dict(config)
             sweep_config.update(tuning.sweep_overrides)
 
@@ -1013,6 +1033,7 @@ def main() -> int:
                 config=config,
                 workload=workload,
                 numa_node_count=hardware.numa_node_count,
+                tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_parallel_layout_sweep:
             if not args.detect_hardware or hardware is None:
@@ -1029,6 +1050,7 @@ def main() -> int:
                 config=config,
                 workload=workload,
                 numa_node_count=hardware.numa_node_count,
+                tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_concurrency_sweep:
             assert workload is not None
@@ -1040,6 +1062,7 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
+                tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_sweep or args.generate_scheduler_sweep:
             assert workload is not None
@@ -1058,8 +1081,11 @@ def main() -> int:
                 print("Initial runtime suggestion:")
                 for key, value in tuning.overrides.items():
                     print(f"  {key}: {value}")
-            if tuning.sweep_overrides and selected_sweep_modes:
-                print("Explicit scheduler sweep seed:")
+            if tuning.sweep_overrides:
+                if args.tune_scheduler:
+                    print("Workload-derived scheduler tuning:")
+                elif selected_sweep_modes:
+                    print("Explicit scheduler sweep seed:")
                 for key, value in tuning.sweep_overrides.items():
                     print(f"  {key}: {value}")
             for note in tuning.notes:

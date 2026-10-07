@@ -163,20 +163,23 @@ def main() -> int:
             }
         )
         print(f"[ADAPTIVE CONCURRENCY] testing max_concurrency={concurrency}")
-        rows = run_comb_workload(
-            server,
-            bench_cmd,
-            serve_comb=serve_comb,
-            bench_comb=bench_comb,
-            link_vars=[],
-            experiment_dir=results_dir,
-            num_runs=args.num_runs,
-            dry_run=False,
-            warmup_num_prompts=min(concurrency, 1000),
-            continue_on_error=args.continue_on_error,
-            workload_var="max_concurrency",
-            workload_value=concurrency,
-        ) or []
+        rows = (
+            run_comb_workload(
+                server,
+                bench_cmd,
+                serve_comb=serve_comb,
+                bench_comb=bench_comb,
+                link_vars=[],
+                experiment_dir=results_dir,
+                num_runs=args.num_runs,
+                dry_run=False,
+                warmup_num_prompts=min(concurrency, 1000),
+                continue_on_error=args.continue_on_error,
+                workload_var="max_concurrency",
+                workload_value=concurrency,
+            )
+            or []
+        )
 
         eligible = _sla_eligible(
             rows,
@@ -240,10 +243,7 @@ def main() -> int:
 
         assert low is not None
         assert high is not None
-        print(
-            "[ADAPTIVE CONCURRENCY] refining bracket "
-            f"PASS={low}, FAIL={high}"
-        )
+        print(f"[ADAPTIVE CONCURRENCY] refining bracket PASS={low}, FAIL={high}")
 
         while high - low > 1:
             midpoint = (low + high) // 2
@@ -252,10 +252,7 @@ def main() -> int:
             else:
                 high = midpoint
 
-        print(
-            "[ADAPTIVE CONCURRENCY] boundary resolved: "
-            f"PASS={low}, FAIL={high}"
-        )
+        print(f"[ADAPTIVE CONCURRENCY] boundary resolved: PASS={low}, FAIL={high}")
 
     return 0
 

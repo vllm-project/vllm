@@ -1,9 +1,12 @@
 # Sweep Tuning
 
 Sweep tuning is optional. The converter always creates an initial `config.yml`
-that can be deployed directly. Workload-derived scheduler values are kept out
-of this file and used only as explicit benchmark seeds; recipe-provided
-scheduler settings remain unchanged. For benchmark-backed tuning, the
+that can be deployed directly. Scheduler calculation is disabled by default:
+TP/DP and concurrency stages remove explicit `max-num-seqs` and
+`max-num-batched-tokens` so vLLM resolves its normal scheduler defaults.
+
+Use `--tune-scheduler` only when you explicitly want workload-derived scheduler
+values before the dedicated scheduler stage. For benchmark-backed tuning, the
 recommended workflow is **Tune All**, which measures the serving stack in
 dependency order:
 
@@ -88,6 +91,36 @@ All workflows keep one fixed input/output workload shape and require
 For **Tune All**, the supplied `--concurrency` is the representative load used
 for the initial TP/DP comparison and to size the benchmark request set. The
 concurrency stage then measures the final SLA-feasible `max_concurrency`.
+
+### Scheduler defaults and `--tune-scheduler`
+
+By default, `--concurrency`, token lengths, and SLA values are workload hints;
+they do not cause the converter to calculate `max-num-seqs` or
+`max-num-batched-tokens`. This keeps scheduler capacity independent from the
+seed concurrency while TP/DP and maximum concurrency are being measured.
+
+The default Tune All policy is:
+
+```text
+Stage 1: TP/DP        -> vLLM scheduler defaults
+Stage 2: concurrency -> vLLM scheduler defaults
+Stage 3: scheduler   -> calculate and benchmark scheduler candidates
+```
+
+For a directly deployable heuristic configuration, or to intentionally carry
+workload-derived scheduler values into the earlier sweep stages, opt in with:
+
+```bash
+--tune-scheduler
+```
+
+With that flag, the existing workload formulas are enabled. In particular,
+`max-num-seqs` uses the per-replica workload concurrency and
+`max-num-batched-tokens` uses the estimated decode and prefill pressure.
+
+A scheduler-only sweep is also an explicit opt-in to scheduler calculation: it
+uses the workload formulas as benchmark seeds and compares them with vLLM
+defaults.
 
 ### Generate the Tune All package
 
@@ -192,11 +225,14 @@ Skipped candidates and reasons are saved in
 `sweep/parallel_layout_skips.json`. If model metadata cannot be loaded, the
 generator keeps the generic layouts and relies on the third policy.
 
-Each candidate starts with a per-replica scheduler baseline:
+By default, parallel-layout candidates change only TP and DP. The generated
+benchmark config removes explicit `max-num-seqs` and
+`max-num-batched-tokens`, so every layout uses vLLM-resolved scheduler
+defaults. This prevents a scheduler value derived from the seed concurrency
+from becoming part of the TP/DP selection.
 
-```text
-max-num-seqs = ceil(global concurrency / data-parallel-size)
-```
+With `--tune-scheduler`, the workload-derived per-replica scheduler baseline is
+restored for this stage.
 
 The stage writes:
 
@@ -245,8 +281,13 @@ preserved.
 
 ### Stage 2: Tune Concurrency
 
-The concurrency stage keeps the selected TP/DP layout and scheduler baseline
-fixed while finding the largest useful client concurrency.
+The concurrency stage keeps the selected TP/DP layout fixed while finding the
+largest useful client concurrency. By default the generated benchmark config
+removes explicit `max-num-seqs` and `max-num-batched-tokens`, so the seed
+concurrency cannot become an artificial scheduler admission limit.
+
+With `--tune-scheduler`, explicit scheduler values are preserved as an opt-in
+behavior.
 
 When TTFT and/or TPOT objectives are supplied, Recipes uses an **adaptive SLA
 boundary search** instead of uniformly sampling the entire workload range.

@@ -320,6 +320,7 @@ def build_parallel_layout_plan(
     *,
     model_metadata: ModelParallelMetadata = UNKNOWN_MODEL_PARALLEL_METADATA,
     cpu_moe_dp_supported: bool = True,
+    tune_scheduler: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Build candidates and diagnostics after applying parallel safety policy."""
     validate_sweep_workload(workload)
@@ -391,18 +392,18 @@ def build_parallel_layout_plan(
             )
             continue
 
-        max_num_seqs, max_num_batched_tokens = _scheduler_baseline_for_dp(
-            config, workload, data_parallel_size
-        )
-        candidates.append(
-            {
-                "_benchmark_name": name,
-                "tensor_parallel_size": tensor_parallel_size,
-                "data_parallel_size": data_parallel_size,
-                "max_num_seqs": max_num_seqs,
-                "max_num_batched_tokens": max_num_batched_tokens,
-            }
-        )
+        candidate = {
+            "_benchmark_name": name,
+            "tensor_parallel_size": tensor_parallel_size,
+            "data_parallel_size": data_parallel_size,
+        }
+        if tune_scheduler:
+            max_num_seqs, max_num_batched_tokens = _scheduler_baseline_for_dp(
+                config, workload, data_parallel_size
+            )
+            candidate["max_num_seqs"] = max_num_seqs
+            candidate["max_num_batched_tokens"] = max_num_batched_tokens
+        candidates.append(candidate)
 
     if not candidates:
         raise ValueError(
@@ -419,6 +420,7 @@ def build_parallel_layout_params(
     *,
     model_metadata: ModelParallelMetadata = UNKNOWN_MODEL_PARALLEL_METADATA,
     cpu_moe_dp_supported: bool = True,
+    tune_scheduler: bool = False,
 ) -> list[dict[str, Any]]:
     """Build full-NUMA layouts plus the largest supported TP layout."""
     candidates, _ = build_parallel_layout_plan(
@@ -427,6 +429,7 @@ def build_parallel_layout_params(
         numa_node_count,
         model_metadata=model_metadata,
         cpu_moe_dp_supported=cpu_moe_dp_supported,
+        tune_scheduler=tune_scheduler,
     )
     return candidates
 
@@ -894,6 +897,7 @@ def write_parallel_layout_sweep_files(
     config: dict[str, Any],
     workload: WorkloadHints,
     numa_node_count: int,
+    tune_scheduler: bool = False,
 ) -> list[Path]:
     """Write a standalone NUMA-aware TP/DP sweep package."""
     validate_sweep_workload(workload)
@@ -902,15 +906,20 @@ def write_parallel_layout_sweep_files(
 
     parallel_params = directory / "parallel_layout_serve_params.json"
     parallel_skips = directory / "parallel_layout_skips.json"
+    parallel_config = directory / "parallel-layout-benchmark-config.yml"
     bench_params = directory / "bench_params.json"
     run_parallel = directory / "run_parallel_layout_sweep.sh"
     recommend_parallel = directory / "recommend_parallel_layout.py"
     guide = directory / "SWEEP.md"
 
     initial_config_rel = _relative_to(directory, config_path)
+    parallel_config_rel = _relative_to(directory, str(parallel_config))
     selected_config_rel = "parallel-layout-config.yml"
     env_rel = _relative_to(directory, env_path)
     request_model, tokenizer = _benchmark_models(config)
+
+    _write_sweep_config(parallel_config, config)
+    benchmark_config_rel = initial_config_rel if tune_scheduler else parallel_config_rel
 
     try:
         model_metadata = inspect_model_parallel_metadata(config)
@@ -930,13 +939,14 @@ def write_parallel_layout_sweep_files(
         numa_node_count,
         model_metadata=model_metadata,
         cpu_moe_dp_supported=cpu_moe_dp_supported,
+        tune_scheduler=tune_scheduler,
     )
     _write_json(parallel_params, parallel_candidates)
     _write_json(parallel_skips, skipped_candidates)
     _write_json(bench_params, build_bench_params(workload))
     _write_run_script(
         run_parallel,
-        config_rel=initial_config_rel,
+        config_rel=benchmark_config_rel,
         env_rel=env_rel,
         request_model=request_model,
         tokenizer=tokenizer,
@@ -1370,6 +1380,7 @@ def write_concurrency_sweep_files(
     env_path: str,
     config: dict[str, Any],
     workload: WorkloadHints,
+    tune_scheduler: bool = False,
 ) -> list[Path]:
     """Write a standalone max_concurrency tuning package."""
     validate_sweep_workload(workload)
@@ -1377,19 +1388,24 @@ def write_concurrency_sweep_files(
     directory.mkdir(parents=True, exist_ok=True)
 
     bench_params = directory / "concurrency_bench_params.json"
+    concurrency_config = directory / "concurrency-benchmark-config.yml"
     adaptive_script = directory / "adaptive_concurrency.py"
     run_script = directory / "run_concurrency_sweep.sh"
     recommend_script = directory / "recommend_concurrency.py"
 
     config_rel = _relative_to(directory, config_path)
+    concurrency_config_rel = _relative_to(directory, str(concurrency_config))
     env_rel = _relative_to(directory, env_path)
     request_model, tokenizer = _benchmark_models(config)
+
+    _write_sweep_config(concurrency_config, config)
+    benchmark_config_rel = config_rel if tune_scheduler else concurrency_config_rel
 
     _write_json(bench_params, build_concurrency_bench_params(workload))
     _write_adaptive_concurrency_script(adaptive_script)
     _write_concurrency_run_script(
         run_script,
-        config_rel=config_rel,
+        config_rel=benchmark_config_rel,
         env_rel=env_rel,
         request_model=request_model,
         tokenizer=tokenizer,
@@ -1399,6 +1415,7 @@ def write_concurrency_sweep_files(
     analysis_files = _write_post_benchmark_analysis_files(directory, workload=workload)
     return [
         bench_params,
+        concurrency_config,
         adaptive_script,
         run_script,
         recommend_script,
@@ -1414,6 +1431,7 @@ def write_full_sweep_files(
     config: dict[str, Any],
     workload: WorkloadHints,
     numa_node_count: int,
+    tune_scheduler: bool = False,
 ) -> list[Path]:
     """Write TP/DP -> concurrency -> scheduler end-to-end tuning artifacts."""
     files = write_parallel_layout_sweep_files(
@@ -1423,6 +1441,7 @@ def write_full_sweep_files(
         config=config,
         workload=workload,
         numa_node_count=numa_node_count,
+        tune_scheduler=tune_scheduler,
     )
 
     directory = Path(output_dir)

@@ -64,12 +64,10 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --tpot-sla-ms 100
 ```
 
-`--output-tokens` is used to estimate steady-state request turnover for
-`max-num-batched-tokens`. When both `--target-qps` and `--tpot-sla-ms` are
-available, they are also used to estimate per-replica prompt arrival pressure
-per scheduler step. `--ttft-sla-ms` is collected but is not yet converted
-directly into a batch-size formula because the relationship between TTFT and
-scheduler budget is model- and hardware-dependent.
+Scheduler calculation is opt-in with `--tune-scheduler`; workload hints do
+not rewrite `max-num-seqs` or `max-num-batched-tokens` by default. The detailed
+scheduler and staged-sweep behavior is documented in
+[SWEEP_TUNING.md](SWEEP_TUNING.md).
 
 ## Deployment-Time Parameters
 
