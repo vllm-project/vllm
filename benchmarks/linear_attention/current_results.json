@@ -572,6 +572,1696 @@
     }
   ],
   "full_8192_1024": {
-    "status": "rerun requested; no accepted results yet"
+    "audits": {
+      "serving-v15-current-full": {
+        "status": "partial",
+        "jobs": [
+          "3257663",
+          "3257664",
+          "3257665",
+          "3257666",
+          "3257667",
+          "3257668",
+          "3257669",
+          "3257670"
+        ],
+        "results": [
+          {
+            "status": "model_validation_failed",
+            "model": "glm",
+            "gpu": "GB200",
+            "job": "3257665",
+            "arms": [],
+            "means": {},
+            "failures": [
+              {
+                "arm": "00-candidate-vllm_auto",
+                "reason": "GSM64 fails the declared minimum or protocol; timing stopped",
+                "details": {
+                  "accuracy": 0.84375,
+                  "invalid_rate": 0.0,
+                  "latency": 44.28730495198397,
+                  "questions_per_second": 1.4451093844926535,
+                  "total_output_tokens": 5795,
+                  "tokens_per_second": 130.85013879898324,
+                  "num_questions": 64,
+                  "num_shots": 5,
+                  "max_tokens": 256,
+                  "timestamp": 1791349637.8991168
+                },
+                "excluded_from_performance": true
+              }
+            ]
+          },
+          {
+            "status": "partial",
+            "model": "kimi",
+            "gpu": "GB200",
+            "job": "3257663",
+            "arms": [
+              {
+                "name": "00-candidate-vllm_auto",
+                "choice": "vllm_auto",
+                "gsm64_correct": 64,
+                "gsm1319": {
+                  "accuracy": 0.9469294920394238,
+                  "invalid_rate": 0.000758150113722517,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 336.16499201161787,
+                    "mean_tpot_ms": 8.037624685223491,
+                    "output_throughput": 119.63779692063602,
+                    "duration": 8.559167974977754,
+                    "sha256": "1d5093737e768592f15d4312e2c839cc20038653c9f993bf6b6c691d99ef563f",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 334.2927820049226,
+                    "mean_tpot_ms": 8.037838128050343,
+                    "output_throughput": 119.66087786098916,
+                    "duration": 8.55751702899579,
+                    "sha256": "9bd46636f89f360430b58c0ef01f0c2018caa41242371af3cc7ed2be28c51ab7",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 324.34146699961275,
+                    "mean_tpot_ms": 8.038132004874539,
+                    "output_throughput": 119.79593609770843,
+                    "duration": 8.547869262984022,
+                    "sha256": "3f92e494e75368c70b2a25874c4517b0dc0eae9a09acbb007435ec550f227f96",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1697.8807252453407,
+                    "mean_tpot_ms": 12.929279331376987,
+                    "output_throughput": 547.4706531824942,
+                    "duration": 14.96335913601797,
+                    "sha256": "060fb8e937fcad4b8c6d76d5f2da61d3dcb2210c10d73089e81e308499b93410",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1659.1352783798357,
+                    "mean_tpot_ms": 12.898700897355873,
+                    "output_throughput": 550.0461868453359,
+                    "duration": 14.893294773995876,
+                    "sha256": "70e7aee3de0dc25d21ce6ba1ca9ddcff68c6e4e0ba5f54c6403aa6758ea46e8b",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1616.7656179895857,
+                    "mean_tpot_ms": 12.8952177129823,
+                    "output_throughput": 551.7454224552116,
+                    "duration": 14.847427212982439,
+                    "sha256": "dadea214be5d138ec25db19fac4fac35666aca20aa1e6b05fcde67dfc73d73ea",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 5344.539548126704,
+                    "mean_tpot_ms": 21.795036488696628,
+                    "output_throughput": 1176.534501555067,
+                    "duration": 27.851286942022853,
+                    "sha256": "f0674658c795ab1ffd2ab4c8491bfbc9ac05e8a8b9819e6e8dd51a5b0b2bf6e8",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 5314.775631810335,
+                    "mean_tpot_ms": 21.36660409619204,
+                    "output_throughput": 1196.685644261668,
+                    "duration": 27.382295557006728,
+                    "sha256": "ea9d472b713c718aec7c2758edb4d322941b3ece28baf583987cd2aeb8a12284",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 5259.089498529647,
+                    "mean_tpot_ms": 21.436214109518048,
+                    "output_throughput": 1196.1687655796934,
+                    "duration": 27.394127771025524,
+                    "sha256": "d45b49555faf553d472b4e074208f9dafc17218e7552e0a983a61bc56e2e57e6",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 22566.51074843103,
+                    "mean_tpot_ms": 58.59282098474232,
+                    "output_throughput": 1436.6818439019426,
+                    "duration": 91.23244687495753,
+                    "sha256": "e015e9c2b1eb5b1824ebc8783da0cb948e2d861b1bb30254cbea62859a7fe17a",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 22140.999947548607,
+                    "mean_tpot_ms": 57.70431042130133,
+                    "output_throughput": 1457.4748833105089,
+                    "duration": 89.93088080000598,
+                    "sha256": "77676af7c8fe013e38b8e2b5cad4593c658fc86a0089021ea825dcd786ea46d4",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 20284.523359303876,
+                    "mean_tpot_ms": 55.87973271566717,
+                    "output_throughput": 1520.390749547741,
+                    "duration": 86.20941691403277,
+                    "sha256": "facb24529e4a12f1730509d45310c630ba3591abacc82af65705f0f7f60a8b89",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  }
+                ],
+                "hosts": [
+                  "lyris0171.lyris.clusters.nvidia.com",
+                  "lyris0173.lyris.clusters.nvidia.com",
+                  "lyris0174.lyris.clusters.nvidia.com",
+                  "lyris0175.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "01-candidate-flashinfer_auto",
+                "choice": "flashinfer_auto",
+                "gsm64_correct": 64,
+                "gsm1319": {
+                  "accuracy": 0.9438968915845337,
+                  "invalid_rate": 0.000758150113722517,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 327.23523600725457,
+                    "mean_tpot_ms": 8.06995782601071,
+                    "output_throughput": 119.29909275842336,
+                    "duration": 8.583468460012227,
+                    "sha256": "d17b329f909a2f17790a8008618f2cad3cfcf8ef11eda6ddf4fca94d987e3223",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 325.979711022228,
+                    "mean_tpot_ms": 8.087131544471493,
+                    "output_throughput": 119.07258590356405,
+                    "duration": 8.599796437018085,
+                    "sha256": "9166106d70fdd88723802644690ec1ff7c104a6c01198f157e4a4bb4f980e684",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 327.9618720407598,
+                    "mean_tpot_ms": 8.062304118258982,
+                    "output_throughput": 119.39757548475872,
+                    "duration": 8.576388555986341,
+                    "sha256": "8e3397947f41bbe071e7d32bc6b1701088f46b7f05190116cafef798e5db1f5a",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1885.9028192528058,
+                    "mean_tpot_ms": 11.61221088746963,
+                    "output_throughput": 593.562394712803,
+                    "duration": 13.801413420005701,
+                    "sha256": "304006ec487c5e1d9d8405285c427cc8fd8c2f57a6ca2dc0ac98767d81e2585f",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1814.1784309918876,
+                    "mean_tpot_ms": 11.560504220189438,
+                    "output_throughput": 598.9525659074242,
+                    "duration": 13.677209960005712,
+                    "sha256": "f44c91e19e0bdac0cb7e0753ee77ec1abb670c53490b289556551d376406b357",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1821.328749123495,
+                    "mean_tpot_ms": 11.606319443906672,
+                    "output_throughput": 596.6039356715618,
+                    "duration": 13.731052563001867,
+                    "sha256": "e8dcb60a3413aa571ba896609873d727519be9126b5ab72a0f901b6bbaa78282",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 5713.8530801858,
+                    "mean_tpot_ms": 20.7801606847528,
+                    "output_throughput": 1205.6410210568458,
+                    "duration": 27.178902697982267,
+                    "sha256": "9fbed8eaf40183b4c415259ab0d507edcf11e7e5229344035db1a52c77e52606",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 5576.14074527919,
+                    "mean_tpot_ms": 20.678593275875624,
+                    "output_throughput": 1216.4353697529307,
+                    "duration": 26.937723790993914,
+                    "sha256": "f14a50aeb2ef7de4dd7888e1510f284de1b398a4c9eb451517cddbee92872697",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 5487.858998341835,
+                    "mean_tpot_ms": 20.487838931973553,
+                    "output_throughput": 1229.3855684394837,
+                    "duration": 26.65396507101832,
+                    "sha256": "6f1aef8929290408e1cdf2ab19eccb929ca5ba9270eef1a12ca1e3e6522abaf0",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 21629.976174443982,
+                    "mean_tpot_ms": 56.52213687519093,
+                    "output_throughput": 1495.16482562386,
+                    "duration": 87.66391353897052,
+                    "sha256": "5b670a373e9aed6cd43388c46d821dff396c5a0e71e75359e7ee0a1991f62d25",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 20900.292429533238,
+                    "mean_tpot_ms": 55.9002357315099,
+                    "output_throughput": 1518.838084501558,
+                    "duration": 86.29754635301651,
+                    "sha256": "de882c18f5e4601cb3909e7b5ccec2b72711afba10cd4043fd303fa994ce8f7e",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 19864.866014078416,
+                    "mean_tpot_ms": 54.45470299233805,
+                    "output_throughput": 1565.8185654057038,
+                    "duration": 83.7082934739883,
+                    "sha256": "4a6f25f886346189788e2cf032222ccb9823f23d9e90f1259876acb036854cf3",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  }
+                ],
+                "hosts": [
+                  "lyris0171.lyris.clusters.nvidia.com",
+                  "lyris0173.lyris.clusters.nvidia.com",
+                  "lyris0174.lyris.clusters.nvidia.com",
+                  "lyris0175.lyris.clusters.nvidia.com"
+                ]
+              }
+            ],
+            "means": {},
+            "failures": []
+          },
+          {
+            "status": "model_validation_failed",
+            "model": "qwen35",
+            "gpu": "GB200",
+            "job": "3257669",
+            "arms": [
+              {
+                "name": "00-candidate-vllm_auto",
+                "choice": "vllm_auto",
+                "gsm64_correct": 58,
+                "gsm1319": {
+                  "accuracy": 0.8498862774829417,
+                  "invalid_rate": 0.0,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 120.26771495584399,
+                    "mean_tpot_ms": 3.4601420225217785,
+                    "output_throughput": 279.74064787938346,
+                    "duration": 3.6605334539781325,
+                    "sha256": "d30afa977c8aabb856aee75b3928c65782b2e3eee6e97f426797c5e0bf20226f",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 127.16452399035916,
+                    "mean_tpot_ms": 3.4650027527057823,
+                    "output_throughput": 278.8350705337745,
+                    "duration": 3.6724218300078064,
+                    "sha256": "6ef19c8a327fb6a54fc8f0abbe63a3c46e781bf375b6ba7ae2006f923355dd56",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 135.54546696832404,
+                    "mean_tpot_ms": 3.463481179869143,
+                    "output_throughput": 278.31729575173983,
+                    "duration": 3.679253914975561,
+                    "sha256": "0c5e172c49f3ef882c6173aebb077886d598d4cde53fab15d42ea12a872912ca",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 655.2542711360729,
+                    "mean_tpot_ms": 5.852569313173638,
+                    "output_throughput": 1230.0375737137556,
+                    "duration": 6.659959154960234,
+                    "sha256": "004d429deb0eabac6b3c44e83b93f9f52a090f8bea42cb22fab55d9e1848c25c",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 638.5727253655205,
+                    "mean_tpot_ms": 5.751441254168758,
+                    "output_throughput": 1252.62304877874,
+                    "duration": 6.539876468013972,
+                    "sha256": "87b02a31ddfe974e928492ed762d273ea84a0ab461fb0a29719b604266c66ff9",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 654.220367243397,
+                    "mean_tpot_ms": 5.809005466396504,
+                    "output_throughput": 1238.449717466368,
+                    "duration": 6.614721521968022,
+                    "sha256": "879063f18466697504f4151e00edf4b90cf4862664c0b1c708e2c6b097a21bbd",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 2003.4416258731653,
+                    "mean_tpot_ms": 10.907760245331785,
+                    "output_throughput": 2470.3130779866265,
+                    "duration": 13.264715428987984,
+                    "sha256": "1fec6c47de8656f4b7aaf8c717c1437fad47f53f1219ca59c7805f69dd7c7736",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 2049.0356840964523,
+                    "mean_tpot_ms": 11.083522977639714,
+                    "output_throughput": 2428.589062881339,
+                    "duration": 13.49260791001143,
+                    "sha256": "ac6d574664cb8b212676bc41362c98037403d79ee3531213d1aa3d078d50edd0",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 2368.737130316731,
+                    "mean_tpot_ms": 11.241316183468113,
+                    "output_throughput": 2344.9112331758265,
+                    "duration": 13.974089737981558,
+                    "sha256": "b3e856b99ec4f6e3767dfa537de8bed2ec966a58358f46dc892a349e82149f8c",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 8051.89987806898,
+                    "mean_tpot_ms": 23.23536730931441,
+                    "output_throughput": 4036.0042641125733,
+                    "duration": 32.47568422200857,
+                    "sha256": "13c7f4291abfb5581b9a7919bd4dfb50c0bc14071f2ef1b792a03f841ae69dc3",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7683.437909951863,
+                    "mean_tpot_ms": 22.969050555381113,
+                    "output_throughput": 4115.1611771824555,
+                    "duration": 31.851000326976646,
+                    "sha256": "fdf937a94e955abd71aa0f056f7d3121ccb54d0fa52e5daedd12f2feddf53d43",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 8036.237901465938,
+                    "mean_tpot_ms": 23.240255979061846,
+                    "output_throughput": 4035.5641975625904,
+                    "duration": 32.47922560101142,
+                    "sha256": "1f25cbfacd117e5faffe1f7da54edfd95fe6100c8342b88446375b4dc7c2dd58",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  }
+                ],
+                "hosts": [
+                  "lyris0179.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "01-candidate-flashinfer_auto",
+                "choice": "flashinfer_auto",
+                "gsm64_correct": 58,
+                "gsm1319": {
+                  "accuracy": 0.8741470811220622,
+                  "invalid_rate": 0.000758150113722517,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 121.92991998745129,
+                    "mean_tpot_ms": 3.3280060263892284,
+                    "output_throughput": 290.3256058102699,
+                    "duration": 3.5270743589499034,
+                    "sha256": "bd3802acf26fb884faddccf28cb41145c4ba522abbd2171d1fce5c0fd6f508ca",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 120.93004194321111,
+                    "mean_tpot_ms": 3.330053303052534,
+                    "output_throughput": 290.2392308814946,
+                    "duration": 3.528124013042543,
+                    "sha256": "9ff32907758c8c20b10dc2ecdc862382f69c10fd5efecbf3dcf0c5db173adfb5",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 120.66212896024808,
+                    "mean_tpot_ms": 3.3291060048932044,
+                    "output_throughput": 290.3365467435781,
+                    "duration": 3.5269414460053667,
+                    "sha256": "5837f3eb1edfe5cef2e50aa4af221dac44791e364288eb5e379d68ec4f60acb2",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 587.0313532504952,
+                    "mean_tpot_ms": 5.64753865445312,
+                    "output_throughput": 1283.622077033908,
+                    "duration": 6.381940718041733,
+                    "sha256": "d827191ca22f53b41ee35739db27f1377210568d683a1ea2c33b835b2deecb1a",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 574.1218446200946,
+                    "mean_tpot_ms": 5.5056013104913,
+                    "output_throughput": 1316.291158945834,
+                    "duration": 6.223547080997378,
+                    "sha256": "d5e1d87d694bdebc5c5bc88395fdf068e46b940f156b30237617407119bdda19",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 599.3724599975394,
+                    "mean_tpot_ms": 5.637107331133965,
+                    "output_throughput": 1283.331125765114,
+                    "duration": 6.3833876039716415,
+                    "sha256": "3617c09ea5a5834f7219076114ce9ee1cd5de19bca6983ff2fd8ec8b9e3662ad",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1822.8860512517713,
+                    "mean_tpot_ms": 10.664003508185877,
+                    "output_throughput": 2552.9479873870055,
+                    "duration": 12.835357461997773,
+                    "sha256": "4b52a53b77f128517cc098f262a7d66a2199e13f9bf6cf4f9e9debfea44f61ef",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1777.213850593398,
+                    "mean_tpot_ms": 10.425964817567479,
+                    "output_throughput": 2612.347272023068,
+                    "duration": 12.543508419010323,
+                    "sha256": "990bd45d5d04a193995e23e038ad0e26953da2e71ebbf0277be9c4389d845c7e",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1791.1044152860995,
+                    "mean_tpot_ms": 10.358863408112885,
+                    "output_throughput": 2623.977053717861,
+                    "duration": 12.48791408201214,
+                    "sha256": "736967bcd610739352c049a9a36a8e3ae2d3f88750dbd076b19f29dc60d46f22",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 7022.598757609558,
+                    "mean_tpot_ms": 22.074774931483535,
+                    "output_throughput": 4330.702116597561,
+                    "duration": 30.265762103023008,
+                    "sha256": "93240c8f8ce812628aa3f842aa1c4cf51beba0dc76739582c85c138f6aab7106",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7221.9614053947225,
+                    "mean_tpot_ms": 22.323053457783445,
+                    "output_throughput": 4267.572621072712,
+                    "duration": 30.713478513003793,
+                    "sha256": "904d9bd01eb8699e097f6cfcd2a0adf0c8b9355da19c35b924b10943befe0f6a",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 6940.353207103726,
+                    "mean_tpot_ms": 22.126876280877447,
+                    "output_throughput": 4337.84942165613,
+                    "duration": 30.215894388966262,
+                    "sha256": "74494296fb81f5ab0096a1012297485ec963286e28b9b8ce7619013a71d5f3a8",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  }
+                ],
+                "hosts": [
+                  "lyris0179.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "02-candidate-flashinfer_cudnn",
+                "choice": "flashinfer_cudnn",
+                "gsm64_correct": 57,
+                "gsm1319": {
+                  "accuracy": 0.849128127369219,
+                  "invalid_rate": 0.0,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 122.10558902006596,
+                    "mean_tpot_ms": 3.4250504594320796,
+                    "output_throughput": 282.36938446929815,
+                    "duration": 3.626455474004615,
+                    "sha256": "edb14c62d1601b34999f9fe5815528652f8a9512d1cf2faac9462136ee97594b",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 119.39834000077099,
+                    "mean_tpot_ms": 3.4249001026143553,
+                    "output_throughput": 282.5885377098393,
+                    "duration": 3.623643082974013,
+                    "sha256": "7ba074ee3c675cec3e164585c5dd44aa9178679eab4cfb0207dc9fd9f87adb5a",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 118.89084399444982,
+                    "mean_tpot_ms": 3.4235017184684287,
+                    "output_throughput": 282.7395539118438,
+                    "duration": 3.621707631042227,
+                    "sha256": "dd3eb8a1267ee2832226c971c7ac64e563b644a7d82640eee7575c2eed01ef26",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 569.7249811128131,
+                    "mean_tpot_ms": 5.661141024211425,
+                    "output_throughput": 1284.3271022970332,
+                    "duration": 6.378437381994445,
+                    "sha256": "a0cba5cd629eec99294ed45d62821dc788b2d360c9bc1804fe83c4f30d17c5a5",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 562.4134388635866,
+                    "mean_tpot_ms": 5.740805340309824,
+                    "output_throughput": 1269.5304112121014,
+                    "duration": 6.452779648010619,
+                    "sha256": "bf95b36bae39d4280835138db3dd075ec656635c044c53b043104a26eee96752",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 586.4777376264101,
+                    "mean_tpot_ms": 5.745141926076285,
+                    "output_throughput": 1263.9435628641552,
+                    "duration": 6.481302045984194,
+                    "sha256": "e0d2af8927d3118c685332e6f6a97963e0c1b20963c9bab8801bfa99206b354d",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1842.9572309087234,
+                    "mean_tpot_ms": 10.503373055048911,
+                    "output_throughput": 2582.1730715479753,
+                    "duration": 12.690086640999652,
+                    "sha256": "c08abda793ef07b6407855c458b19b8d9dc2f5595f402305ab0c8d87727d3f82",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1886.7169931636454,
+                    "mean_tpot_ms": 10.95524866183594,
+                    "output_throughput": 2482.7178522091976,
+                    "duration": 13.19843894900987,
+                    "sha256": "5c704184d7050671ae084dd4cf091c8f4e9bd09bf6b85d4f6895cbbeb65e16be",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1849.0937148799276,
+                    "mean_tpot_ms": 10.729826131686874,
+                    "output_throughput": 2534.5878511170295,
+                    "duration": 12.928334674041253,
+                    "sha256": "6502dcbd9605b40f04070e94bb6f362bbeb637b534e76f740e879ac9fb95d515",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 7146.964301437492,
+                    "mean_tpot_ms": 22.374349511806418,
+                    "output_throughput": 4269.210833378741,
+                    "duration": 30.701692915987223,
+                    "sha256": "7a6fdc88564ee1d981a17e2740da134c9927744ac7997396381a7f29c6eda843",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7347.021266218235,
+                    "mean_tpot_ms": 22.603890133133888,
+                    "output_throughput": 4208.601295210385,
+                    "duration": 31.143838725984097,
+                    "sha256": "07efd166859dbd617cb2e4de0ee74fdd84f20dc734ad35f236b271ea197d6e10",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 7156.274068237053,
+                    "mean_tpot_ms": 22.34869479693144,
+                    "output_throughput": 4271.0262750219545,
+                    "duration": 30.688642860041,
+                    "sha256": "f546e122c13ca0171cd185a05a64f5c4357aa1ab82f9679d7843ebb3ee20523d",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  }
+                ],
+                "hosts": [
+                  "lyris0179.lyris.clusters.nvidia.com"
+                ]
+              }
+            ],
+            "means": {},
+            "failures": [
+              {
+                "arm": "03-candidate-flashinfer_cudnn",
+                "reason": "GSM64 fails the declared minimum or protocol; timing stopped",
+                "details": {
+                  "accuracy": 0.859375,
+                  "invalid_rate": 0.0,
+                  "latency": 14.753044442972168,
+                  "questions_per_second": 4.338087656916627,
+                  "total_output_tokens": 8979,
+                  "tokens_per_second": 608.6201417414749,
+                  "num_questions": 64,
+                  "num_shots": 5,
+                  "max_tokens": 256,
+                  "timestamp": 1791352027.5585806
+                },
+                "excluded_from_performance": true
+              }
+            ]
+          },
+          {
+            "status": "passed",
+            "model": "qwen_next",
+            "gpu": "GB200",
+            "job": "3257667",
+            "arms": [
+              {
+                "name": "00-candidate-vllm_auto",
+                "choice": "vllm_auto",
+                "gsm64_correct": 55,
+                "gsm1319": {
+                  "accuracy": 0.8642911296436695,
+                  "invalid_rate": 0.0,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 120.67640700843185,
+                    "mean_tpot_ms": 3.5108016324316025,
+                    "output_throughput": 275.8015982741355,
+                    "duration": 3.7128138720290735,
+                    "sha256": "e8460e995ffb53a24a0c46e6cb01272a806f2486860b474d5b52157b96f18d16",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 124.9899539980106,
+                    "mean_tpot_ms": 3.512017480994439,
+                    "output_throughput": 275.3895006570857,
+                    "duration": 3.7183697909931652,
+                    "sha256": "b25f61dfa9d211cd190958c446df76b80c0bb93ec7af623bb41fbc8850f7b2e9",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 123.68977500591427,
+                    "mean_tpot_ms": 3.513328561102762,
+                    "output_throughput": 275.3892848415009,
+                    "duration": 3.718372704985086,
+                    "sha256": "92f1d8f4c9eaea74d8ca7db5caf1277122809bb3187f09e228d109868d498b32",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 633.615324011771,
+                    "mean_tpot_ms": 4.9405860408170685,
+                    "output_throughput": 1436.003791948756,
+                    "duration": 5.704720311972778,
+                    "sha256": "906e61639f7518392b8c54dc58ad759df728a98211df8e0b2d6460913d42e528",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 615.9056736287312,
+                    "mean_tpot_ms": 5.296616636609585,
+                    "output_throughput": 1353.816341004741,
+                    "duration": 6.051042339997366,
+                    "sha256": "af7f0b87a1b71dcdb0adb020eaf5e1b33a690f59bbcd1b281bf885bd26c7655b",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 600.9932706219843,
+                    "mean_tpot_ms": 5.297089137453522,
+                    "output_throughput": 1357.02481321714,
+                    "duration": 6.036735599976964,
+                    "sha256": "eb5770abf9bf3391598c61763bb58d4858180858bed7bbea6f39679223f38805",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1965.6263014348951,
+                    "mean_tpot_ms": 8.746114971775873,
+                    "output_throughput": 2978.451053596514,
+                    "duration": 11.00169162102975,
+                    "sha256": "72dd254fedd307889128a7757e455f5b9297464488150e5d616543792aba4651",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1943.060552535826,
+                    "mean_tpot_ms": 8.72640337029856,
+                    "output_throughput": 2990.049713870418,
+                    "duration": 10.959015112021007,
+                    "sha256": "83a49a3098126c78f50d0fabc0aea6a0751d7686c300e16b8e0f8933383385d9",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1938.8860822200513,
+                    "mean_tpot_ms": 8.4218859396725,
+                    "output_throughput": 3079.0745481690783,
+                    "duration": 10.642158703005407,
+                    "sha256": "2b95adf452249345d7d3e780cea8df84297b844534cee53e3769be79ce2aecc0",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 7464.881284578951,
+                    "mean_tpot_ms": 18.898753838297807,
+                    "output_throughput": 4798.05297312266,
+                    "duration": 27.317747580993455,
+                    "sha256": "3430c41121f5fcae2c5d2fd86e4713c7fc85f431b80a7a3d25486fea9fb444a0",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7366.878048921535,
+                    "mean_tpot_ms": 18.843628375529228,
+                    "output_throughput": 4826.065123172953,
+                    "duration": 27.159185931959655,
+                    "sha256": "67aa7d5fbbf8673a8a756f474e62af258b627e58212056426b8355a9e49813e5",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 7446.2584954394515,
+                    "mean_tpot_ms": 18.780601650560428,
+                    "output_throughput": 4822.687279756706,
+                    "duration": 27.178208413009997,
+                    "sha256": "042b8fd69d5e491975c07b0f941cdc46c6bd8c5265704dcb9eba8754ca659d68",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  }
+                ],
+                "hosts": [
+                  "lyris0178.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "01-candidate-flashinfer_auto",
+                "choice": "flashinfer_auto",
+                "gsm64_correct": 56,
+                "gsm1319": {
+                  "accuracy": 0.8673237300985596,
+                  "invalid_rate": 0.0,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 126.61191000370309,
+                    "mean_tpot_ms": 3.551832258071794,
+                    "output_throughput": 272.2937328797932,
+                    "duration": 3.7606447609723546,
+                    "sha256": "a11d8b7bb4e8ee5c87709ce0b8a007b3ec663ccd21c648eb13566689180a9a27",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 126.0458780452609,
+                    "mean_tpot_ms": 3.5650229911895273,
+                    "output_throughput": 271.3536162786739,
+                    "duration": 3.7736736810184084,
+                    "sha256": "62ee12e1fd654b5c9117a81b7e3dc1efd513891f0598c2dd9caf79f1c5c128f6",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 124.7513240086846,
+                    "mean_tpot_ms": 3.5559462814911367,
+                    "output_throughput": 272.1193356623496,
+                    "duration": 3.763054902025033,
+                    "sha256": "c58270a5f826809dc0922828e127bfd9f24f022fbc0605433a1945a406f28831",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 632.1979265121627,
+                    "mean_tpot_ms": 5.030550050337772,
+                    "output_throughput": 1413.645783693482,
+                    "duration": 5.79494530701777,
+                    "sha256": "0356f9590e0d4aada2d23d3ca76a8a95d053484f9d9cae9db286168c9bfda612",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 621.3524968770798,
+                    "mean_tpot_ms": 5.3383457332490245,
+                    "output_throughput": 1343.085008614701,
+                    "duration": 6.0993905430077575,
+                    "sha256": "91293a48cb4616125812c4d1034b6716989742e89e63ac16f6b68b10929c6032",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 626.0133870091522,
+                    "mean_tpot_ms": 5.296016973961111,
+                    "output_throughput": 1351.6895952824098,
+                    "duration": 6.060563037986867,
+                    "sha256": "f08875ad3255f6e133052405e2394f97a15665becfe0c6742f356cdf8195e868",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 2026.6863369743078,
+                    "mean_tpot_ms": 8.861317084430935,
+                    "output_throughput": 2931.27200753875,
+                    "duration": 11.178764684998896,
+                    "sha256": "25172769a28943218a762e51415f29d53b24a670ccc52b19cc807ae5f33e10eb",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1960.7747470363392,
+                    "mean_tpot_ms": 8.985477012402265,
+                    "output_throughput": 2914.1310125107643,
+                    "duration": 11.244518471998163,
+                    "sha256": "cf62a882d379c19bb926472245bf8e0cf6df2f1774860edb5132461b6c72f19b",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1982.2171771229478,
+                    "mean_tpot_ms": 8.616382732076465,
+                    "output_throughput": 3009.7380196808035,
+                    "duration": 10.887326333962847,
+                    "sha256": "5d07f0e6e64c93993d565d3455a46739ae675cc16bef3c75a1bb5888e9e26b59",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 7426.132946431153,
+                    "mean_tpot_ms": 18.507967360819695,
+                    "output_throughput": 4878.870557041417,
+                    "duration": 26.86523416999262,
+                    "sha256": "f83251c329cd46f6cf9c6dd9696ce7dad56cd84d3a962cc26ebc91ee9dcb333f",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7502.362373860706,
+                    "mean_tpot_ms": 18.82691348373955,
+                    "output_throughput": 4805.203299727399,
+                    "duration": 27.277097726007923,
+                    "sha256": "c45ec2c13a8837cd8911584a890e95bc483bcff9537e67a5150f93cef5ad0ca8",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 7413.86205826484,
+                    "mean_tpot_ms": 19.234199313289334,
+                    "output_throughput": 4742.225504131077,
+                    "duration": 27.63934357103426,
+                    "sha256": "8b83ecbf7fa630294a01f792a546e1428cdcfa7c2b9e4c7ffe586296969d2efe",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  }
+                ],
+                "hosts": [
+                  "lyris0178.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "02-candidate-flashinfer_cudnn",
+                "choice": "flashinfer_cudnn",
+                "gsm64_correct": 57,
+                "gsm1319": {
+                  "accuracy": 0.8658074298711145,
+                  "invalid_rate": 0.0,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 126.99116999283433,
+                    "mean_tpot_ms": 3.4972676089650725,
+                    "output_throughput": 276.3603034866768,
+                    "duration": 3.7053078429889865,
+                    "sha256": "11a3cc8b72d612760575d146fa3e6cbf3ebc89d977ef72e42b8cb9f47793f6d4",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 124.4109480176121,
+                    "mean_tpot_ms": 3.498087008790962,
+                    "output_throughput": 276.4929130961505,
+                    "duration": 3.703530728991609,
+                    "sha256": "8742df2ff489a6baa7a2a157b4fb1d69f953c6702e9a8a978be630f27bbc01d0",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 124.57684800028801,
+                    "mean_tpot_ms": 3.5063066246226535,
+                    "output_throughput": 275.85375656855706,
+                    "duration": 3.7121118549839593,
+                    "sha256": "f78168695feb7831a56fa14e9aa7b48c10f90758d2dfb8982c64b8dd1ca6d694",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 597.1215218742145,
+                    "mean_tpot_ms": 5.05650170747817,
+                    "output_throughput": 1415.548703133257,
+                    "duration": 5.787155173020437,
+                    "sha256": "8b70120e1188dbcd14669fdc16f451c742dbc9b213260c505a2ad7764f580a56",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 605.3086498795892,
+                    "mean_tpot_ms": 5.232078600196347,
+                    "output_throughput": 1371.1913000008103,
+                    "duration": 5.974366961047053,
+                    "sha256": "9f95183bdac72ceb44d512bdbbfb75c00d2b2a9505a11b5d32846a012672d7cb",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 605.0196842479636,
+                    "mean_tpot_ms": 5.086186345191711,
+                    "output_throughput": 1406.4024548586215,
+                    "duration": 5.824790743004996,
+                    "sha256": "b9b27202f1cab9c69a225c0c01fd6030a929005bd0bd406a3e19fe76b7c23bd4",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1922.317374150225,
+                    "mean_tpot_ms": 8.716684021684788,
+                    "output_throughput": 2999.9371105341397,
+                    "duration": 10.922895645024255,
+                    "sha256": "dbb2340494336b6366e334f021e3ef86671554f8248eee6171fd6ab076d1cb36",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 2091.6713483802596,
+                    "mean_tpot_ms": 9.085296982702468,
+                    "output_throughput": 2855.2930231986224,
+                    "duration": 11.476230192056391,
+                    "sha256": "f934f7bab7a724ff0cb4c102d45a85ef2dbbfcce5fb20b330106fac21f2323cf",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 2002.402755908406,
+                    "mean_tpot_ms": 8.8188201578977,
+                    "output_throughput": 2949.030570003053,
+                    "duration": 11.111448057985399,
+                    "sha256": "0fd8e4fa44619a02bca690375560e491c4650d26b47a7aea8af0a7f612921458",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 7342.016602422518,
+                    "mean_tpot_ms": 18.714484876380425,
+                    "output_throughput": 4853.037788928294,
+                    "duration": 27.008238076989073,
+                    "sha256": "a6125a70377a547bd07963e8f3e731b1fb07c4df6ad79d3062c51bacee646099",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7416.51490114873,
+                    "mean_tpot_ms": 18.9527129105565,
+                    "output_throughput": 4796.842842182794,
+                    "duration": 27.324639207974542,
+                    "sha256": "fedf70821ef72fd98dc08d554186f1dccddf76c2a696e968efc4bb4e075b104b",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 7348.6373689197535,
+                    "mean_tpot_ms": 18.59173506223529,
+                    "output_throughput": 4874.639065365921,
+                    "duration": 26.88855487399269,
+                    "sha256": "5c56a9ad073a8ab6bcd80d0a570f597fe7055a2cc83ccfd49616a46d214a2b8e",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  }
+                ],
+                "hosts": [
+                  "lyris0178.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "03-candidate-flashinfer_cudnn",
+                "choice": "flashinfer_cudnn",
+                "gsm64_correct": 56,
+                "gsm1319": {
+                  "accuracy": 0.8597422289613343,
+                  "invalid_rate": 0.0,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 120.53509301040322,
+                    "mean_tpot_ms": 3.5072504125129456,
+                    "output_throughput": 276.08427538095634,
+                    "duration": 3.709012396982871,
+                    "sha256": "1dd3d22f6f6f08c3cfe5028a95dbf970c6acd8b7e3eeaa53144f5f2914275c07",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 120.46212900895625,
+                    "mean_tpot_ms": 3.5113946930482576,
+                    "output_throughput": 275.77852062922835,
+                    "duration": 3.7131245670025237,
+                    "sha256": "e6e3666953f079fb97783ed32c38aba58debac26bf58af4a81e09368a3ea6e05",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 120.39460096275434,
+                    "mean_tpot_ms": 3.519932030304586,
+                    "output_throughput": 275.1373938350302,
+                    "duration": 3.7217769119888544,
+                    "sha256": "abe055cc34647b605f571c194f81a166e8979022b6887da7aea5c062925eb31b",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 612.2346276242752,
+                    "mean_tpot_ms": 5.043138015153784,
+                    "output_throughput": 1415.3362787612264,
+                    "duration": 5.788023753033485,
+                    "sha256": "4430d89270098752fc4b8c0339ed7de6f4533820c287d3f34e5a2c26a501028c",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 592.2140451220912,
+                    "mean_tpot_ms": 5.218618881220068,
+                    "output_throughput": 1377.3893764520426,
+                    "duration": 5.947483071999159,
+                    "sha256": "173e075f1b53ffebabeff8615c522a9b31c85a554341741c05a8a33447a105bf",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 590.6700780033134,
+                    "mean_tpot_ms": 5.214492874390996,
+                    "output_throughput": 1378.7257086663121,
+                    "duration": 5.941718464018777,
+                    "sha256": "f227f4cffd3d47d46cfec14c79ece7b4578789ce3b321cae532a0337c039680a",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1908.6138510592718,
+                    "mean_tpot_ms": 8.448597279847894,
+                    "output_throughput": 3081.070807051591,
+                    "duration": 10.635263534029946,
+                    "sha256": "54908d3a1b15d6cbf1f8490b165fceff6ff05800a35ab0218a614bfb5d338668",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1916.6215830646252,
+                    "mean_tpot_ms": 8.723735248657807,
+                    "output_throughput": 2998.07503756472,
+                    "duration": 10.929679740977008,
+                    "sha256": "85fa466f15fa0a0c3d46ff9da1ec0146908c0464f7cb809f7a748a7ac67eb2d0",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1864.521679970494,
+                    "mean_tpot_ms": 8.672424148797305,
+                    "output_throughput": 3027.092190751379,
+                    "duration": 10.82490982604213,
+                    "sha256": "23a727c6979df4d6dcf28be9ddb3943a6d236657b89eaf524451c82ffe01c906",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 7308.515978585092,
+                    "mean_tpot_ms": 18.718278994120034,
+                    "output_throughput": 4856.650787341522,
+                    "duration": 26.98814589297399,
+                    "sha256": "6bbc4ba7c71fbc8f469ad73105297a27a693d0f885686bbabfc9a231d9220b25",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7197.49257333342,
+                    "mean_tpot_ms": 18.904726359229148,
+                    "output_throughput": 4842.261733430691,
+                    "duration": 27.06834269099636,
+                    "sha256": "61dc80dc9dae4fb2f38b7c6ab709ac29df5313a99848912ce8f2b21b7fddba35",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 7179.99636288414,
+                    "mean_tpot_ms": 18.645477123864325,
+                    "output_throughput": 4898.237485386641,
+                    "duration": 26.759012888011057,
+                    "sha256": "795a3451b522b02825e00da8cf43a3358a25de47d1ab6870bd5f5a622e2dc41f",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  }
+                ],
+                "hosts": [
+                  "lyris0178.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "04-candidate-flashinfer_auto",
+                "choice": "flashinfer_auto",
+                "gsm64_correct": 58,
+                "gsm1319": {
+                  "accuracy": 0.865049279757392,
+                  "invalid_rate": 0.000758150113722517,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 125.00794901279733,
+                    "mean_tpot_ms": 3.5530054379156257,
+                    "output_throughput": 272.31908933371966,
+                    "duration": 3.7602945959661156,
+                    "sha256": "d23dc7f2e8111e9a186bf9790f4ea438e849e1ce833eeb9a6304da923c0c7d85",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 127.31029401766136,
+                    "mean_tpot_ms": 3.551231192564637,
+                    "output_throughput": 272.28241663258177,
+                    "duration": 3.760801055992488,
+                    "sha256": "a8c40d7be4e4981452e497f0f5896b3454937f90784788e8e3dda70ada2434ed",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 123.81818797439337,
+                    "mean_tpot_ms": 3.5537861612828436,
+                    "output_throughput": 272.3470179242217,
+                    "duration": 3.75990898598684,
+                    "sha256": "c0618059b37d633dacb7116d5257fbb7d287ae743025b0f8de3eddb199469a6f",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 613.3906291142921,
+                    "mean_tpot_ms": 5.043312783854822,
+                    "output_throughput": 1414.971176150339,
+                    "duration": 5.789517226978205,
+                    "sha256": "c4329aa677636a8c0316bf858327c2670f2268c88bd9cc6fc39eb73efd14c822",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 622.5148757366696,
+                    "mean_tpot_ms": 5.166200141245552,
+                    "output_throughput": 1382.7051607167518,
+                    "duration": 5.92461808398366,
+                    "sha256": "fc20e6d08cc3928021451889e58a90574e9e37a0d4762f2d47731ff0849ce931",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 606.263293120719,
+                    "mean_tpot_ms": 5.113518679378994,
+                    "output_throughput": 1399.3679377144047,
+                    "duration": 5.854071527021006,
+                    "sha256": "1f855aef6487a6b99c9c2b7c777eb8603fb9718ca5d8d2135965d65dafebde85",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1997.5691224117327,
+                    "mean_tpot_ms": 8.872551539685182,
+                    "output_throughput": 2936.0972446733886,
+                    "duration": 11.160393294005189,
+                    "sha256": "332321352f3dd780c175483b33d632a398334ecfe4780d29f71b287117e1a6c5",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1947.3341024131514,
+                    "mean_tpot_ms": 8.779913263769481,
+                    "output_throughput": 2973.9806186052697,
+                    "duration": 11.018229169014376,
+                    "sha256": "ce76bada2333dd370ec7d4ee59c6c72e7aa131bd6fa3784a5f2277ae7a721df9",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1971.015015278681,
+                    "mean_tpot_ms": 8.303934510298529,
+                    "output_throughput": 3105.1329802972778,
+                    "duration": 10.55284917197423,
+                    "sha256": "95cc97f15e4c03363fe406deabe0c71ce6045cefa5e588723b3656494e20f964",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 7319.454877602311,
+                    "mean_tpot_ms": 18.604138243347556,
+                    "output_throughput": 4882.683160909962,
+                    "duration": 26.844256668002345,
+                    "sha256": "bed5835f80e5be2253bbf1319d2488975b939b5b7b7a14a1334fa3b04ffc62bd",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7277.242925385053,
+                    "mean_tpot_ms": 18.690235547975107,
+                    "output_throughput": 4869.884040488392,
+                    "duration": 26.91480924602365,
+                    "sha256": "49e9157642b231ba9f559eda965ba7cd25ee3efa58111a7e12a0641e43048ed0",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 7325.924791242869,
+                    "mean_tpot_ms": 18.73839082756109,
+                    "output_throughput": 4850.865303288493,
+                    "duration": 27.020333859021775,
+                    "sha256": "2ac746fc8ebdf410dcf7a5dbc6c1145db7eaf1e4c57a0a2783b2481a528f92b4",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  }
+                ],
+                "hosts": [
+                  "lyris0178.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "05-candidate-vllm_auto",
+                "choice": "vllm_auto",
+                "gsm64_correct": 55,
+                "gsm1319": {
+                  "accuracy": 0.8597422289613343,
+                  "invalid_rate": 0.0,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 127.83133797347546,
+                    "mean_tpot_ms": 3.5109560703858733,
+                    "output_throughput": 275.2649048887941,
+                    "duration": 3.720052872027736,
+                    "sha256": "bc595bc52fff6688d4ce4c5f6bd424e5a9e0692f568e4e9ddf00a43cad54fad2",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 132.32272100867704,
+                    "mean_tpot_ms": 3.508057609953365,
+                    "output_throughput": 275.1521341327376,
+                    "duration": 3.7215775310178287,
+                    "sha256": "8cccbb38fcd6900e0656a137a82b499a9057ddb6724d827c79b81d2800fbba0a",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 133.90097999945283,
+                    "mean_tpot_ms": 3.5077705738095535,
+                    "output_throughput": 275.0534845595475,
+                    "duration": 3.72291229700204,
+                    "sha256": "ae5ea7d1b7f3337bfc01d5728abb3f93a20098363293ce8060d12957c74a058c",
+                    "prompts_sha256": "739655f70ff3496d70d4b20b5d447e17948fae8bb89f693b060334bff9822fb6"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 666.504910128424,
+                    "mean_tpot_ms": 4.898715604831843,
+                    "output_throughput": 1438.574566751477,
+                    "duration": 5.694525810016785,
+                    "sha256": "f8e48c1e26c37103f87e94485304b1966c306b069a2af047b997b92fbf1b7000",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 671.1954081401927,
+                    "mean_tpot_ms": 5.347290226165991,
+                    "output_throughput": 1330.2165953579267,
+                    "duration": 6.158395579026546,
+                    "sha256": "53f124fd43282c76279ff1e0994cfe4fa101e2b61395e15ef472896c9d419385",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 655.6095024861861,
+                    "mean_tpot_ms": 5.280746028836025,
+                    "output_throughput": 1348.5590161185771,
+                    "duration": 6.074632183008362,
+                    "sha256": "7de2d83b798ae0bfd899ba1d6def6f061d9fbfad3b7cb91e457dc6d71fac3fcb",
+                    "prompts_sha256": "5eea0a7be89c90feb3f37a780569e3dfec88b13948fb62501d21c8aebf02cf82"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 2131.1786961578036,
+                    "mean_tpot_ms": 8.998374127865342,
+                    "output_throughput": 2868.0656674794027,
+                    "duration": 11.425121945969295,
+                    "sha256": "994b3e045ec4369844c0e5e1a640e23b9b3cfa313b7e5df51f615256d6d355db",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 2152.7544901473448,
+                    "mean_tpot_ms": 9.248628286023095,
+                    "output_throughput": 2799.1597361513273,
+                    "duration": 11.706370157015044,
+                    "sha256": "9001d54360ad5776330af671334cc2a878520f39d78442b4e23287c52bdaeb05",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 2054.4079845622036,
+                    "mean_tpot_ms": 8.72404479411092,
+                    "output_throughput": 2960.7618440735087,
+                    "duration": 11.067421739979181,
+                    "sha256": "c9cac6acfe2eb8b31bb838c700c643a4866b5e021e9050665b99b47d2c1cace1",
+                    "prompts_sha256": "20a8c822e17512813d81d2321fec9761630710720c825f35974923e4ee8c8495"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 7439.345151351063,
+                    "mean_tpot_ms": 18.738185138956712,
+                    "output_throughput": 4832.018966158484,
+                    "duration": 27.125721342978068,
+                    "sha256": "0e5e34061dcc8d9099f449292a232b580f734aa0d488408f9c190c3d2d1ef177",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 7378.4876439085565,
+                    "mean_tpot_ms": 18.7480942102203,
+                    "output_throughput": 4841.96389398991,
+                    "duration": 27.070007722009905,
+                    "sha256": "4becca9b4adba4c1559a5dab08009b9a247cbf4fbdab1e8e9b65014c247ec2a7",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 7359.173742035637,
+                    "mean_tpot_ms": 18.400340265985346,
+                    "output_throughput": 4911.189890613238,
+                    "duration": 26.688440666999668,
+                    "sha256": "4e1768ae072372acc575e73b525d8c860cf9c08eba85424f70c7758252d986a0",
+                    "prompts_sha256": "79a92ae672a8ce5a26de497b700e39d69a3c350eb87e2c60eb66f43ad1b352e5"
+                  }
+                ],
+                "hosts": [
+                  "lyris0178.lyris.clusters.nvidia.com"
+                ]
+              }
+            ],
+            "means": {
+              "vllm_auto": {
+                "1": {
+                  "mean_ttft_ms": 127.23519583232701,
+                  "mean_tpot_ms": 3.510488654779599,
+                  "output_throughput": 275.34181789230024
+                },
+                "8": {
+                  "mean_ttft_ms": 640.6373481695482,
+                  "mean_tpot_ms": 5.176840612452339,
+                  "output_throughput": 1377.3658540664364
+                },
+                "32": {
+                  "mean_ttft_ms": 2030.9856845096874,
+                  "mean_tpot_ms": 8.810908581624382,
+                  "output_throughput": 2945.9270938900418
+                },
+                "128": {
+                  "mean_ttft_ms": 7409.170727705866,
+                  "mean_tpot_ms": 18.734933913258303,
+                  "output_throughput": 4838.663021135659
+                }
+              },
+              "flashinfer_auto": {
+                "1": {
+                  "mean_ttft_ms": 125.5909238437501,
+                  "mean_tpot_ms": 3.5551373870859275,
+                  "output_throughput": 272.11920145189
+                },
+                "8": {
+                  "mean_ttft_ms": 620.2887680616792,
+                  "mean_tpot_ms": 5.164657393671213,
+                  "output_throughput": 1384.2441103620147
+                },
+                "32": {
+                  "mean_ttft_ms": 1980.9327502061933,
+                  "mean_tpot_ms": 8.736596023777143,
+                  "output_throughput": 2978.3919805510423
+                },
+                "128": {
+                  "mean_ttft_ms": 7377.496662131155,
+                  "mean_tpot_ms": 18.766974129455388,
+                  "output_throughput": 4838.288644264457
+                }
+              },
+              "flashinfer_cudnn": {
+                "1": {
+                  "mean_ttft_ms": 122.89513149880804,
+                  "mean_tpot_ms": 3.5067063963740797,
+                  "output_throughput": 275.95119383276653
+                },
+                "8": {
+                  "mean_ttft_ms": 600.4281011252411,
+                  "mean_tpot_ms": 5.141836070605179,
+                  "output_throughput": 1394.098970312045
+                },
+                "32": {
+                  "mean_ttft_ms": 1951.0247654222137,
+                  "mean_tpot_ms": 8.744259639931327,
+                  "output_throughput": 2985.0831231839175
+                },
+                "128": {
+                  "mean_ttft_ms": 7298.862297882276,
+                  "mean_tpot_ms": 18.754569221064287,
+                  "output_throughput": 4853.611617105977
+                }
+              }
+            },
+            "failures": []
+          }
+        ],
+        "reviewer_sha256": "4944f7019eb7a8a3c033ffc94ae6de7e9c2ed8fb305bb1cab188ceba9c57bdf7",
+        "limitations": [
+          "All repeats retained; no historical measurements substituted.",
+          "Correctness floors are safety gates, not accuracy equivalence. Keep full GSM scores and invalid rates.",
+          "Kimi topology differs: GB200 TP16 versus GB300 TP8; KDA state is controlled BF16.",
+          "Unprofiled serving metrics cannot establish CPU-boundness or isolated PR effects.",
+          "Shared generated FlashInfer _build_meta.py reports a stale version/commit; its exact contents are archived separately. Current implementation is identified by staged source hashes, not that generated label."
+        ]
+      },
+      "serving-v18-glm-current-full": {
+        "status": "partial",
+        "jobs": [
+          "3258192"
+        ],
+        "results": [],
+        "reviewer_sha256": "1e65ba9fdc393949ce0d83b545f33bdc162c500acc678acc994158d99cd00adb",
+        "limitations": [
+          "All repeats retained; no historical measurements substituted.",
+          "Correctness floors are safety gates, not accuracy equivalence. Keep full GSM scores and invalid rates.",
+          "Kimi topology differs: GB200 TP16 versus GB300 TP8; KDA state is controlled BF16.",
+          "Unprofiled serving metrics cannot establish CPU-boundness or isolated PR effects.",
+          "Shared generated FlashInfer _build_meta.py reports a stale version/commit; its exact contents are archived separately. Current implementation is identified by staged source hashes, not that generated label."
+        ]
+      },
+      "serving-v19-qwen35-current-full": {
+        "status": "partial",
+        "jobs": [
+          "3258435"
+        ],
+        "results": [],
+        "reviewer_sha256": "4944f7019eb7a8a3c033ffc94ae6de7e9c2ed8fb305bb1cab188ceba9c57bdf7",
+        "limitations": [
+          "All repeats retained; no historical measurements substituted.",
+          "Correctness floors are safety gates, not accuracy equivalence. Keep full GSM scores and invalid rates.",
+          "Kimi topology differs: GB200 TP16 versus GB300 TP8; KDA state is controlled BF16.",
+          "Unprofiled serving metrics cannot establish CPU-boundness or isolated PR effects.",
+          "Shared generated FlashInfer _build_meta.py reports a stale version/commit; its exact contents are archived separately. Current implementation is identified by staged source hashes, not that generated label."
+        ]
+      }
+    },
+    "completed_jobs": [
+      "3257667"
+    ]
   }
 }
