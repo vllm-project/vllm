@@ -70,6 +70,28 @@ def test_ep_gather_uses_64_bit_row_offsets():
     torch.testing.assert_close(output, torch.ones_like(output), rtol=0, atol=0)
 
 
+def test_ep_gather_uses_64_bit_output_row_offsets():
+    hidden_size = 6144
+    output_row = (1 << 31) // hidden_size + 1
+    num_rows = output_row + 1
+    output = torch.empty(
+        (num_rows, hidden_size),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+
+    ep_gather(
+        input_tensor=torch.ones((1, hidden_size), device="cuda", dtype=torch.bfloat16),
+        recv_topk_ids=torch.zeros((num_rows, 1), device="cuda", dtype=torch.int64),
+        recv_topk_weight=torch.ones((num_rows, 1), device="cuda", dtype=torch.float32),
+        input_index=torch.zeros((num_rows, 1), device="cuda", dtype=torch.int32),
+        expert_map=None,
+        output_tensor=output,
+    )
+
+    torch.testing.assert_close(output, torch.ones_like(output), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("workspace_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("num_columns", [2048, 6144, 6145])
 def test_fp8_workspace_shape(workspace_dtype, num_columns):
