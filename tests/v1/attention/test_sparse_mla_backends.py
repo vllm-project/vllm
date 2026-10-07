@@ -3424,7 +3424,8 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     def prepare_kernel(self, *args, **kwargs):  # noqa: ARG001
         pass
 
-    def run_kernel(self, q, cache, indices, counts):  # noqa: ARG001
+    def run_kernel(self, q, cache, indices, counts, out=None):  # noqa: ARG001
+        assert out is None
         kernel_shapes.append(q.shape)
         return q[..., :1], None
 
