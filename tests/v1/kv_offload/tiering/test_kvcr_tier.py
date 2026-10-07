@@ -5,19 +5,20 @@ from collections.abc import Collection, Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
+import msgspec
 import numpy as np
 import pytest
 
 pytest.importorskip("kvcr")
 
-from kvcr import ROUTER_HINT_KEY, KVCRBindings
+from kvcr import KVCRBindings
 from kvcr.config import G3Options, KVCRBackendConfigs, KVCRConfig, KVCRGuardConfig
 from kvcr.policy import FIFOPolicy, G3FIFOPolicy, G3LRUPolicy, LRUPolicy
 from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
-    MemDescriptor,
+    MemoryRef,
     OpEntryResult,
     OpEntryStatus,
     OpHandle,
@@ -27,6 +28,7 @@ from kvcr.types import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
@@ -76,11 +78,9 @@ class RecordingKVCR:
         self.submit_hint_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.discard_hint_calls: list[str] = []
         self.deliver_calls: list[
-            tuple[OpHandle, dict[BlockKey, list[MemDescriptor]], str | None]
+            tuple[OpHandle, dict[BlockKey, list[MemoryRef]], str | None]
         ] = []
-        self.deposit_calls: list[
-            tuple[OpHandle, dict[BlockKey, list[MemDescriptor]]]
-        ] = []
+        self.deposit_calls: list[tuple[OpHandle, dict[BlockKey, list[MemoryRef]]]] = []
         self.completed: list[tuple[OpHandle, dict[BlockKey, OpEntryResult]]] = []
         self._next_op_handle = 1
 
@@ -105,7 +105,7 @@ class RecordingKVCR:
 
     def deliver(
         self,
-        blocks: Mapping[BlockKey, list[MemDescriptor]],
+        blocks: Mapping[BlockKey, list[MemoryRef]],
         request_id: str | None = None,
     ) -> OpHandle:
         op_handle = self._next_op_handle
@@ -116,7 +116,7 @@ class RecordingKVCR:
 
     def deposit(
         self,
-        blocks: Mapping[BlockKey, list[MemDescriptor]],
+        blocks: Mapping[BlockKey, list[MemoryRef]],
     ) -> OpHandle:
         op_handle = self._next_op_handle
         self._next_op_handle += 1
@@ -246,7 +246,11 @@ def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
         compatibility_digest="Opaque-Digest",
     )
     assert kvcr.config is not None
-    assert kvcr.config.pool_layouts == [("", tier._primary_row_stride)]
+    assert kvcr.config.pool_layouts == [("", tier.block_size_bytes)]
+    (region,) = kvcr.backend_configs.framework_regions
+    assert region.addr == np.asarray(tier._primary_kv_view).ctypes.data
+    assert (region.size, region.stride or region.size, region.count) == (16, 16, 4)
+    assert (region.label, region.mem_type, region.device_Id) == ("", "DRAM", 0)
     assert kvcr.backend_configs.local_dram is None
 
 
@@ -271,10 +275,10 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch):
     """Check hint forwarding, key conversion, load descriptors, and cleanup."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
-    router_hint = {"opaque": True}
+    kv_hint = KvHintsEnvelope(protocol_version="0.1", message_id="msg", actions=[])
     ctx = ReqContext(
         req_id="req",
-        kv_transfer_params={ROUTER_HINT_KEY: router_hint, "unrelated": object()},
+        kv_hints=kv_hint,
     )
     key = make_offload_key((123).to_bytes(8, "big"), 0)
     same_hash_other_group = make_offload_key((123).to_bytes(8, "big"), 7)
@@ -282,7 +286,9 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch):
 
     tier.on_new_request(ctx)
 
-    assert kvcr.submit_hint_calls == [((), {"request_id": "req", "hints": router_hint})]
+    assert kvcr.submit_hint_calls == [
+        ((), {"request_id": "req", "hints": msgspec.to_builtins(kv_hint)})
+    ]
 
     bindings = kvcr.constructor_bindings
     assert bindings is not None
@@ -302,9 +308,7 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch):
     assert request_id == "req"
     assert list(blocks) == [key]
     (descriptor,) = blocks[key]
-    assert descriptor.end_point_name == kvcr.nixl_agent_name
-    assert descriptor.addr == tier._primary_base_addr + 2 * 16
-    assert descriptor.size == 16
+    assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
     assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
 
     # Here we verify that request cleanup discards the request-scoped hint in
@@ -347,7 +351,7 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     tier = _make_tier(monkeypatch, kvcr)
     keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
     hit_keys = (keys[0], keys[2])
-    chunk_ids = {keys[0]: 1, keys[2]: 5}
+    chunk_ids = {keys[0]: 1, keys[2]: 3}
     lifecycle: list[str] = []
 
     class Parent:
@@ -384,7 +388,7 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     block_descriptors = descriptors[keys[2]]
     assert block_descriptors is not None
     (descriptor,) = block_descriptors
-    assert descriptor.addr == (tier._primary_base_addr + 5 * tier._primary_row_stride)
+    assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=3)
     assert lifecycle == ["new", "finished"]
 
     polls = 0
@@ -478,14 +482,16 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
     local_dram = kvcr.backend_configs.local_dram
     assert local_dram is not None
     assert [(name, size) for name, _, size in local_dram.pools] == [
-        ("", 2 * tier._primary_row_stride)
+        ("", 2 * tier.block_size_bytes)
     ]
 
     key = OffloadKey(b"k0")
     tier.submit_store(_job(11, ReqContext(req_id="req"), key=key, chunk_id=2))
 
     _, blocks = kvcr.deposit_calls[0]
-    assert blocks[key][0].addr == tier._primary_base_addr + 2 * 16
+    assert blocks[key] == [
+        MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
+    ]
     assert list(tier.get_finished_jobs()) == [JobResult(11, True)]
 
     assert kvcr.inventory_sink is not None

@@ -15,12 +15,12 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
-    RoutedExpertsTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -120,9 +120,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        check_ep_fault: bool = False,
+        check_ep_fault: bool,
+        pending_aux_output: "PendingAuxOutput | None",
         word_align_fn: Callable[[list[str], list[list[int]]], Any] | None = None,
-        routed_experts: RoutedExpertsTensors | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -130,8 +130,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
+        self.pending_aux_output = pending_aux_output
         self.word_align_fn = word_align_fn
-        self.routed_experts = routed_experts
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -154,13 +154,19 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self.sampling_mask_tensors = (
                     sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
                 )
-            self.routed_experts_cpu: RoutedExpertsTensors | None = None
-            if routed_experts is not None:
-                self.routed_experts_cpu = routed_experts.to_cpu_nonblocking()
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
             }
+            token_id_logprobs = self.model_runner_output.prompt_token_id_logprobs_dict
+            self.prompt_token_id_logprobs_dict = {
+                k: v.to("cpu", non_blocking=True) for k, v in token_id_logprobs.items()
+            }
+            if self.pending_aux_output is not None:
+                self.pending_aux_output.enqueue_cpu_copy(
+                    num_sampled=self.num_sampled_tokens_np,
+                    num_rejected=async_copy_to_np(sampler_output.num_rejected),
+                )
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
@@ -181,7 +187,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
-                self.sampling_mask_tensors.tolists()
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
             )
 
         if self.num_nans is not None:
@@ -194,8 +200,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
-        if self.routed_experts_cpu is not None:
-            self.model_runner_output.routed_experts = self.routed_experts_cpu.tolists()
+        self.model_runner_output.prompt_token_id_logprobs_dict = (
+            self.prompt_token_id_logprobs_dict
+        )
+        if self.pending_aux_output is not None:
+            self.model_runner_output.aux_output_connector_output = (
+                self.pending_aux_output.process_output()
+            )
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()

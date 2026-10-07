@@ -7,22 +7,21 @@ import mmap
 import socket
 import time
 import uuid
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import msgspec
 from kvcr import (
     DURATION_METRIC,
     KVCR,
     ROUTER_HINT_CAPABILITIES,
-    ROUTER_HINT_KEY,
     STATE_METRIC,
     TRANSFER_BLOCKS_METRIC,
     TRANSFER_BYTES_METRIC,
     KVCRBindings,
 )
 from kvcr.config import (
-    FrameworkDramInput,
     G3Options,
     KeyAdapter,
     KVCRBackendConfigs,
@@ -43,11 +42,12 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
-    MemDescriptor,
+    MemoryRef,
     OpHandle,
     PinRequestId,
     PinResult,
     QueryStatus,
+    RegionDescriptor,
 )
 from typing_extensions import override
 
@@ -177,7 +177,7 @@ class _FrameworkPinAdapter:
 
     def _resolve_pin(
         self, parent: ParentManager, keys: Collection[BlockKey]
-    ) -> tuple[str, dict[BlockKey, list[MemDescriptor] | None]] | None:
+    ) -> tuple[str, dict[BlockKey, list[MemoryRef] | None]] | None:
         offload_keys = tuple(OffloadKey(bytes(key)) for key in keys)
         request_id = f"kvcr-source:{self._next_request_id}"
         self._next_request_id += 1
@@ -202,7 +202,7 @@ class _FrameworkPinAdapter:
             if len(job_keys) != len(chunk_ids) or set(job_keys) != set(hit_keys):
                 return None
 
-            descriptors: dict[BlockKey, list[MemDescriptor] | None] = {
+            descriptors: dict[BlockKey, list[MemoryRef] | None] = {
                 BlockKey(bytes(key)): None for key in offload_keys
             }
             descriptors.update(
@@ -350,12 +350,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         with socket.socket() as _s:
             _s.bind(("", 0))
             _nixl_listen_port = _s.getsockname()[1]
-        self._primary_base_addr = ctypes.addressof(
-            ctypes.c_char.from_buffer(primary_kv_view)
-        )
-        if primary_kv_view.strides is None:
-            raise ValueError("primary KV memoryview must expose strides")
-        self._primary_row_stride = int(primary_kv_view.strides[0])
         if secondary_g2_slots < 0:
             raise ValueError("secondary_g2_slots must be non-negative")
         if (
@@ -375,7 +369,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 )
             else:
                 local_mapping = mmap.mmap(
-                    -1, secondary_g2_slots * self._primary_row_stride
+                    -1, secondary_g2_slots * self.block_size_bytes
                 )
                 local_dram = LocalDramOptions(
                     pools=[
@@ -408,7 +402,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         try:
             self._kvcr = KVCR(
                 KVCRConfig(
-                    pool_layouts=[("", self._primary_row_stride)],
+                    pool_layouts=[("", self.block_size_bytes)],
                     enable_telemetry=enable_telemetry,
                     operation_timeout_ms=operation_timeout_ms,
                     abandon_timeout_ms=abandon_timeout_ms,
@@ -429,9 +423,15 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                     policy=selected_policy,
                 ),
                 KVCRBackendConfigs(
-                    framework_dram=FrameworkDramInput(
-                        self._primary_base_addr, primary_kv_view.nbytes
-                    ),
+                    framework_regions=[
+                        RegionDescriptor(
+                            addr=ctypes.addressof(
+                                ctypes.c_char.from_buffer(primary_kv_view)
+                            ),
+                            size=self.block_size_bytes,
+                            count=len(primary_kv_view),
+                        )
+                    ],
                     local_dram=local_dram,
                     g3=g3_config,
                     remote_fw_dram=RemoteFWDramOptions(
@@ -575,14 +575,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        params = getattr(req_context, "kv_transfer_params", None)
-        if isinstance(params, Mapping):
-            hint = params.get(ROUTER_HINT_KEY)
-            if hint is not None:
-                self._kvcr.submit_hint(
-                    request_id=req_context.req_id,
-                    hints=hint,
-                )
+        if (hint := req_context.kv_hints) is not None:
+            self._kvcr.submit_hint(
+                request_id=req_context.req_id,
+                hints=msgspec.to_builtins(hint),
+            )
         return RequestOffloadingContext()
 
     @override
@@ -624,12 +621,8 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             )
         )
 
-    def _make_descriptor(self, chunk_id: int) -> MemDescriptor:
-        return MemDescriptor(
+    def _make_descriptor(self, chunk_id: int) -> MemoryRef:
+        return MemoryRef(
             end_point_name=self._kvcr.config.nixl_agent_name,
-            mem_type="DRAM",
-            addr=self._primary_base_addr + chunk_id * self._primary_row_stride,
-            size=self._primary_row_stride,
-            device_Id=0,
-            info="",
+            element_index=chunk_id,
         )
