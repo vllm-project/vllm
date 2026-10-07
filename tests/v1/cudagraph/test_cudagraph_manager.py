@@ -23,10 +23,10 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.spec_decode.autoregressive import (
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     cudagraph_utils as spec_cudagraph_utils,
 )
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
 
