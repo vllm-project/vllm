@@ -60,6 +60,7 @@ def ref_paged_attn(
     block_tables: torch.Tensor,
     scale: float,
     sliding_window: int | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Naive reference paged attention using einsum."""
     num_seqs = len(query_lens)
@@ -98,7 +99,10 @@ def ref_paged_attn(
             )
             mask |= window_mask
         attn.masked_fill_(mask, float("-inf"))
-        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        if sinks is not None:
+            sink = sinks.float()[:, None, None].expand(-1, query_len, 1)
+            attn = torch.cat([attn, sink], dim=-1)
+        attn = torch.softmax(attn, dim=-1)[..., :kv_len].to(v.dtype)
         out = torch.einsum("hqk,khd->qhd", attn, v)
         outputs.append(out)
         start_idx += query_len
@@ -836,6 +840,109 @@ def test_aiter_fa_shared_kv_matches_reference(
         torch.testing.assert_close(
             kv_cache.view(torch.uint8), cache_before, atol=0, rtol=0
         )
+
+
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize("use_sinks", [True, False])
+def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_sinks):
+    """Extends whose cached context spans several chunks count each sink once."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends import rocm_aiter_fa
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionImpl,
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    _assert_aiter_supported()
+    # 32 context tokens per request per chunk: context lens 128, 32 and 69 give
+    # 4 chunks, and the second request has empty chunks 1-3.
+    monkeypatch.setattr(rocm_aiter_fa, "_CP_TOKENS_PER_ITER_ROCM", 96)
+    set_random_seed(42)
+    batch_spec = BatchSpec(seq_lens=[160, 48, 77], query_lens=[32, 16, 8])
+    num_blocks = 64
+    # head_dim 64, as in gpt-oss: at 128 aiter routes bf16 varlen calls to its
+    # v3 kernel, which ignores sinks.
+    config = create_vllm_config(
+        model_name="Qwen/Qwen2.5-0.5B-Instruct",
+        dtype="bfloat16",
+        max_num_batched_tokens=1024,
+    )
+    num_heads = config.model_config.get_num_attention_heads(config.parallel_config)
+    num_kv_heads = config.model_config.get_num_kv_heads(config.parallel_config)
+    head_size = config.model_config.get_head_size()
+    scale = head_size**-0.5
+    # Sinks comparable to the softmax mass of the real keys.
+    sinks = torch.randn(num_heads, dtype=torch.float32) + 4.0 if use_sinks else None
+    with set_current_vllm_config(config):
+        layer = Attention(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            cache_config=config.cache_config,
+            prefix="layer",
+            attn_backend=AiterFlashAttentionBackend,
+            sinks=sinks,
+        )
+        builder = AiterFlashAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config),
+            ["layer"],
+            config,
+            torch.device("cuda"),
+        )
+        common = create_common_attn_metadata(
+            batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=num_blocks
+        )
+        with torch.device("cpu"):
+            metadata = builder.build(0, common)
+    assert isinstance(layer.impl, AiterFlashAttentionImpl)
+    assert metadata.num_extends == 3
+    assert metadata.extend_metadata is not None
+    assert metadata.extend_metadata.chunk_context_metadata.num_chunks == 4
+
+    kv_cache = torch.empty(
+        num_blocks, num_kv_heads, BLOCK_SIZE, 2 * head_size, dtype=torch.bfloat16
+    )
+    key_cache, value_cache = layer.impl._split_kv_cache(kv_cache)
+    key_cache.copy_(torch.randn_like(key_cache))
+    value_cache.copy_(torch.randn_like(value_cache))
+    key_cache, value_cache = key_cache.contiguous(), value_cache.contiguous()
+
+    # The new tokens' K/V must match what the cache holds at their positions.
+    keys, values = [], []
+    for i, (seq_len, query_len) in enumerate(
+        zip(batch_spec.seq_lens, batch_spec.query_lens)
+    ):
+        pos = torch.arange(seq_len - query_len, seq_len)
+        blocks = common.block_table_tensor[i, pos // BLOCK_SIZE]
+        keys.append(key_cache[blocks, pos % BLOCK_SIZE])
+        values.append(value_cache[blocks, pos % BLOCK_SIZE])
+    query = torch.randn(
+        batch_spec.compute_num_tokens(), num_heads, head_size, dtype=torch.bfloat16
+    )
+    output = torch.empty_like(query)
+    layer.impl.forward(
+        layer, query, torch.cat(keys), torch.cat(values), kv_cache, metadata, output
+    )
+    expected = ref_paged_attn(
+        query,
+        key_cache,
+        value_cache,
+        batch_spec.query_lens,
+        batch_spec.seq_lens,
+        common.block_table_tensor,
+        scale,
+        sinks=sinks,
+    )
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
 # Decode path test --------------------------------------------------------
