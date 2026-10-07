@@ -81,9 +81,9 @@ steps:
     - bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy"
+      label: ":amd: (MI355) Push NixlConnector PP prefill PD accuracy"
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 55
       depends_on:
         - image-build-amd
@@ -138,9 +138,9 @@ steps:
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) CrossLayer KV layout Distributed NixlConnector PD accuracy"
+      label: ":amd: (MI355) CrossLayer KV layout Distributed NixlConnector PD accuracy"
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 60
       depends_on:
         - image-build-amd
@@ -166,9 +166,9 @@ steps:
     - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy"
+      label: ":amd: (MI355) Hybrid SSM NixlConnector PD accuracy"
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 80
       depends_on:
         - image-build-amd
@@ -198,9 +198,9 @@ steps:
     - bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) NixlConnector PD edge case"
+      label: ":amd: (MI355) NixlConnector PD edge case"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 65
       depends_on:
         - image-build-amd

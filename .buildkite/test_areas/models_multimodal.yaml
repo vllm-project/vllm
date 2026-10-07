@@ -162,9 +162,9 @@ steps:
     - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (Extended Generation 1)"
+      label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 1)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 100
       depends_on:
       - image-build-amd
@@ -181,9 +181,9 @@ steps:
     - pytest -v -s models/multimodal/generation_ppl_test/
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (PPL)"
+      label: ":amd: (MI355 DPX) Multimodal Models (PPL)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
@@ -239,9 +239,9 @@ steps:
     - pytest -v -s models/multimodal/pooling -m 'not core_model'
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (Extended Pooling)"
+      label: ":amd: (MI355 DPX) Multimodal Models (Extended Pooling)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 75
       depends_on:
       - image-build-amd

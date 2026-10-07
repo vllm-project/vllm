@@ -57,9 +57,9 @@ steps:
     - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
   mirror:
     amd:
-      label: ":amd: (MI300) LoRA TP (Distributed) %N"
+      label: ":amd: (MI355) LoRA TP (Distributed) %N"
       dind: false
-      device: mi300_4
+      device: mi355_4
       working_dir: "/vllm-workspace/tests"
       timeout_in_minutes: 65
       depends_on:
