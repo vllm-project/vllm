@@ -85,6 +85,7 @@ def test_dspark_markov_head_is_replicated(
     assert head.markov_w2.tp_size == 1
     assert head.markov_w1.weight.shape == (128, 8)
     assert head.markov_w2.weight.shape == (128, 8)
+    head.markov_w2.quant_method.process_weights_after_loading(head.markov_w2)
 
     def fail_collective(*args, **kwargs):
         raise AssertionError("replicated Markov head must not invoke TP collectives")
@@ -241,7 +242,7 @@ def test_v41_dspark_loads_linear_scales(
         linear_scale_name=scale_name,
         pad_shared_expert=False,
         model=SimpleNamespace(
-            layers=[SimpleNamespace(ffn=SimpleNamespace(use_mega_moe=False))],
+            layers=[SimpleNamespace(ffn=SimpleNamespace(use_native_mega_moe=False))],
             confidence_head=None,
         ),
         named_parameters=lambda: [(runtime_name, param)],

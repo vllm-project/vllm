@@ -6,12 +6,16 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+use vllm_engine_core_client::mock_engine::default_ready_response;
+use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
+use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     EngineCoreOutputs, RequestBatchOutputs,
@@ -20,7 +24,9 @@ use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
     Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
@@ -167,7 +173,9 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         priority: 0,
         data_parallel_rank: None,
         session_id: None,
+        kv_hints: None,
         reasoning_parser_kwargs: None,
+        reasoning_ended: None,
         lora_request: None,
     }
 }
@@ -275,6 +283,7 @@ async fn generate_streams_outputs() {
         Some(GeneratePromptInfo {
             prompt_token_ids: vec![11, 22].into(),
             prompt_logprobs: Some(prompt_logprobs()),
+            prompt_token_id_logprobs: None,
         })
     );
     assert_eq!(first.token_ids, vec![1, 2]);
@@ -403,6 +412,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         prompt_info: Some(GeneratePromptInfo {
             prompt_token_ids: Arc::from([11_u32, 22]),
             prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
         }),
         token_ids: vec![33, 44],
         logprobs: None,
@@ -864,6 +874,138 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     assert!(rendered.contains(&format!(
         "vllm:request_prefill_kv_computed_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_queue_time_seconds_sum{{model_name=\"{model_name}\",engine=\"4\"}} 1.0"
+    )));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = EngineId::from_engine_index(6);
+    let model_name = request_metrics_model_name("metrics-no-log-stats-model");
+    let lora_name = request_metrics_model_name("metrics-no-log-stats-lora");
+    let (finish_tx, finish_rx) = oneshot::channel::<()>();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id,
+        EngineCoreReadyResponse {
+            supports_lora: true,
+            max_loras: 1,
+            ..default_ready_response()
+        },
+        move |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+
+                // Engines started with `--disable-log-stats` attach neither
+                // lifecycle events nor scheduler stats to their outputs.
+                for token in [1, 2] {
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            engine_index: 6,
+                            timestamp: 10.0 + f64::from(token),
+                            outputs: vec![request_output(&request.request_id, vec![token], None)],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
+
+                finish_rx.await.unwrap();
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        engine_index: 6,
+                        timestamp: 13.0,
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![3],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name(&model_name)
+            .with_engine_stats_enabled(false)
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .unwrap();
+    let llm = Llm::new(client);
+    let mut request = sample_generate_request("req-no-log-stats", 8);
+    request.arrival_time = None;
+    request.lora_request = Some(LoraRequest {
+        lora_name: lora_name.clone(),
+        lora_int_id: 1,
+        lora_path: "/unused".to_string(),
+        base_model_name: None,
+        tensorizer_config_dict: None,
+        load_inplace: false,
+        is_3d_lora_weight: false,
+    });
+    let mut stream = llm.generate(request).await.unwrap();
+
+    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![1]);
+    // The dispatcher handles the second batch only after finishing the first
+    // one, including its LoRA info update.
+    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![2]);
+    assert!(!METRICS.render().unwrap().contains(&lora_name));
+
+    finish_tx.send(()).unwrap();
+    let final_output = stream.next().await.unwrap().unwrap();
+    assert_eq!(final_output.finish_reason, Some(FinishReason::Length));
+    assert!(stream.next().await.is_none());
+
+    let rendered = METRICS.render().unwrap();
+    for metric in [
+        "vllm:time_to_first_token_seconds_count",
+        "vllm:e2e_request_latency_seconds_count",
+        "vllm:request_decode_time_seconds_count",
+    ] {
+        assert!(
+            rendered.contains(&format!(
+                "{metric}{{model_name=\"{model_name}\",engine=\"6\"}} 1"
+            )),
+            "{metric} should be exported"
+        );
+    }
+    for metric in [
+        "vllm:num_requests_running",
+        "vllm:kv_cache_usage_perc",
+        "vllm:num_preemptions_total",
+        "vllm:request_num_preemptions_count",
+        "vllm:request_queue_time_seconds_count",
+        "vllm:request_prefill_time_seconds_count",
+        "vllm:request_inference_time_seconds_count",
+    ] {
+        assert!(
+            !rendered.contains(&format!("{metric}{{model_name=\"{model_name}\"")),
+            "{metric} should not be exported"
+        );
+    }
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
