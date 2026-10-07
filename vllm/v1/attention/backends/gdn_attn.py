@@ -3,7 +3,7 @@
 """Backend for GatedDeltaNet attention."""
 
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import ClassVar, Literal
 
 import torch
 
@@ -94,6 +94,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
     reorder_batch_threshold: int = 1
 
+    # update_block_table() re-gathers the state indices and shares every other
+    # field with the group it was built for. A subclass that holds per-group
+    # metadata beyond those indices sets this False and builds each group.
+    reuses_group_metadata: ClassVar[bool] = True
+
     def __init__(
         self,
         kv_cache_spec: MambaSpec,
@@ -134,8 +139,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.supports_update_block_table = (
             vllm_config.use_v2_model_runner
             and device.type == "cuda"
-            # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
-            and type(self) is GDNAttentionMetadataBuilder
+            and self.reuses_group_metadata
         )
         if self.supports_update_block_table:
             # Opts into MRV2's CUDA-only aligned-index precompute.
