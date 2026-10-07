@@ -690,6 +690,7 @@ async fn unary_generate_returns_collected_text() {
         pb::finish_info::FinishReason::Stop as i32
     );
     assert_eq!(finish.num_output_tokens, 3);
+    assert_eq!(finish.num_cached_tokens, Some(0));
 
     let prompt = response.prompt_info.expect("prompt_info present");
     assert_eq!(prompt.num_prompt_tokens, 5); // "hello" = 5 bytes
@@ -1438,6 +1439,7 @@ async fn streaming_generate_yields_incremental_responses() {
         .find_map(|r| r.outputs.as_ref())
         .expect("at least one output");
     let finish = last_output.finish_info.as_ref().expect("finish_info on last output");
+    assert_eq!(finish.num_cached_tokens, Some(0));
     assert_eq!(
         finish.finish_reason,
         pb::finish_info::FinishReason::Stop as i32

@@ -129,6 +129,8 @@ pub struct SamplingParams {
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Words to avoid during generation (tokenized to IDs during lowering).
     pub bad_words: Option<Vec<String>>,
+    /// Pre-tokenized sequences to prohibit, in addition to `bad_words`.
+    pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
     /// Specific token IDs for which log probabilities should be returned at
     /// each position.
     ///
@@ -173,6 +175,7 @@ impl Default for SamplingParams {
             logit_bias: None,
             allowed_token_ids: None,
             bad_words: None,
+            bad_words_token_ids: None,
             logprob_token_ids: None,
             structured_outputs: None,
             skip_reading_prefix_cache: None,

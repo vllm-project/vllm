@@ -203,6 +203,10 @@ fn build_sampling_params(
         if !d.allowed_token_ids.is_empty() {
             params.allowed_token_ids = Some(d.allowed_token_ids.clone());
         }
+        if !d.bad_words_token_ids.is_empty() {
+            params.bad_words_token_ids =
+                Some(d.bad_words_token_ids.iter().map(|sequence| sequence.ids.clone()).collect());
+        }
         params.structured_outputs = convert_structured_output(d)?;
     }
 
@@ -403,6 +407,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
+        num_cached_tokens: Some(finished.usage.cached_token_count as u32),
     })
 }
 
@@ -577,6 +582,41 @@ mod tests {
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn grpc_bad_words_token_ids_survive_protobuf_conversion_and_lowering() {
+        let request = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                bad_words_token_ids: vec![
+                    pb::TokenIds { ids: vec![5] },
+                    pb::TokenIds { ids: vec![7, 11] },
+                ],
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let encoded = request.encode_to_vec();
+        for stream in [false, true] {
+            let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+            let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+            let engine = vllm_text::lower_text_request(
+                text,
+                vec![1],
+                SamplingHints::default(),
+                SamplingLimits {
+                    max_model_len: 256,
+                    max_logprobs: 20,
+                    model_vocab_size: 512,
+                    tokenizer_vocab_size: 512,
+                },
+                &TestTokenizer::new(),
+            )
+            .unwrap()
+            .generate_request;
+            let params = engine.sampling_params;
+            assert_eq!(params.bad_words_token_ids, Some(vec![vec![5], vec![7, 11]]));
         }
     }
 
@@ -859,7 +899,9 @@ mod tests {
 
     #[test]
     fn to_sequence_output_threads_token_ids_into_eos_id() {
-        let fin = finished(FinishReason::Stop(None));
+        let mut fin = finished(FinishReason::Stop(None));
+        fin.usage.prompt_token_count = 8;
+        fin.usage.cached_token_count = 5;
         let opts = ResponseOpts {
             output_text: true,
             output_token_ids: true,
@@ -868,10 +910,12 @@ mod tests {
 
         let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts)
             .expect("sequence output");
+        let out = pb::SequenceOutput::decode(out.encode_to_vec().as_slice()).unwrap();
 
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(finish.stop_reason, Some(PbStopReason::EosTokenId(30)));
+        assert_eq!(finish.num_cached_tokens, Some(5));
     }
 
     #[test]
