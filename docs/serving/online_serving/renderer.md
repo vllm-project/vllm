@@ -135,6 +135,11 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
     `return_tokens_as_token_ids` on `/v1/chat/completions` and `/v1/completions`
     is unchanged: it is a user-facing OpenAI option and still uses the
     `token_id:N` format.
+    `top_logprobs` is no longer cut to `max(logprobs, 1)` entries, in either
+    `output_mode`: it now holds every candidate the engine returned, which is
+    `logprobs + 1` entries when the sampled token is outside the top
+    `logprobs`. Clients that assume `len(top_logprobs) == logprobs` should
+    take the first `logprobs` entries after sorting by `rank`.
 
 ## Multimodal Render Features
 

@@ -5,7 +5,7 @@ mod convert;
 mod types;
 mod validate;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
@@ -410,9 +410,9 @@ fn position_to_generate_logprobs_content(
         )
     })?;
 
-    // One pass: the first entry of each token id wins, as in Python's dict. The
-    // sampled token is the only one the engine can list twice.
-    let mut seen = HashSet::with_capacity(position.entries.len());
+    // The engine row is the sampled token followed by the top k, which are
+    // distinct; only the sampled token can repeat, at its own rank (anywhere in
+    // 1..=k). Skip that repeat, as Python's dict does: linear, no allocation.
     Ok(GenerateLogProbsContent {
         token_id: chosen.token_id,
         logprob: clamp_logprob(chosen.logprob),
@@ -420,8 +420,9 @@ fn position_to_generate_logprobs_content(
         top_logprobs: position
             .entries
             .iter()
-            .filter(|entry| seen.insert(entry.token_id))
-            .map(|entry| GenerateLogProb {
+            .enumerate()
+            .filter(|(i, entry)| *i == 0 || entry.token_id != chosen.token_id)
+            .map(|(_, entry)| GenerateLogProb {
                 token_id: entry.token_id,
                 logprob: clamp_logprob(entry.logprob),
                 rank: wire_rank(entry.rank),
@@ -572,6 +573,23 @@ mod tests {
         // ranks 1 and 2, all kept (derender cuts per endpoint).
         let pos = position(&[(50, -3.0, 5), (10, -0.2, 1), (20, -1.0, 2)]);
         assert_eq!(top(&pos), vec![(50, Some(5)), (10, Some(1)), (20, Some(2))]);
+    }
+
+    #[test]
+    fn generate_top_logprobs_drop_the_sampled_repeat_at_its_own_rank() {
+        // Sampled token 30 is rank 3: the engine row is [30, 10, 20, 30, 40],
+        // so the repeat is at entries[3], not entries[1].
+        let pos = position(&[
+            (30, -1.0, 3),
+            (10, -0.2, 1),
+            (20, -0.5, 2),
+            (30, -1.0, 3),
+            (40, -2.0, 4),
+        ]);
+        assert_eq!(
+            top(&pos),
+            vec![(30, Some(3)), (10, Some(1)), (20, Some(2)), (40, Some(4))]
+        );
     }
 
     #[test]

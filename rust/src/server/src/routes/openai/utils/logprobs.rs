@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use itertools::Itertools as _;
 use vllm_text::{
@@ -288,13 +288,16 @@ fn chat_top_logprob_entries(
         usize::try_from(top_logprobs).unwrap_or(0)
     };
 
-    // One pass: the first entry of each token id wins (the sampled token is the
-    // only one the engine lists twice), linear even for the full vocabulary.
-    let mut seen = HashSet::with_capacity(limit.min(position.entries.len()));
+    // The engine row is the sampled token followed by the top k, which are
+    // distinct; only the sampled token can repeat, at its own rank (anywhere in
+    // 1..=k). Skip that repeat: linear, no allocation, even for the full vocab.
+    let sampled = position.entries.first().map(|entry| entry.token_id);
     position
         .entries
         .iter()
-        .filter(move |entry| seen.insert(entry.token_id))
+        .enumerate()
+        .filter(move |(i, entry)| *i == 0 || Some(entry.token_id) != sampled)
+        .map(|(_, entry)| entry)
         .take(limit)
 }
 

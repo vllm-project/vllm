@@ -9,7 +9,11 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ToolCall,
 )
-from vllm.entrypoints.generate.base.serving import decode_token_ids
+from vllm.entrypoints.generate.base.serving import (
+    chat_top_logprobs_limit,
+    completion_top_logprobs_limit,
+    decode_token_ids,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -160,6 +164,7 @@ class OnlineDerenderer:
             else {}
         )
 
+        top_limit = _chat_top_logprobs_limit(chat_request)
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
@@ -168,7 +173,7 @@ class OnlineDerenderer:
                 _resolve_logprobs(
                     choice.logprobs,
                     tokenizer,
-                    top_limit=_chat_top_logprobs_limit(chat_request),
+                    top_limit=top_limit,
                 )
                 if choice.logprobs is not None
                 else None
@@ -436,6 +441,7 @@ class OnlineDerenderer:
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         updated_state = state
 
+        top_limit = _chat_top_logprobs_limit(chat_request)
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
@@ -459,7 +465,7 @@ class OnlineDerenderer:
                     choice.logprobs,
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
-                    top_limit=_chat_top_logprobs_limit(chat_request),
+                    top_limit=top_limit,
                 )
 
             include_role = not updated_state.role_sent
@@ -738,6 +744,7 @@ class OnlineDerenderer:
         total_prompt_tokens = 0
         total_completion_tokens = 0
         index = 0
+        top_limit = _completion_top_logprobs_limit(completion_request)
 
         for gen, pt, seed_ids_override in zip(
             generate_responses, prompt_tokens_list, prompt_token_ids_list
@@ -769,7 +776,7 @@ class OnlineDerenderer:
                     resolved = _resolve_logprobs(
                         choice.logprobs,
                         tokenizer,
-                        top_limit=_completion_top_logprobs_limit(completion_request),
+                        top_limit=top_limit,
                     )
                     completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
                         resolved
@@ -844,6 +851,7 @@ class OnlineDerenderer:
         stream_choices: list[CompletionResponseStreamChoice] = []
         updated_state = state
 
+        top_limit = _completion_top_logprobs_limit(completion_request)
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
@@ -860,7 +868,7 @@ class OnlineDerenderer:
                     choice.logprobs,
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
-                    top_limit=_completion_top_logprobs_limit(completion_request),
+                    top_limit=top_limit,
                 )
                 completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
                     resolved, initial_text_offset=state.logprob_text_offset
@@ -1015,33 +1023,27 @@ def _correct_decoded_token(
 
 
 def _chat_top_logprobs_limit(chat_request: ChatCompletionRequest | None) -> int | None:
-    """How many of generate's `top_logprobs` entries `/v1/chat/completions`
-    keeps: entry `i` when `logprob_token_ids` is set, `top_logprobs == -1` or
-    `i < top_logprobs` (`_get_top_logprobs`). None keeps all of them, which is
-    also what happens without a `chat_request`."""
-    if (
-        chat_request is None
-        or chat_request.logprob_token_ids
-        or chat_request.top_logprobs == -1
-    ):
+    """The cut `/v1/chat/completions` applies (`chat_top_logprobs_limit`, the
+    same helper its `_get_top_logprobs` uses). None keeps every candidate, which
+    is also what happens without a `chat_request`."""
+    if chat_request is None:
         return None
-    return chat_request.top_logprobs or 0
+    return chat_top_logprobs_limit(
+        chat_request.top_logprobs, bool(chat_request.logprob_token_ids)
+    )
 
 
 def _completion_top_logprobs_limit(
     completion_request: CompletionRequest | None,
 ) -> int | None:
-    """How many of generate's `top_logprobs` entries `/v1/completions` keeps:
-    entry `i` when `logprob_token_ids` is set or `logprobs >= i`, so the first
-    `logprobs + 1` (the OpenAI completions convention). None keeps all of them,
+    """The cut `/v1/completions` applies (`completion_top_logprobs_limit`, the
+    same helper `_create_completion_logprobs` uses). None keeps every candidate,
     which is also what happens without a `completion_request`."""
-    if (
-        completion_request is None
-        or completion_request.logprob_token_ids
-        or completion_request.logprobs is None
-    ):
+    if completion_request is None:
         return None
-    return max(completion_request.logprobs + 1, 0)
+    return completion_top_logprobs_limit(
+        completion_request.logprobs, bool(completion_request.logprob_token_ids)
+    )
 
 
 def _resolve_logprobs(
@@ -1138,11 +1140,9 @@ def _convert_chat_logprobs_to_completion_logprobs(
         text_offset.append(offset)
         tokens.append(entry.token)
         token_logprobs.append(entry.logprob)
-        top_logprobs_list.append(
-            {t.token: t.logprob for t in entry.top_logprobs}
-            if entry.top_logprobs
-            else None
-        )
+        # A dict even when the endpoint's cut keeps nothing (logprobs=-1), as
+        # /v1/completions returns `{}` there; None is only for missing logprobs.
+        top_logprobs_list.append({t.token: t.logprob for t in entry.top_logprobs})
         offset += len(entry.token)
 
     return CompletionLogProbs(
