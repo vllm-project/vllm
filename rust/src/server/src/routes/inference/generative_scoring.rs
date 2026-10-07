@@ -216,7 +216,9 @@ fn prepare_generative_scoring_request(
             add_special_tokens: false,
             data_parallel_rank: ctx.data_parallel_rank,
             session_id: None,
-            reasoning_parser_kwargs: None,
+            kv_hints: None,
+            reasoning_parser_kwargs: Default::default(),
+            reasoning_ended: None,
             lora_request: lora_resolution.lora_request.clone(),
             arrival_time: None,
         })
