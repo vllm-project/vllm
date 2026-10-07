@@ -1139,7 +1139,7 @@ def get_sentence_transformer_tokenizer_config(
 
     logger.info("Found sentence-transformers tokenize configuration.")
 
-    if all(k in encoder_dict for k in ("max_seq_length", "do_lower_case")):
+    if "max_seq_length" in encoder_dict:
         return encoder_dict
     return None
 
