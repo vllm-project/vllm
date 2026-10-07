@@ -37,8 +37,9 @@ def test_adaptive_verified_budget_counter_differs_from_proposals():
         per_engine_labelvalues={0: ["0"]},  # any string
     )
     stats = SpecDecodingStats.new(num_spec_tokens=5)
-    stats.observe_draft_stats_per_req(num_draft_tokens=5, num_accepted_tokens=2)
-    stats.observe_draft_stats_per_batch(num_verified_draft_tokens=3)
+    stats.observe_draft_stats_per_req(
+        num_draft_tokens=5, num_accepted_tokens=2, num_verified_draft_tokens=3
+    )
     prom.observe(stats)
 
     samples = {
@@ -54,8 +55,9 @@ def test_adaptive_verified_budget_counter_differs_from_proposals():
 @pytest.mark.parametrize("adaptive_verification", [True, False])
 def test_adaptive_verified_budget_logging(adaptive_verification: bool):
     stats = SpecDecodingStats.new(num_spec_tokens=5)
-    stats.observe_draft_stats_per_req(num_draft_tokens=5, num_accepted_tokens=2)
-    stats.observe_draft_stats_per_batch(num_verified_draft_tokens=3)
+    stats.observe_draft_stats_per_req(
+        num_draft_tokens=5, num_accepted_tokens=2, num_verified_draft_tokens=3
+    )
 
     spec_logging = SpecDecodingLogging(
         enable_adaptive_verification=adaptive_verification
