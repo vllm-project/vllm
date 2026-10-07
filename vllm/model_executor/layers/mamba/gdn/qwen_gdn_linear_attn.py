@@ -197,6 +197,7 @@ def fi_chunk_gated_delta_rule(
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = True,
+    g_is_exp: bool = False,
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -222,7 +223,7 @@ def fi_chunk_gated_delta_rule(
         q=q,
         k=k,
         v=v,
-        g=torch.exp(fi_g),
+        g=fi_g if g_is_exp else torch.exp(fi_g),
         beta=fi_beta,
         initial_state=fi_state,
         output_final_state=output_final_state,
@@ -276,6 +277,7 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        g_is_exp: bool = False,
     ):
         o, final_state = fi_chunk_gated_delta_rule(
             q=q,
@@ -287,6 +289,7 @@ class ChunkGatedDeltaRule(CustomOp):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            g_is_exp=g_is_exp,
         )
         if core_attn_out is not None:
             o_flat = o.squeeze(0).reshape(-1)
@@ -308,7 +311,9 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        g_is_exp: bool = False,
     ):
+        assert not g_is_exp, "The Triton GDN prefill backend expects log gates"
         return fla_chunk_gated_delta_rule(
             q=q,
             k=k,
@@ -338,7 +343,9 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        g_is_exp: bool = False,
     ):
+        assert not g_is_exp, "The CuTeDSL GDN prefill backend expects log gates"
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             chunk_gated_delta_rule_cutedsl,
         )
@@ -1102,6 +1109,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
         dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+        g_is_exp = self.chunk_gated_delta_rule.gdn_prefill_backend == "flashinfer"
         q, k, v, g, beta = fused_post_conv_prep(
             conv_output=dummy_mixed_qkv,
             a=dummy_a,
@@ -1112,7 +1120,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             head_k_dim=self.head_k_dim,
             head_v_dim=self.head_v_dim,
             apply_l2norm=True,
-            output_g_exp=False,
+            output_g_exp=g_is_exp,
         )
         q = q.unsqueeze(0)
         k = k.unsqueeze(0)
@@ -1127,7 +1135,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=device,
             dtype=state_dtype,
         )
-        cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
+        cu_seqlens = torch.tensor(
+            [0, T], device=device, dtype=torch.int64 if g_is_exp else torch.int32
+        )
 
         # CuteDSL kernels require metadata
         chunk_indices = None
@@ -1152,6 +1162,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=chunk_indices,
                 chunk_offsets=chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                g_is_exp=g_is_exp,
             )
         except Exception:
             logger.warning(
@@ -1415,6 +1426,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_prefill = a_non_spec
                 b_prefill = b_non_spec
 
+            g_is_exp = self.chunk_gated_delta_rule.gdn_prefill_backend == "flashinfer"
             (
                 query_non_spec,
                 key_non_spec,
@@ -1431,7 +1443,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 head_k_dim=self.head_k_dim,
                 head_v_dim=self.head_v_dim,
                 apply_l2norm=True,
-                output_g_exp=False,
+                output_g_exp=g_is_exp,
             )
             query_non_spec = query_non_spec.unsqueeze(0)
             key_non_spec = key_non_spec.unsqueeze(0)
@@ -1523,6 +1535,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                g_is_exp=g_is_exp,
             )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
