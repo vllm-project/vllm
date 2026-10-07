@@ -555,3 +555,61 @@ def test_extract_tool_calls_non_ascii(xlam_tool_parser, xlam_tokenizer, streamin
 
     assert "北京" in args
     assert "\\u" not in args
+
+
+@pytest.mark.parametrize(
+    ids=[
+        "deeply_nested_arguments",
+        "brace_inside_string_value",
+        "flat_arguments",
+        "parallel_calls",
+    ],
+    argnames=["model_output"],
+    argvalues=[
+        (
+            """[{"name": "search", "arguments": {"filter": {"geo": {"city": "Dallas"}}}}]""",  # noqa: E501
+        ),
+        (
+            """[{"name": "send_message", "arguments": {"text": "use } to close the block"}}]""",  # noqa: E501
+        ),
+        (
+            """[{"name": "get_current_weather", "arguments": {"city": "Dallas", "days": 3}}]""",  # noqa: E501
+        ),
+        (
+            """[{"name": "a", "arguments": {"x": {"y": {"z": 1}}}}, {"name": "b", "arguments": {"q": 2}}]""",  # noqa: E501
+        ),
+    ],
+)
+def test_streaming_arguments_match_non_streaming(xlam_tool_parser, model_output):
+    """Streamed argument deltas must concatenate to the non-streaming arguments.
+
+    The output is fed one character at a time so that a chunk boundary falls at
+    every position, including inside the string value that contains a brace.
+    """
+    expected = [
+        tool_call.function.arguments
+        for tool_call in xlam_tool_parser.extract_tool_calls(
+            model_output, request=None
+        ).tool_calls
+    ]
+
+    streamed: dict[int, str] = {}
+    previous_text = ""
+    for char in model_output:
+        current_text = previous_text + char
+        delta_message = xlam_tool_parser.extract_tool_calls_streaming(
+            previous_text,
+            current_text,
+            char,
+            [],
+            [],
+            [],
+            request=None,
+        )
+        previous_text = current_text
+        for tool_call in (delta_message.tool_calls if delta_message else None) or []:
+            streamed[tool_call.index] = streamed.get(tool_call.index, "") + (
+                tool_call.function.arguments or ""
+            )
+
+    assert [streamed.get(index, "") for index in range(len(expected))] == expected
