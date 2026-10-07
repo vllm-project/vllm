@@ -16,7 +16,10 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterExperts,
+    AiterUnquantizedExperts,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_aiter, has_deep_ep, has_deep_gemm
@@ -76,10 +79,10 @@ def assert_aiter_quant_scheme_case(config: Config) -> None:
     indirectly through the general quant-config sweep.
     See https://github.com/vllm-project/vllm/issues/54966."""
     fe_cls = config.fused_experts_type
-    if fe_cls is not AiterExperts:
+    if not issubclass(fe_cls, AiterExperts):
         return
 
-    if config.quant_config is None:
+    if config.quant_config is None or config.quant_dtype is None:
         w_key, a_key = None, None
     else:
         w_key, a_key = config.fp8_quant_key_pair()
@@ -97,7 +100,7 @@ def assert_aiter_activation_case(config: Config) -> None:
     AiterExperts being reached only indirectly through the general
     activation sweep. See https://github.com/vllm-project/vllm/issues/54966."""
     fe_cls = config.fused_experts_type
-    if fe_cls is not AiterExperts:
+    if not issubclass(fe_cls, AiterExperts):
         return
 
     assert fe_cls._supports_activation(config.activation), (
@@ -152,7 +155,7 @@ def rank_worker(
             if (
                 topk == 1
                 and config.supports_apply_weight_on_input()
-                and config.fused_experts_type is AiterExperts
+                and issubclass(config.fused_experts_type, AiterExperts)
                 and config.quant_block_shape is not None
             ):
                 print(
@@ -168,7 +171,7 @@ def rank_worker(
             # https://github.com/vllm-project/vllm/issues/57029
             if (
                 config.world_size > 1
-                and config.fused_experts_type is AiterExperts
+                and issubclass(config.fused_experts_type, AiterExperts)
                 and getattr(config.prepare_finalize_type, "__name__", "")
                 in ("DeepEPHTPrepareAndFinalize", "MoriPrepareAndFinalize")
             ):
@@ -206,7 +209,7 @@ def rank_worker(
 
             is_aiter_fp8 = (
                 _cp.is_rocm()
-                and config.fused_experts_type is AiterExperts
+                and issubclass(config.fused_experts_type, AiterExperts)
                 and config.quant_config is not None
             )
             if is_aiter_fp8:
@@ -266,7 +269,7 @@ def is_nyi_config(config: Config) -> bool:
             return True
 
     if config.activation != MoEActivation.SILU:
-        if config.fused_experts_type is not AiterExperts:
+        if not issubclass(config.fused_experts_type, AiterExperts):
             return True  # AITER-only for this axis, for now
         if config.quant_dtype is not None:
             return True  # unquantized-only for this axis, for now
@@ -587,7 +590,7 @@ def test_aiter_moe_sorting_backend_dispatch_env_matrix(
         dtype=torch.bfloat16,
         quant_config=None,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=AiterUnquantizedExperts,
         world_size=1,
     )
     assert config.is_valid()[0]
@@ -667,7 +670,7 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
         dtype=torch.bfloat16,
         quant_config=None,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=AiterUnquantizedExperts,
         world_size=1,
     )
     assert config.is_valid()[0]

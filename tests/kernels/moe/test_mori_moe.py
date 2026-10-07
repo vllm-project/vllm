@@ -42,7 +42,10 @@ MNKS = [
 
 def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, fp8, graph):
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterFp8ChannelExperts,
+        AiterUnquantizedExperts,
+    )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
     )
@@ -94,7 +97,8 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, fp8, graph):
     assert isinstance(prepare, MoriPrepareAndFinalize)
     assert prepare.use_fp8_dispatch == fp8
     assert prepare.num_dispatchers() == 2
-    experts = AiterExperts(config, quant)
+    experts_cls = AiterFp8ChannelExperts if fp8 else AiterUnquantizedExperts
+    experts = experts_cls(config, quant)
     assert not experts.expects_unquantized_inputs
     kernel = FusedMoEKernel(prepare, experts)
     local_w1, local_w2 = rocm_aiter_ops.shuffle_weights(
