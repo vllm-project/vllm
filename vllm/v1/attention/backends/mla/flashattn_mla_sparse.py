@@ -29,6 +29,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.workspace import current_workspace_manager
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 
@@ -268,9 +269,16 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
                 )
             assert attn_metadata.prefill is not None
             assert attn_metadata.prefill.host_staging_plans is not None
+            (staging,) = current_workspace_manager().get_simultaneous(
+                index_group.prefill_staging_spec(self.index_group_index)
+            )
             for plan in attn_metadata.prefill.host_staging_plans:
                 prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
-                    self.index_group_index, kv_c_and_k_pe_cache, attn_metadata, plan
+                    self.index_group_index,
+                    kv_c_and_k_pe_cache,
+                    attn_metadata,
+                    plan,
+                    staging,
                 )
                 tokens = slice(
                     num_decode_tokens + plan.tokens.start,

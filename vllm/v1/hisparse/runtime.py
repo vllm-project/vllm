@@ -764,13 +764,18 @@ class HiSparseRuntime:
         self.eager_host_mirror = config.eager_host_mirror
         self.resident_source_index = -1
         self.request_state_indices: torch.Tensor | None = None
-        # Shared by every HiSparse layer; reserved before memory profiling.
-        self.prefill_staging: torch.Tensor | None = None
+        # Shared workspace bytes for staging prefill history; reserved before
+        # memory profiling. Zero when prefills don't stage through it.
+        self.prefill_staging_bytes = 0
         self.shared_host_region: SharedOffloadRegion | None = None
 
     @property
     def host_cache(self) -> torch.Tensor:
         return self._host_cache
+
+    @property
+    def prefill_staging_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
+        return ((self.prefill_staging_bytes,), torch.uint8)
 
     def bind_hot_cache(
         self,
@@ -830,6 +835,7 @@ class HiSparseRuntime:
         self,
         kv_cache: torch.Tensor,
         plan: HiSparsePrefillStagingPlan,
+        staging: torch.Tensor,
         resident_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Gather this runtime's host cache using a shared staging plan."""
@@ -839,16 +845,14 @@ class HiSparseRuntime:
                 f"the KV cache block size {kv_cache.shape[1]}."
             )
         row_width = kv_cache.shape[-1]
-        if self.prefill_staging is None:
-            raise RuntimeError("HiSparse prefill staging is not reserved.")
         num_bytes = plan.row_ids.shape[1] * row_width * kv_cache.element_size()
-        if num_bytes > self.prefill_staging.numel():
+        if num_bytes > staging.numel():
             raise RuntimeError(
                 f"HiSparse prefill staging needs {num_bytes} bytes but "
-                f"{self.prefill_staging.numel()} are reserved."
+                f"{staging.numel()} are reserved."
             )
         staged = (
-            self.prefill_staging[:num_bytes]
+            staging[:num_bytes]
             .view(kv_cache.dtype)
             .view(-1, plan.block_size, row_width)
         )
@@ -1349,13 +1353,10 @@ def create_hisparse_cache_handle(
     if is_index_group_leader and index_group is not None:
         index_group.hisparse_group = runtime.index_group
     if stages_prefill:
-        num_bytes = get_hisparse_prefill_staging_bytes(
+        runtime.prefill_staging_bytes = get_hisparse_prefill_staging_bytes(
             vllm_config, row_width * kv_dtype.itemsize
         )
-        runtime.prefill_staging = current_workspace_manager().get_persistent_resource(
-            ("hisparse_prefill_staging", num_bytes),
-            lambda: torch.empty(num_bytes, dtype=torch.uint8, device=device),
-        )
+        current_workspace_manager().get_simultaneous(runtime.prefill_staging_spec)
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
         "device_buffer_size=%d (%d LRU rows), max_num_seqs=%d.",

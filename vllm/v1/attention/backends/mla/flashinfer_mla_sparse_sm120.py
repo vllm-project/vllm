@@ -18,6 +18,7 @@ from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -161,9 +162,16 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                 )
             assert attn_metadata.prefill is not None
             assert attn_metadata.prefill.host_staging_plans is not None
+            (staging,) = current_workspace_manager().get_simultaneous(
+                index_group.prefill_staging_spec(self.index_group_index)
+            )
             for plan in attn_metadata.prefill.host_staging_plans:
                 prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
-                    self.index_group_index, kv_c_and_k_pe_cache, attn_metadata, plan
+                    self.index_group_index,
+                    kv_c_and_k_pe_cache,
+                    attn_metadata,
+                    plan,
+                    staging,
                 )
                 tokens = slice(
                     num_decode_tokens + plan.tokens.start,

@@ -811,7 +811,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             )
         # Reserve capacity without retaining views that prevent old storage
         # from being released when another layer grows the shared workspace.
-        current_workspace_manager().get_simultaneous(*self.workspace_specs)
+        reserved_specs = list(self.workspace_specs)
+        if isinstance(self.index_group, HiSparseMLAIndexGroup):
+            reserved_specs.append(
+                self.index_group.prefill_staging_spec(self.index_group_index)
+            )
+        current_workspace_manager().get_simultaneous(*reserved_specs)
 
     def _forward_bf16_kv(
         self,
@@ -859,10 +864,19 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 del decode_out
             assert attn_metadata.prefill is not None
             assert attn_metadata.prefill.host_staging_plans is not None
+            # q is a view of this impl's workspace, so take staging alongside it.
+            *_, staging = current_workspace_manager().get_simultaneous(
+                *self.workspace_specs,
+                index_group.prefill_staging_spec(self.index_group_index),
+            )
             for plan in attn_metadata.prefill.host_staging_plans:
                 staged_cache, plan_block_table, plan_req_ids = (
                     index_group.stage_prefill_rows(
-                        self.index_group_index, kv_c_and_k_pe_cache, attn_metadata, plan
+                        self.index_group_index,
+                        kv_c_and_k_pe_cache,
+                        attn_metadata,
+                        plan,
+                        staging,
                     )
                 )
                 tokens = slice(

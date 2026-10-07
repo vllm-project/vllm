@@ -215,6 +215,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
     def cache(self, layer_index: int) -> HiSparseCacheHandle:
         return self.caches[layer_index]
 
+    def prefill_staging_spec(
+        self, layer_index: int
+    ) -> tuple[tuple[int, ...], torch.dtype]:
+        return self.cache(layer_index).runtime.prefill_staging_spec
+
     def physical_kv_cache(self, layer_index: int) -> torch.Tensor:
         cache = self.cache(layer_index)
         return cache.runtime.hot.attention_cache
@@ -267,9 +272,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         kv_cache: torch.Tensor,
         attn_metadata: Any,
         plan: HiSparsePrefillStagingPlan,
+        staging: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Stage one plan's prefill requests; returns the staged cache, its block
-        table, and plan-relative request ids for the plan's query tokens."""
+        """Stage one plan's prefill requests into ``staging``; returns the staged
+        cache, its block table, and plan-relative request ids for the plan's
+        query tokens."""
         cache = self.cache(layer_index)
         first_request = attn_metadata.num_decodes + plan.requests.start
         last_request = first_request + plan.block_table.shape[0]
@@ -283,6 +290,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         staged_cache = cache.runtime.gather_prefill_cache(
             kv_cache,
             plan,
+            staging,
             resident_cache=resident_cache,
         )
         prefill_req_ids = attn_metadata.req_id_per_token[

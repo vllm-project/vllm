@@ -111,6 +111,7 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.worker.workspace import current_workspace_manager
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -3111,8 +3112,8 @@ def test_hisparse_mixed_batch_bf16_row_split(
     staging_calls = []
     original_gather = cache_handle.runtime.gather_prefill_cache
 
-    def spy_gather(self, kv, plan, resident_cache=None):
-        staged = original_gather(kv, plan, resident_cache)
+    def spy_gather(self, kv, plan, staging, resident_cache=None):
+        staged = original_gather(kv, plan, staging, resident_cache)
         staging_calls.append((plan, staged))
         return staged
 
@@ -3133,7 +3134,10 @@ def test_hisparse_mixed_batch_bf16_row_split(
     prefill_blocks = cdiv(batch_spec.seq_lens[-1], block_size)
     assert staged.shape[0] <= prefill_blocks + 1  # +1: block-0 tail padding
     # Staging reuses the buffer reserved before memory profiling.
-    reserved = cache_handle.runtime.prefill_staging
+    # Staging uses the shared workspace, after the impl's own buffers.
+    *_, reserved = current_workspace_manager().get_simultaneous(
+        *impl.workspace_specs, cache_handle.runtime.prefill_staging_spec
+    )
     assert staged.data_ptr() == reserved.data_ptr()
 
     torch.testing.assert_close(backend_output, reference, rtol=0.01, atol=0.01)
@@ -3298,15 +3302,13 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows(
         .to(device)
     )
 
-    runtime = SimpleNamespace(
-        prefill_staging=torch.empty(
-            plan.row_ids.shape[1] * row_width * host_cache.element_size(),
-            dtype=torch.uint8,
-            device=device,
-        )
+    staging = torch.empty(
+        plan.row_ids.shape[1] * row_width * host_cache.element_size(),
+        dtype=torch.uint8,
+        device=device,
     )
     staged = HiSparseRuntime.gather_prefill_cache(
-        runtime, host_cache, plan, resident_cache=resident_cache
+        None, host_cache, plan, staging, resident_cache=resident_cache
     )
 
     staged_flat = staged.view(-1, row_width).cpu()
@@ -4069,7 +4071,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     staged = torch.empty((1, 1, 8))
     calls = []
 
-    def gather(kv_cache, staging_plan, resident_cache=None):
+    def gather(kv_cache, staging_plan, staging, resident_cache=None):
         calls.append((kv_cache, staging_plan, resident_cache))
         return staged
 
@@ -4094,7 +4096,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     )
 
     result, block_table, request_ids = index_group.stage_prefill_rows(
-        0, source, metadata, plan
+        0, source, metadata, plan, torch.empty(0, dtype=torch.uint8)
     )
 
     assert result is staged

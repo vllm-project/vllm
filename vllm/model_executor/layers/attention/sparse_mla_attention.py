@@ -243,14 +243,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         layer_prefill_backend = attention_layer.prefill_backend
         self.hisparse_staging_block_capacity: int | None = None
         hisparse_cache = getattr(attention_layer, "hisparse_cache", None)
-        if hisparse_cache is not None and (
-            (staging := hisparse_cache.runtime.prefill_staging) is not None
-        ):
+        if hisparse_cache is not None and hisparse_cache.runtime.prefill_staging_bytes:
             runtime = hisparse_cache.runtime
             block_size = kv_cache_spec.block_size
             block_bytes = block_size * runtime.row_width * runtime.kv_dtype.itemsize
             # One block is the staging plan's block-0 padding.
-            capacity = staging.numel() // block_bytes - 1
+            capacity = runtime.prefill_staging_bytes // block_bytes - 1
             needed = cdiv(vllm_config.model_config.max_model_len, block_size)
             if capacity < needed:
                 raise ValueError(
