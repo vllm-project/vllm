@@ -3421,6 +3421,56 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     assert lse is None
 
 
+def test_flashinfer_hisparse_resident_mixed_batch_skips_host_staging():
+    """A resident prefill batched with decodes reads resident KV in one kernel
+    instead of staging its whole history from host."""
+    device = torch.device("cpu")
+    num_tokens = 6
+    q = torch.randn(num_tokens, 2, 4, device=device)
+    topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=device)
+    valid_counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=device)
+    kernel_shapes: list[torch.Size] = []
+
+    def convert(self, layer_index, logical_topk_indices, *args, **kwargs):  # noqa: ARG001
+        return logical_topk_indices, valid_counts[: logical_topk_indices.shape[0]]
+
+    def prepare_kernel(self, *args, **kwargs):  # noqa: ARG001
+        pass
+
+    def run_kernel(self, q, cache, indices, counts):  # noqa: ARG001
+        kernel_shapes.append(q.shape)
+        return q[..., :1], None
+
+    cache_handle = SimpleNamespace(
+        all_context_pages_resident=True,
+        runtime=SimpleNamespace(
+            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
+        ),
+    )
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.caches = [cache_handle]
+    index_group.convert_logical_to_physical_topk = MethodType(convert, index_group)
+    index_group.stage_prefill_rows = MagicMock(side_effect=AssertionError)
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.topk_indices_buffer = topk
+    impl.index_group = index_group
+    impl.index_group_index = 0
+    impl._prepare_mqa_kernel = MethodType(prepare_kernel, impl)
+    impl._run_mqa_kernel = MethodType(run_kernel, impl)
+    metadata = SimpleNamespace(num_decode_tokens=2)
+
+    output, _ = FlashInferMLASparseImpl.forward_mqa(
+        impl,
+        q,
+        torch.empty(1, device=device),
+        metadata,
+        SimpleNamespace(),
+    )
+
+    assert kernel_shapes == [q.shape]
+    assert output.shape == (num_tokens, 2, 1)
+
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(90),
     reason="FlashAttention MLA requires Hopper",
@@ -3613,16 +3663,23 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     impl._run_mqa_kernel.assert_called_once()
 
 
-def test_hisparse_resident_prefill_uses_attention_block_stride():
+@pytest.mark.parametrize("workspace_rows", [1, 4], ids=["prefill_sized", "mixed"])
+def test_hisparse_resident_prefill_uses_attention_block_stride(workspace_rows):
+    """Resident batches with prefill rows read resident pages directly, even when
+    they fit the decode residency workspace."""
     expected = torch.tensor([[19]], dtype=torch.int32)
     cache_handle = SimpleNamespace(
         all_context_pages_resident=True,
+        num_decode_tokens=1,
+        num_actual_tokens=2,
         view=SimpleNamespace(block_size=64, attention_block_stride=832),
         block_table=torch.tensor([[3]], dtype=torch.int32),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache_handle]
-    index_group.physical_topk_indices = torch.empty((1, 1), dtype=torch.int32)
+    index_group.physical_topk_indices = torch.empty(
+        (workspace_rows, 1), dtype=torch.int32
+    )
     index_group._convert_once = MagicMock(return_value=expected)
     topk = torch.zeros((2, 1), dtype=torch.int32)
     metadata = SimpleNamespace(

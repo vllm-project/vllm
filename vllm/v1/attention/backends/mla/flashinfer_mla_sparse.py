@@ -507,6 +507,28 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         index_group = self.index_group
         if isinstance(index_group, HiSparseMLAIndexGroup):
             num_decode_tokens = attn_metadata.num_decode_tokens
+            if (
+                num_decode_tokens == num_actual_toks
+                or index_group.cache(self.index_group_index).all_context_pages_resident
+            ):
+                physical_topk, valid_counts = (
+                    index_group.convert_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices,
+                        attn_metadata,
+                        block_stride_rows=None,
+                        return_valid_counts=True,
+                    )
+                )
+                return self._run_mqa_kernel(
+                    q,
+                    index_group.physical_kv_cache(self.index_group_index).view(
+                        kv_c_and_k_pe_cache.dtype
+                    ),
+                    physical_topk,
+                    valid_counts,
+                )
+
             decode_out: torch.Tensor | None = None
             decode_lse: torch.Tensor | None = None
             if num_decode_tokens > 0:
@@ -521,28 +543,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 )
                 decode_out, decode_lse = self._run_mqa_kernel(
                     q[:num_decode_tokens],
-                    index_group.physical_kv_cache(self.index_group_index).view(
-                        kv_c_and_k_pe_cache.dtype
-                    ),
-                    physical_topk,
-                    valid_counts,
-                )
-                if num_decode_tokens == num_actual_toks:
-                    return decode_out, decode_lse
-
-            cache = index_group.cache(self.index_group_index)
-            if num_decode_tokens == 0 and cache.all_context_pages_resident:
-                physical_topk, valid_counts = (
-                    index_group.convert_logical_to_physical_topk(
-                        self.index_group_index,
-                        topk_indices,
-                        attn_metadata,
-                        block_stride_rows=None,
-                        return_valid_counts=True,
-                    )
-                )
-                return self._run_mqa_kernel(
-                    q,
                     index_group.physical_kv_cache(self.index_group_index).view(
                         kv_c_and_k_pe_cache.dtype
                     ),
