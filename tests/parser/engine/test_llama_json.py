@@ -3,9 +3,8 @@
 """Tests for the engine-based Llama 3.x/4 JSON parser (llama3_json /
 llama4_json).
 
-Staged commit 2/7: full format-shape coverage (bare arguments, phantom-JSON
-retraction, envelope-aware name resolution). Later commits grow both
-llama_json.py and this file together.
+Staged commit 3/7: adds truncation repair on top of full format-shape
+coverage. Later commits grow both llama_json.py and this file together.
 """
 
 import json
@@ -248,3 +247,30 @@ class TestNamedChoiceBareArguments:
             ("get_weather", {"city": "SF"})
         ]
         assert content is None
+
+
+class TestTruncationRepair:
+    """A value cut off mid-stream must come back as valid JSON, not raw
+    unterminated text -- every streamed delta, not just the final one."""
+
+    def test_mid_string_truncation_is_closed(self):
+        from vllm.parser.llama_json import _llama_arg_converter
+
+        raw = '{"name": "f", "parameters": {"city": "San Franci'
+        assert _llama_arg_converter(raw, False) == '{"city": "San Franci"}'
+
+    def test_mid_number_truncation_cuts_back_to_last_complete_digit(self):
+        from vllm.parser.llama_json import _llama_arg_converter
+
+        raw = '{"name": "f", "parameters": {"x": 1.'
+        assert _llama_arg_converter(raw, False) == '{"x": 1}'
+
+    def test_streamed_arguments_close_cleanly_even_char_by_char(self):
+        """The accumulated argument text need not be valid JSON mid-stream
+        (partial mode never appends closers), but once the call finishes
+        the accumulated text must be exactly the closed, valid object --
+        not left truncated the way it would be without repair."""
+        text = '{"name": "f", "parameters": {"city": "San Francisco", "unit": "C"}}'
+        results = _stream(_parser(), _request(), text, chunk_size=1)
+        _, calls = _accumulate(results)
+        assert json.loads(calls[0]["args"]) == {"city": "San Francisco", "unit": "C"}

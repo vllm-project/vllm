@@ -10,13 +10,11 @@ opens a call; it closes when the envelope's JSON balances
 substring. A balanced ``{...}`` with no top-level ``"name"`` is prose JSON,
 not a call; its text is restored as content in place.
 
-This commit brings the parser up to full *format-shape* coverage: named
-tool choice constrained to bare parameters (no envelope), phantom-JSON
-retraction (prose that merely looks like a call), and envelope-aware name
-resolution that never picks up a nested ``"name"`` key the way the engine's
-default regex would. Truncation repair, schema-coercion safety, and
-resumable scanning are not implemented yet -- a value cut off mid-stream is
-still emitted verbatim, which later commits fix.
+This commit adds truncation repair: a value cut off mid-stream is cut back
+to the last completable point and closed by appending ``"``/``}``/``]``, so
+every streamed delta -- not just the final one -- is valid JSON. Before this,
+an unfinished string or number streamed verbatim and unterminated.
+Schema-coercion safety and resumable scanning are not implemented yet.
 """
 
 from __future__ import annotations
@@ -24,6 +22,8 @@ from __future__ import annotations
 import functools
 import json
 from typing import TYPE_CHECKING
+
+import regex as re
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.parser.engine.events import EventType, SemanticEvent
@@ -50,6 +50,10 @@ PYTHON_TAG = "<|python_tag|>"
 PYTHON_START = "<|python_start|>"
 PYTHON_END = "<|python_end|>"
 _WS = " \t\r\n"
+_HEX = "0123456789abcdefABCDEF"
+_ESCAPES = '"\\/bfnrt'
+# Ends a JSON string token: closing quote, an escape, or an unescaped control char.
+_STR_STOP = re.compile(r'["\\\x00-\x1f]')
 # Matched by position, not this order: the first alias in the text wins.
 _ARG_KEYS = ("arguments", "parameters")
 
@@ -195,30 +199,210 @@ def _envelope_name(raw: str) -> str | None:
     return None
 
 
-def _llama_bare_arg_converter(raw_args: str, partial: bool) -> str:
-    """Convert a named choice's bare parameter object to arguments.
+def _scan_number(raw: str, start: int) -> tuple[int, int]:
+    """Return ``(token_end, complete_end)`` for the number token at
+    ``raw[start]``: where the token stops, and how much of it is already a
+    complete JSON number (``start`` when none of it is)."""
+    n = len(raw)
+    i = start
+    if i < n and raw[i] == "-":
+        i += 1
+    int_start = i
+    while i < n and "0" <= raw[i] <= "9":
+        i += 1
+    if i == int_start:
+        return i, start
+    if raw[int_start] == "0" and i - int_start > 1:
+        return int_start + 1, int_start + 1
+    complete = i
+    if i < n and raw[i] == ".":
+        i += 1
+        frac_start = i
+        while i < n and "0" <= raw[i] <= "9":
+            i += 1
+        if i == frac_start:
+            # No digit after the point; an exponent can't rescue "1.e5".
+            return i, complete
+        complete = i
+    if i < n and raw[i] in "eE":
+        i += 1
+        if i < n and raw[i] in "+-":
+            i += 1
+        exp_start = i
+        while i < n and "0" <= raw[i] <= "9":
+            i += 1
+        if i > exp_start:
+            complete = i
+    return i, complete
 
-    No truncation repair yet: an unfinished value is cut back to the last
-    *complete* value and the rest held, same limitation as the envelope
-    converter below.
+
+def _scan_string_end(raw: str, start: int) -> tuple[int, int]:
+    """Scan the JSON string opening at ``raw[start]``.
+
+    Returns ``(end, safe_end)``: ``end`` past the closing quote (-1 while
+    unterminated, on an invalid escape, or a raw control char), and
+    ``safe_end`` the longest prefix a closing quote can be appended to.
     """
+    n = len(raw)
+    i = start + 1
+    while True:
+        # JSON forbids raw control chars in strings, so one ends the
+        # string just as an invalid escape does.
+        match = _STR_STOP.search(raw, i)
+        if match is None:
+            return -1, n
+        stop = match.start()
+        ch = raw[stop]
+        if ch == '"':
+            return stop + 1, stop
+        if ch != "\\":
+            return -1, stop
+        if stop + 1 >= n:
+            return -1, stop
+        nxt = raw[stop + 1]
+        if nxt == "u":
+            if stop + 6 > n:
+                return -1, stop
+            if any(c not in _HEX for c in raw[stop + 2 : stop + 6]):
+                return -1, stop
+            i = stop + 6
+        elif nxt in _ESCAPES:
+            i = stop + 2
+        else:
+            return -1, stop
+
+
+def _closeable_prefix(raw: str) -> tuple[int, str]:
+    """Return ``(end, closers)``: the longest prefix of *raw* that becomes
+    valid JSON when *closers* (only ``"``/``}``/``]``) is appended.
+
+    Truncated/malformed model output leaves the argument span as a JSON
+    fragment; emitting it verbatim is invalid and retracting already-sent
+    text is impossible, so it's cut back to the last completable point and
+    closed by appending -- an append-only repair, keeping streaming and
+    non-streaming byte-identical. ``end`` never moves backwards as *raw*
+    grows, which keeps the streamed text prefix-stable.
+
+    Lexical errors are cut back the same way: a raw control char ends its
+    string, and a fractionless ``1.e5`` keeps only ``1``.
+    """
+    stack: list[str] = []
+    closers = ""
+    best = 0
+    best_closers = ""
+    expect = "value"
+    i = 0
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch in _WS:
+            i += 1
+            continue
+        if expect == "colon":
+            if ch != ":":
+                break
+            i += 1
+            expect = "value"
+            continue
+        if expect == "comma_or_close":
+            if ch == "," and stack:
+                expect = "key" if stack[-1] == "}" else "value"
+                i += 1
+                continue
+            if not stack or ch != stack[-1]:
+                break
+            stack.pop()
+            closers = closers[1:]
+            i += 1
+            best, best_closers = i, closers
+            continue
+        if expect in ("key", "key_or_close"):
+            if ch == "}" and expect == "key_or_close":
+                stack.pop()
+                closers = closers[1:]
+                i += 1
+                best, best_closers = i, closers
+                expect = "comma_or_close"
+                continue
+            if ch != '"':
+                break
+            key_end, _ = _scan_string_end(raw, i)
+            if key_end < 0:
+                break
+            i = key_end
+            expect = "colon"
+            continue
+        # expect is "value" or "value_or_close"
+        if ch == "]" and expect == "value_or_close":
+            stack.pop()
+            closers = closers[1:]
+            i += 1
+            best, best_closers = i, closers
+            expect = "comma_or_close"
+            continue
+        if ch in "{[":
+            closer = "}" if ch == "{" else "]"
+            stack.append(closer)
+            closers = closer + closers
+            i += 1
+            best, best_closers = i, closers
+            expect = "key_or_close" if ch == "{" else "value_or_close"
+            continue
+        if ch == '"':
+            str_end, safe = _scan_string_end(raw, i)
+            if str_end < 0:
+                # An unterminated string value closes with a quote; an
+                # incomplete escape at the very end does not.
+                if safe > best:
+                    best, best_closers = safe, '"' + closers
+                break
+            i = str_end
+            best, best_closers = i, closers
+            expect = "comma_or_close"
+            continue
+        if ch == "-" or "0" <= ch <= "9":
+            token_end, complete = _scan_number(raw, i)
+            if complete > i:
+                best, best_closers = complete, closers
+            if complete != token_end:
+                break
+            i = token_end
+            expect = "comma_or_close"
+            continue
+        for literal in ("true", "false", "null"):
+            if raw.startswith(literal, i):
+                i += len(literal)
+                best, best_closers = i, closers
+                expect = "comma_or_close"
+                break
+        else:
+            break
+    return best, best_closers
+
+
+def _llama_bare_arg_converter(raw_args: str, partial: bool) -> str:
+    """Convert a named choice's bare parameter object to arguments."""
+    end, closers = _closeable_prefix(raw_args)
     if partial:
-        return raw_args
-    end = _scan_json_value(raw_args, 0) if raw_args else None
-    if end is None:
-        return raw_args or "{}"
-    return raw_args[:end]
+        return raw_args[:end]
+    if end == 0:
+        return "{}"
+    return raw_args[:end] + closers
 
 
 def _llama_arg_converter(raw_args: str, partial: bool) -> str:
-    """Carve the arguments value out of the envelope (verbatim,
-    prefix-stable). No truncation repair yet -- see
-    ``_llama_bare_arg_converter``.
-    """
+    """Carve the arguments value out of the envelope (verbatim, prefix-
+    stable), cut back to what still closes into valid JSON, and closed
+    once final."""
     span = _args_value_span(raw_args)
     if span is None:
         return "" if partial else "{}"
-    return span if partial else (span or "{}")
+    end, closers = _closeable_prefix(span)
+    if partial:
+        return span[:end]
+    if end == 0:
+        return "{}"
+    return span[:end] + closers
 
 
 _CONSTRAINING_KEYS = (
