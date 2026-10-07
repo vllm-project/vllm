@@ -13,6 +13,7 @@ from utils import (
     _extract_step_logprobs,
     _random_prompt,
     skip_if_not_cuda,
+    skip_if_not_gdn,
     skip_unsupported,
 )
 
@@ -977,4 +978,93 @@ def LLM_with_max_seqs(
         # Enable for MOE models
         # enable_expert_parallel=True,
         **extra_kwargs,
+    )
+
+
+@skip_if_not_gdn
+@skip_unsupported
+@pytest.mark.timeout(1800)
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "cudagraph"])
+def test_gdn_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend, enforce_eager):
+    """Bitwise batch invariance for the GDN_ATTN (GatedDeltaNet) layers.
+
+    The parametrized backend only selects the full-attention half of the
+    hybrid stack; the GDN layers always route to GDN_ATTN. The run is
+    repeated with full CUDA graphs so the padded-decode path is exercised,
+    not just the eager one.
+    """
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+
+    llm = LLM(
+        model=TEST_MODEL,
+        tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "1")),
+        max_num_seqs=32,
+        max_model_len=4096,
+        dtype="auto",
+        gpu_memory_utilization=0.9,
+        enforce_eager=enforce_eager,
+        attention_config={"backend": backend},
+    )
+
+    # Engine startup is itself the proof that the GDN path is live: with
+    # VLLM_BATCH_INVARIANT=1 the mamba backend selector rejects any backend
+    # whose supports_batch_invariance() is False, so reaching this line means
+    # GDN_ATTN was selected and accepted.
+    from vllm.transformers_utils.config import get_config
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+
+    layer_types = (
+        get_config(TEST_MODEL, trust_remote_code=False).get_text_config().layer_types
+    )
+    num_gdn_layers = sum(1 for t in layer_types if t == "linear_attention")
+    assert num_gdn_layers > 0, f"{TEST_MODEL} declares no GDN layers"
+    assert GDNAttentionBackend.supports_batch_invariance()
+    print(
+        f"\n[GDN] {TEST_MODEL}: {num_gdn_layers} GatedDeltaNet layers, "
+        f"full-attn backend={backend}, enforce_eager={enforce_eager}, "
+        f"VLLM_BATCH_INVARIANT={int(envs.VLLM_BATCH_INVARIANT)}"
+    )
+
+    # Ragged lengths so prefill chunking and the prefill->decode transition
+    # both differ between the BS=1 and BS=N runs.
+    prompts = [_random_prompt(8, 160) for _ in range(16)]
+    sp = SamplingParams(
+        temperature=0.6, top_p=1.0, max_tokens=16, seed=1234, logprobs=5
+    )
+
+    bs1 = []
+    for p in prompts:
+        outs = llm.generate([p], sp, use_tqdm=False)
+        step_logprobs, token_ids = _extract_step_logprobs(outs[0])
+        if step_logprobs is None:
+            pytest.skip("Logprobs are not available on RequestOutput.")
+        bs1.append((step_logprobs, token_ids))
+
+    outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+    assert len(outs_batched) == len(prompts)
+
+    mismatches = []
+    for i, o in enumerate(outs_batched):
+        step_logprobs, token_ids = _extract_step_logprobs(o)
+        if step_logprobs is None:
+            pytest.skip("Logprobs are not available on RequestOutput.")
+        bs1_logprobs, bs1_tokens = bs1[i]
+        if list(bs1_tokens) != list(token_ids):
+            mismatches.append(f"prompt {i}: tokens {bs1_tokens} != {token_ids}")
+            continue
+        if len(bs1_logprobs) != len(step_logprobs):
+            mismatches.append(f"prompt {i}: step count differs")
+            continue
+        for step, (a, b) in enumerate(zip(bs1_logprobs, step_logprobs)):
+            if not torch.equal(a, b):
+                mismatches.append(
+                    f"prompt {i} step {step}: max|delta|="
+                    f"{(a - b).abs().max().item():.3e}"
+                )
+                break
+
+    assert not mismatches, "GDN_ATTN is not batch invariant:\n" + "\n".join(
+        mismatches[:10]
     )

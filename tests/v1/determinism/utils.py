@@ -58,6 +58,35 @@ BACKENDS: list[str] = sorted(
     {b for cfg in DEVICE_BACKENDS.values() if cfg.available for b in cfg.backends}
 )
 
+
+def _has_gdn_layers(model: str) -> bool:
+    """True when the model interleaves GatedDeltaNet (GDN_ATTN) layers with
+    full attention.
+
+    Detection is by layer type rather than by a model_type allowlist, so it
+    covers every Qwen GDN variant (``qwen3_next``, ``qwen3_5_text``,
+    ``qwen3_5_moe_text``, and the multimodal ``*ForConditionalGeneration``
+    wrappers) without needing to enumerate them.
+    """
+    try:
+        cfg = get_config(model, trust_remote_code=False)
+    except Exception:
+        return False
+    layer_types = getattr(cfg.get_text_config(), "layer_types", None)
+    return isinstance(layer_types, (list, tuple)) and "linear_attention" in layer_types
+
+
+# GDN layers always route to the GDN_ATTN mamba backend; the parametrized
+# backend above only selects the full-attention half of the hybrid stack.
+IS_GDN_MODEL: bool = _has_gdn_layers(TEST_MODEL)
+
+skip_if_not_gdn = pytest.mark.skipif(
+    not IS_GDN_MODEL,
+    reason=(
+        "Requires a GDN (GatedDeltaNet) model; set VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B"
+    ),
+)
+
 skip_unsupported = pytest.mark.skipif(
     not any(cfg.available for cfg in DEVICE_BACKENDS.values()),
     reason="Requires CUDA >= Ampere (SM80) or Intel XPU with Triton",
