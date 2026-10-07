@@ -9,6 +9,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+    LoRAExpertsMixin,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -180,6 +183,14 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             # expert not owned by this rank so they are skipped.
             sentinel = global_num_experts - 1 if self.moe_config.ep_rank == 0 else 0
             topk_ids = torch.where(topk_ids < 0, sentinel, topk_ids)
+        if isinstance(self, _XPUExpertsWithLoRA) and self._lora_context is not None:
+            if apply_router_weight_on_input or a1q_scale is not None:
+                raise NotImplementedError(
+                    "XPU MoE LoRA requires unquantized inputs "
+                    "and output routing weights"
+                )
+            self._apply_with_lora(output, hidden_states, topk_weights, topk_ids)
+            return
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
@@ -189,7 +200,132 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
 
 
-class XPUExpertsFp8(XPUExperts):
+class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
+    def _apply_with_lora(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> None:
+        ctx = self._lora_context
+        impl = self.fused_moe_impl
+        assert ctx is not None and impl is not None
+        if ctx.fully_sharded:
+            raise NotImplementedError("Fully sharded LoRA is not supported by XPU MoE")
+        num_tokens, hidden_size = hidden_states.shape
+        topk = topk_ids.shape[1]
+        rows = num_tokens * topk
+        if rows == 0:
+            return
+        counts = torch.zeros(
+            impl.num_experts, dtype=torch.int32, device=hidden_states.device
+        )
+        routing = torch.empty_like(topk_ids, dtype=torch.int32)
+        remapped = hidden_states.new_empty(rows, hidden_size)
+        torch.ops._moe_C.remap_hidden_states(
+            hidden_states=hidden_states,
+            hidden_states_scales=None,
+            remapped_hidden_states=remapped,
+            remapped_hidden_states_scales=None,
+            expert_map=impl.expert_map,
+            rows_per_expert=counts,
+            unpermuted_row_to_permuted_row=routing,
+            topk_ids=topk_ids,
+            total_experts_num=impl.total_experts_num,
+            local_experts_num=impl.local_experts_num,
+        )
+        grouped = output.new_empty(rows, 2 * impl.inter_size)
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+            ptr_A=remapped,
+            ptr_A_scale=None,
+            ptr_B=impl.w13,
+            ptr_B_scale=impl.gemm1_wei_scales,
+            ptr_bias=impl.w13_bias,
+            ptr_D=grouped,
+            rows_per_expert=counts,
+            N=2 * impl.inter_size,
+            K=hidden_size,
+            num_experts=impl.num_experts,
+        )
+        # Native GEMMs group by expert; the LoRA kernels address original
+        # token/top-k rows. Nonlocal routes must never read undefined data.
+        route = routing.flatten().long()
+        local = route >= 0
+        original = grouped.index_select(0, route.clamp_min(0))
+        original.masked_fill_(~local[:, None], 0)
+        lora_width = sum(b.shape[-2] for b in ctx.w13_lora_b_stacked)
+        delta = output.new_zeros(rows, lora_width)
+        w1 = impl.w13 if impl.is_int4 else impl.w13.transpose(-1, -2)
+        w2 = impl.w2 if impl.is_int4 else impl.w2.transpose(-1, -2)
+        metadata = self.apply_w13_lora(
+            ctx,
+            y=delta,
+            x=hidden_states,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            expert_map=impl.expert_map,
+            w1=w1,
+            w2=w2,
+            num_tokens=num_tokens,
+            top_k_num=topk,
+            add_inputs=False,
+        )
+        if impl.inter_size_scale == 1:
+            # Each gate/up half may have independent padding in the base weights.
+            width = lora_width // 2
+            original[:, :width].add_(delta[:, :width])
+            original[:, impl.inter_size : impl.inter_size + width].add_(
+                delta[:, width:]
+            )
+        else:
+            original[:, :lora_width].add_(delta)
+        if impl.gemm1_clamp_limit is not None and impl.gemm1_clamp_limit > 0:
+            original[:, : impl.inter_size].clamp_(max=impl.gemm1_clamp_limit)
+            original[:, impl.inter_size :].clamp_(
+                min=-impl.gemm1_clamp_limit, max=impl.gemm1_clamp_limit
+            )
+        activated = output.new_empty(rows, impl.inter_size * impl.inter_size_scale)
+        impl.act_func(activated, original)
+        # The extra row receives nonlocal routes; valid grouped rows are unique.
+        # This avoids a device-to-host synchronization from boolean indexing.
+        grouped_input = output.new_empty(rows + 1, activated.shape[1])
+        grouped_input.index_copy_(0, route.masked_fill(~local, rows), activated)
+        grouped_output = output.new_empty(rows, hidden_size)
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+            ptr_A=grouped_input[:rows],
+            ptr_A_scale=None,
+            ptr_B=impl.w2,
+            ptr_B_scale=impl.gemm2_wei_scales,
+            ptr_bias=impl.w2_bias,
+            ptr_D=grouped_output,
+            rows_per_expert=counts,
+            N=hidden_size,
+            K=activated.shape[1],
+            num_experts=impl.num_experts,
+        )
+        combined = grouped_output.index_select(0, route.clamp_min(0))
+        combined.masked_fill_(~local[:, None], 0)
+        combined = combined.view(num_tokens, topk, hidden_size)
+        combined.mul_(topk_weights[:, :, None])
+        self.apply_w2_lora(
+            ctx,
+            y=combined,
+            x=activated[:, : ctx.w2_lora_a_stacked[0].shape[-1]].contiguous(),
+            topk_weights=topk_weights,
+            sorted_token_ids_lora=metadata[0],
+            expert_ids_lora=metadata[1],
+            num_tokens_post_padded_lora=metadata[2],
+            token_lora_mapping=metadata[3],
+            num_tokens=num_tokens,
+            w1=w1,
+            w2=w2,
+            top_k_num=topk,
+        )
+        torch.sum(combined, dim=1, out=output)
+
+
+class XPUExpertsFp8(_XPUExpertsWithLoRA):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -217,6 +353,10 @@ class XPUExpertsFp8(XPUExperts):
 
 
 class XPUExpertsMxFp8(XPUExpertsFp8):
+    @staticmethod
+    def supports_lora() -> bool:
+        return False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -244,7 +384,7 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsBlockFp8(XPUExperts):
+class XPUExpertsBlockFp8(_XPUExpertsWithLoRA):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -270,7 +410,7 @@ class XPUExpertsBlockFp8(XPUExperts):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsWNA16(XPUExperts):
+class XPUExpertsWNA16(_XPUExpertsWithLoRA):
     """W4A16 INT4-symmetric MoE backed by `xpu_fused_moe(is_int4=True)`.
 
     Weight layout when `is_int4=True` (per `xpu_fused_moe` docstring):

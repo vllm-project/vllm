@@ -1319,3 +1319,216 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
             adapter_enabled,
             block_size,
         )
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU native MoE")
+@pytest.mark.parametrize("recipe", ["fp8", "block_fp8", "int4"])
+@pytest.mark.parametrize("logical_size", [96, 128])
+@pytest.mark.parametrize("mapped_experts", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("packed", [False, True])
+def test_xpu_quantized_moe_lora_reference(
+    recipe, logical_size, mapped_experts, dtype, packed
+):
+    """LoRA must follow token routes, padded gate/up halves and router weights."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.config import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        fp8_w8a16_moe_quant_config,
+        int4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        XPUExpertsBlockFp8,
+        XPUExpertsFp8,
+        XPUExpertsWNA16,
+    )
+
+    block_fp8 = recipe == "block_fp8"
+    torch.manual_seed(42)
+    device = "xpu"
+    tokens, experts, hidden, padded, rank = 4, 2, 256, 128, 8
+
+    def rand(*shape):
+        return torch.randn(*shape, device=device, dtype=dtype) * 0.05
+
+    x = rand(tokens, hidden)
+    w1 = rand(experts, hidden, 2 * padded)
+    w2 = rand(experts, padded, hidden)
+    w1[:, :, logical_size:padded] = 0
+    w1[:, :, padded + logical_size :] = 0
+    w2[:, logical_size:, :] = 0
+    if recipe == "int4":
+
+        def pack(w):
+            q = (w.transpose(-1, -2) * 64).round().clamp(-8, 7).to(torch.int32)
+            ref = (q.float() / 64).transpose(-1, -2)
+            q = q + 8
+            return (q[..., ::2] | (q[..., 1::2] << 4)).to(torch.uint8).contiguous(), ref
+
+        w1, ref_w1 = pack(w1)
+        w2, ref_w2 = pack(w2)
+        s1 = torch.full(
+            (experts, 2 * padded, hidden // 128), 1 / 64, device=device, dtype=dtype
+        )
+        s2 = torch.full((experts, hidden, 1), 1 / 64, device=device, dtype=dtype)
+    else:
+        w1, w2 = w1.to(torch.float8_e4m3fn), w2.to(torch.float8_e4m3fn)
+        ref_w1, ref_w2 = w1.float(), w2.float()
+        s1 = torch.ones(
+            (experts, hidden // 128, 2) if block_fp8 else (experts,), device=device
+        )
+        s2 = torch.ones(
+            (experts, 1, hidden // 128) if block_fp8 else (experts,), device=device
+        )
+    # Nonuniform scales expose expert/block-axis swaps in the native path.
+    s1.mul_(torch.linspace(0.5, 1.5, s1.numel(), device=device).view_as(s1))
+    s2.mul_(torch.linspace(1.5, 0.5, s2.numel(), device=device).view_as(s2))
+    if recipe == "int4":
+        ref_w1 *= (s1.float() * 64).transpose(-1, -2).repeat_interleave(128, 1)
+        ref_w2 *= (s2.float() * 64).transpose(-1, -2).repeat_interleave(128, 1)
+    elif block_fp8:
+        ref_w1 *= s1.repeat_interleave(128, 1).repeat_interleave(128, 2)
+        ref_w2 *= s2.repeat_interleave(128, 1).repeat_interleave(128, 2)
+    else:
+        ref_w1 *= s1[:, None, None]
+        ref_w2 *= s2[:, None, None]
+    config = make_dummy_moe_config(
+        num_experts=4 if mapped_experts else experts,
+        num_local_experts=experts,
+        experts_per_token=2,
+        hidden_dim=hidden,
+        intermediate_size=padded,
+        in_dtype=dtype,
+    )
+    if mapped_experts:
+        config.moe_parallel_config.ep_size = 2
+    quant = fp8_w8a16_moe_quant_config(
+        s1, s2, block_shape=[128, 128] if block_fp8 else None
+    )
+    cls = XPUExpertsBlockFp8 if block_fp8 else XPUExpertsFp8
+    if recipe == "int4":
+        quant = int4_w4a16_moe_quant_config(s1, s2, block_shape=[0, 128])
+        cls = XPUExpertsWNA16
+    assert cls.supports_lora()
+    impl = cls(config, quant)
+    wrapper = PunicaWrapperXPU(
+        32, 8, device, lora_config=LoRAConfig(max_loras=2, max_lora_rank=8)
+    )
+    mapping = (1, 2, 0, 1)
+    wrapper.update_metadata(
+        LoRAMapping(mapping, mapping, is_prefill=True), [1, 2, None], 3, 128
+    )
+    a13 = (rand(2, experts, rank, hidden), rand(2, experts, rank, hidden))
+    b13 = (rand(2, experts, logical_size, rank), rand(2, experts, logical_size, rank))
+    if packed:
+        a13 = (a13[0],)
+        b13 = (torch.cat(b13, dim=-2),)
+    a2, b2 = (rand(2, experts, rank, logical_size),), (rand(2, experts, hidden, rank),)
+    ctx = MoELoRAContext(
+        a13,
+        b13,
+        a2,
+        b2,
+        torch.ones(3, device=device, dtype=torch.int32),
+        2,
+        2,
+        len(a13),
+        False,
+        0,
+        1,
+        experts,
+        wrapper,
+        False,
+    )
+    impl.set_lora_context(ctx)
+    ids = torch.tensor([[1, 0], [0, 1], [1, 0], [0, 1]], device=device)
+    expert_map = None
+    if mapped_experts:
+        expert_map = torch.tensor([1, 0, -1, -1], device=device, dtype=torch.int32)
+        ids = torch.tensor([[1, 0], [0, -1], [2, 1], [-1, -1]], device=device)
+    weights = torch.tensor(
+        [[0.2, 0.8], [0.7, 0.3], [0.6, 0.4], [0.9, 0.1]], device=device
+    )
+    output = torch.empty_like(x)
+    workspace = torch.empty(0, device=device)
+    impl.apply(
+        output,
+        x,
+        w1,
+        w2,
+        weights,
+        ids,
+        MoEActivation.SILU,
+        4 if mapped_experts else experts,
+        expert_map,
+        None,
+        None,
+        workspace,
+        workspace,
+        None,
+        False,
+    )
+    if not packed and not mapped_experts and logical_size == 96:
+        graph = torch.xpu.XPUGraph()
+        with torch.xpu.graph(graph):
+            impl.apply(
+                output,
+                x,
+                w1,
+                w2,
+                weights,
+                ids,
+                MoEActivation.SILU,
+                experts,
+                expert_map,
+                None,
+                None,
+                workspace,
+                workspace,
+                None,
+                False,
+            )
+        x.mul_(0.5)
+        graph.replay()
+    reference = torch.zeros_like(x, dtype=torch.float32)
+    for t in range(tokens):
+        for k in range(2):
+            e = int(ids[t, k])
+            if e < 0:
+                continue
+            if expert_map is not None:
+                e = int(expert_map[e])
+            if e < 0:
+                continue
+            base13 = x[t].float() @ ref_w1[e]
+            adapter = mapping[t] - 1
+            if adapter >= 0:
+                for s in range(2):
+                    delta = (
+                        x[t].float()
+                        @ a13[0 if packed else s][adapter, e].float().T
+                        @ (
+                            b13[0][
+                                adapter, e, s * logical_size : (s + 1) * logical_size
+                            ]
+                            if packed
+                            else b13[s][adapter, e]
+                        )
+                        .float()
+                        .T
+                    )
+                    base13[s * padded : s * padded + logical_size] += delta
+            activation = torch.nn.functional.silu(base13[:padded]) * base13[padded:]
+            y = activation @ ref_w2[e]
+            if adapter >= 0:
+                y += (
+                    activation[:logical_size]
+                    @ a2[0][adapter, e].float().T
+                    @ b2[0][adapter, e].float().T
+                )
+            reference[t] += weights[t, k] * y
+    torch.testing.assert_close(output.float(), reference, atol=2e-3, rtol=2e-2)
