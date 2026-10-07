@@ -14,11 +14,11 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
+    SpeculatorCudaGraphManager,
+)
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
