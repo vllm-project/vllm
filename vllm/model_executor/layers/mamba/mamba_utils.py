@@ -238,13 +238,14 @@ class MambaStateShapeCalculator:
         """Append the physical ReplaySSM ring shapes.
 
         ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
-        B_cache uses the un-extended ``n_groups``.
+        B_cache uses the same extended group count as the conv-state shards.
         """
         ring_buffer_len = logical_window
         if backend == MambaBackendEnum.FLASHINFER:
             # FlashInfer keeps the live window and current verify window together.
             ring_buffer_len += 1 + num_speculative_tokens
         local_nheads, head_dim, state_size = base_shapes[1]
+        n_groups += cls.extra_groups_for_head_shards(n_groups, tp_world_size)
         local_ngroups = divide(n_groups, tp_world_size)
         return (
             *base_shapes,
@@ -269,12 +270,7 @@ class MambaStateShapeCalculator:
     def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int):
         """Compute the increase in group numbers to account for
         replication in order to accompany the head shards."""
-        # in the case ngoups % tp_size == 0, this will be zero
-        if ngroups % tp_size == 0:
-            return 0
-
-        # for n_groups == 1, this is exactly tp_size - n_groups
-        return tp_size - ngroups
+        return (-ngroups) % tp_size
 
     @classmethod
     def gated_delta_net_state_shape(
