@@ -381,6 +381,7 @@ def test_worker_tracks_asleep_tags_across_sleep_and_partial_wake(monkeypatch):
 
     worker = _make_worker(_RecordingEngine())
     worker._sleep_mode_backend = _Backend()
+    worker._sleep_saved_parameters = {}
     worker._sleep_saved_buffers = {}
     worker._sleep_saved_draft_buffers = {}
     worker.vllm_config = SimpleNamespace(
