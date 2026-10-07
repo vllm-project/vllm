@@ -207,6 +207,8 @@ class SchedulerIterationDetails:
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
+    num_new_req_cached_tokens: int = 0
+    num_new_req_prompt_tokens: int = 0
 
 
 KV_FETCH_WAITING_TO_START = "waiting_to_start"

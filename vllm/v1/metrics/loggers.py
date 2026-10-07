@@ -192,6 +192,7 @@ class LoggingStatLogger(StatLoggerBase):
 
         logger.info(
             "%sIteration(%d): %d context requests, %d context tokens, "
+            "%d new-req cached tokens, %d new-req prompt tokens, "
             "%d generation requests, %d generation tokens, "
             "iteration elapsed time: %.2f ms%s, "
             "%s KV cache usage: %.1f%%%s",
@@ -199,6 +200,8 @@ class LoggingStatLogger(StatLoggerBase):
             details.iteration_index,
             details.num_ctx_requests,
             details.num_ctx_tokens,
+            details.num_new_req_cached_tokens,
+            details.num_new_req_prompt_tokens,
             details.num_generation_requests,
             details.num_generation_tokens,
             details.elapsed_ms,

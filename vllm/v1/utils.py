@@ -29,6 +29,7 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -837,6 +838,8 @@ class IterationDetails:
     num_generation_tokens: int
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
+    num_new_req_cached_tokens: int = 0
+    num_new_req_prompt_tokens: int = 0
 
     def __repr__(self) -> str:
         return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
@@ -844,7 +847,9 @@ class IterationDetails:
                  num_generation_requests={self.num_generation_requests}, \
                  num_generation_tokens={self.num_generation_tokens}, \
                  num_encoder_inputs={self.num_encoder_inputs}, \
-                 num_encoder_output_tokens={self.num_encoder_output_tokens})"
+                 num_encoder_output_tokens={self.num_encoder_output_tokens}, \
+                 num_new_req_cached_tokens={self.num_new_req_cached_tokens}, \
+                 num_new_req_prompt_tokens={self.num_new_req_prompt_tokens})"
 
 
 def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
@@ -866,6 +871,16 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
     num_generation_requests = 0
     num_generation_tokens = 0
     new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
+
+    # Stats needed to compute prefix cache hit rate.
+    num_new_req_cached_tokens = 0
+    num_new_req_prompt_tokens = 0
+    for new_req in scheduler_output.scheduled_new_reqs:
+        num_new_req_cached_tokens += new_req.num_computed_tokens
+        num_new_req_prompt_tokens += length_from_prompt_token_ids_or_embeds(
+            new_req.prompt_token_ids, new_req.prompt_embeds
+        )
+
     for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
         if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or (
             req_id in new_req_ids
@@ -889,4 +904,6 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
         num_generation_tokens,
         num_encoder_inputs,
         num_encoder_output_tokens,
+        num_new_req_cached_tokens,
+        num_new_req_prompt_tokens,
     )

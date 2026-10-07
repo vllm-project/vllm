@@ -593,6 +593,8 @@ class EngineCore:
                 elapsed_ms=0.0,
                 num_encoder_inputs=details.num_encoder_inputs,
                 num_encoder_output_tokens=details.num_encoder_output_tokens,
+                num_new_req_cached_tokens=details.num_new_req_cached_tokens,
+                num_new_req_prompt_tokens=details.num_new_req_prompt_tokens,
             )
 
         start_time = time.monotonic()

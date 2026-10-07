@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
+import torch
+
+from vllm.v1.core.sched.output import (
+    CachedRequestData,
+    NewRequestData,
+    ScheduledEncoderInputStats,
+    SchedulerOutput,
+)
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
@@ -149,6 +156,72 @@ def test_compute_iteration_details_includes_encoder_stats():
 
     assert iteration_details.num_encoder_inputs == 2
     assert iteration_details.num_encoder_output_tokens == 392
+
+
+def _new_request(req_id: str, prompt_len: int, num_computed_tokens: int):
+    return NewRequestData(
+        req_id=req_id,
+        prompt_token_ids=list(range(prompt_len)),
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([],),
+        num_computed_tokens=num_computed_tokens,
+        lora_request=None,
+    )
+
+
+def test_compute_iteration_details_counts_new_req_cached_tokens():
+    """A prefix-cache hit is never scheduled, so it must come from
+    num_computed_tokens rather than num_scheduled_tokens."""
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_new_reqs = [_new_request("a", 100, 80)]
+    scheduler_output.num_scheduled_tokens = {"a": 20}
+
+    iteration_details = compute_iteration_details(scheduler_output)
+
+    assert iteration_details.num_ctx_requests == 1
+    assert iteration_details.num_ctx_tokens == 20
+    assert iteration_details.num_new_req_cached_tokens == 80
+    assert iteration_details.num_new_req_prompt_tokens == 100
+
+
+def test_compute_iteration_details_counts_prompt_embeds_length():
+    """prompt_token_ids is None for prompt_embeds requests; the denominator must
+    still reflect the prompt length."""
+    scheduler_output = SchedulerOutput.make_empty()
+    req = _new_request("a", 0, 48)
+    req.prompt_token_ids = None
+    req.prompt_embeds = torch.zeros(64, 8)
+    scheduler_output.scheduled_new_reqs = [req]
+    scheduler_output.num_scheduled_tokens = {"a": 16}
+
+    iteration_details = compute_iteration_details(scheduler_output)
+
+    assert iteration_details.num_new_req_cached_tokens == 48
+    assert iteration_details.num_new_req_prompt_tokens == 64
+
+
+def test_compute_iteration_details_excludes_continuation_chunks():
+    """A continuation chunk must contribute nothing, or a cold chunked prompt
+    would report reuse it never had."""
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_cached_reqs = CachedRequestData(
+        req_ids=["a"],
+        resumed_req_ids=set(),
+        new_token_ids=[[]],
+        all_token_ids={},
+        new_block_ids=[None],
+        num_computed_tokens=[64],
+        num_output_tokens=[0],
+    )
+    scheduler_output.num_scheduled_tokens = {"a": 32}
+
+    iteration_details = compute_iteration_details(scheduler_output)
+
+    assert iteration_details.num_ctx_requests == 1
+    assert iteration_details.num_new_req_cached_tokens == 0
+    assert iteration_details.num_new_req_prompt_tokens == 0
 
 
 def test_prefill_kv_computed_with_cache():
