@@ -341,6 +341,74 @@ def _try_load_aot_compiled_fn(
         return None
 
 
+def _load_aot_fn_uniform(model: Any, aot_compilation_path: str) -> Any | None:
+    """Load the AOT-compiled function, keeping the decision uniform across ranks.
+
+    A rank that compiles while its peers run loaded artifacts can issue
+    collectives the others never join (#60391), so when the model runs on
+    more than one rank the load-or-compile decision is made collectively:
+    every rank loads iff every rank has a usable artifact, and any
+    disagreement sends every rank to the compile path. Under
+    ``VLLM_FORCE_AOT_LOAD`` a failure raises on every rank instead of one
+    rank dying while its peers hang in a later collective.
+    """
+    if not (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and torch.distributed.get_world_size() > 1
+    ):
+        return _try_load_aot_compiled_fn(model, aot_compilation_path)
+
+    world_size = torch.distributed.get_world_size()
+
+    def every_rank(ok: bool) -> bool:
+        reports: list[bool] = [False] * world_size
+        torch.distributed.all_gather_object(reports, ok)
+        return all(reports)
+
+    has_artifact = (
+        os.path.isfile(aot_compilation_path)
+        and os.path.getsize(aot_compilation_path) > 0
+    )
+    if not every_rank(has_artifact):
+        reason = "an AOT artifact is missing or empty on at least one rank"
+        if envs.VLLM_FORCE_AOT_LOAD:
+            raise RuntimeError(
+                f"VLLM_FORCE_AOT_LOAD is set but {reason}; "
+                "failing uniformly on all ranks"
+            )
+        logger.warning(
+            "Compiling model again on every rank because %s; a per-rank "
+            "decision could split collective usage across ranks",
+            reason,
+        )
+        return None
+
+    load_error: Exception | None = None
+    try:
+        loaded_fn = _try_load_aot_compiled_fn(model, aot_compilation_path)
+    except Exception as e:
+        # Report the failure to the gather instead of raising past it, so no
+        # peer blocks forever; FORCE re-raises uniformly below.
+        loaded_fn, load_error = None, e
+    if every_rank(loaded_fn is not None):
+        return loaded_fn
+    if envs.VLLM_FORCE_AOT_LOAD:
+        if load_error is not None:
+            raise load_error
+        raise RuntimeError(
+            "VLLM_FORCE_AOT_LOAD is set but an AOT artifact failed to load "
+            "on at least one rank; failing uniformly on all ranks"
+        )
+    if load_error is None:
+        logger.warning(
+            "Compiling model again on every rank because an AOT artifact "
+            "failed to load on at least one rank; a per-rank decision could "
+            "split collective usage across ranks",
+        )
+    return None
+
+
 def _support_torch_compile(
     cls: type[_T],
     dynamic_arg_dims: DynamicArgDims,
@@ -584,7 +652,7 @@ def _support_torch_compile(
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             if not envs.VLLM_DISABLE_COMPILE_CACHE:
-                loaded_fn = _try_load_aot_compiled_fn(self, aot_compilation_path)
+                loaded_fn = _load_aot_fn_uniform(self, aot_compilation_path)
                 if loaded_fn is not None:
                     self.aot_compiled_fn = loaded_fn
                     self.was_aot_compile_fn_loaded_from_disk = True
