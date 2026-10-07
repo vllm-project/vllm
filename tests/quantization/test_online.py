@@ -34,6 +34,7 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.humming import HummingMxfp8LinearKernel
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
@@ -1059,7 +1060,7 @@ def test_online_quantization(
         assert isinstance(moe._quant_method, expected_moe_cls)
 
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME and isinstance(
-        o_proj.quant_method.kernel, MarlinMxfp8LinearKernel
+        o_proj.quant_method.kernel, (MarlinMxfp8LinearKernel, HummingMxfp8LinearKernel)
     ):
         assert o_proj.weight.dtype == torch.int32
     elif model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME and isinstance(
