@@ -63,8 +63,14 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsTranscription,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 from .whisper import ISO639_1_SUPPORTED_LANGS
+import re
 
 logger = init_logger(__name__)
 MAX_AUDIO_CLIP_S = 40
@@ -664,6 +670,26 @@ class OmniAsrForConditionalGeneration(
     supports_transcription_only = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(r"^(llama_decoder\..*)\.self_attn_layer_norm"): r"\1.input_layernorm",
+            re.compile(r"^(llama_decoder\..*)\.ffn_layer_norm"): r"\1.post_attention_layernorm",
+            re.compile(r"^(llama_decoder\..*)\.self_attn\.output_proj"): r"\1.self_attn.o_proj",
+            re.compile(r"^(llama_decoder\..*)\.ffn\.inner_proj"): r"\1.mlp.up_proj",
+            re.compile(r"^(llama_decoder\..*)\.ffn\.output_proj"): r"\1.mlp.down_proj",
+            re.compile(r"^(llama_decoder\..*)\.ffn\.gate_proj"): r"\1.mlp.gate_proj",
+        },
+        orig_to_new_prefix={
+            "text_frontend": "language_model.model.embed_tokens",
+            "encoder_frontend": "model.encoder_frontend",
+            "llama_decoder.layer_norm": "language_model.model.norm",
+            "llama_decoder": "language_model.model",
+            "encoder_proj": "model.encoder_proj",
+            "lang_embeddings": "model.lang_embeddings",
+            "encoder": "model.encoder",
+        },
+    )
+
     def __init__(self, *, vllm_config=None, prefix: str = ""):
         super().__init__()
         config: OmniASRConfig = vllm_config.model_config.hf_config
@@ -766,42 +792,19 @@ class OmniAsrForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def transform(inputs):
             name, loaded_weight = inputs
-
-            if name.startswith("llama_decoder.layer_norm"):
-                name = name.replace(
-                    "llama_decoder.layer_norm", "language_model.model.norm"
-                )
-            elif name.startswith("llama_decoder."):
-                name = name.replace("llama_decoder.", "language_model.model.")
-                name = name.replace(".self_attn_layer_norm", ".input_layernorm")
-                name = name.replace(".ffn_layer_norm", ".post_attention_layernorm")
-                name = name.replace(".self_attn.output_proj", ".self_attn.o_proj")
-                name = name.replace(".ffn.inner_proj", ".mlp.up_proj")
-                name = name.replace(".ffn.output_proj", ".mlp.down_proj")
-                name = name.replace(".ffn.gate_proj", ".mlp.gate_proj")
-
+            if name.startswith("llama_decoder."):
                 if ".self_attn.q_proj" in name:
                     num_heads = self.config.text_config.num_attention_heads
                     loaded_weight = _permute_q_k_for_neox(loaded_weight, num_heads)
                 elif ".self_attn.k_proj" in name:
                     num_heads = self.config.text_config.num_key_value_heads
                     loaded_weight = _permute_q_k_for_neox(loaded_weight, num_heads)
-
-            elif name.startswith("text_frontend"):
-                name = name.replace(
-                    "text_frontend", "language_model.model.embed_tokens"
-                )
-            elif name.startswith("final_proj"):
-                # final_proj is top-level on this class, no prefix needed
-                pass
-            else:
-                name = "model." + name
-
             return name, loaded_weight
 
         loader = AutoWeightsLoader(self)
-        result = loader.load_weights(map(transform, weights))
-        return result
+        return loader.load_weights(
+            map(transform, weights), mapper=self.hf_to_vllm_mapper
+        )
 
     @classmethod
     def get_speech_to_text_config(
