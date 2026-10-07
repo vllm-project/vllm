@@ -251,6 +251,7 @@ class Scheduler(SchedulerInterface):
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
         self.encoder_cache_mismatch_reqs: set[str] = set()
+        self.missing_multimodal_kv_reqs: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1673,6 +1674,11 @@ class Scheduler(SchedulerInterface):
                 mm_feature.mm_position = replace(
                     mm_feature.mm_position, offset=mm_feature.mm_position.offset + base
                 )
+                if mm_feature.requires_kv:
+                    session.mm_required_kv_tokens = max(
+                        session.mm_required_kv_tokens,
+                        mm_feature.mm_position.offset + mm_feature.mm_position.length,
+                    )
             session.mm_features.extend(update.mm_features)
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
@@ -1815,6 +1821,16 @@ class Scheduler(SchedulerInterface):
         """
         if num_new_tokens == 0 or not request.has_encoder_inputs:
             return [], num_new_tokens, encoder_compute_budget, [], []
+        if num_computed_tokens < request.mm_required_kv_tokens:
+            logger.error(
+                "Request %s cannot recompute multimodal input without media; "
+                "KV covers %d tokens, requires %d. Retry through prefill.",
+                request.request_id,
+                num_computed_tokens,
+                request.mm_required_kv_tokens,
+            )
+            self.missing_multimodal_kv_reqs.add(request.request_id)
+            return [], 0, encoder_compute_budget, [], []
         encoder_inputs_to_schedule: list[int] = []
         mm_features = request.mm_features
         assert mm_features is not None
@@ -2302,6 +2318,8 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs.clear()
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
+        error_req_ids.update(self.missing_multimodal_kv_reqs)
+        self.missing_multimodal_kv_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
         if self.ec_connector is not None:

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
+import json
 import time
 from collections.abc import Callable, Mapping
 from functools import partial
@@ -11,6 +13,7 @@ from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
+    MultiModalInput,
     PromptType,
     SingletonInput,
     split_enc_dec_input,
@@ -20,6 +23,11 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.kv_handoff import (
+    export_multimodal_kv_handoff,
+    restore_multimodal_kv_handoff,
+    validate_kv_handoff_info,
+)
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
@@ -39,6 +47,8 @@ logger = init_logger(__name__)
 
 
 class InputProcessor:
+    external_kv_handoff_version = 1
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -430,7 +440,7 @@ class InputProcessor:
         current_platform.validate_request(engine_input, params)
 
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
-        self._validate_model_inputs(encoder_input, decoder_input)
+        self._validate_model_inputs(encoder_input, decoder_input, params)
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_input["type"] == "embeds":
@@ -501,6 +511,7 @@ class InputProcessor:
         mm_features: list[MultiModalFeatureSpec] | None = None
 
         if decoder_input["type"] == "multimodal":
+            requires_kv = decoder_input.get("mm_requires_kv", False)
             decoder_mm_inputs = decoder_input["mm_kwargs"]
             decoder_mm_positions = decoder_input["mm_placeholders"]
             decoder_mm_hashes = decoder_input["mm_hashes"]
@@ -532,6 +543,7 @@ class InputProcessor:
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,
+                        requires_kv=requires_kv,
                     )
                 )
 
@@ -605,6 +617,7 @@ class InputProcessor:
         self,
         prompt_input: SingletonInput,
         prompt_type: Literal["encoder", "decoder"],
+        params: SamplingParams | PoolingParams,
     ) -> None:
         prompt_ids = (
             None
@@ -628,19 +641,24 @@ class InputProcessor:
                 )
 
         if prompt_input["type"] == "multimodal":
-            decoder_mm_positions = prompt_input["mm_placeholders"]
-            for modality, mm_positions in decoder_mm_positions.items():
-                for mm_position in mm_positions:
-                    num_embeds = mm_position.get_num_embeds()
-                    if num_embeds > self.mm_encoder_cache_size:
-                        raise VLLMValidationError(
-                            f"The {prompt_type} prompt contains a(n) {modality} item "
-                            f"with {num_embeds} embedding tokens, which exceeds the "
-                            f"pre-allocated encoder cache size "
-                            f"{self.mm_encoder_cache_size}. Please reduce the input "
-                            f"size or increase the encoder cache size "
-                            f"by setting --limit-mm-per-prompt at startup."
-                        )
+            if prompt_input.get("mm_requires_kv", False) is not False:
+                # Only validated KV-only inputs can bypass encoder capacity.
+                # The scheduler enforces their actual KV coverage.
+                self._validate_external_kv_input(prompt_input, params)
+            else:
+                decoder_mm_positions = prompt_input["mm_placeholders"]
+                for modality, mm_positions in decoder_mm_positions.items():
+                    for mm_position in mm_positions:
+                        num_embeds = mm_position.get_num_embeds()
+                        if num_embeds > self.mm_encoder_cache_size:
+                            raise VLLMValidationError(
+                                f"The {prompt_type} prompt contains a(n) {modality} "
+                                f"item with {num_embeds} embedding tokens, which "
+                                f"exceeds the pre-allocated encoder cache size "
+                                f"{self.mm_encoder_cache_size}. Please reduce the "
+                                f"input size or increase the encoder cache size "
+                                f"by setting --limit-mm-per-prompt at startup."
+                            )
 
         # Shared by generate, embedding and pooling requests.
         if prompt_ids:
@@ -650,8 +668,150 @@ class InputProcessor:
         self,
         encoder_input: SingletonInput | None,
         decoder_input: SingletonInput,
+        params: SamplingParams | PoolingParams,
     ):
         if encoder_input is not None:
-            self._validate_model_input(encoder_input, prompt_type="encoder")
+            self._validate_model_input(
+                encoder_input, prompt_type="encoder", params=params
+            )
 
-        self._validate_model_input(decoder_input, prompt_type="decoder")
+        self._validate_model_input(decoder_input, prompt_type="decoder", params=params)
+
+    def _kv_handoff_model_fingerprint(self) -> str:
+        model = self.model_config
+        identity = {
+            "model": model.model,
+            "revision": model.revision,
+            "config": model.hf_config.to_dict(),
+            "dtype": str(model.dtype),
+            "quantization": model.quantization,
+            "kv_cache_dtype": self.cache_config.cache_dtype,
+            "prefix_caching_hash_algo": self.cache_config.prefix_caching_hash_algo,
+        }
+        return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+    async def prepare_multimodal_kv_handoff(
+        self, prompt: PromptType
+    ) -> tuple[MultiModalInput, dict[str, Any]]:
+        """Render once and export the exact input passed to prefill generation.
+
+        Returns:
+            The rendered engine input and a Generate-compatible dictionary
+            containing token_ids, features and cache_salt. Add sampling_params
+            to submit the dictionary to /inference/v1/generate, or restore it
+            with restore_multimodal_kv_handoff() for Python submission.
+            Submit the input directly to AsyncLLM.generate() or
+            LLMEngine.add_request(). LLM.generate() renders raw prompts and
+            does not accept processed multimodal engine inputs.
+
+        """
+        error = self.get_external_kv_handoff_error()
+        if error is not None:
+            raise VLLMValidationError(error)
+        parsed = parse_model_prompt(self.model_config, prompt)
+        (engine_input,) = await self.renderer.render_cmpl_async([parsed])
+        if engine_input["type"] != "multimodal":
+            raise VLLMValidationError("KV handoff requires a rendered multimodal input")
+        state = export_multimodal_kv_handoff(
+            engine_input, self._kv_handoff_model_fingerprint()
+        )
+        return engine_input, state
+
+    def restore_multimodal_kv_handoff(self, payload: dict[str, Any]) -> MultiModalInput:
+        """Restore engine input without image loading or preprocessing.
+
+        Submit the result directly to AsyncLLM.generate() or
+        LLMEngine.add_request(). Do not pass it to LLM.generate() or a renderer:
+        rendering again would discard media identities and KV requirements.
+
+        The input may use local cached KV or a configured KV connector. The
+        scheduler rejects execution unless KV covers every required media span,
+        including after failed loads or preemption. Export/restore does not
+        initiate or validate a KV transfer.
+        """
+        error = self.get_external_kv_handoff_error()
+        if error is not None:
+            raise VLLMValidationError(error)
+        return restore_multimodal_kv_handoff(
+            payload, self._kv_handoff_model_fingerprint()
+        )
+
+    def get_external_kv_handoff_error(self) -> str | None:
+        """Check model/input compatibility independently of KV transport.
+
+        Loading and recovery use the configured connector and scheduler;
+        this check also permits continuation from local KV without a connector.
+        """
+        config = self.vllm_config
+        if (
+            self.model_config.hf_config.architectures
+            != ["LlavaForConditionalGeneration"]
+            or self.model_config.is_encoder_decoder
+            or self.model_config.uses_mrope
+        ):
+            return "external multimodal KV requires a decoder-only LLaVA model"
+        if config.lora_config is not None or config.speculative_config is not None:
+            return "external multimodal KV does not support LoRA or speculation yet"
+        if config.ec_transfer_config is not None:
+            return "external multimodal KV cannot use an encoder cache connector"
+        return None
+
+    def _validate_external_kv_input(
+        self, decoder_input: MultiModalInput, params: SamplingParams | PoolingParams
+    ) -> None:
+        error = self.get_external_kv_handoff_error()
+        if error is not None:
+            raise VLLMValidationError(error)
+        if not isinstance(params, SamplingParams) or params.prompt_logprobs is not None:
+            raise VLLMValidationError(
+                "external multimodal KV requires generation without prompt logprobs"
+            )
+        if decoder_input["mm_requires_kv"] is not True:
+            raise VLLMValidationError("mm_requires_kv must be a boolean")
+        try:
+            validate_kv_handoff_info(
+                decoder_input.get("mm_kv_handoff"),
+                self._kv_handoff_model_fingerprint(),
+            )
+        except ValueError as exc:
+            raise VLLMValidationError(str(exc)) from exc
+        hashes = decoder_input["mm_hashes"]
+        positions = decoder_input["mm_placeholders"]
+        data = decoder_input["mm_kwargs"]
+        if (
+            set(hashes) != {"image"}
+            or set(positions) != {"image"}
+            or set(data) != {"image"}
+        ):
+            raise VLLMValidationError("external multimodal KV supports images only")
+        if not hashes["image"] or not (
+            len(hashes["image"]) == len(positions["image"]) == len(data["image"])
+        ):
+            raise VLLMValidationError("external multimodal KV item counts must match")
+        previous_end = 0
+        for mm_hash, position, item in zip(
+            hashes["image"], positions["image"], data["image"]
+        ):
+            if not isinstance(mm_hash, str) or not mm_hash or item is not None:
+                raise VLLMValidationError(
+                    "external multimodal KV requires hashes and no media payload"
+                )
+            if (
+                type(position.offset) is not int
+                or type(position.length) is not int
+                or position.offset < previous_end
+                or position.length <= 0
+                or position.offset + position.length
+                > len(decoder_input["prompt_token_ids"])
+            ):
+                raise VLLMValidationError(
+                    "external multimodal KV has invalid placeholder ranges"
+                )
+            if position.is_embed is not None and (
+                position.is_embed.ndim != 1
+                or position.is_embed.numel() != position.length
+            ):
+                raise VLLMValidationError(
+                    "external multimodal KV has an invalid embedding mask"
+                )
+            previous_end = position.offset + position.length

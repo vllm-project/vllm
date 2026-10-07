@@ -12,6 +12,7 @@ from vllm.exceptions import VLLMValidationError
 if TYPE_CHECKING:
     import torch
 
+    from vllm.multimodal.feature_specs import MultiModalKvInfo
     from vllm.multimodal.inputs import MultiModalKwargsOptionalItems, PlaceholderRange
 
 
@@ -143,6 +144,12 @@ class MultiModalInput(_InputOptions):
 
     mm_hashes: MultiModalHashes
     """The hashes of the multi-modal data."""
+
+    mm_requires_kv: NotRequired[bool]
+    """All media computation is supplied by KV; missing coverage is an error."""
+
+    mm_kv_handoff: NotRequired["MultiModalKvInfo"]
+    """Source model and position compatibility for a KV-backed continuation."""
 
     mm_placeholders: MultiModalPlaceholders
     """

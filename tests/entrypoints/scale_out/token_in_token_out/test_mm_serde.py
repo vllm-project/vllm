@@ -22,7 +22,8 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.inputs import mm_input
+from vllm.inputs import MultiModalInput, mm_input
+from vllm.multimodal.feature_utils import engine_input_from_features
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
@@ -127,7 +128,7 @@ def _image_engine_input(
     *,
     pixel_keep_on_cpu: bool = False,
     grid_keep_on_cpu: bool = True,
-) -> tuple[object, MultiModalFieldElem, MultiModalFieldElem]:
+) -> tuple[MultiModalInput, MultiModalFieldElem, MultiModalFieldElem]:
     pixel_values = MultiModalFieldElem(
         data=torch.randn(5, 3, dtype=torch.float32),
         field=MultiModalBatchedField(keep_on_cpu=pixel_keep_on_cpu),
@@ -384,3 +385,81 @@ def test_metadata_can_replace_or_extend_full_mm_data():
     merged = merge_mm_kwargs_items(full_item, metadata_item)
     assert merged is not None
     assert set(merged) == {"pixel_values", "image_grid_thw"}
+
+
+@pytest.mark.parametrize("metadata_only", [False, True])
+def test_shared_features_preserve_sparse_masks_for_full_and_ec_inputs(metadata_only):
+    engine_input, _, _ = _image_engine_input()
+    mask = torch.tensor([True, False, True])
+    engine_input["mm_placeholders"]["image"] = [PlaceholderRange(0, 3, mask)]
+    features = extract_mm_features(engine_input)
+    assert features is not None
+    if metadata_only:
+        features.kwargs_data = None
+    request = GenerateRequest(
+        token_ids=engine_input["prompt_token_ids"],
+        features=features,
+        sampling_params={},
+        ec_transfer_params={"image": "source"} if metadata_only else None,
+    )
+    request = GenerateRequest.model_validate_json(request.model_dump_json())
+    restored = engine_input_from_features(request.token_ids, request.features)
+    assert torch.equal(restored["mm_placeholders"]["image"][0].is_embed, mask)
+    assert restored.get("mm_requires_kv", False) is False
+    assert "image_grid_thw" in restored["mm_kwargs"]["image"][0]
+
+
+@pytest.mark.parametrize("has_metadata", [False, True])
+@pytest.mark.parametrize("has_transfer", [False, True])
+def test_explicit_kv_requirement_accepts_metadata_or_layout_with_local_or_remote_kv(
+    has_metadata, has_transfer
+):
+    engine_input, _, _ = _image_engine_input()
+    features = extract_mm_features(engine_input).model_dump()
+    features["kwargs_data"] = None
+    if not has_metadata:
+        features["mm_metadata"] = None
+    features["requires_kv"] = True
+    features["kv_handoff"] = {
+        "version": 1,
+        "model_fingerprint": "model-a",
+        "position_state": "sequence",
+    }
+    request = GenerateRequest.model_validate(
+        {
+            "token_ids": engine_input["prompt_token_ids"],
+            "features": features,
+            "sampling_params": {},
+            "kv_transfer_params": {"remote": True} if has_transfer else None,
+        }
+    )
+    restored = engine_input_from_features(request.token_ids, request.features)
+    assert restored["mm_requires_kv"] is True
+    assert restored["mm_kv_handoff"]["model_fingerprint"] == "model-a"
+    assert (restored["mm_kwargs"]["image"][0] is not None) == has_metadata
+
+
+def test_transfer_parameters_alone_do_not_authorize_metadata_only_inputs():
+    engine_input, _, _ = _image_engine_input()
+    features = extract_mm_features(engine_input)
+    features.kwargs_data = None
+    with pytest.raises(ValidationError, match="features.requires_kv"):
+        GenerateRequest(
+            token_ids=engine_input["prompt_token_ids"],
+            features=features,
+            sampling_params={},
+            kv_transfer_params={"remote": True},
+        )
+
+
+def test_kv_requirement_rejects_full_media_payload():
+    engine_input, _, _ = _image_engine_input()
+    features = extract_mm_features(engine_input).model_dump()
+    features["requires_kv"] = True
+    features["kv_handoff"] = {
+        "version": 1,
+        "model_fingerprint": "model-a",
+        "position_state": "sequence",
+    }
+    with pytest.raises(ValidationError, match="full kwargs_data"):
+        MultiModalFeatures.model_validate(features)

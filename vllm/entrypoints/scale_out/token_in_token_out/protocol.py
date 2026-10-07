@@ -31,6 +31,12 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logprobs import Logprob
+from vllm.multimodal.feature_specs import (
+    MultiModalFeatures as MultiModalFeatures,
+)
+from vllm.multimodal.feature_specs import (
+    PlaceholderRangeInfo as PlaceholderRangeInfo,
+)
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -40,112 +46,12 @@ from vllm.utils import random_uuid
 OutputMode: TypeAlias = Literal["tokens", "text"]
 
 
-class PlaceholderRangeInfo(BaseModel):
-    """Serializable placeholder location for a single multi-modal item."""
-
-    offset: int = Field(ge=0)
-    """Start index of the placeholder tokens in the prompt."""
-
-    length: int = Field(gt=0)
-    """Number of placeholder tokens."""
-
-    # TODO: add `is_embed: list[bool] | None` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
-
-
 def _has_serialized_mm_items(
     payload: dict[str, list[str | None]] | None,
 ) -> bool:
     if not payload:
         return False
     return any(item is not None for items in payload.values() for item in items)
-
-
-class MultiModalFeatures(BaseModel):
-    """Lightweight multimodal metadata produced by the render step.
-
-    Carries hashes (for cache lookup / identification) and placeholder
-    positions so the downstream `/generate` service knows *where* in
-    the token sequence each multimodal item lives.
-    """
-
-    mm_hashes: dict[str, list[str]]
-    """Per-modality item hashes, e.g. `{"image": ["abc", "def"]}`."""
-
-    mm_placeholders: dict[str, list[PlaceholderRangeInfo]]
-    """Per-modality placeholder ranges in the token sequence."""
-
-    kwargs_data: dict[str, list[str | None]] | None = None
-    """Per-modality serialized tensor data.
-
-    Each value is a list parallel to `mm_hashes[modality]`.  A `str`
-    entry is a base64-encoded `MultiModalKwargsItem`; `None` means
-    the item should be resolved from cache.  The entire field is
-    `None` for metadata-only (cache-hit) responses.
-    """
-
-    mm_metadata: dict[str, list[str | None]] | None = None
-    """Per-modality serialized metadata for disaggregated prefill.
-
-    Each value is a list parallel to `mm_hashes[modality]`. A `str`
-    entry is a base64-encoded `MultiModalKwargsItem` containing only
-    placeholder-metadata and `keep_on_cpu` fields. `None` means that
-    the metadata is unavailable for that item. Prefill can use this
-    instead of `kwargs_data` only when `ec_transfer_params` is also
-    set, so embeddings arrive through the EC connector rather than from
-    `pixel_values`.
-    """
-
-    @model_validator(mode="after")
-    def _validate_parallel_fields(self) -> "MultiModalFeatures":
-        modalities = set(self.mm_hashes)
-        if set(self.mm_placeholders) != modalities:
-            raise ValueError(
-                "mm_hashes and mm_placeholders must use the same modalities"
-            )
-        if self.kwargs_data is not None and set(self.kwargs_data) != modalities:
-            raise ValueError("kwargs_data must use the same modalities as mm_hashes")
-        if self.mm_metadata is not None and set(self.mm_metadata) != modalities:
-            raise ValueError("mm_metadata must use the same modalities as mm_hashes")
-
-        flattened_ranges: list[tuple[int, int]] = []
-        for modality in modalities:
-            num_hashes = len(self.mm_hashes[modality])
-            num_placeholders = len(self.mm_placeholders[modality])
-            if num_hashes != num_placeholders:
-                raise ValueError(
-                    f"{modality} mm_hashes and mm_placeholders must have "
-                    "the same length"
-                )
-            if (
-                self.kwargs_data is not None
-                and len(self.kwargs_data[modality]) != num_hashes
-            ):
-                raise ValueError(
-                    f"{modality} kwargs_data and mm_hashes must have the same length"
-                )
-            if (
-                self.mm_metadata is not None
-                and len(self.mm_metadata[modality]) != num_hashes
-            ):
-                raise ValueError(
-                    f"{modality} mm_metadata and mm_hashes must have the same length"
-                )
-            flattened_ranges.extend(
-                (placeholder.offset, placeholder.offset + placeholder.length)
-                for placeholder in self.mm_placeholders[modality]
-            )
-
-        flattened_ranges.sort()
-        for (offset, end), (next_offset, _) in zip(
-            flattened_ranges, flattened_ranges[1:]
-        ):
-            if next_offset < end:
-                raise ValueError(
-                    "mm_placeholders must be globally non-overlapping and sorted"
-                )
-        return self
 
 
 class ReasoningParserKwargs(BaseModel):
@@ -198,9 +104,11 @@ class GenerateRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _require_ec_for_metadata_only(self) -> "GenerateRequest":
+    def _require_fulfillment_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
         if features is None:
+            return self
+        if features.requires_kv:
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
@@ -214,7 +122,8 @@ class GenerateRequest(BaseModel):
                 for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
             ):
                 raise ValueError(
-                    "metadata-only multimodal items require ec_transfer_params"
+                    "metadata-only multimodal items require ec_transfer_params "
+                    "or features.requires_kv"
                 )
         return self
 
