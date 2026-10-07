@@ -1289,6 +1289,7 @@ fn test_tools() -> Vec<ChatTool> {
                 "required": ["location"]
             }),
             strict: None,
+            defer_loading: None,
         },
         ChatTool {
             name: "add".to_string(),
@@ -1306,6 +1307,7 @@ fn test_tools() -> Vec<ChatTool> {
                 "required": ["y", "x", "items"]
             }),
             strict: None,
+            defer_loading: None,
         },
     ]
 }
