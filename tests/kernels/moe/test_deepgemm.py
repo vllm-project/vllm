@@ -998,3 +998,19 @@ def test_expanded_preparation_masks_padding_and_builds_live_expert_bounds(
     torch.testing.assert_close(actual_ids, expected_ids, rtol=0, atol=0)
     torch.testing.assert_close(actual_scales, expected_scales, rtol=0, atol=0)
     torch.testing.assert_close(actual_ends, expected_ends, rtol=0, atol=0)
+
+
+def test_expanded_preparation_uses_64_bit_id_row_offsets():
+    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+        prepare_expanded_deepgemm_input,
+    )
+
+    ids = torch.empty_strided((3, 1), (1 << 30, 1), device="cuda", dtype=torch.int64)
+    ids[:, 0].copy_(torch.arange(3, device="cuda"))
+    scales = torch.ones((3, 40), device="cuda")
+    counts = torch.zeros(48, device="cuda", dtype=torch.int32)
+    counts[:3] = 1
+    _, actual_ids, _ = prepare_expanded_deepgemm_input(ids, scales, counts, None, 128)
+    torch.testing.assert_close(
+        actual_ids, torch.arange(3, device="cuda", dtype=torch.int32), rtol=0, atol=0
+    )

@@ -15,7 +15,7 @@ from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
 from vllm.utils.math_utils import round_up
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _prepare_expanded_deepgemm_input(
     ids,
     scales,
@@ -24,7 +24,7 @@ def _prepare_expanded_deepgemm_input(
     out_ids,
     out_scales,
     expert_ends,
-    M: tl.constexpr,
+    M,
     S: tl.constexpr,
     E: tl.constexpr,
     ID_STRIDE: tl.constexpr,
@@ -36,7 +36,7 @@ def _prepare_expanded_deepgemm_input(
     BLOCK: tl.constexpr,
     EXPERT_BLOCK: tl.constexpr,
 ):
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     rows = offsets // S
     cols = offsets % S
     valid = rows < M
