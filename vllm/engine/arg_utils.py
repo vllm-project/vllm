@@ -84,6 +84,7 @@ from vllm.config.kernel import (
     IrOpPriorityConfig,
     LinearBackend,
     MoEBackend,
+    SparseIndexerMqaLogitsBackend,
     SparseIndexerTopkBackend,
 )
 from vllm.config.load import SafetensorsLoadStrategy
@@ -547,6 +548,9 @@ class EngineArgs:
     linear_backend: LinearBackend = KernelConfig.linear_backend
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
         KernelConfig.sparse_indexer_topk_backend
+    )
+    sparse_indexer_mqa_logits_backend: SparseIndexerMqaLogitsBackend = (
+        KernelConfig.sparse_indexer_mqa_logits_backend
     )
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
@@ -1795,6 +1799,13 @@ class EngineArgs:
         kernel_group.add_argument(
             "--sparse-indexer-topk-backend", **sparse_indexer_topk_kwargs
         )
+        sparse_indexer_mqa_logits_kwargs = kernel_kwargs[
+            "sparse_indexer_mqa_logits_backend"
+        ]
+        sparse_indexer_mqa_logits_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        kernel_group.add_argument(
+            "--sparse-indexer-mqa-logits-backend", **sparse_indexer_mqa_logits_kwargs
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -2737,6 +2748,10 @@ class EngineArgs:
             kernel_config.linear_backend = self.linear_backend
         if self.sparse_indexer_topk_backend != "auto":
             kernel_config.sparse_indexer_topk_backend = self.sparse_indexer_topk_backend
+        if self.sparse_indexer_mqa_logits_backend != "auto":
+            kernel_config.sparse_indexer_mqa_logits_backend = (
+                self.sparse_indexer_mqa_logits_backend
+            )
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
         for op_name, op_priority in asdict(self.ir_op_priority).items():

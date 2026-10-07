@@ -198,6 +198,13 @@ def _missing_sparse_mla(*_: Any, **__: Any) -> NoReturn:
     )
 
 
+def _missing_sm120_paged_mqa_logits(*_: Any, **__: Any) -> NoReturn:
+    raise RuntimeError(
+        "FlashInfer SM120 paged MQA-logits APIs are not available. Install a "
+        "FlashInfer build that ships flashinfer.sm120_paged_mqa_logits."
+    )
+
+
 def _get_submodule(module_name: str) -> Any | None:
     """Safely import a submodule and return it, or None if not available."""
     try:
@@ -312,6 +319,18 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
 flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
     "xqa_batch_decode_with_kv_cache",
+)
+# DeepSeek sparse-attention indexer: FP8 paged MQA logits on SM12x. Same call
+# shape as DeepGEMM's pair (schedule metadata, then the persistent kernel).
+flashinfer_sm120_get_paged_mqa_logits_metadata = _lazy_import_wrapper(
+    "flashinfer.sm120_paged_mqa_logits",
+    "get_paged_mqa_logits_metadata",
+    fallback_fn=_missing_sm120_paged_mqa_logits,
+)
+flashinfer_sm120_fp8_paged_mqa_logits = _lazy_import_wrapper(
+    "flashinfer.sm120_paged_mqa_logits",
+    "fp8_paged_mqa_logits",
+    fallback_fn=_missing_sm120_paged_mqa_logits,
 )
 flashinfer_packed_fused_kda_decode = _lazy_import_wrapper(
     "flashinfer", "packed_fused_kda_decode"
@@ -447,6 +466,57 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
     mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
     dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
     return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
+
+
+@functools.cache
+def has_flashinfer_sm120_paged_mqa_logits() -> bool:
+    """Return ``True`` if FlashInfer ships the SM120 FP8 paged MQA-logits
+    kernels used by the DeepSeek sparse-attention indexer decode path."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.sm120_paged_mqa_logits")
+    return mod is not None and all(
+        callable(getattr(mod, name, None))
+        for name in ("get_paged_mqa_logits_metadata", "fp8_paged_mqa_logits")
+    )
+
+
+@functools.cache
+def flashinfer_sm120_paged_mqa_logits_route_available(
+    num_heads: int, page_kv: int, next_n: int
+) -> bool:
+    """Whether FlashInfer ships an SM120 paged MQA-logits kernel for this
+    (indexer heads, KV page size, Q rows per request) combination.
+
+    The package exports a fixed set of routes; ask its capability query rather
+    than assuming, so an unshipped shape is never selected only to abort at
+    the first decode. A build without the query reports no routes.
+    """
+    if not has_flashinfer_sm120_paged_mqa_logits():
+        return False
+    mod = _get_submodule(
+        "flashinfer.experimental.deepgemm_sm120_paged_mqa_logits.sm120_paged_mqa"
+    )
+    route_available = getattr(mod, "route_available", None) if mod else None
+    if route_available is None:
+        return False
+    return bool(route_available(int(num_heads), int(page_kv), int(next_n)))
+
+
+@functools.cache
+def flashinfer_sm120_paged_mqa_logits_max_batch() -> int | None:
+    """Request-row ceiling of FlashInfer's SM120 paged MQA-logits scheduler
+    (the ``context_lens.shape[0]`` it accepts), or ``None`` when the package
+    or its policy query is unavailable."""
+    if not has_flashinfer_sm120_paged_mqa_logits():
+        return None
+    mod = _get_submodule(
+        "flashinfer.experimental.deepgemm_sm120_paged_mqa_logits.sm120_paged_mqa"
+    )
+    max_batch = getattr(mod, "max_batch", None) if mod else None
+    if max_batch is None:
+        return None
+    return int(max_batch())
 
 
 @functools.cache
@@ -1315,6 +1385,11 @@ __all__ = [
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "flashinfer_xqa_batch_decode_with_kv_cache",
+    "flashinfer_sm120_get_paged_mqa_logits_metadata",
+    "flashinfer_sm120_fp8_paged_mqa_logits",
+    "flashinfer_sm120_paged_mqa_logits_route_available",
+    "flashinfer_sm120_paged_mqa_logits_max_batch",
+    "has_flashinfer_sm120_paged_mqa_logits",
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",
     "autotune",

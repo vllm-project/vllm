@@ -178,6 +178,8 @@ SparseIndexerTopkBackend = Literal[
     "aiter",
 ]
 
+SparseIndexerMqaLogitsBackend = Literal["auto", "deep_gemm", "flashinfer_sm120"]
+
 # DeepGEMM consumes the DeepSeek-V4 MXFP4 checkpoint recipe. CuTeDSL is
 # selected by quantization methods and is not architecture-specific.
 FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
@@ -343,6 +345,25 @@ class KernelConfig:
     Explicit values raise RuntimeError when their constraints are not met.
     """
 
+    sparse_indexer_mqa_logits_backend: SparseIndexerMqaLogitsBackend = "auto"
+    """Backend for the DSA sparse indexer's paged MQA-logits decode kernel (the
+    stage that scores every cached K row ahead of the top-k). Available options:
+
+    - "auto": FlashInfer's SM120 kernel on SM12x GPUs (RTX 5090 / RTX PRO 6000
+      Blackwell) when FlashInfer ships a route for the model's indexer heads,
+      KV page size and next_n (1 + num_speculative_tokens in {1, 2, 4}), the
+      indexer cache is a dense per-layer view (layer-compact KV cache layout,
+      unpadded page), decode context parallelism is off and max_num_seqs fits
+      FlashInfer's scheduler request ceiling; DeepGEMM everywhere else
+    - "deep_gemm": Use DeepGEMM's fp8_fp4_paged_mqa_logits kernel
+    - "flashinfer_sm120": Use FlashInfer's SM120 FP8 paged MQA-logits kernel
+      (SM12x only, FP8 indexer cache, next_n in {1, 2, 4}, same constraints
+      as the "auto" selection)
+
+    Explicit values raise RuntimeError when their constraints are not met. The
+    dense prefill indexer logits always run on DeepGEMM.
+    """
+
     linear_backend: LinearBackend = "auto"
     """Backend for linear layer GEMM kernels. Available options:
 
@@ -396,6 +417,13 @@ class KernelConfig:
     @field_validator("sparse_indexer_topk_backend", mode="before")
     @classmethod
     def _normalize_sparse_indexer_topk_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("sparse_indexer_mqa_logits_backend", mode="before")
+    @classmethod
+    def _normalize_sparse_indexer_mqa_logits_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value
