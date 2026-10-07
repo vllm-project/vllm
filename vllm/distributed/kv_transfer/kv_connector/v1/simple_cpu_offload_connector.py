@@ -72,6 +72,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         # future cache miss, so opt out of the producer-role default.
         return False
 
+    @classmethod
+    def requires_matching_kv_cache_groups(cls, vllm_config: VllmConfig) -> bool:
+        # Offloaded KV never leaves this engine.
+        return False
+
     def __init__(
         self,
         vllm_config: VllmConfig,

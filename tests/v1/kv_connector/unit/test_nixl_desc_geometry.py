@@ -294,7 +294,7 @@ def test_packed_mla_rejects_unequal_block_sizes_before_peer_registration(
     metadata.engine_id = "remote"
     metadata.block_size = remote_block_size
     with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
-        producer.add_remote_agent(metadata)
+        producer._validate_remote_parallel_config(metadata)
     assert len(producer.nixl_wrapper.dlists) == 1  # Only the local list exists.
     assert producer.tp_mappings == {}
     assert "remote" not in producer.dst_num_blocks
@@ -529,8 +529,11 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
     assert _descriptor_geometry(padded) == _descriptor_geometry(unpadded)
 
 
-def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
-    """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout."""
+def _make_mla_hybrid_worker(
+    local_block_size, kernel_block_size, num_logical_blocks, mamba=True
+):
+    """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout, or a pure
+    MLA one without ``mamba``."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
     )
@@ -563,6 +566,7 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
     # The three groups overlay each other, so layer i of every group aliases the same
     # region: mla.i, kda_a.i and kda_b.i all live at i * layer_stride.
     layer_stride = num_logical_blocks * unified_page
+    prefixes = ("mla", "kda_a", "kda_b") if mamba else ("mla",)
     kv_cache_config = KVCacheConfig(
         num_blocks=num_logical_blocks,
         kv_cache_tensors=[
@@ -572,12 +576,14 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
                 layer_stride=layer_stride,
                 block_stride=unified_page,
             )
-            for prefix in ("mla", "kda_a", "kda_b")
+            for prefix in prefixes
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla.0", "mla.1"], mla_spec),
-            KVCacheGroupSpec(["kda_a.0", "kda_a.1"], kda_spec),
-            KVCacheGroupSpec(["kda_b.0", "kda_b.1"], kda_spec),
+            KVCacheGroupSpec(
+                [f"{prefix}.0", f"{prefix}.1"],
+                mla_spec if prefix == "mla" else kda_spec,
+            )
+            for prefix in prefixes
         ],
     )
 
@@ -623,14 +629,17 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
             )
             for _ in range(2)
         ]
+        # MLA layers see their pages as [B, 1, N, C], like the real views.
         worker.register_kv_caches(
             {
-                "kda_a.0": tensors[0],
-                "mla.0": tensors[0],
-                "kda_b.0": tensors[0],
-                "kda_a.1": tensors[1],
-                "mla.1": tensors[1],
-                "kda_b.1": tensors[1],
+                f"{prefix}.{i}": tensors[i].view(
+                    len(tensors[i]), 1, kernel_block_size, -1
+                )
+                if prefix == "mla"
+                else tensors[i]
+                for i in range(2)
+                for prefix in ("kda_a", "mla", "kda_b")
+                if prefix in prefixes
             }
         )
     # Keep tensors alive alongside the worker; flat views for byte checks.
@@ -969,12 +978,21 @@ def _resolve(
 
 
 def _run_hetero_case(
-    local_block, kernel, remote_block, num_tokens, tp_size=2, remote_kernel=None
+    local_block,
+    kernel,
+    remote_block,
+    num_tokens,
+    tp_size=2,
+    remote_kernel=None,
+    mamba=True,
+    cached=0,
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
     ``remote_kernel`` defaults to the local kernel block size; a smaller
-    value additionally exercises block_size_ratio > 1.
+    value additionally exercises block_size_ratio > 1. Without ``mamba`` the
+    model is pure MLA, whose local prefix hit of ``cached`` blocks is not
+    pulled.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
@@ -983,14 +1001,15 @@ def _run_hetero_case(
     remote_kernel = remote_kernel or kernel
     block_size_ratio = kernel // remote_kernel
     remote_ppl = remote_block // remote_kernel
-    matched = num_tokens - 1  # mamba N-1 rule
-    n_local = -(-num_tokens // local_block)
+    matched = num_tokens - 1 if mamba else num_tokens  # mamba N-1 rule
+    n_local = -(-matched // local_block)  # D allocates for the pulled tokens
     n_remote = -(-matched // remote_block)
 
     worker = _make_mla_hybrid_worker(
         local_block_size=local_block,
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
+        mamba=mamba,
     )
     # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
     # shards of each.
@@ -1006,8 +1025,12 @@ def _run_hetero_case(
     # Sparse ids so neighbors exist between the request's blocks.
     local_attn = [2 * i + 1 for i in range(n_local)]
     remote_attn = [2 * i + 2 for i in range(n_remote)]
-    local_ids = (local_attn, [0], [2 * n_local + 2])
-    remote_ids = [remote_attn, [1], [0]]
+    if mamba:
+        local_ids: tuple[list[int], ...] = (local_attn, [0], [2 * n_local + 2])
+        remote_ids = [remote_attn, [1], [0]]
+    else:
+        local_ids = (local_attn[cached:],)
+        remote_ids = [remote_attn]
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -1020,6 +1043,7 @@ def _run_hetero_case(
             "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": tp_size,
+            "remote_num_tokens": matched,
         },
     )
     meta = metadata.reqs_to_recv["req-b"]
@@ -1091,7 +1115,9 @@ def _run_hetero_case(
 
     # Invariant 3: full coverage of the matched tokens, at the finest
     # transfer granularity (the remote kernel block).
-    needed = {t for t in range(0, matched - matched % remote_kernel, remote_kernel)}
+    needed = set(
+        range(cached * local_block, matched - matched % remote_kernel, remote_kernel)
+    )
     missing = needed - covered_tokens
     assert not missing, (
         f"tokens never transferred: {sorted(missing)[:8]} "
@@ -1118,7 +1144,7 @@ def _run_hetero_case(
     assert "req-b" in done_recving
     n_excluded = -(-matched // local_block)
     stale = []
-    for b in local_attn[:n_excluded]:
+    for b in local_attn[cached:n_excluded]:
         for region, t in enumerate(worker._test_tensors):
             page = t[b * local_unified : (b + 1) * local_unified]
             n_stale = int((page == 0xAA).sum())
@@ -1134,21 +1160,26 @@ def _run_hetero_case(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "local_block,remote_block",
+    "local_block,remote_block,mamba",
     [
-        (12, 8),  # ppl 3 vs 2
-        (36, 8),  # ppl 9 vs 2 (large ppl asymmetry, scaled)
-        (24, 4),  # ppl 6 vs 1
-        (16, 24),  # remote larger than local (D_TP > P_TP direction)
+        (12, 8, True),  # ppl 3 vs 2
+        (36, 8, True),  # ppl 9 vs 2 (large ppl asymmetry, scaled)
+        (24, 4, True),  # ppl 6 vs 1
+        (16, 24, True),  # remote larger than local (D_TP > P_TP direction)
+        (16, 24, False),  # pure MLA
     ],
 )
 @pytest.mark.parametrize("num_tokens", list(range(2, 40)))
-def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens):
+def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens, mamba):
     """Sweep prompt lengths across block-boundary residues for several
     hetero-ppl geometries; assert neighbor-safety, token alignment, and
     coverage of every transferred kernel block."""
     _run_hetero_case(
-        local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
+        local_block,
+        kernel=4,
+        remote_block=remote_block,
+        num_tokens=num_tokens,
+        mamba=mamba,
     )
 
 
@@ -1159,19 +1190,22 @@ def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens)
     # (8), the remote logical block (8) and the local logical block (24).
     [2, 5, 8, 9, 13, 16, 17, 21, 24, 25, 29, 32, 33, 41, 48, 49],
 )
-def test_hetero_ppl_with_block_size_ratio(num_tokens):
+@pytest.mark.parametrize(("mamba", "cached"), [(True, 0), (False, 2)])
+def test_hetero_ppl_with_block_size_ratio(num_tokens, mamba, cached):
     """Both hetero regimes at once: kernel blocks differ (local 8 / remote
     4, block_size_ratio=2) *and* physical_blocks_per_logical differs (3 vs
     2). The transfer is clipped at remote sub-block granularity by the
-    pairing and front-trimmed by _apply_prefix_caching, so the
-    untransferred tail can span both a partial block and whole blocks —
-    the case each of the two former zeroing paths handled only half of."""
+    pairing, so the untransferred tail can span both a partial block and
+    whole blocks — the case each of the two former zeroing paths handled
+    only half of."""
     _run_hetero_case(
         local_block=24,
         kernel=8,
         remote_block=8,
         remote_kernel=4,
-        num_tokens=num_tokens,
+        num_tokens=num_tokens + cached * 24,
+        mamba=mamba,
+        cached=cached,
     )
 
 
@@ -1225,12 +1259,25 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
 
 
 @pytest.mark.cpu_test
-def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
+@pytest.mark.parametrize(
+    ("mamba", "remote_dcp_size", "page_divisor"),
+    [
+        # Equal kernel block sizes (ratio 1), but a half-sized per-token page.
+        (True, 1, 2),
+        # Pure MLA under DCP with different logical block sizes (12 vs 8).
+        (False, 2, 1),
+    ],
+)
+def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid(
+    mamba, remote_dcp_size, page_divisor
+):
     """The MLA per-token page is TP-independent, so kernel block lengths
     differing by anything other than the block-size ratio must fail the
-    handshake loudly rather than transfer at mismatched geometry."""
+    handshake loudly rather than transfer at mismatched geometry. So must
+    DCP, which shards tokens at the logical block size, across different
+    logical block sizes."""
     worker = _make_mla_hybrid_worker(
-        local_block_size=12, kernel_block_size=4, num_logical_blocks=8
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8, mamba=mamba
     )
     meta_r = _make_remote_meta(
         worker,
@@ -1239,10 +1286,11 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
         remote_num_logical=12,
         remote_ssm_sizes=(24, 32),
     )
-    # Equal kernel block sizes (ratio 1), but a half-sized per-token page.
-    meta_r.block_lens = [x // 2 for x in worker.block_len_per_layer]
+    meta_r.block_lens = [x // page_divisor for x in worker.block_len_per_layer]
     with pytest.raises((AssertionError, RuntimeError)):
-        worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
+        worker.add_remote_agent(
+            meta_r, remote_tp_rank=0, remote_tp_size=2, remote_dcp_size=remote_dcp_size
+        )
 
 
 def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
@@ -1651,3 +1699,232 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
     )
     # Paged block 1 in both regions; ring block 0 only in its scratch region.
     assert sorted(desc_ids.tolist()) == sorted([0 * 2 + 1, 1 * 2 + 1, 1 * 2 + 0])
+
+
+def _make_grouped_worker(engine_id, specs, group_size, tp_rank=0, tp_size=1):
+    """Pull worker whose KV cache groups hold up to ``group_size`` layers of
+    one spec, assigned as by the uniform-page-size planner."""
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    layers_by_spec = defaultdict(list)
+    for name, spec in specs.items():
+        layers_by_spec[spec].append(name)
+    groups = []
+    for spec, names in layers_by_spec.items():
+        num_groups = -(-len(names) // group_size)
+        groups += [
+            KVCacheGroupSpec(names[i::num_groups], spec) for i in range(num_groups)
+        ]
+    vllm_config = create_vllm_config(block_size=16)
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    page_size = next(iter(specs.values())).page_size_bytes
+    num_regions = max(len(group.layer_names) for group in groups)
+    kv_cache_config = get_kv_cache_config_from_groups(
+        vllm_config, groups, 32 * num_regions * page_size
+    )
+    caches = allocate_kv_cache(
+        kv_cache_config, torch.device("cpu"), KVCacheLayout.LBHNC
+    )
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [
+        max(spec.block_size for spec in specs.values())
+    ]
+    fake_backend.get_name.return_value = "FLASH_ATTN"
+    fake_platform = MagicMock(device_type="cuda")
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=tp_rank),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=tp_size),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "current_platform", fake_platform),
+        # The full attention layers' single KV head.
+        patch.object(
+            type(vllm_config.model_config), "get_total_num_kv_heads", lambda _: 1
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, engine_id, kv_cache_config)
+        worker.register_kv_caches(caches)
+    return worker, caches
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("hybrid", "prefill_tp", "prefill_group_size", "decode_group_size"),
+    [
+        ("sliding_window", 1, 2, 4),
+        ("gdn", 1, 2, 4),
+        ("sliding_window", 2, 2, 4),
+        ("replicated", 2, 4, 4),
+    ],
+)
+def test_pull_between_different_group_plans(
+    monkeypatch, hybrid, prefill_tp, prefill_group_size, decode_group_size
+):
+    """P and D group the same layers differently, or prefill TP2 replicates
+    every KV head: each decode KV head and token receives the prefill KV of
+    the same layer, head and token, and nothing else in the decode KV cache
+    is written. At prefill TP2 the full attention head is replicated and the
+    sliding-window heads are sharded, which changes their pages by different
+    factors, or replicated."""
+    import ctypes
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        MambaSpec,
+        SlidingWindowSpec,
+    )
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+
+    def make_specs(tp):
+        # Equal 1 KiB pages: a replicated 1 x 16 full attention head, and
+        # sliding-window heads of 2 x 8 sharded across TP or 1 x 16 replicated.
+        full = FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
+        )
+        block, heads, size = (
+            (16, 1, 16) if hybrid == "replicated" else (16 * tp, 2 // tp, 8)
+        )
+        other = (
+            SlidingWindowSpec(
+                block_size=block,
+                num_kv_heads=heads,
+                head_size=size,
+                dtype=torch.float16,
+                sliding_window=64,
+            )
+            if hybrid != "gdn"
+            else MambaSpec(
+                block_size=16,
+                shapes=((24, 3), (2, 4, 4)),
+                dtypes=(torch.float16, torch.float16),
+                page_size_padded=full.page_size_bytes,
+                mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            )
+        )
+        return {
+            f"model.layers.{i}.attn": full if i % 4 == 3 else other for i in range(8)
+        }
+
+    prefill = [
+        _make_grouped_worker(
+            "P", make_specs(prefill_tp), prefill_group_size, rank, prefill_tp
+        )
+        for rank in range(prefill_tp)
+    ]
+    decode, decode_caches = _make_grouped_worker("D", make_specs(1), decode_group_size)
+    decode._remote_agents["P"] = {
+        (0, rank): decode.add_remote_agent(
+            msgspec.msgpack.decode(
+                worker.xfer_handshake_metadata.agent_metadata_bytes,
+                type=NixlAgentMetadata,
+            ),
+            rank,
+            prefill_tp,
+        )
+        for rank, (worker, _) in enumerate(prefill)
+    }
+    assert decode.tp_mappings["P"].group_pairs is not None
+
+    page_size = 1024
+    num_tokens = 48
+
+    def raw(cache):
+        storage = cache.untyped_storage()
+        return torch.empty(0, dtype=torch.uint8).set_(storage, 0, (storage.nbytes(),))
+
+    def page(caches, name, block):
+        start = caches[name].data_ptr() - raw(caches[name]).data_ptr()
+        start += block * page_size
+        return raw(caches[name])[start : start + page_size]
+
+    def block_ids(worker, ids):
+        # Pages of the request's tokens per attention group, one SSM state slot.
+        return [
+            [
+                next(ids)
+                for _ in range(
+                    1
+                    if isinstance(group.kv_cache_spec, MambaSpec)
+                    else -(-num_tokens // group.kv_cache_spec.block_size)
+                )
+            ]
+            for group in worker.kv_cache_config.transfer_groups
+        ]
+
+    prefill_ids = block_ids(prefill[0][0], iter(range(1, 32)))
+    decode_ids = block_ids(decode, iter(range(31, 0, -1)))
+    for worker, caches in prefill:
+        for ids, group in zip(prefill_ids, worker.kv_cache_config.transfer_groups):
+            for name in group.layer_names:
+                for block in ids:
+                    page(caches, name, block).random_(0, 256)
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=decode_ids,
+        kv_transfer_params={
+            "remote_block_ids": prefill_ids,
+            "remote_engine_id": "P",
+            "remote_request_id": "req-P",
+            "remote_host": "localhost",
+            "remote_port": 1,
+            "tp_size": prefill_tp,
+            "remote_num_tokens": num_tokens,
+        },
+    )
+    decode._read_blocks_for_req("req", metadata.reqs_to_recv["req"])
+    nixl = decode.nixl_wrapper
+    for _, local, local_ids, remote, remote_ids in nixl.xfers:
+        for (dst, length, _), (src, src_length, _) in zip(
+            nixl.dlists[local][local_ids], nixl.dlists[remote][remote_ids], strict=True
+        ):
+            assert length == src_length
+            ctypes.memmove(int(dst), int(src), int(length))
+
+    prefill_group = prefill[0][0].kv_cache_config.transfer_group_index_by_layer
+    for ids, group in zip(decode_ids, decode.kv_cache_config.transfer_groups):
+        for name in group.layer_names:
+            prefill_ids_of_layer = prefill_ids[prefill_group[name]]
+            for pos, block in enumerate(ids):
+                received = page(decode_caches, name, block)
+                if isinstance(group.kv_cache_spec, MambaSpec):
+                    sent = page(prefill[0][1], name, prefill_ids_of_layer[pos])
+                    size = group.kv_cache_spec.state_content_size_bytes
+                    assert torch.equal(received[:size], sent[:size]), (name, block)
+                else:
+                    # [heads, tokens, K|V] views of both pages.
+                    heads = decode_caches[name][block].view(torch.int16)
+                    for head in range(heads.shape[0]):
+                        rank = head * prefill_tp // max(heads.shape[0], prefill_tp)
+                        prefill_cache = prefill[rank][1][name].view(torch.int16)
+                        start = pos * heads.shape[1]
+                        sent = prefill_cache[
+                            prefill_ids_of_layer[start // prefill_cache.shape[2]]
+                        ][head % prefill_cache.shape[1]]
+                        offset = start % prefill_cache.shape[2]
+                        assert torch.equal(
+                            heads[head], sent[offset : offset + heads.shape[1]]
+                        ), (name, block, head)
+                received.zero_()
+    assert not raw(next(iter(decode_caches.values()))).any()
+
+    # A full local prefix hit only notifies each prefill rank, once.
+    notified = []
+    nixl.send_notif = lambda agent, notif_msg: notified.append(agent)
+    metadata.reqs_to_recv["req"].local_physical_block_ids = []
+    decode._read_blocks_for_req("req", metadata.reqs_to_recv["req"])
+    assert len(notified) == prefill_tp

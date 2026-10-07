@@ -24,6 +24,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -31,6 +32,40 @@ EngineId = str
 # block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
 # mutability and are for connector internal use only.
 BlockIds = tuple[list[int], ...] | list[list[int]]
+
+
+def get_prefill_stop(request: "Request", backoff: int) -> int:
+    """The prompt tokens a P/D prefiller computes and its decoder loads.
+
+    Both sides derive it from the same prompt. It leaves the trailing
+    ``backoff`` tokens to the decoder, and moves back to the start of a
+    multimodal item that cut would split: models parse an item from its
+    whole placeholder. 0 means no prefix can be transferred, and the decoder
+    computes the whole prompt.
+    """
+    stop = request.num_prompt_tokens - backoff
+    for feature in request.mm_features:
+        position = feature.mm_position
+        if position.offset < stop < position.offset + position.length:
+            stop = position.offset
+    return max(stop, 0)
+
+
+def truncate_prompt_for_prefill(request: "Request", stop: int) -> None:
+    """P-side: drop the prompt from ``stop`` on, with the multimodal items
+    there, before the request is scheduled."""
+    # A mixed-mode prompt carries token ids, embeddings and a mask.
+    if request.prompt_token_ids is not None:
+        del request.prompt_token_ids[stop:]
+    if request.prompt_embeds is not None:
+        request.prompt_embeds = request.prompt_embeds[:stop]
+    if request.prompt_is_token_ids is not None:
+        del request.prompt_is_token_ids[stop:]
+    del request._all_token_ids[stop:]
+    request.num_prompt_tokens = stop
+    request.mm_features = [
+        feature for feature in request.mm_features if feature.mm_position.offset < stop
+    ]
 
 
 def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
@@ -256,8 +291,6 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
 
     """
     blocks_to_update = cache.index_select(0, indices)
-    # use physical order
-    blocks_to_update = blocks_to_update.permute(0, 2, 1, 3)
     n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
@@ -267,56 +300,28 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
         .permute(0, 2, 1, 3, 4)
         .flatten(2, 3)
     )
-    permuted_blocks = permuted_blocks.permute(0, 2, 1, 3)
-    cache.index_copy_(0, indices, permuted_blocks)
-
-
-def kv_postprocess_layout_on_receive(cache, indices):
-    """Transforms the layout of received KV cache blocks to the local format.
-
-    This method corrects layout mismatches from direct memory copies by
-    permuting the tensor dimensions.
-
-    4D cache:
-    - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
-    - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
-    5D cache:
-    - **Source Layout:** `[num_blocks, kv_dim, n_kv_head, block_size, head_dim]`
-    - **Target Layout:** `[num_blocks, kv_dim, block_size, n_kv_head, head_dim]`
-
-    Implementation:
-    - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
-    - permuted_blocks = x.permute(*inv_order) # transpose n_kv_heads, block_size
-    - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
-
-    """
-    blocks_to_update = cache.index_select(0, indices)
-    target_shape = list(blocks_to_update.shape)
-    target_shape[0] = -1
-    inv_order = [0, 1, 3, 2, 4] if blocks_to_update.ndim == 5 else [0, 2, 1, 3]
-    src_shape = tuple(target_shape[i] for i in inv_order)
-    blocks_to_update = cache.index_select(0, indices)
-    permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
     cache.index_copy_(0, indices, permuted_blocks)
 
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
     """Transforms the layout of received KV cache to the local block_size and LBHNC.
-    (Only works for local blocksize > remote blocksize)
+    (Only works for local blocksize >= remote blocksize)
 
     prefill is LBHNC, smaller block_size
     decode(local) is LBNHC, larger block_size
     """
     blocks_to_update = cache.index_select(0, indices)
 
-    block_size, n_kv_heads, head_size = blocks_to_update.shape[1:]
+    n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
 
+    # View the received bytes in memory order as the remote head-major blocks.
     permuted_blocks = (
-        blocks_to_update.reshape(-1, n_blocks, n_kv_heads, remote_block_size, head_size)
-        .permute(0, 1, 3, 2, 4)
-        .flatten(1, 2)
+        blocks_to_update.transpose(1, 2)
+        .reshape(-1, n_blocks, n_kv_heads, remote_block_size, head_size)
+        .permute(0, 2, 1, 3, 4)
+        .flatten(2, 3)
     )
     cache.index_copy_(0, indices, permuted_blocks)
 

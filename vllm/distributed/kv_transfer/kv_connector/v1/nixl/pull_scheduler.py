@@ -58,8 +58,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            token_ids = request.prompt_token_ids or []
-            actual = self._get_remote_prefill_token_count(len(token_ids))
+            actual = self._get_remote_prefill_token_count(request)
             count = actual - num_computed_tokens
             if count > 0:
                 return count, True
@@ -82,10 +81,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # as an external token count to scheduler.
             # The tokens will be loaded if not already present
             # in the prefill node local cache
+            # The workers pair the two sides' blocks from the end of the
+            # sequence, so the decode node's KV is reusable only if this
+            # request resumes where it ends, short of the last prompt token.
             remote_num_tokens = params.get("remote_num_tokens") or 0
-            count = (
-                min(remote_num_tokens, request.num_prompt_tokens) - num_computed_tokens
-            )
+            count = 0
+            if remote_num_tokens < request.num_prompt_tokens:
+                count = remote_num_tokens - num_computed_tokens
             if count > 0:
                 # Check kv_recompute_threshold: skip pull if
                 # remote tokens are below the threshold.

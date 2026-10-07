@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -725,6 +726,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     mock_plan = MagicMock(spec=TPMapping)
     mock_plan.all_source_ranks = ()
     mock_plan.source_ranks_per_group = ()
+    mock_plan.group_pairs = None
     worker.tp_mappings = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()
@@ -1403,46 +1405,66 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
-def test_post_process_zeroes_untransferred_tail():
-    """The untransferred sub-blocks of the last local block are zeroed on
-    receive; mamba state caches are untouched by the attention permute."""
+@pytest.mark.parametrize(
+    ("kv_cache_layout", "enable_permute_local_kv"),
+    [("LBHNC", False), ("LBNHC", False), ("LBNHC", True)],
+)
+def test_post_process_zeroes_untransferred_tail(
+    kv_cache_layout, enable_permute_local_kv
+):
+    """Received remote sub-blocks are regrouped per head and the untransferred
+    sub-blocks of the last local block are zeroed on receive, once per block
+    although two attention groups alias the tensor."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     ratio = 4
     block_tokens = 8  # 2 tokens per remote sub-block
+    num_kv_heads = 2  # fewer than ratio
 
     worker = MagicMock(spec=NixlConnectorWorker)
-    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
     worker.transfer_topo = MagicMock()
     worker.device_type = "cpu"
-    worker.enable_permute_local_kv = False
-    attn_cache = torch.ones(6, block_tokens, 2, 4)
-    mamba_cache = torch.ones(6, 16)
-    worker.device_kv_caches = {"attn.0": attn_cache, "mamba.0": mamba_cache}
+    worker.enable_permute_local_kv = enable_permute_local_kv
+    worker.kv_cache_layout = kv_cache_layout
+    # Attention caches are [B, H, N, C]; distinct values per head and token.
+    expected = torch.arange(6 * num_kv_heads * block_tokens * 4).view(
+        6, num_kv_heads, block_tokens, 4
+    )
+    # Blocks [2, 3] as received: `ratio` head-major remote sub-blocks each.
+    received = (
+        expected[2:4]
+        .unflatten(2, (ratio, -1))
+        .transpose(1, 2)
+        .reshape(2, num_kv_heads, block_tokens, 4)
+    )
+    if kv_cache_layout == "LBNHC":
+        attn_cache = expected.transpose(1, 2).contiguous().transpose(1, 2)
+        if enable_permute_local_kv:
+            # The remote is LBHNC: its bytes land in token-major memory.
+            attn_cache.transpose(1, 2)[2:4] = received.view(2, block_tokens, -1, 4)
+        # Otherwise token-major blocks receive the sub-blocks in token order.
+    else:
+        attn_cache = expected.clone()
+        attn_cache[2:4] = received
+    worker.device_kv_caches = {"attn.0": attn_cache, "swa.0": attn_cache}
     fa_group = MagicMock(layer_names=["attn.0"])
-    ssm_group = MagicMock(layer_names=["mamba.0"])
-    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, ssm_group])
-    # The cached property filters mamba layers out of the permuted caches.
-    attn_caches = NixlConnectorWorker._attention_kv_caches.func(worker)
-    assert len(attn_caches) == 1 and attn_caches[0] is attn_cache
-    worker._attention_kv_caches = attn_caches
+    swa_group = MagicMock(layer_names=["swa.0"])
+    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, swa_group])
     _bind_worker_method(worker, "post_process_device_kv_on_receive")
 
-    # Request occupies blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [([2, 3], 6)])
+    # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
-    assert torch.all(attn_cache[2] == 1)
-    assert torch.all(attn_cache[3, :4] == 1)
-    assert torch.all(attn_cache[3, 4:] == 0)
-    # Untouched blocks and the mamba cache keep their content.
-    assert torch.all(attn_cache[4] == 1)
-    assert torch.all(mamba_cache == 1)
+    assert torch.equal(attn_cache[2], expected[2])
+    assert torch.equal(attn_cache[3, :, :4], expected[3, :, :4])
+    assert torch.all(attn_cache[3, :, 4:] == 0)
+    # Untouched blocks keep their content.
+    assert torch.equal(attn_cache[4], expected[4])
 
 
 @pytest.mark.cpu_test
@@ -1559,21 +1581,17 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "has_mamba,is_hma_required,expected_count",
-    [
-        (True, True, 9),
-        (False, False, 10),
-        (False, True, 10),
-    ],
+    "has_mamba,is_hma_required",
+    [(True, True), (False, False), (False, True)],
     ids=["mamba", "fa_only", "swa_only"],
 )
-def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
-    """D-side: Mamba gets N-1 matched tokens, non-Mamba gets N."""
+def test_mamba_n1_d_side(has_mamba, is_hma_required):
+    """D-side: every model gets N-1 matched tokens; decode recomputes the last."""
     sched = make_nixl_scheduler(has_mamba=has_mamba, is_hma_required=is_hma_required)
     req = create_request(num_tokens=10, do_remote_prefill=True)
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
-    assert count == expected_count
+    assert count == 9
     assert is_async is True
 
 
@@ -1607,7 +1625,7 @@ def test_mamba_n1_p_side_truncation():
 
     Also verifies idempotency (calling again is a no-op) which is
     needed for preemption safety via the _p_side_truncated guard,
-    and that non-Mamba models skip truncation entirely.
+    and that full-attention models are truncated too.
     """
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     req = create_request(num_tokens=10, do_remote_decode=True)
@@ -1630,36 +1648,74 @@ def test_mamba_n1_p_side_truncation():
     sched.on_new_request(req)
     assert len(req.prompt_token_ids) == original_len - 1
 
-    # Non-Mamba: truncation is skipped
     fa_sched = make_nixl_scheduler(has_mamba=False, is_hma_required=False)
     fa_req = create_request(num_tokens=10, do_remote_decode=True)
     fa_original = len(fa_req.prompt_token_ids)
 
+    # A mixed token-id / embeddings prompt is cut consistently.
+    fa_req.prompt_embeds = torch.zeros(fa_original, 8)
+    fa_req.prompt_is_token_ids = [True] * (fa_original - 2) + [False] * 2
     fa_sched.on_new_request(fa_req)
-    assert len(fa_req.prompt_token_ids) == fa_original
+    assert len(fa_req.prompt_token_ids) == fa_original - 1
+    assert len(fa_req.prompt_embeds) == fa_original - 1
+    assert len(fa_req.prompt_is_token_ids) == fa_original - 1
+    assert fa_req.num_tokens == fa_original - 1
+
+    # A prompt ending in an image is cut before the image rather than inside
+    # it, since models parse an item from its whole placeholder; the decoder
+    # loads the same prefix and computes the image itself.
+    image = MultiModalFeatureSpec(
+        data=None,
+        mm_position=PlaceholderRange(offset=4, length=6),
+        identifier="image",
+        modality="image",
+    )
+    mm_req = create_request(num_tokens=10, do_remote_decode=True)
+    mm_req.mm_features = [image]
+    fa_sched.on_new_request(mm_req)
+    assert mm_req.num_prompt_tokens == len(mm_req.prompt_token_ids) == 4
+    assert mm_req.mm_features == []
+    d_req = create_request(num_tokens=10, do_remote_prefill=True)
+    d_req.mm_features = [image]
+    assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (4, True)
+
+    # An item from the start of the prompt leaves no prefix to transfer: the
+    # prefiller keeps its prompt and the decoder computes all of it.
+    whole = MultiModalFeatureSpec(
+        data=None,
+        mm_position=PlaceholderRange(offset=0, length=10),
+        identifier="whole",
+        modality="image",
+    )
+    mm_req = create_request(num_tokens=10, do_remote_decode=True)
+    mm_req.mm_features = [whole]
+    fa_sched.on_new_request(mm_req)
+    assert mm_req.num_prompt_tokens == 10 and mm_req.mm_features == [whole]
+    d_req = create_request(num_tokens=10, do_remote_prefill=True)
+    d_req.mm_features = [whole]
+    assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (0, False)
 
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "swa_enabled,mamba_enabled,expected_has_mamba,expected_is_hma",
+    "swa_enabled,mamba_enabled,expected_is_hma",
     [
-        (True, True, True, True),
-        (True, False, False, True),
-        (False, False, False, False),
+        (True, True, True),
+        (True, False, True),
+        (False, False, False),
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
 )
-def test_has_mamba_init(
+def test_is_hma_required_init(
     mock_platform,
     swa_enabled,
     mamba_enabled,
-    expected_has_mamba,
     expected_is_hma,
 ):
-    """Test _has_mamba / _is_hma_required derived from kv_cache_groups."""
+    """Test _is_hma_required derived from kv_cache_groups."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
@@ -1681,7 +1737,6 @@ def test_has_mamba_init(
         engine_id="test-engine",
         kv_cache_config=kv_cache_config,
     )
-    assert scheduler._has_mamba is expected_has_mamba
     assert scheduler._is_hma_required is expected_is_hma
 
 

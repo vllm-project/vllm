@@ -529,6 +529,14 @@ class KVConnectorBase_V1(ABC):
             connectivity issues or eviction), those tokens must not be taken
             into account.
 
+            The count should leave the last prompt token to compute, as the
+            local prefix cache does. A full-prompt count is rewound by one
+            token after the blocks were laid out for the full prompt, which
+            sliding window, circular buffer and Mamba groups cannot tolerate.
+            A connector transferring from a peer engine must have the peer
+            stop at the same position, since the two sides pair blocks from
+            the end of the sequence.
+
         """
         pass
 
@@ -690,6 +698,12 @@ class KVConnectorBase_V1(ABC):
                 "on the abstract base class"
             )
         return None
+
+    @classmethod
+    def requires_matching_kv_cache_groups(cls, vllm_config: "VllmConfig") -> bool:
+        """Whether engines exchanging KV through this connector need the same
+        KV cache groups, so the planner plans them TP-invariantly."""
+        return True
 
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:

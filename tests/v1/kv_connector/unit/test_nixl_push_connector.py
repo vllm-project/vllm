@@ -84,6 +84,7 @@ def _make_request(
     req = MagicMock()
     req.request_id = request_id
     req.num_computed_tokens = 64
+    req.num_prompt_tokens = 65
 
     if is_d_side:
         # D-side request: do_remote_prefill=True -> prefill on a remote P.
@@ -435,6 +436,7 @@ def _registration_data(
         "decode_port": decode_port,
         "decode_tp_size": decode_tp_size,
         "local_block_ids": local_block_ids,
+        "num_tokens": 48,
         "remote_engine_id": remote_engine_id,
         "remote_host": remote_host,
         "remote_port": remote_port,
@@ -1058,7 +1060,6 @@ class TestPushWriterNotifs:
         """A submission error remains a failure even if later polls succeed."""
         w = self._pollable_worker()
         request_id = self._make_sending_req(w)
-        w.transfer_topo.block_size_ratio.return_value = 1
         w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
         w._compute_desc_ids = MagicMock(return_value=[0])
         w.dst_num_blocks = {w.engine_id: 8}
@@ -1143,17 +1144,26 @@ class TestPushSchedulerNegative:
         assert sched._reqs_need_recv == {}
 
     def test_update_state_after_alloc_zero_external_tokens_does_not_register(self):
-        """num_external_tokens=0 should not stage a D registration."""
+        """num_external_tokens=0 (a full prefix-cache hit on D) should not
+        stage a D registration, and should stop renewing P's lease instead of
+        holding P's blocks until the request ends."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
+        sched._heartbeat_by_engine = {}
+        sched._heartbeat_req_engine = {}
 
         request = _make_request(request_id="req-zero-ext")
+        sched.on_new_request(request)
+        assert request.request_id in sched._heartbeat_req_engine
         sched.update_state_after_alloc(
             request, _BlocksMock(([1, 2, 3],)), num_external_tokens=0
         )
 
         assert sched._push_pending_registrations == {}
         assert sched._push_registration_deadlines == {}
+        assert sched._heartbeat_by_engine == {}
+        sched.request_finished(request, ([1, 2, 3],))
+        assert sched._reqs_need_recv == {}
 
     def test_request_finished_unfinished_status_does_not_stage(self):
         """If a request is still RUNNING, request_finished must not stash
@@ -1690,7 +1700,6 @@ class TestPushPrefixCaching:
             remote_tp_size=1,
         )
         w.transfer_topo.tp_ratio.return_value = 1
-        w.transfer_topo.block_size_ratio.return_value = 1
         w.tp_mappings = {
             engine_id: TPMapping(
                 source_ranks_per_group=((0,),),
@@ -2118,19 +2127,35 @@ def test_set_region_layers_rejects_layer_outside_any_kv_group():
 
 
 @pytest.mark.parametrize(
-    ("local_block_size", "remote_block_size", "remote_tp_size", "error"),
+    (
+        "local_block_size",
+        "remote_block_size",
+        "remote_ppl",
+        "remote_tp_size",
+        "remote_group",
+        "error",
+    ),
     [
-        (32, 16, 1, "identical P/D block sizes"),
-        (16, 32, 1, "identical P/D block sizes"),
-        (16, 16, 2, "decode TP greater"),
+        (32, 16, 1, 1, 0, "identical P/D block sizes"),
+        (16, 32, 1, 1, 0, "identical P/D block sizes"),
+        (16, 16, 1, 2, 0, "decode TP greater"),
+        (16, 16, 2, 1, 0, "identical P/D block sizes"),
+        (16, 16, 1, 1, 1, "different KV cache group plans"),
     ],
 )
 def test_layer_handshake_rejects_unsupported_geometry(
-    local_block_size: int, remote_block_size: int, remote_tp_size: int, error: str
+    local_block_size: int,
+    remote_block_size: int,
+    remote_ppl: int,
+    remote_tp_size: int,
+    remote_group: int,
+    error: str,
 ):
     """Reject unsupported peers without registering agents or transfer state."""
     metadata = _agent_metadata([["a"]], [0xA000], [128])
     metadata.block_size = remote_block_size
+    metadata.physical_blocks_per_logical_kv_block = remote_ppl
+    metadata.region_member_pages = [[(remote_group, 8, 16)]]
     worker = _layer_routing_worker([["a"]], {"a": 0})
     worker.block_size = local_block_size
     worker.block_len_per_layer = [128]
@@ -2150,7 +2175,9 @@ def test_layer_handshake_rejects_unsupported_geometry(
         attn_backends=[],
     )
 
+    worker.pcp_size = 1
     with pytest.raises(NotImplementedError, match=error):
+        worker._validate_remote_parallel_config(metadata)
         worker.add_remote_agent(metadata, remote_tp_size=remote_tp_size)
     worker.nixl_wrapper.add_remote_agent.assert_not_called()
     worker.nixl_wrapper.prep_xfer_dlist.assert_not_called()

@@ -654,6 +654,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return next(iter(layouts), None)
 
     @classmethod
+    def requires_matching_kv_cache_groups(cls, vllm_config: "VllmConfig") -> bool:
+        return any(
+            connector_cls.requires_matching_kv_cache_groups(temp_config)
+            for connector_cls, temp_config in cls._get_connector_classes_and_configs(
+                vllm_config
+            )
+        )
+
+    @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
     ) -> KVConnectorStats | None:

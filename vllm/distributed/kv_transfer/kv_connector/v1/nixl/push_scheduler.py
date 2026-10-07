@@ -117,8 +117,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         )
 
         if params is not None and params.get("do_remote_prefill"):
-            token_ids = request.prompt_token_ids or []
-            actual = self._get_remote_prefill_token_count(len(token_ids))
+            actual = self._get_remote_prefill_token_count(request)
             count = actual - num_computed_tokens
             if count > 0:
                 return count, True
@@ -159,7 +158,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
         if num_external_tokens <= 0:
             # Nothing to receive: full prefix-cache hit on D, no
-            # registration to stage.
+            # registration to stage. Stop renewing P's lease so it reclaims
+            # the blocks, and finish the remote prefill here so
+            # request_finished does not stage an empty recv for it.
+            self._stop_heartbeat(request.request_id)
+            params["do_remote_prefill"] = False
             return
 
         # First-pass D path: stash registration data the worker will
@@ -170,6 +173,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         )
         local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
         local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
+        # Both sides pair blocks from the last token P pushes.
+        params["remote_num_tokens"] = self._get_remote_prefill_token_count(request)
 
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
@@ -181,6 +186,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             "decode_port": self.side_channel_port,
             "decode_tp_size": (self.vllm_config.parallel_config.tensor_parallel_size),
             "local_block_ids": local_block_ids,
+            "num_tokens": params["remote_num_tokens"],
             "remote_engine_id": params["remote_engine_id"],
             "remote_host": params["remote_host"],
             "remote_port": params["remote_port"],
