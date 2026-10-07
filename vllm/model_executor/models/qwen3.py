@@ -79,7 +79,7 @@ class Qwen3Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
         per_layer_sliding_window: int | None = None,
-        mrope_positions_bounded: bool = False,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -125,7 +125,7 @@ class Qwen3Attention(nn.Module):
             max_position=max_position,
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
-            mrope_positions_bounded=mrope_positions_bounded,
+            mrope_positions_factor=mrope_positions_factor,
         )
         attn_cls = (
             EncoderOnlyAttention
@@ -181,7 +181,7 @@ class Qwen3DecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         per_layer_sliding_window: int | None = None,
-        mrope_positions_bounded: bool = False,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -214,7 +214,7 @@ class Qwen3DecoderLayer(nn.Module):
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
             per_layer_sliding_window=per_layer_sliding_window,
-            mrope_positions_bounded=mrope_positions_bounded,
+            mrope_positions_factor=mrope_positions_factor,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,

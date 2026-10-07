@@ -316,7 +316,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         mrope_section: list[int] | None = None,
         mrope_interleaved: bool = False,
         *,
-        positions_bounded: bool = False,
+        positions_factor: int = 4,
         # YaRN parameters.
         scaling_factor: float | None = None,
         beta_fast: int = 32,
@@ -347,10 +347,8 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
         # a larger the cos and sin cache. Models whose positions never exceed
-        # the token count do not need it.
-        self.cache_max_position_num = max_position_embeddings * (
-            1 if positions_bounded else 4
-        )
+        # the token count pass `positions_factor=1`.
+        self.cache_max_position_num = max_position_embeddings * positions_factor
         super().__init__(
             head_size,
             rotary_dim,

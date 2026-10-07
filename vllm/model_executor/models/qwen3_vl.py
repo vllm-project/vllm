@@ -1748,19 +1748,20 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         return PromptUpdateDetails.from_seq(all_token_ids)
 
 
-def mrope_positions_bounded(vllm_config: VllmConfig) -> bool:
+def mrope_positions_factor(vllm_config: VllmConfig) -> int:
     # Video pruning keeps the positions of the tokens it drops. A drafter gets
     # the target's positions, so it follows the target.
     spec = vllm_config.speculative_config
     model_config = (spec and spec.target_model_config) or vllm_config.model_config
     mm_config = model_config.multimodal_config
-    return mm_config is None or not mm_config.is_multimodal_pruning_enabled()
+    pruned = mm_config is not None and mm_config.is_multimodal_pruning_enabled()
+    return 4 if pruned else 1
 
 
 class Qwen3VLDecoderLayer(Qwen3DecoderLayer):
     def __init__(self, **kwargs) -> None:
-        bounded = mrope_positions_bounded(get_current_vllm_config())
-        super().__init__(**kwargs, mrope_positions_bounded=bounded)
+        factor = mrope_positions_factor(get_current_vllm_config())
+        super().__init__(**kwargs, mrope_positions_factor=factor)
 
 
 @support_torch_compile(
