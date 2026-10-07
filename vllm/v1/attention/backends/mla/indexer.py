@@ -692,6 +692,7 @@ class DeepseekV32IndexerMetadata:
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
     positions: torch.Tensor | None = None
+    block_table: torch.Tensor | None = None
 
 
 @triton.jit(do_not_specialize=["num_reqs", "num_actual_tokens", "num_tokens"])
@@ -1695,6 +1696,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            block_table=common_attn_metadata.block_table_tensor,
         )
 
         return attn_metadata
@@ -1710,7 +1712,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert metadata.num_prefills == 0
         assert metadata.num_decodes == metadata.num_decode_tokens
         assert decode.seq_lens.numel() == metadata.num_decode_tokens
+        assert metadata.block_table is not None
         assert self.dcp_world_size == 1
+
+        # One query token per request, so the per-token decode block table is
+        # the request block table (already in the indexer kernel's blocks).
+        # build() may copy it into a builder buffer, so re-derive it here.
+        decode.block_table.copy_(metadata.block_table[: metadata.num_decode_tokens])
+        if decode.indices is not None:
+            decode.indices.copy_(self.arange_buffer[: metadata.num_decode_tokens])
+        if decode.per_req_decode_lens is not None:
+            decode.per_req_decode_lens.fill_(1)
 
         if self.compress_ratio > 1:
             get_compressed_slot_mapping(
