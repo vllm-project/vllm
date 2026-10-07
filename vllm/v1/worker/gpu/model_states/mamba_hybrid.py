@@ -115,8 +115,13 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
+            # The column is in mamba blocks. cache_config.block_size is the
+            # min over prefix-cacheable groups, so a drafter group with its own
+            # smaller block (e.g. DFlash) pulls it below mamba_block_size.
+            mamba_block_size = self.cache_config.mamba_block_size
+            assert mamba_block_size is not None
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                (new_req_data.num_computed_tokens - 1) // mamba_block_size
             )
 
     def _get_mamba_group_info(
