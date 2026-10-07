@@ -880,11 +880,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
-        can_use_xqa_or_trtllm_gen_decode = (
-            can_use_trtllm_attention(
-                self.num_qo_heads, self.num_kv_heads, is_prefill=False
-            )
-            and not self.nvfp4_fa2
+        can_use_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
+            self.num_qo_heads, self.num_kv_heads, is_prefill=False
         )
         # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
         # get_supported_kernel_block_sizes).
@@ -1077,13 +1074,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=spec.num_kv_heads,
                 is_prefill=False,
-            ) or (
-                is_xqa_arch
-                and (
-                    spec.kv_quant_mode.is_nvfp4
-                    or not _is_xqa_head_dim_supported(spec.head_size)
-                )
-            ):
+            ) or (is_xqa_arch and not _is_xqa_head_dim_supported(spec.head_size)):
                 has_uniform_batch_support = False
                 break
 
@@ -2285,7 +2276,6 @@ class FlashInferImpl(AttentionImpl):
         use_dcp = self.dcp_world_size > 1
         if decode_with_xqa:
             assert not use_dcp
-            assert not self.is_kvcache_nvfp4
             assert self.o_sf_scale is None
             assert output.dtype != FP4_DTYPE
 
@@ -2630,7 +2620,10 @@ class FlashInferImpl(AttentionImpl):
 
                     flashinfer_xqa_batch_decode_with_kv_cache(
                         query=decode_query,
-                        kv_cache=kv_cache_tuple,
+                        kv_cache=(
+                            nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_tuple
+                        ),
+                        kv_cache_sf=nvfp4_kv_block_scales,
                         workspace_buffer=workspace_buffer,
                         block_tables=block_tables_decode,
                         seq_lens=seq_lens_decode,
