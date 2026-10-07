@@ -778,6 +778,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -819,7 +820,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "skip_attn must only be True for initial memory profiling."
             )
 
-        # Create a dummy scheduler output. Plain draft-model speculation adds
+        # Create a dummy scheduler output. Standalone AR speculation adds
         # one correction slot per request during prefill. The scheduler
         # accounts for these slots, while dummy runs bypass the scheduler.
         # Adjust the dummy token count only when the expanded draft batch
