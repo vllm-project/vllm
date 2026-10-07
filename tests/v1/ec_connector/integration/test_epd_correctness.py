@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EPD Correctness Test
+"""EPD Correctness Test.
 
 Tests that EPD (Encoder-Prefill-Decode) disaggregation produces the same
 outputs as a baseline single instance.
@@ -27,12 +26,33 @@ import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import openai
 import requests
 
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.utils import encode_image_url
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+
+class EncoderGraphTestWorkerExtension:
+    """Expose encoder replay evidence through the existing test RPC endpoint."""
+
+    model_runner: "MMEncoderModelRunner"
+
+    def encoder_graph_stats(self):
+        from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+        runner = self.model_runner
+        assert isinstance(runner, MMEncoderModelRunner)
+        manager = runner.model_state.encoder_runner.cudagraph_manager
+        if manager is None:
+            return {"is_captured": False, "graph_hits": 0, "graph_misses": 0}
+        return {"is_captured": manager.is_captured(), **manager.get_cumulative_stats()}
+
 
 MAX_OUTPUT_LEN = 256
 
@@ -104,6 +124,7 @@ def check_vllm_server(url: str, timeout=5, retries=10) -> bool:
 
     Returns:
         True if the server is ready, False otherwise
+
     """
     for attempt in range(retries):
         try:
@@ -138,6 +159,7 @@ def run_chat_completion(
 
     Returns:
         Generated text content
+
     """
     with openai.OpenAI(
         api_key="EMPTY", base_url=base_url, timeout=120, max_retries=0

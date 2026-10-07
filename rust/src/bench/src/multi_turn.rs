@@ -170,17 +170,15 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
                 "Random-MM multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
             ));
         }
-        DatasetName::Sonnet => {
-            return Err(BenchError::Config(
-                "Sonnet multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
-            ));
-        }
         DatasetName::SpeedBench => {
             return Err(BenchError::Config(
                 "SPEED-Bench multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
             ));
         }
-        DatasetName::Custom | DatasetName::PrefixRepetition | DatasetName::RandomRerank => {
+        DatasetName::Custom
+        | DatasetName::PrefixRepetition
+        | DatasetName::RandomRerank
+        | DatasetName::TimedTrace => {
             return Err(BenchError::Config(
                 "This dataset does not support multi-turn. Use 'random' or 'sharegpt' with --multi-turn.".into(),
             ));
@@ -192,17 +190,18 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
             let dataset_id = config.dataset_path.as_deref().ok_or_else(|| {
                 BenchError::Config("--dataset-path is required for --dataset-name hf".into())
             })?;
-            let (downloaded_path, _config, _split) =
-                crate::datasets::hf_dataset::download_hf_dataset(
-                    dataset_id,
-                    config.hf_subset.as_deref(),
-                    config.hf_split.as_deref(),
-                    config.num_prompts,
-                )
-                .await?;
-            crate::datasets::multi_turn::load_sharegpt_multi_turn(
+            let (rows, _config, _split) = crate::datasets::hf_dataset::download_hf_dataset(
+                dataset_id,
+                config.hf_subset.as_deref(),
+                config.hf_split.as_deref(),
+                config.num_prompts,
+                config.seed,
+                config.disable_shuffle,
+            )
+            .await?;
+            crate::datasets::multi_turn::load_sharegpt_multi_turn_from_rows(
                 tok,
-                &downloaded_path,
+                &rows,
                 config.num_prompts,
                 config.hf_output_len,
                 config.sharegpt_multi_turn_max_turns,

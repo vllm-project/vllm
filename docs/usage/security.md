@@ -170,7 +170,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
 - `/v1/messages/count_tokens` - Count tokens for Anthropic messages
 - `/v1/responses` - Create a response
-- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render` unless explicitly disabled)
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
@@ -206,7 +206,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`)
+- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`. Use the authenticated `/inference/v1/abort_requests` otherwise)
 
 **Utility endpoints:**
 
@@ -289,6 +289,19 @@ To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter 
 - **Reverse proxy layer:** In addition to vLLM's built-in limit, consider enforcing request body validation and rate limiting at your reverse proxy to further constrain abusive payloads.
 - **Monitoring:** Monitor per-request resource consumption to detect anomalous patterns that may indicate abuse.
 
+### Per-request multimodal arguments
+
+API server endpoints reject non-empty per-request `mm_processor_kwargs` and
+`media_io_kwargs` by default. These arguments can change image, video, or audio
+loading, sizing, sampling, and preprocessing behavior, causing excessive CPU,
+GPU, or memory use when controlled by an untrusted client. Server-level
+`--mm-processor-kwargs` and `--media-io-kwargs` remain available for deployment
+configuration.
+
+Only deployments whose API clients are trusted should start the server with
+`--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
+this option on an endpoint exposed to untrusted clients.
+
 ## Tool Server and MCP Security
 
 vLLM supports connecting to external tool servers via the `--tool-server` argument. This enables models to call tools through the Responses API (`/v1/responses`). Tool server support works with all models — it is not limited to specific model architectures.
@@ -362,7 +375,7 @@ An attacker who can reach the gRPC port can:
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
 2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `Control` service
 3. **Consume GPU and compute resources** by submitting unbounded generation requests
-4. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+4. **Stop a managed engine** through `Control.Shutdown`, or cause denial of service by exploiting bugs in the gRPC interface.
 
 ### Recommendations
 
@@ -537,6 +550,15 @@ ensure that only trusted principals can submit work to the cluster:
 - Place the Ray cluster on an isolated network segment.
 - Do not expose the Ray client port or dashboard to untrusted networks.
 
+## Multi-Tenant Deployments
+
+vLLM does not provide isolation between tenants that share the same server process. Requests from different callers are scheduled together and share the same caches. Options such as `cache_salt` reduce specific cross-tenant risks, but they are not an isolation boundary.
+
+If tenants must be isolated from each other, enforce it in the deployment architecture:
+
+- Run a dedicated vLLM instance per tenant.
+- Place a gateway in front of vLLM that authenticates callers and scopes client-supplied cache identifiers, such as `cache_salt` and multimodal `uuid` values, per tenant.
+
 ## Prefix Cache Timing Side-Channel Mitigation (Cache Salting)
 
 ### Background
@@ -620,7 +642,7 @@ For additional cross-tenant isolation, set `cache_salt` on each request (see [Pr
 
 - **Multi-tenant deployments**: Always generate cryptographically random UUIDs per media item. Additionally, set `cache_salt` to a per-tenant secret for defense in depth.
 - **Single-tenant deployments**: Ensure UUIDs are unique per distinct media content. `cache_salt` is unnecessary when there is no cross-tenant threat.
-- **Default behavior**: Omitting `uuid` entirely preserves the default content-hash-based identity, which is safe against this class of collision but requires hashing the media bytes on every request.
+- **Default behavior**: Omitting `uuid` uses a hash of the media bytes as the cache identity, which requires hashing the media on every request. This avoids accidental collisions between callers, but it does not isolate tenants from each other. See [Multi-Tenant Deployments](#multi-tenant-deployments).
 
 ## Reporting Security Vulnerabilities
 
