@@ -253,13 +253,32 @@ _COMBINATOR_KEYWORDS = ("anyOf", "oneOf", "allOf")
 # pydantic emits them next to anyOf/oneOf and xgrammar can ignore them safely.
 _CONSTRAINT_KEYWORDS = frozenset(
     {
-        "type", "enum", "const",
-        "properties", "required", "additionalProperties",
-        "patternProperties", "propertyNames", "unevaluatedProperties",
-        "minProperties", "maxProperties",
-        "items", "prefixItems", "minItems", "maxItems", "uniqueItems", "contains",
-        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
-        "minLength", "maxLength", "pattern", "format",
+        "type",
+        "enum",
+        "const",
+        "properties",
+        "required",
+        "additionalProperties",
+        "patternProperties",
+        "propertyNames",
+        "unevaluatedProperties",
+        "minProperties",
+        "maxProperties",
+        "items",
+        "prefixItems",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "contains",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "format",
     }
 )
 
@@ -280,6 +299,24 @@ def _schema_types(schema: dict[str, Any]) -> set[str]:
     if isinstance(schema_type, list):
         return {item for item in schema_type if isinstance(item, str)}
     return set()
+
+
+def _branches_imply_type(obj: dict[str, Any], sibling_types: set[str]) -> bool:
+    """True if every branch of every combinator on `obj` declares a type that
+    falls within `sibling_types`, so a dropped sibling `type` changes nothing."""
+    for key in _COMBINATOR_KEYWORDS:
+        if key not in obj:
+            continue
+        branches = obj[key]
+        if not isinstance(branches, list) or not branches:
+            return False
+        for branch in branches:
+            if not isinstance(branch, dict):
+                return False
+            branch_types = _schema_types(branch)
+            if not branch_types or not branch_types <= sibling_types:
+                return False
+    return True
 
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
@@ -352,11 +389,14 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             and ("properties" in obj or len(obj["patternProperties"]) > 1)
         ):
             return True
-        
-        if any(k in obj for k in _COMBINATOR_KEYWORDS) and any(
-            k in obj for k in _CONSTRAINT_KEYWORDS
-        ):
-            return True
+
+        if any(k in obj for k in _COMBINATOR_KEYWORDS):
+            sibling_constraints = {k for k in obj if k in _CONSTRAINT_KEYWORDS}
+            if sibling_constraints and not (
+                sibling_constraints == {"type"}
+                and _branches_imply_type(obj, schema_types)
+            ):
+                return True
 
         # Note(arpera):
         # Xgrammar lacks support of multi-branch allOf

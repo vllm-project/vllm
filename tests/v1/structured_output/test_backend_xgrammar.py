@@ -212,7 +212,6 @@ def unsupported_vllm_issue_56556_schema():
     ]
 
 
-# NEW
 @pytest.fixture
 def unsupported_combinator_with_sibling_constraints():
     """A combinator beside constraint keywords on the same node.
@@ -236,7 +235,7 @@ def unsupported_combinator_with_sibling_constraints():
             "additionalProperties": False,
             "allOf": [{"required": ["a"]}],
         },
-        # oneOf beside type
+        # oneOf beside type, branches do not declare a type
         {
             "type": "object",
             "oneOf": [{"required": ["a"]}, {"required": ["b"]}],
@@ -248,6 +247,9 @@ def unsupported_combinator_with_sibling_constraints():
                 "x": {"type": "string", "anyOf": [{"minLength": 1}]},
             },
         },
+        # NEW: branch type is not within the sibling type, so dropping the
+        # sibling `type` changes what xgrammar accepts
+        {"type": "string", "anyOf": [{"type": "integer"}]},
     ]
 
 
@@ -355,7 +357,6 @@ def supported_allof_anyof_and_oneof():
     ]
 
 
-# NEW
 @pytest.fixture
 def supported_combinator_with_annotations_only():
     """Annotations beside a combinator are safe, so xgrammar keeps these.
@@ -379,6 +380,31 @@ def supported_combinator_with_annotations_only():
         {
             "$defs": {"A": {"type": "string"}},
             "oneOf": [{"$ref": "#/$defs/A"}],
+        },
+        # NEW: sibling `type` is redundant because every branch already declares
+        # a type within it, and xgrammar enforces these correctly.
+        {
+            "type": "object",
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"],
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "integer"}},
+                    "required": ["b"],
+                },
+            ],
+        },
+        # NEW: list-valued sibling `type` covering every branch type
+        {
+            "type": ["string", "null"],
+            "anyOf": [
+                {"type": "string", "maxLength": 3},
+                {"type": "null"},
+            ],
         },
     ]
 
