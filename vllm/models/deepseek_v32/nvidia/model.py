@@ -8,7 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
     fused_embed_norm,
@@ -297,8 +297,11 @@ class DeepseekV32Model(torch.nn.Module):
             assert not self.use_sequence_parallel, (
                 "Currently, SP is not supported with PP"
             )
+            # hidden_states is a per-TP-rank partial sum, but PP send/recv
+            # requires TP-replicated tensors. Reduce it into the residual.
+            residual = residual + tensor_model_parallel_all_reduce(hidden_states)
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {"hidden_states": torch.zeros_like(residual), "residual": residual}
             )
 
         if self.use_sequence_parallel:
