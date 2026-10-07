@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.block_table import get_block_table_width
 
 
@@ -741,7 +742,7 @@ def prepare_sparse_mla_safe_lengths(
     return safe_lengths
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _neutralize_dcp_empty_rows_kernel(
     out_ptr,  # [num_tokens, num_heads, head_dim]
     lse_ptr,  # [num_tokens, num_heads]
@@ -753,6 +754,7 @@ def _neutralize_dcp_empty_rows_kernel(
     lse_stride_h,
     topk_stride_t,
     topk_stride_k,
+    num_tokens,
     num_heads,
     head_dim,
     topk,
@@ -760,32 +762,31 @@ def _neutralize_dcp_empty_rows_kernel(
     NUM_HEADS_PADDED: tl.constexpr,
     HEAD_DIM_PADDED: tl.constexpr,
 ):
-    token = tl.program_id(0)
+    for token in range(tl.program_id(0).to(tl.int64), num_tokens, tl.num_programs(0)):
+        # The DCP filter marks slots this rank does not own -1. If none
+        # survive, the rank contributes nothing to this row.
+        k_offsets = tl.arange(0, BLOCK_K)
+        indices = tl.load(
+            topk_ptr + token * topk_stride_t + k_offsets * topk_stride_k,
+            mask=k_offsets < topk,
+            other=-1,
+        )
+        is_empty = tl.max(indices) < 0
 
-    # The DCP filter marks slots this rank does not own -1. If none survive,
-    # the rank contributes nothing to this row.
-    k_offsets = tl.arange(0, BLOCK_K)
-    indices = tl.load(
-        topk_ptr + token * topk_stride_t + k_offsets * topk_stride_k,
-        mask=k_offsets < topk,
-        other=-1,
-    )
-    is_empty = tl.max(indices) < 0
+        head_offsets = tl.arange(0, NUM_HEADS_PADDED)
+        tl.store(
+            lse_ptr + token * lse_stride_t + head_offsets * lse_stride_h,
+            tl.full([NUM_HEADS_PADDED], float("-inf"), lse_ptr.dtype.element_ty),
+            mask=is_empty & (head_offsets < num_heads),
+        )
 
-    head_offsets = tl.arange(0, NUM_HEADS_PADDED)
-    tl.store(
-        lse_ptr + token * lse_stride_t + head_offsets * lse_stride_h,
-        tl.full([NUM_HEADS_PADDED], float("-inf"), lse_ptr.dtype.element_ty),
-        mask=is_empty & (head_offsets < num_heads),
-    )
-
-    if is_empty:
-        d_offsets = tl.arange(0, HEAD_DIM_PADDED)
-        d_mask = d_offsets < head_dim
-        zeros = tl.zeros([HEAD_DIM_PADDED], out_ptr.dtype.element_ty)
-        for head in range(num_heads):
-            row_ptr = out_ptr + token * out_stride_t + head * out_stride_h
-            tl.store(row_ptr + d_offsets * out_stride_d, zeros, mask=d_mask)
+        if is_empty:
+            d_offsets = tl.arange(0, HEAD_DIM_PADDED)
+            d_mask = d_offsets < head_dim
+            zeros = tl.zeros([HEAD_DIM_PADDED], out_ptr.dtype.element_ty)
+            for head in range(num_heads):
+                row_ptr = out_ptr + token * out_stride_t + head * out_stride_h
+                tl.store(row_ptr + d_offsets * out_stride_d, zeros, mask=d_mask)
 
 
 def neutralize_dcp_empty_rows_(
@@ -809,7 +810,9 @@ def neutralize_dcp_empty_rows_(
     if num_tokens == 0:
         return
 
-    _neutralize_dcp_empty_rows_kernel[(num_tokens,)](
+    # Fewer than ~4 programs per SM leave HBM bandwidth unused on large batches.
+    grid = (min(num_tokens, 4 * num_compute_units(out.device.index)),)
+    _neutralize_dcp_empty_rows_kernel[grid](
         out,
         lse,
         topk_indices,
@@ -820,6 +823,7 @@ def neutralize_dcp_empty_rows_(
         lse.stride(1),
         topk_indices.stride(0),
         topk_indices.stride(1),
+        num_tokens,
         num_heads,
         head_dim,
         topk_indices.shape[1],
