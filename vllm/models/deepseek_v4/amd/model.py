@@ -535,6 +535,11 @@ def _fuse_shared_experts_enabled(config, parallel_config: ParallelConfig) -> boo
 
 def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
+    if not rocm_aiter_ops.is_fused_moe_enabled():
+        raise ValueError(
+            "--moe-backend aiter_mega_moe requires VLLM_ROCM_USE_AITER=1 "
+            " and VLLM_ROCM_USE_AITER_MOE=1."
+        )
     if not on_gfx950():
         raise NotImplementedError("AITER MegaMoE requires gfx950.")
     if (
