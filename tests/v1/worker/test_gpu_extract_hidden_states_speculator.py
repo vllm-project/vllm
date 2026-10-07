@@ -45,7 +45,8 @@ def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
 
     monkeypatch.setattr(spec_module, "ExtractHiddenStatesSpeculator", fake_speculator)
 
-    assert init_speculator(vllm_config, device) == (vllm_config, device)
+    speculator = init_speculator(vllm_config, device, cast(Any, None))
+    assert speculator == (vllm_config, device)
 
 
 def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):

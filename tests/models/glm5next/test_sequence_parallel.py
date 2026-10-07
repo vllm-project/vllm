@@ -15,11 +15,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 
 from vllm.model_executor import parameter
 from vllm.model_executor.layers import linear
 from vllm.models.glm5next.common import model as glm_model
-from vllm.transformers_utils.configs.glm5_next import Glm5NextTextConfig
 
 HIDDEN, INTERMEDIATE, TP_SIZE = 8, 16, 2
 

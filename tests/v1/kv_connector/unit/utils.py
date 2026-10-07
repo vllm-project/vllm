@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, count
 from typing import Any, Literal
+from unittest.mock import Mock
 
 import torch
 
@@ -42,11 +43,20 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
+
+
+def create_mock_connector() -> Mock:
+    connector = Mock()
+    connector.get_external_cache_hit_sources.side_effect = lambda request, num_tokens: (
+        {CacheHitSource.EXTERNAL_UNSPECIFIED: num_tokens} if num_tokens else {}
+    )
+    return connector
 
 
 def assert_scheduler_empty(scheduler: Scheduler):
@@ -60,6 +70,8 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._kv_fetch_stages
+    assert not any(scheduler._kv_fetch_counts.values())
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
