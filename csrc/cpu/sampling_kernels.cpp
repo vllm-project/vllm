@@ -109,6 +109,33 @@ struct SamplingScratch {
 };
 
 float block_maximum(const float* values, int64_t size) {
+#if defined(__x86_64__)
+  using Vec = vec_op::FP32Vec16;
+  const Vec infinity(std::numeric_limits<float>::infinity());
+  Vec max_vec(-std::numeric_limits<float>::infinity());
+  unsigned invalid = 0;
+  int64_t i = 0;
+  for (; i + Vec::VEC_ELEM_NUM <= size; i += Vec::VEC_ELEM_NUM) {
+    const Vec value(values + i);
+    // x86 max can discard NaNs. Comparing "not less than +inf" detects both
+    // NaN and +inf independently, while retaining -inf as a valid mask.
+  #ifdef __AVX512F__
+    invalid |= _mm512_cmp_ps_mask(value.reg, infinity.reg, _CMP_NLT_UQ);
+  #else
+    invalid |= _mm256_movemask_ps(_mm256_or_ps(
+        _mm256_cmp_ps(value.reg_low, infinity.reg_low, _CMP_NLT_UQ),
+        _mm256_cmp_ps(value.reg_high, infinity.reg_high, _CMP_NLT_UQ)));
+  #endif
+    max_vec = max_vec.max(value);
+  }
+  if (invalid) return std::numeric_limits<float>::quiet_NaN();
+  float result = max_vec.reduce_max();
+  for (; i < size; ++i) {
+    if (std::isnan(values[i])) return values[i];
+    result = std::max(result, values[i]);
+  }
+  return result;
+#else
   using Vec = at::vec::Vectorized<float>;
   const auto maximum = [](const Vec& a, const Vec& b) {
     return at::vec::maximum(a, b);
@@ -124,6 +151,7 @@ float block_maximum(const float* values, int64_t size) {
     result = std::max(result, values[i]);
   }
   return result;
+#endif
 }
 
 template <typename Index>
