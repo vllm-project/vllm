@@ -49,6 +49,7 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
+#  14: Add Qwen3.8-Flash-Next PLE page length - #59997
 #
 NIXL_CONNECTOR_VERSION: int = 14
 
