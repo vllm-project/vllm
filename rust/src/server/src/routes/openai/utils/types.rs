@@ -271,6 +271,10 @@ pub struct Tool {
     #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+    /// Tool-level form of [`Function::defer_loading`]; the function-level value
+    /// takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
 }
 
 fn default_function_tool_type() -> String {
@@ -286,6 +290,9 @@ pub struct Function {
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
+    /// Whether the schema is loaded on demand via tool search (vLLM extension,
+    /// mirroring the OpenAI Responses and Anthropic Messages field).
+    pub defer_loading: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
