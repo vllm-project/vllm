@@ -1936,7 +1936,7 @@ class TestFinishRequestServerSide:
         assert StoreResult(job_id=7, success=True) in stores
         assert _srv_outbound(session, "req-1") is None
 
-    def test_write_blocks_failure_finalizes_with_failure(self):
+    def test_write_blocks_failure_finalizes_with_failure(self, monkeypatch):
         """write_blocks returning None must not leave the request hanging.
 
         The matched blocks are gone from req.demanded but no inflight
@@ -1959,7 +1959,7 @@ class TestFinishRequestServerSide:
         )
         session.poll()
         # Force write_blocks to fail on the next call.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
+        monkeypatch.setattr(transport, "write_blocks", lambda *a, **kw: None)
 
         session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=42)
 
@@ -2037,7 +2037,9 @@ class TestFinishRequestServerSide:
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is True
 
-    def test_write_blocks_failure_finalizes_after_last_inflight_completes(self):
+    def test_write_blocks_failure_finalizes_after_last_inflight_completes(
+        self, monkeypatch
+    ):
         """write_blocks returns None on a SECOND match while a first transfer
         is still inflight. The request should NOT finalize until the inflight
         completes, then the elif branch in collect_results
@@ -2067,7 +2069,7 @@ class TestFinishRequestServerSide:
         assert outbound.finishing is False
 
         # Round 2: write_blocks fails for k2 while transfer_1 is still inflight.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
+        monkeypatch.setattr(transport, "write_blocks", lambda *a, **kw: None)
         session.add_stored_blocks("req-1", [OffloadKey(b"k2")], [1], job_id=200)
         # No new transfer was registered.
         assert list(session._server._inflight.keys()) == [tid_1]

@@ -28,7 +28,7 @@ MISTRAL_FORMAT_ARGS = [
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 
 
-def test_realtime_generation_preserves_watermarking():
+def test_realtime_generation_preserves_watermarking(monkeypatch):
     transcription_outputs = []
 
     class EngineClient:
@@ -60,7 +60,7 @@ def test_realtime_generation_preserves_watermarking():
     )
     connection.audio_queue = asyncio.Queue()
     connection._is_connected = True
-    connection.send = send
+    monkeypatch.setattr(connection, "send", send)
 
     asyncio.run(connection._run_generation(streaming_input(), asyncio.Queue()))
 

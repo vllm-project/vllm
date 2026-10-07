@@ -442,10 +442,14 @@ def streamed_reasoning_end(reasoner, output, prompt=PROMPT_TOKEN_IDS):
     return None
 
 
-def test_streaming_reasoning_gate_matches_thinking_closer_without_decoding():
+def test_streaming_reasoning_gate_matches_thinking_closer_without_decoding(
+    monkeypatch,
+):
     tokenizer = FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE)
     reasoner = ResponseTemplateReasoningParser(tokenizer)
-    tokenizer.decode = lambda *_args, **_kwargs: pytest.fail("decoded")  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        tokenizer, "decode", lambda *_args, **_kwargs: pytest.fail("decoded")
+    )
     output = [50, 101] + [102] * 100 + [51, 103]
 
     assert streamed_reasoning_end(reasoner, output) == len(output) - 2
