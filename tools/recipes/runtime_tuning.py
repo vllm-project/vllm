@@ -19,6 +19,7 @@ from math import ceil
 from typing import Any
 
 from hardware_detection import HardwareInfo
+from model_constraints import load_head_constraints, suggest_tensor_parallel_size
 
 from vllm.config.scheduler import SchedulerConfig
 
@@ -119,19 +120,50 @@ def _resolve_tensor_parallel_size(
     workload: WorkloadHints,
     result: TuningResult,
 ) -> None:
-    del config, workload
+    del workload
     if hardware is None or hardware.numa_node_count < 1:
+        return
+
+    if any(
+        config.get(key, 1) != 1
+        for key in ("data-parallel-size", "pipeline-parallel-size")
+    ):
+        result.notes.append(
+            "tensor-parallel-size: kept recipe value; automatic TP selection "
+            "currently requires DP=1 and PP=1"
+        )
         return
 
     # Draft policy: use the largest power-of-two TP that does not exceed the
     # effective NUMA-node count. This deliberately avoids hard-coding unusual
     # non-power-of-two topologies into the converter.
     candidate = 1 << (hardware.numa_node_count.bit_length() - 1)
+    try:
+        constraints = load_head_constraints(config)
+    except Exception as exc:
+        result.notes.append(
+            "tensor-parallel-size: kept recipe value (vLLM default TP=1 if absent); "
+            f"model head detection failed: {exc}"
+        )
+        return
+
+    for constraint in constraints:
+        result.notes.append(
+            f"detected {constraint.name}: "
+            f"attention_heads={constraint.attention_heads}, "
+            f"kv_heads={constraint.kv_heads}"
+        )
+    selected = suggest_tensor_parallel_size(candidate, constraints)
+    if selected != candidate:
+        result.notes.append(
+            f"tensor-parallel-size: reduced NUMA-derived TP={candidate} to "
+            f"TP={selected} for model head partitioning/replication"
+        )
     _record_override(
         result,
         "tensor-parallel-size",
-        candidate,
-        "derived from the effective NUMA-node count",
+        selected,
+        "derived from effective NUMA nodes and detected model head constraints",
     )
 
 
@@ -256,8 +288,8 @@ def _resolve_data_parallel_size(
         return
 
     result.notes.append(
-        "data-parallel-size: target QPS supplied; kept recipe value because "
-        "per-replica capacity is not known yet"
+        "data-parallel-size: automatic DP tuning is disabled; kept recipe value "
+        "because CPU DP auto-binding and per-replica capacity need validation"
     )
 
 

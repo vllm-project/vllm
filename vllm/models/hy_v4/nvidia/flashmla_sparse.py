@@ -228,9 +228,9 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
-        # NOTE(Chen): kernel requires num_local_head to be a multiple of
-        # 64 on hopper and 128 on blackwell. Pad from q's head count, not
-        # self.num_heads: under DCP the heads are all-gathered before this.
+        # NOTE(Chen): kernel requires num_local_head to be a multiple of 64.
+        # Pad from q's head count, not self.num_heads: under DCP the heads are
+        # all-gathered before this.
         if actual_num_heads is None:
             actual_num_heads = q.shape[1]
         padded_num_heads = (
