@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Literal
 
 from fastapi import APIRouter, FastAPI, Request
@@ -20,4 +21,5 @@ async def control_dumper(
 
 
 def attach_router(app: FastAPI):
-    app.include_router(router)
+    if os.getenv("DUMPER_SERVER_PORT") == "reuse":
+        app.include_router(router)

@@ -17,16 +17,13 @@ __all__ = [
 
 
 def register_vllm_serve_api_routers(app: FastAPI):
-    import os
-
-    if os.getenv("DUMPER_SERVER_PORT") == "reuse":
-        from vllm.entrypoints.serve.tensor_dump.api_router import attach_router
-
-        attach_router(app)
-
     from .instrumentator import register_instrumentator_api_routers
 
     register_instrumentator_api_routers(app)
+
+    from .tensor_dump.api_router import attach_router as attach_tensor_dump_router
+
+    attach_tensor_dump_router(app)
 
     from vllm.entrypoints.serve.lora.api_router import (
         attach_router as attach_lora_router,

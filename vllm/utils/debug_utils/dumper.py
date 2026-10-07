@@ -436,6 +436,19 @@ class _Dumper:
     def configure(self, **kwargs) -> None:
         self._config = replace(self._config, **kwargs)
 
+    def control(self, method: str, body: dict | str | None = None) -> dict:
+        if method == "get_state":
+            return self.get_state()
+        if method == "configure":
+            if isinstance(body, str):
+                body = json.loads(body)
+            self.configure(**(body or {}))
+        elif method == "reset":
+            self.reset()
+        else:
+            raise ValueError(f"Unknown dumper control method: {method!r}")
+        return {}
+
     def configure_default(self, **kwargs) -> None:
         self._config = self._config.with_defaults(**kwargs)
 
@@ -1265,6 +1278,10 @@ def _calc_rel_diff(x: "torch.Tensor", y: "torch.Tensor"):
 def _obj_to_dict(obj):
     if isinstance(obj, dict):
         return obj
+    for plugin in _plugins:
+        converted = plugin.convert_value(obj, skip_forward_batch=False)
+        if converted is not None:
+            return converted
     ret = {}
     for k in dir(obj):
         if k.startswith("__") and k.endswith("__"):
@@ -1390,16 +1407,7 @@ class _DumperHttpManager:
     # ------------------------------- private ---------------------------------
 
     def _handle_request_inner(self, *, method: str, body: dict[str, Any]) -> dict:
-        if method == "get_state":
-            return self._dumper.get_state()
-        elif method == "configure":
-            self._dumper.configure(**body)
-            return {}
-        elif method == "reset":
-            self._dumper.reset()
-            return {}
-        else:
-            raise ValueError(f"Unknown dumper control method: {method!r}")
+        return self._dumper.control(method, body)
 
 
 # http control server

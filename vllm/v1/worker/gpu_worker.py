@@ -3,7 +3,6 @@
 """A GPU worker class."""
 
 import gc
-import json
 import os
 import time
 from collections.abc import Callable
@@ -1378,19 +1377,9 @@ class Worker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def dumper_control(self, action: str, body: str = "{}") -> dict:
-        from vllm.utils.debug_utils.dumper import dumper
-
         if not self.use_v2_model_runner or self.model_runner.tensor_dumper is None:
             raise RuntimeError("Dumper was not enabled at startup.")
-        if action == "configure":
-            dumper.configure(**json.loads(body))
-            return {}
-        elif action == "reset":
-            dumper.reset()
-            return {}
-        elif action == "get_state":
-            return dumper.get_state()
-        raise ValueError(f"Unknown dumper action: {action}")
+        return self.model_runner.tensor_dumper.control(action, body)
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.

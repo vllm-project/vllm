@@ -1893,16 +1893,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not dummy_run and self.tensor_dumper is not None:
             with set_current_vllm_config(self.vllm_config):
-                self.tensor_dumper.dump_dict(
-                    "forward_batch_info",
-                    {
-                        "input_ids": input_batch.input_ids[: input_batch.num_tokens],
-                        "positions": input_batch.positions[: input_batch.num_tokens],
-                        "seq_lens": input_batch.seq_lens[: input_batch.num_reqs],
-                        "rids": input_batch.req_ids,
-                        "extend_seq_lens": input_batch.num_scheduled_tokens.tolist(),
-                    },
-                )
+                self.tensor_dumper.dump_dict("forward_batch_info", input_batch)
 
         # Update the EPLB meta.
         ubatch_slices = ubatch_state.slices if ubatch_state is not None else None
