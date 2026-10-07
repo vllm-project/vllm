@@ -562,6 +562,7 @@ mod tests {
                 }
             }),
             strict: None,
+            defer_loading: None,
         }];
         let mut parser = Qwen3CoderToolParser::new(&tools);
         let output = parser
