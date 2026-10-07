@@ -1594,6 +1594,10 @@ class VllmConfig:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
+                    and not (
+                        self.speculative_config.method == "suffix"
+                        and self.use_v2_model_runner
+                    )
                     and self.speculative_config.method != "draft_model"
                     and self.speculative_config.method != "dspark"
                     and self.speculative_config.method != "dflash"
@@ -1601,7 +1605,8 @@ class VllmConfig:
                     raise ValueError(
                         "Currently, async scheduling is only supported "
                         "with EAGLE/MTP/Draft Model/NGram GPU/DSpark/DFlash "
-                        "kind of speculative decoding"
+                        "kind of speculative decoding, and with suffix decoding on "
+                        "Model Runner V2"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -1628,6 +1633,10 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
+                and not (
+                    self.speculative_config.method == "suffix"
+                    and self.use_v2_model_runner
+                )
                 and self.speculative_config.method != "draft_model"
                 and self.speculative_config.method != "dspark"
                 and self.speculative_config.method != "dflash"
@@ -2981,7 +2990,6 @@ class VllmConfig:
 
         if speculative_config is not None:
             if speculative_config.method in (
-                "suffix",
                 "medusa",
                 "mlp_speculator",
                 "custom_class",

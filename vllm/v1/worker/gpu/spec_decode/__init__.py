@@ -76,6 +76,10 @@ def init_speculator(
         )
 
         return StandaloneARSpeculator(vllm_config, device)
+    elif speculative_config.method == "suffix":
+        from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator
+
+        return SuffixSpeculator(vllm_config, device, req_states)
     elif speculative_config.use_ngram():
         from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
             NgramGPUSpeculator,

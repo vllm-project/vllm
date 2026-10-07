@@ -97,10 +97,14 @@ def test_suffix_decoding_acceptance(
     sampling_config: SamplingParams,
     model_name: str,
     vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Check that suffix decoding caching takes effect and improves acceptance
-    lengths and acceptance rates over multiple runs of the same prompts.
+    lengths and acceptance rates over multiple runs of the same prompts on the
+    V1 model runner (Arctic Inference). The V2 speculator is covered by
+    test_suffix_cross_request_acceptance_v2.
     """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     test_prompts = get_test_prompts(mm_enabled=False)
 
     with vllm_runner(
@@ -171,3 +175,49 @@ def test_suffix_decoding_acceptance(
 
     # Heuristic: expect at least 80.0% acceptance rate at the end.
     assert last_accept_rate > 0.80, f"Expected final acceptance rate > 0.80; {summary}"
+
+
+@single_gpu_only
+def test_suffix_cross_request_acceptance_v2(
+    sampling_config: SamplingParams,
+    model_name: str,
+    vllm_runner,
+):
+    """On Model Runner V2, repeating the same prompts should let suffix
+    decoding draft the earlier responses from its corpus of finished
+    requests."""
+    test_prompts = get_test_prompts(mm_enabled=False)
+    k = 8
+
+    with vllm_runner(
+        model_name,
+        block_size=None,
+        trust_remote_code=False,
+        speculative_config={"method": "suffix", "num_speculative_tokens": k},
+        max_model_len=1024,
+        disable_log_stats=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        assert spec_runner.llm.llm_engine.vllm_config.use_v2_model_runner
+        num_drafts = []
+        num_accept = []
+        for _ in range(2):
+            spec_runner.llm.chat(test_prompts, sampling_config)
+            metrics = spec_runner.llm.get_metrics()
+            num_drafts.append(
+                get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts")
+            )
+            num_accept.append(
+                get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_accepted_tokens"
+                )
+            )
+
+    # Stats are cumulative; compare per-draft acceptance of the two runs.
+    first = num_accept[0] / num_drafts[0]
+    second = (num_accept[1] - num_accept[0]) / (num_drafts[1] - num_drafts[0])
+    summary = f"accepted per draft: first={first:.2f}, second={second:.2f}"
+    assert second > first, summary
+    # Greedy repeats of finished responses should be drafted almost fully.
+    assert second > 0.5 * k, summary

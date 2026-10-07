@@ -131,6 +131,7 @@ vllm serve <target-model> \
 | --- | --- | --- | --- |
 | `suffix_decoding_max_tree_depth` | `integer` | `24` | Maximum combined prefix-match and speculation tree depth. |
 | `suffix_decoding_max_cached_requests` | `integer` | `10000` | Maximum number of requests cached in the global suffix tree. Set `0` to disable the global cache. |
+| `suffix_decoding_corpus_tokens` | `integer` | `1048576` | Model Runner V2 only: token capacity of the GPU corpus of finished responses. Set `0` to match only within each request. |
 | `suffix_decoding_max_spec_factor` | `float` | `1.0` | Caps speculative length as a multiple of prefix-match length. |
 | `suffix_decoding_min_token_prob` | `float` | `0.1` | Minimum estimated token probability required to speculate a token. |
 
@@ -165,7 +166,7 @@ vllm serve <target-model> \
 
   llm = LLM(
       model="Qwen/Qwen3-8B",
-      speculative_config={                               
+      speculative_config={
           "method": "draft_model",
           "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
           "num_speculative_tokens": 3,
