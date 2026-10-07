@@ -126,6 +126,11 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
+        # Tear down any existing registration first: a reconnect must
+        # create a fresh NIXL registration (and fresh UCX endpoints)
+        # instead of merging into — and silently reusing — a stale one.
+        # On first registration this is a no-op teardown.
+        self.remove_remote_peer(peer_id)
         nixl_name = self._agent.add_remote_agent(agent_metadata)
         block_descs = [
             (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
@@ -138,11 +143,39 @@ class NixlTransport(DataTransport):
     def remove_remote_peer(self, peer_id: str) -> None:
         nixl_name = self._peer_nixl_names.pop(peer_id, None)
         dlist = self._remote_dlists.pop(peer_id, None)
+        # Fail any transfers still tracked for this peer: their remote
+        # registration is going away, so their handles can never complete
+        # and poll() would re-check (and log) them forever.
+        stale_tids = [
+            tid for tid, entry in self._inflight.items() if entry.peer_id == peer_id
+        ]
+        if stale_tids:
+            self.cancel(stale_tids)
         if self._agent is not None:
+            # Independent teardown steps: one failure must not skip the
+            # other. Skipping remove_remote_agent() would orphan the NIXL
+            # registration that a later add_remote_peer() merges into,
+            # reusing the peer's stale UCX endpoints.
             if dlist is not None:
-                self._agent.release_dlist_handle(dlist)
+                try:
+                    self._agent.release_dlist_handle(dlist)
+                except Exception as exc:
+                    logger.warning(
+                        "NixlTransport %s: release_dlist_handle failed for peer=%s: %s",
+                        self._agent_name,
+                        peer_id,
+                        exc,
+                    )
             if nixl_name:
-                self._agent.remove_remote_agent(nixl_name)
+                try:
+                    self._agent.remove_remote_agent(nixl_name)
+                except Exception as exc:
+                    logger.warning(
+                        "NixlTransport %s: remove_remote_agent failed for peer=%s: %s",
+                        self._agent_name,
+                        peer_id,
+                        exc,
+                    )
 
     # ------------------------------------------------------------------
     # Transfer submission and polling
@@ -216,6 +249,13 @@ class NixlTransport(DataTransport):
                     transfer_id,
                     exc,
                 )
+                # A raise means the transfer can never complete (e.g. its
+                # remote registration was invalidated). Report it failed so
+                # the normal drain below pops it and releases its handle,
+                # instead of re-checking a dead transfer forever.
+                if failed_ids is None:
+                    failed_ids = []
+                failed_ids.append(transfer_id)
                 continue
             if state == "DONE":
                 if done_ids is None:
