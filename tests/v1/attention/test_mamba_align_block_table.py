@@ -117,3 +117,33 @@ def test_none_mode_returns_the_input_unchanged():
     bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device="cuda")
     sl = torch.randint(0, 1000, (4,), dtype=torch.int32, device="cuda")
     assert mamba_get_block_table_tensor(bt, sl, _spec(64, 3), "none") is bt
+
+
+# ---------------------------------------------------------------------------
+# CPU tensors. Every test above runs on "cuda", which is exactly how the
+# regression reached review: `mamba_get_block_table_tensor` is a SHARED
+# utility and its callers legitimately pass CPU tensors -- the GDN and
+# linear-attention metadata builders are unit-tested with
+# `DEVICE = torch.device("cpu")`. A Triton kernel cannot run on those at all,
+# while the torch expression it replaced could. These run without a GPU.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("nspec", [0, 1, 3])
+@pytest.mark.parametrize("block_size", [1, 16, 64])
+def test_cpu_tensors_match_the_reference(nspec, block_size):
+    """The align branch must work on CPU, not just on the accelerator."""
+    width = 2 + nspec + 8
+    bt = torch.arange(5 * width, dtype=torch.int32).reshape(5, width)
+    sl = torch.tensor([0, 1, block_size, block_size * 3 + 1, 7], dtype=torch.int32)
+    got = mamba_get_block_table_tensor(bt, sl, _spec(block_size, nspec), "align")
+    want = _reference(bt, sl, block_size, nspec)
+    assert torch.equal(got, want), f"cpu mismatch: {got.tolist()} != {want.tolist()}"
+    assert got.device == bt.device
+    assert got.dtype == bt.dtype
+
+
+def test_cpu_none_mode_passes_through():
+    bt = torch.arange(12, dtype=torch.int32).reshape(3, 4)
+    sl = torch.tensor([1, 2, 3], dtype=torch.int32)
+    assert mamba_get_block_table_tensor(bt, sl, _spec(16, 3), "none") is bt

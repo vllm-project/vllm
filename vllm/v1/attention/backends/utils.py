@@ -1233,6 +1233,22 @@ def mamba_get_block_table_tensor(
         # launch. Zero-length requests in a CUDA graph still clamp to row 0.
         num_reqs = block_table.shape[0]
         n_out = 1 + kv_cache_spec.num_speculative_blocks
+        if not block_table.is_cuda:
+            # Triton runs on the accelerator only, and this helper IS called
+            # with CPU tensors: the GDN and linear-attention metadata builders
+            # are unit-tested on CPU (`DEVICE = torch.device("cpu")`). The
+            # expression this replaced was plain torch and handled that, so
+            # keep it for the CPU path rather than narrowing the contract.
+            # kimi_k3/nvidia/kda_metadata.py asserts `is_cuda` instead; a
+            # shared utility cannot, because its callers legitimately pass CPU.
+            start_indices = (seq_lens - 1) // kv_cache_spec.block_size
+            start_indices = start_indices.clamp(min=0)
+            offsets = torch.arange(
+                n_out, device=block_table.device, dtype=torch.int32
+            )
+            return torch.gather(
+                block_table, 1, (start_indices.unsqueeze(1) + offsets).to(torch.int64)
+            )
         out = block_table.new_empty((num_reqs, n_out))
         if num_reqs == 0:
             return out
