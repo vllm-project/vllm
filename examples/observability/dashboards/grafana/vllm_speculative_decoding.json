@@ -913,7 +913,11 @@
   "templating": {
     "list": [
       {
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "default",
+          "value": "default"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Data source",
