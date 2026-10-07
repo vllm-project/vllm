@@ -13,9 +13,14 @@ from vllm.models.qwen4_exp.nvidia import indexer_qsa
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
+from vllm.models.qwen4_exp.nvidia import qsa as nvidia_qsa
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
-from vllm.models.qwen4_exp.nvidia.qsa import qsa_kv_cache_dtype
+from vllm.models.qwen4_exp.nvidia.qsa import (
+    Qwen4ExpQSAFlashAttentionBackend,
+    qsa_fp8_kv_view_dtype,
+    qsa_kv_cache_dtype,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.utils import clear_layer_kv_caches
@@ -24,6 +29,9 @@ requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
     reason="QSA kernels require CUDA and Triton",
 )
+
+E4M3 = torch.float8_e4m3fn
+E5M2 = torch.float8_e5m2
 
 
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
@@ -221,8 +229,9 @@ def _qsa_sparse_paged_attention_reference(
 ) -> torch.Tensor:
     """Dense reference for QSA sparse paged attention.
 
-    Mirrors the kernel's dequant: fp8-e4m3 K/V caches are dequantized with the
-    per-tensor k_scale/v_scale host floats; bf16 caches use unit scales.
+    Mirrors the kernel's dequant: fp8 (e4m3/e5m2) K/V caches are dequantized
+    with the per-tensor k_scale/v_scale host floats; bf16 caches use unit
+    scales.
     """
     output = torch.zeros_like(q)
     repeats = q.shape[1] // k_cache.shape[2]
@@ -460,6 +469,45 @@ def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
     assert qsa_kv_cache_dtype(cache_config, "model.layers.47.self_attn") == "fp8"
     cache_config.kv_cache_dtype_skip_layers = []
     assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "fp8"
+
+
+def test_qsa_fp8_kv_view_dtypes() -> None:
+    assert qsa_fp8_kv_view_dtype("fp8") == E4M3
+    assert qsa_fp8_kv_view_dtype("fp8_e4m3") == E4M3
+    assert qsa_fp8_kv_view_dtype("fp8_e5m2") == E5M2
+    for kv_cache_dtype in ("auto", "bfloat16"):
+        assert qsa_fp8_kv_view_dtype(kv_cache_dtype) is None
+    assert Qwen4ExpQSAFlashAttentionBackend.supports_kv_cache_dtype("fp8_e5m2")
+
+
+@pytest.mark.parametrize(
+    ("capability", "kv_cache_dtype", "rejected"),
+    [
+        (86, "fp8", True),
+        (86, "fp8_e4m3", True),
+        (86, "fp8_e5m2", False),
+        (86, "auto", False),
+        (80, "fp8_e5m2", False),
+        (89, "fp8", False),
+        (89, "fp8_e5m2", False),
+    ],
+)
+def test_qsa_fp8_e4m3_kv_cache_rejected_below_sm89(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: int,
+    kv_cache_dtype: str,
+    rejected: bool,
+) -> None:
+    fake_platform = SimpleNamespace(
+        is_cuda=lambda: True,
+        has_device_capability=lambda c: capability >= c,
+    )
+    monkeypatch.setattr(nvidia_qsa, "current_platform", fake_platform)
+    if rejected:
+        with pytest.raises(NotImplementedError, match="fp8_e5m2"):
+            nvidia_qsa._check_fp8_kv_cache_dtype_supported(kv_cache_dtype)
+    else:
+        nvidia_qsa._check_fp8_kv_cache_dtype_supported(kv_cache_dtype)
 
 
 @requires_qsa_kernels
@@ -961,28 +1009,34 @@ def test_qsa_block_expansion_correctness() -> None:
         "page_size",
         "use_prefill_config",
         "num_requests",
-        "fp8",
+        "fp8_dtype",
     ),
     [
         # Production page sizes from hybrid-cache block alignment: 784/800
         # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
         # splits are per-rank TP1/TP2/TP4; the largest batch runs both
         # use_prefill_config variants.
-        pytest.param(1, 24, 2, 1600, True, 2, False, id="tp1_r1"),
-        pytest.param(16, 12, 1, 1600, True, 3, False, id="tp2_r16"),
-        pytest.param(32, 6, 1, 800, True, 5, False, id="tp4_r32"),
-        pytest.param(128, 24, 2, 1568, True, 7, False, id="tp1_r128"),
-        pytest.param(257, 6, 1, 800, True, 13, False, id="tp4_r257"),
-        pytest.param(513, 6, 1, 784, True, 17, False, id="tp4_r513"),
-        pytest.param(700, 6, 1, 800, True, 23, False, id="tp4_r700"),
-        pytest.param(1024, 24, 2, 1600, True, 33, False, id="tp1_r1024"),
-        pytest.param(2048, 24, 2, 1600, True, 63, False, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1600, False, 63, False, id="tp1_r2048_uniform"),
+        pytest.param(1, 24, 2, 1600, True, 2, None, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, None, id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, None, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, None, id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, None, id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, None, id="tp4_r513"),
+        pytest.param(700, 6, 1, 800, True, 23, None, id="tp4_r700"),
+        pytest.param(1024, 24, 2, 1600, True, 33, None, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, None, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, None, id="tp1_r2048_uniform"),
         # fp8_e4m3 K/V caches on the TP1 head split.
-        pytest.param(1, 24, 2, 1600, True, 2, True, id="tp1_r1_fp8"),
-        pytest.param(128, 24, 2, 1568, True, 7, True, id="tp1_r128_fp8"),
-        pytest.param(2048, 24, 2, 1600, True, 63, True, id="tp1_r2048_prefill_fp8"),
-        pytest.param(2048, 24, 2, 1600, False, 63, True, id="tp1_r2048_uniform_fp8"),
+        pytest.param(1, 24, 2, 1600, True, 2, E4M3, id="tp1_r1_fp8"),
+        pytest.param(128, 24, 2, 1568, True, 7, E4M3, id="tp1_r128_fp8"),
+        pytest.param(2048, 24, 2, 1600, True, 63, E4M3, id="tp1_r2048_prefill_fp8"),
+        pytest.param(2048, 24, 2, 1600, False, 63, E4M3, id="tp1_r2048_uniform_fp8"),
+        # fp8_e5m2 K/V caches (the fp8 format usable on SM80/SM86).
+        pytest.param(1, 24, 2, 1600, True, 2, E5M2, id="tp1_r1_e5m2"),
+        pytest.param(16, 12, 1, 1600, True, 3, E5M2, id="tp2_r16_e5m2"),
+        pytest.param(128, 24, 2, 1568, True, 7, E5M2, id="tp1_r128_e5m2"),
+        pytest.param(2048, 24, 2, 1600, True, 63, E5M2, id="tp1_r2048_prefill_e5m2"),
+        pytest.param(2048, 24, 2, 1600, False, 63, E5M2, id="tp1_r2048_uniform_e5m2"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -992,14 +1046,15 @@ def test_qsa_sparse_paged_attention_correctness(
     page_size: int,
     use_prefill_config: bool,
     num_requests: int,
-    fp8: bool,
+    fp8_dtype: torch.dtype | None,
 ) -> None:
     """QSA sparse paged attention matches the dense reference.
 
-    fp8 only changes the K/V cache dtype (e4m3 with a per-tensor scale pair) and
-    the scales; the reference dequantizes the same cache with those scales, so
-    both paths compare the production kernel against the reference on identical
-    inputs. fp8=True additionally covers the host-side scale folding.
+    fp8_dtype only changes the K/V cache dtype (e4m3 or e5m2 with a per-tensor
+    scale pair) and the scales; the reference dequantizes the same cache with
+    those scales, so both paths compare the production kernel against the
+    reference on identical inputs. fp8 cases additionally cover the host-side
+    scale folding.
     """
     torch.manual_seed(2)
     # One QSA attention problem: bf16 Q and paged K/V, a packed selection with
@@ -1087,13 +1142,15 @@ def test_qsa_sparse_paged_attention_correctness(
 
     scale = head_dim**-0.5
 
-    if fp8:
+    if fp8_dtype == E4M3 and not current_platform.has_device_capability(89):
+        pytest.skip("fp8_e4m3 KV cache requires SM89+ (Triton fp8e4nv)")
+    if fp8_dtype is not None:
         # A fixed non-unit pair (k != v) exercises the host-side scale folding
         # and catches a k/v swap; scales are host floats, as the layer exposes
         # them. Stored values are the scaled ones, as reshape_and_cache does.
         k_scale, v_scale = 0.5, 2.0
-        k_cache = (k_cache / k_scale).to(torch.float8_e4m3fn)
-        v_cache = (v_cache / v_scale).to(torch.float8_e4m3fn)
+        k_cache = (k_cache / k_scale).to(fp8_dtype)
+        v_cache = (v_cache / v_scale).to(fp8_dtype)
     else:
         k_scale, v_scale = 1.0, 1.0
 
