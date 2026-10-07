@@ -314,6 +314,11 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # P/D hidden-state handoff: scheduled requests whose single scheduled
+    # token is the last prompt token, already in the KV cache. The worker runs
+    # no forward pass for it and samples from the transferred hidden state.
+    hidden_state_record_req_ids: set[str] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

@@ -79,6 +79,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    HiddenStateRecordSpec,
     KpoolTailSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -1624,6 +1625,22 @@ class NixlBaseConnectorWorker:
                 assert block_stride % physical_ratio == 0
                 region_specs = [
                     (cache.data_ptr(), block_len, block_stride // physical_ratio)
+                ]
+            elif isinstance(layer_spec, HiddenStateRecordSpec):
+                # The record view is a [1, 1, num_slots * hidden] slice at the
+                # start of a padded page (one slot per stored hidden state; see
+                # hidden_state_handoff.RecordLayout). Transfer whole
+                # (kernel-split) pages, like the attention pages it aliases, so
+                # it shares their region.
+                physical_ratio = self._physical_blocks_per_logical_kv_block
+                block_stride = cache.stride(0) * cache.element_size()
+                assert block_stride % physical_ratio == 0
+                region_specs = [
+                    (
+                        cache.data_ptr(),
+                        physical_page_size,
+                        block_stride // physical_ratio,
+                    )
                 ]
             else:
                 if cache.ndim == 1:

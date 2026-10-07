@@ -110,6 +110,11 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
+from vllm.v1.worker.gpu.hidden_state_handoff import (
+    HIDDEN_STATE_RECORD_LAYER,
+    HiddenStateHandoff,
+    get_hidden_state_record_spec,
+)
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -162,7 +167,10 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
+from vllm.v1.worker.gpu.spec_decode.utils import (
+    DraftTokensHandler,
+    get_drafter_hidden_states,
+)
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import (
     StructuredOutputsWorker,
@@ -344,6 +352,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        # P/D hidden-state handoff, set up with the KV cache when enabled.
+        self.hidden_state_handoff: HiddenStateHandoff | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -592,6 +602,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
                 kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
+        record_spec = get_hidden_state_record_spec(self.vllm_config, self.model)
+        if record_spec is not None:
+            kv_cache_spec[HIDDEN_STATE_RECORD_LAYER] = record_spec
         return kv_cache_spec
 
     def initialize_kv_cache(
@@ -778,6 +791,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
+        if HIDDEN_STATE_RECORD_LAYER in kv_caches_dict:
+            assert self.pcp_manager is None
+            self.hidden_state_handoff = HiddenStateHandoff(self, kv_caches_dict)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -895,6 +911,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert self.execute_model_state is not None
         input_batch = self.execute_model_state.input_batch
+        assert input_batch is not None
         attn_metadata = self.execute_model_state.attn_metadata
         slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
         hidden_states = self.execute_model_state.hidden_states
@@ -915,7 +932,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 mm_inputs = [], all_false
 
-            spec_hidden_states = self._get_drafter_hidden_states(hidden_states)
+            spec_hidden_states = get_drafter_hidden_states(self.model, hidden_states)
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
@@ -1300,8 +1317,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_drafts_iter, dtype=np.int32, count=num_reqs
             )
             if self.adaptive_verification is not None:
+                extra_logits = 0
+                if self.hidden_state_handoff is not None:
+                    extra_logits = len(self.hidden_state_handoff.sample_only_req_ids)
                 num_toks = self.adaptive_verification.get_num_tokens(
-                    num_tokens_per_req, draft_tokens
+                    num_tokens_per_req, draft_tokens, num_extra_logits=extra_logits
                 )
 
         prefill_runs_as_decode_np = None
@@ -1720,12 +1740,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
+            if self.hidden_state_handoff is not None:
+                # Rows sampled from a P/D hidden-state record skip the forward.
+                scheduler_output = self.hidden_state_handoff.begin_step(
+                    scheduler_output
+                )
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
                 self.aux_output_connector.begin_step(
                     scheduler_output.aux_output_connector_metadata
                 )
             if scheduler_output.total_num_scheduled_tokens == 0:
+                hidden_state_handoff = self.hidden_state_handoff
+                if hidden_state_handoff and hidden_state_handoff.has_sample_only_reqs:
+                    self._skip_forward_for_sampling(scheduler_output)
+                    return None
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return self._merge_ec_connector_no_forward(
@@ -2063,6 +2092,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
+            has_structured_output_reqs=scheduler_output.has_structured_output_requests,
         )
 
         if not self.is_last_pp_rank:
@@ -2074,23 +2104,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return None
 
-    def _get_drafter_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Hidden states fed to the drafter.
-
-        Targets such as DeepSeek V4 expose the pre-hc_head residual through
-        get_mtp_target_hidden_states(). The buffer is sized at
-        max_num_batched_tokens and only allocated for drafters that consume
-        target hidden states, so None means "use the regular hidden states".
-        """
-        get_target_hidden_states = getattr(
-            self.model, "get_mtp_target_hidden_states", None
+    def _skip_forward_for_sampling(self, scheduler_output: SchedulerOutput) -> None:
+        """Every scheduled row samples from a P/D hidden-state record: run no
+        forward pass, only the KV connector and the sampling step."""
+        self.kv_connector.pre_forward(scheduler_output)
+        self.kv_connector.finish_forward()
+        self.execute_model_state = ExecuteModelState(
+            finished_req_ids=scheduler_output.finished_req_ids,
+            num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
+            has_structured_output_reqs=scheduler_output.has_structured_output_requests,
         )
-        if get_target_hidden_states is None:
-            return hidden_states
-        target_hidden_states = get_target_hidden_states()
-        if target_hidden_states is None:
-            return hidden_states
-        return target_hidden_states[: hidden_states.shape[0]]
 
     @torch.inference_mode()
     @step_eplb_after()
@@ -2111,9 +2134,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        has_struct_output_reqs = self.execute_model_state.has_structured_output_reqs
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
+            assert input_batch is not None
             # Non-last PP rank: hidden_states is None because this rank produced
             # IntermediateTensors instead of final hidden states. Receive the
             # sampled tokens broadcast from the last rank and update local state.
@@ -2136,12 +2161,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
-        assert hidden_states is not None
         draft_hidden_states = hidden_states
         if self.pcp_manager is not None:
+            assert hidden_states is not None
             hidden_states, aux_hidden_states, input_batch = (
                 self.pcp_manager.restore_for_sampling(hidden_states, aux_hidden_states)
             )
+
+        fwd_batch = input_batch
+        if self.hidden_state_handoff is not None:
+            input_batch, hidden_states = self.hidden_state_handoff.prepare_sampling(
+                input_batch, hidden_states, aux_hidden_states, has_struct_output_reqs
+            )
+        assert input_batch is not None and hidden_states is not None
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -2237,14 +2269,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.observe_verification(
                     input_batch.idx_mapping, num_sampled, num_rejected
                 )
-            spec_hidden_states = self._get_drafter_hidden_states(draft_hidden_states)
+            hidden_state_handoff = self.hidden_state_handoff
+            if hidden_state_handoff and hidden_state_handoff.has_sample_only_reqs:
+                (
+                    draft_batch,
+                    spec_hidden_states,
+                    aux_hidden_states,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                ) = hidden_state_handoff.prepare_drafting(
+                    fwd_batch, draft_hidden_states, aux_hidden_states, input_batch
+                )
+            else:
+                draft_batch = input_batch
+                spec_hidden_states = get_drafter_hidden_states(
+                    self.model, draft_hidden_states
+                )
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
-                    input_batch,
+                    draft_batch,
                     attn_metadata,
                     slot_mappings_by_layer,
                     spec_hidden_states,
@@ -2297,6 +2344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None
 
         input_batch = self.execute_model_state.input_batch
+        assert input_batch is not None
         hidden_states = self.execute_model_state.hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
@@ -2408,16 +2456,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
 
 class ExecuteModelState(NamedTuple):
-    input_batch: InputBatch
-    attn_metadata: dict[str, Any] | None
-    slot_mappings_by_layer: dict[str, torch.Tensor] | None
-    hidden_states: torch.Tensor | None
-    aux_hidden_states: list[torch.Tensor] | None
-    dp_sync: DPSyncState | None
-    finished_req_ids: set[str]
-    ec_connector_output: ECConnectorOutput | None
-    cudagraph_stats: CUDAGraphStat | None
-    num_spec_tokens_to_schedule: int
+    # None when no forward ran: every row samples from a hidden-state record.
+    input_batch: InputBatch | None = None
+    attn_metadata: dict[str, Any] | None = None
+    slot_mappings_by_layer: dict[str, torch.Tensor] | None = None
+    hidden_states: torch.Tensor | None = None
+    aux_hidden_states: list[torch.Tensor] | None = None
+    dp_sync: DPSyncState | None = None
+    finished_req_ids: set[str] = set()
+    ec_connector_output: ECConnectorOutput | None = None
+    cudagraph_stats: CUDAGraphStat | None = None
+    num_spec_tokens_to_schedule: int = 0
+    has_structured_output_reqs: bool = False
 
 
 class BatchReqState(NamedTuple):

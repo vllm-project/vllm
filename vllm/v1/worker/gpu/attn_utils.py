@@ -211,7 +211,7 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
-        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
+        if not kv_cache_group_spec.kv_cache_spec.has_attention_module:
             attn_groups.append([])
             continue
         if active_layer_names is not None:

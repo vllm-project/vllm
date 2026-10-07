@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiddenStateRecordSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KpoolTailSpec,
@@ -2691,6 +2692,12 @@ def register_all_kvcache_specs(vllm_config):
         KpoolTailSpec,
         KpoolTailManager,
         uniform_type_base_spec=KpoolTailSpec,
+    )
+    # P/D hidden-state handoff: one block per request, like a ring buffer.
+    KVCacheSpecRegistry.register(
+        HiddenStateRecordSpec,
+        CircularBufferManager,
+        uniform_type_base_spec=HiddenStateRecordSpec,
     )
 
     KVCacheSpecRegistry.register(

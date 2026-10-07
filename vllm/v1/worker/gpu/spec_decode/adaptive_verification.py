@@ -283,11 +283,14 @@ class AdaptiveVerificationManager:
         self,
         num_tokens_per_req: dict[str, int],
         draft_tokens: dict[str, list[int]],
+        num_extra_logits: int = 0,
     ) -> int:
         """Token count once the draft budget is trimmed to fit.
 
         Stashes the chosen budget in ``_batch_budget`` for the compaction and
-        reallocation that follow in the same step.
+        reallocation that follow in the same step. ``num_extra_logits`` are
+        logits sampled alongside this batch but outside it (P/D hidden-state
+        handoff rows), which must fit the same verification chunk.
         """
         assert self.cost_tables is not None
         req_ids = list(num_tokens_per_req)
@@ -312,9 +315,10 @@ class AdaptiveVerificationManager:
         valid = steps[None, :] < scheduled_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
+        used_logits = num_reqs * self.num_bonus_tokens + num_extra_logits
         max_draft_budget = min(
             int(scheduled_drafts.sum()),
-            max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
+            max(0, self._max_total_logits - used_logits),
         )
         scores = scores[:max_draft_budget]
         draft_cost_ms, verify_cost_ms = self.cost_tables
