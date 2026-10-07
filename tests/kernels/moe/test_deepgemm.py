@@ -963,3 +963,38 @@ def test_deepgemm_fp4_padded_decode_padding_robust(
 
         assert torch.isfinite(out_poison).all(), "padding garbage leaked into output"
         torch.testing.assert_close(out_poison, out_clean, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_rows", [3, 8193])
+@pytest.mark.parametrize("with_expert_map", [False, True])
+def test_expanded_preparation_masks_padding_and_builds_live_expert_bounds(
+    num_rows, with_expert_map
+):
+    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+        prepare_expanded_deepgemm_input,
+    )
+
+    torch.manual_seed(42)
+    # Offset, strided inputs exercise the last partial tile and pointer arithmetic.
+    ids = torch.randint(-1, 48, (num_rows + 1, 2), device="cuda")[1:, :1]
+    scales = torch.rand((num_rows + 1, 320), device="cuda")[1:, ::2]
+    counts = torch.arange(48, device="cuda", dtype=torch.int64) % 7
+    counts[::3] = 0
+    expert_map = (
+        torch.arange(48, device="cuda", dtype=torch.int32).flip(0)
+        if with_expert_map
+        else None
+    )
+    mapped = ids[:, 0] if expert_map is None else expert_map[ids[:, 0].clamp_min(0)]
+    expected_ids = torch.where(ids[:, 0] >= 0, mapped, -1).to(torch.int32)
+    scales[ids[:, 0] < 0] = float("nan")
+    expected_scales = torch.where((expected_ids >= 0)[:, None], scales, 1)
+    padded = (counts + 127) // 128 * 128
+    expected_ends = (padded.cumsum(0) - padded + counts).to(torch.int32)
+
+    actual_scales, actual_ids, actual_ends = prepare_expanded_deepgemm_input(
+        ids, scales, counts, expert_map, 128
+    )
+    torch.testing.assert_close(actual_ids, expected_ids, rtol=0, atol=0)
+    torch.testing.assert_close(actual_scales, expected_scales, rtol=0, atol=0)
+    torch.testing.assert_close(actual_ends, expected_ends, rtol=0, atol=0)

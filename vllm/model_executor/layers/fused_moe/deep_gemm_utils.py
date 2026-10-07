@@ -15,6 +15,88 @@ from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
 from vllm.utils.math_utils import round_up
 
 
+@triton.jit
+def _prepare_expanded_deepgemm_input(
+    ids,
+    scales,
+    counts,
+    expert_map,
+    out_ids,
+    out_scales,
+    expert_ends,
+    M: tl.constexpr,
+    S: tl.constexpr,
+    E: tl.constexpr,
+    ID_STRIDE: tl.constexpr,
+    SF_STRIDE_M: tl.constexpr,
+    SF_STRIDE_K: tl.constexpr,
+    COUNT_STRIDE: tl.constexpr,
+    ALIGNMENT: tl.constexpr,
+    HAS_EXPERT_MAP: tl.constexpr,
+    BLOCK: tl.constexpr,
+    EXPERT_BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    rows = offsets // S
+    cols = offsets % S
+    valid = rows < M
+    expert = tl.load(ids + rows * ID_STRIDE, valid, other=-1)
+    if HAS_EXPERT_MAP:
+        expert = tl.load(expert_map + expert, valid & (expert >= 0), other=-1)
+    sf = tl.load(
+        scales + rows.to(tl.int64) * SF_STRIDE_M + cols * SF_STRIDE_K,
+        valid,
+        other=1,
+    )
+    sf = tl.where(expert >= 0, sf, 1)
+    tl.store(out_scales + offsets.to(tl.int64), sf, valid)
+    tl.store(out_ids + rows, expert, valid & (cols == 0))
+    if tl.program_id(0) == 0:
+        experts = tl.arange(0, EXPERT_BLOCK)
+        n = tl.load(counts + experts * COUNT_STRIDE, experts < E, other=0).to(tl.int32)
+        padded = tl.cdiv(n, ALIGNMENT) * ALIGNMENT
+        ends = tl.cumsum(padded) - padded + n
+        tl.store(expert_ends + experts, ends, experts < E)
+
+
+def prepare_expanded_deepgemm_input(
+    topk_ids: torch.Tensor,
+    scales: torch.Tensor,
+    counts: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    alignment: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare safe scales and expert metadata without copying expanded activations."""
+    assert topk_ids.ndim == 2 and topk_ids.shape[1] == 1
+    M, S = scales.shape
+    assert topk_ids.shape[0] == M and M > 0
+    out_ids = torch.empty((M,), dtype=torch.int32, device=topk_ids.device)
+    out_scales = torch.empty((M, S), dtype=scales.dtype, device=scales.device)
+    expert_ends = torch.empty_like(counts, dtype=torch.int32)
+    _prepare_expanded_deepgemm_input[(triton.cdiv(M * S, 1024),)](
+        topk_ids,
+        scales,
+        counts,
+        expert_map,
+        out_ids,
+        out_scales,
+        expert_ends,
+        M,
+        S,
+        counts.numel(),
+        topk_ids.stride(0),
+        scales.stride(0),
+        scales.stride(1),
+        counts.stride(0),
+        alignment,
+        expert_map is not None,
+        1024,
+        triton.next_power_of_2(counts.numel()),
+        num_warps=4,
+    )
+    return out_scales, out_ids, expert_ends
+
+
 def expert_num_tokens_round_up_and_sum(
     expert_num_tokens: torch.Tensor, alignment: int
 ) -> int:

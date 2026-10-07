@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
     deepgemm_unpermute_and_reduce,
     ep_gather,
+    prepare_expanded_deepgemm_input,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -718,11 +719,15 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
             assert align_used is not None
             assert topk_ids.size(1) == 1
             M_sum = a1q.size(0)
-            ids = topk_ids[:, 0]
-            mapped_ids = ids if expert_map is None else expert_map[ids.clamp_min(0)]
-            expert_ids = torch.where(ids >= 0, mapped_ids, -1).to(torch.int32)
-            a1q_scale = torch.where((expert_ids >= 0)[:, None], a1q_scale, 1)
-            grouped_layout = _expanded_expert_ends(expert_tokens_meta, align_used)
+            assert expert_tokens_meta is not None
+            assert expert_tokens_meta.expert_num_tokens is not None
+            a1q_scale, expert_ids, grouped_layout = prepare_expanded_deepgemm_input(
+                topk_ids,
+                a1q_scale,
+                expert_tokens_meta.expert_num_tokens,
+                expert_map,
+                align_used,
+            )
         else:
             M_sum, _ = compute_aligned_M_and_alignment(
                 M=topk_ids.size(0),
