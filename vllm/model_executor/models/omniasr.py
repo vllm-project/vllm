@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
-import os
 from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 
+import regex as re
 import torch
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -57,6 +55,7 @@ from vllm.transformers_utils.processors.omniasr import (
     OmniASRFeatureExtractor,
     OmniASRProcessor,
 )
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -70,7 +69,6 @@ from .utils import (
     maybe_prefix,
 )
 from .whisper import ISO639_1_SUPPORTED_LANGS
-import re
 
 logger = init_logger(__name__)
 MAX_AUDIO_CLIP_S = 40
@@ -112,12 +110,10 @@ ISO_TO_OMNIASR_CODE = {
 
 @lru_cache(maxsize=8)
 def _load_lang_table(model_id: str) -> dict[str, int]:
-    if os.path.isdir(model_id):
-        path = os.path.join(model_id, "lang_lookup.json")
-    else:
-        path = hf_hub_download(repo_id=model_id, filename="lang_lookup.json")
-    with open(path) as f:
-        return json.load(f)
+    table = get_hf_file_to_dict("lang_lookup.json", model_id)
+    if table is None:
+        raise ValueError(f"lang_lookup.json not found for model {model_id!r}")
+    return table
 
 
 def _resolve_lang_id(lang: str | None, model_id: str, n_special: int) -> int:
@@ -153,8 +149,7 @@ def _permute_q_k_for_neox(w, num_heads):
 
 
 class OmniASRModel(nn.Module):
-    """
-    Full OmniASR model: encoder + projection + LLaMA decoder.
+    """Full OmniASR model: encoder + projection + LLaMA decoder.
 
     This class encapsulates the audio encoder (Wav2Vec2), the projection layer
     to match decoder dimensions, and the text/language embeddings.
@@ -175,8 +170,7 @@ class OmniASRModel(nn.Module):
         self.encoder_stacking = config.encoder_stacking
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the OmniASR model.
+        """Forward pass of the OmniASR model.
 
         Args:
             audio: [batch_size, num_samples] - input audio waveform.
@@ -184,6 +178,7 @@ class OmniASRModel(nn.Module):
         Returns:
             [batch_size, seq_len, projection_dim] - encoder output projected to
             decoder hidden size.
+
         """
         x = self.encoder_frontend(audio)
         x = self.encoder(x)
@@ -201,14 +196,14 @@ class OmniASRModel(nn.Module):
         return x  # [batch, seq, config.projection_dim] ready for LLaMA decoder
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """
-        Load weights for the OmniASR model.
+        """Load weights for the OmniASR model.
 
         Args:
             weights: An iterable of (name, loaded_weight) tuples.
 
         Returns:
             A set of parameter names that were loaded.
+
         """
         stacked_params_mapping = [
             (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
@@ -236,9 +231,7 @@ class OmniASRModel(nn.Module):
 
 
 class Wav2Vec2FeatureExtractor(nn.Module):
-    """
-    Wav2Vec2 feature extractor consisting of multiple 1D convolutional layers.
-    """
+    """Wav2Vec2 feature extractor consisting of multiple 1D convolutional layers."""
 
     def __init__(self, config: OmniASRConfig):
         super().__init__()
@@ -267,14 +260,14 @@ class Wav2Vec2FeatureExtractor(nn.Module):
                 )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply convolutional layers to input waveform.
+        """Apply convolutional layers to input waveform.
 
         Args:
             x: [batch_size, 1, num_samples] - input audio waveform.
 
         Returns:
             [batch_size, feature_dim, seq_len] - extracted features.
+
         """
         for layer in self.layers:
             x = layer["conv"](x)
@@ -286,8 +279,7 @@ class Wav2Vec2FeatureExtractor(nn.Module):
 
     @staticmethod
     def compute_seq_len(config: OmniASRConfig, num_samples: int) -> int:
-        """
-        Compute output sequence length after CNN feature extraction.
+        """Compute output sequence length after CNN feature extraction.
 
         Pure function — operates on config without instantiating the module.
         Mirrors PyTorch Conv1d's output_size formula.
@@ -312,9 +304,7 @@ class Wav2Vec2FeatureExtractor(nn.Module):
 
 
 class Wav2Vec2Attention(nn.Module):
-    """
-    Self-attention with separate q/k/v/output projections (matching checkpoint).
-    """
+    """Self-attention with separate q/k/v/output projections (matching checkpoint)."""
 
     def __init__(self, config: OmniASRConfig):
         super().__init__()
@@ -349,14 +339,14 @@ class Wav2Vec2Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for Wav2Vec2 attention.
+        """Forward pass for Wav2Vec2 attention.
 
         Args:
             x: [batch_size, seq_len, hidden_size] - input hidden states.
 
         Returns:
             [batch_size, seq_len, hidden_size] - output of attention layer.
+
         """
         qkv, _ = self.qkv_proj(x)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -366,9 +356,7 @@ class Wav2Vec2Attention(nn.Module):
 
 
 class Wav2Vec2FFN(nn.Module):
-    """
-    Feed-forward network for Wav2Vec2 encoder layer.
-    """
+    """Feed-forward network for Wav2Vec2 encoder layer."""
 
     def __init__(
         self,
@@ -392,14 +380,14 @@ class Wav2Vec2FFN(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for Wav2Vec2 FFN.
+        """Forward pass for Wav2Vec2 FFN.
 
         Args:
             x: [batch_size, seq_len, hidden_size] - input hidden states.
 
         Returns:
             [batch_size, seq_len, hidden_size] - output of FFN.
+
         """
         x, _ = self.inner_proj(x)
         x = nn.functional.gelu(x)
@@ -408,8 +396,7 @@ class Wav2Vec2FFN(nn.Module):
 
 
 class Wav2Vec2EncoderLayer(nn.Module):
-    """
-    A single Transformer encoder layer for Wav2Vec2.
+    """A single Transformer encoder layer for Wav2Vec2.
 
     Each layer consists of a self-attention mechanism and a feed-forward
     network, with LayerNorm applied before each and residual connections
@@ -437,8 +424,7 @@ class Wav2Vec2EncoderLayer(nn.Module):
 
 
 class Wav2Vec2Frontend(nn.Module):
-    """
-    Frontend for Wav2Vec2 including feature extraction and positional encoding.
+    """Frontend for Wav2Vec2 including feature extraction and positional encoding.
 
     This module handles the initial processing of raw audio waveforms,
     including convolutional feature extraction, layer normalization,
@@ -486,8 +472,7 @@ class Wav2Vec2Frontend(nn.Module):
 
 
 class Wav2Vec2TransformerEncoder(nn.Module):
-    """
-    Transformer encoder for Wav2Vec2.
+    """Transformer encoder for Wav2Vec2.
 
     Comprises multiple stackable Transformer encoder layers followed by
     a final LayerNorm. Processes extracted audio features into high-level
@@ -509,14 +494,13 @@ class Wav2Vec2TransformerEncoder(nn.Module):
 
 
 class OmniASRProcessingInfo(BaseProcessingInfo):
-    """
-    Processing information for the OmniASR model.
+    """Processing information for the OmniASR model.
 
     Provides metadata and helper methods for handling audio inputs,
     including sequence length computation.
     """
 
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> PreTrainedConfig:
         return self.ctx.get_hf_config()
 
     def get_default_tok_params(self):
@@ -554,8 +538,7 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
 
 
 class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo]):
-    """
-    Multi-modal processor for the OmniASR model.
+    """Multi-modal processor for the OmniASR model.
 
     Extends BaseMultiModalProcessor to handle audio modality inputs
     and coordinate prompt updates for speech-to-text tasks.
@@ -563,7 +546,7 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
 
     def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
-        
+
     def _preprocess_hf_mm_data(
         self,
         mm_data: Mapping[str, object],
@@ -586,11 +569,13 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
     ) -> BatchFeature:
         hf_config = self.info.get_hf_config()
         language = hf_processor_mm_kwargs.get("language", None)
+        if language is not None and not isinstance(language, str):
+            raise TypeError(f"language must be a str, got {type(language)}")
         lang_id = _resolve_lang_id(
-                language,
-                self.info.ctx.model_config.model,
-                hf_config.n_special_tokens,
-            )
+            language,
+            self.info.ctx.model_config.model,
+            hf_config.n_special_tokens,
+        )
         processed_data["language_id"] = torch.tensor([lang_id], dtype=torch.long)
         return processed_data
 
@@ -627,8 +612,7 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
 
 
 class OmniASRDummyInputsBuilder(BaseDummyInputsBuilder[OmniASRProcessingInfo]):
-    """
-    Dummy input builder for OmniASR.
+    """Dummy input builder for OmniASR.
 
     Generates synthetic audio and text data for testing and
     initialization purposes.
@@ -660,8 +644,7 @@ class OmniASRDummyInputsBuilder(BaseDummyInputsBuilder[OmniASRProcessingInfo]):
 class OmniAsrForConditionalGeneration(
     nn.Module, SupportsTranscription, SupportsMultiModal
 ):
-    """
-    OmniASR model for conditional generation (speech-to-text).
+    """OmniASR model for conditional generation (speech-to-text).
 
     This model integrates a Wav2Vec2-based audio tower with a LLaMA-based
     language model for generating transcriptions from audio input.
@@ -672,9 +655,15 @@ class OmniAsrForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
-            re.compile(r"^(llama_decoder\..*)\.self_attn_layer_norm"): r"\1.input_layernorm",
-            re.compile(r"^(llama_decoder\..*)\.ffn_layer_norm"): r"\1.post_attention_layernorm",
-            re.compile(r"^(llama_decoder\..*)\.self_attn\.output_proj"): r"\1.self_attn.o_proj",
+            re.compile(
+                r"^(llama_decoder\..*)\.self_attn_layer_norm"
+            ): r"\1.input_layernorm",
+            re.compile(
+                r"^(llama_decoder\..*)\.ffn_layer_norm"
+            ): r"\1.post_attention_layernorm",
+            re.compile(
+                r"^(llama_decoder\..*)\.self_attn\.output_proj"
+            ): r"\1.self_attn.o_proj",
             re.compile(r"^(llama_decoder\..*)\.ffn\.inner_proj"): r"\1.mlp.up_proj",
             re.compile(r"^(llama_decoder\..*)\.ffn\.output_proj"): r"\1.mlp.down_proj",
             re.compile(r"^(llama_decoder\..*)\.ffn\.gate_proj"): r"\1.mlp.gate_proj",
@@ -749,7 +738,7 @@ class OmniAsrForConditionalGeneration(
         lid_emb = self.language_model.model.embed_tokens(
             torch.tensor([self.config.lid_marker_token_id], device=device)
         ).to(dtype)
-        if language_id is not None:
+        if isinstance(language_id, torch.Tensor):
             lang_id = language_id.flatten()[0].item()
         else:
             lang_id = _resolve_lang_id(
