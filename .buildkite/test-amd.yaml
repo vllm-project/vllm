@@ -111,38 +111,6 @@ steps:
 #                                                                                                                                       #
 #########################################################################################################################################
 
-- label: ":computer: (CPU) Rust Frontend Cargo Style + Clippy" # TBD
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  no_gpu: true
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - rust/
-  - rust-toolchain.toml
-  - .buildkite/test_areas/rust_frontend_cargo.yaml
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-  commands:
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
-
-- label: ":computer: (CPU) Rust Frontend Cargo" # TBD
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  no_gpu: true
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - rust/
-  - rust-toolchain.toml
-  - .buildkite/test_areas/rust_frontend_cargo.yaml
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-  commands:
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
-
 - label: ":computer: (CPU) Docker Build Metadata" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
