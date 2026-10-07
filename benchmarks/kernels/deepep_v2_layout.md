@@ -39,8 +39,15 @@ vllm serve FP8_BLOCK_MODEL --data-parallel-size 2 --enable-expert-parallel \
   --kernel-config '{"moe_backend":"deep_gemm","deepep_v2_do_expand":true,"deepep_v2_do_cpu_sync":false}'
 ```
 
-Non-expanded DeepGEMM inputs retain the permutation path. Other expert backends,
-and quantization schemes outside block FP8, retain their compatibility paths.
+The integration also supports direct expanded input for DeepGEMM FP4 experts.
+It includes the padding-aware schedulers from upstream PRs #59044 and #59128.
+The FP4 path prepares local IDs, safe scales, and live expert endpoints in one
+GPU kernel; row count does not specialize the kernel. Both GEMMs and activation
+quantization use expert endpoints to skip padded computation. This preparation
+does not copy activations or read CPU receive counts.
+
+Non-expanded DeepGEMM inputs retain the permutation path. Other expert backends
+retain their compatibility paths.
 The standalone benchmark below separately demonstrates one grouped GEMM.
 
 | Case | Expanded expert groups | CPU count wait | Receive allocation |
@@ -131,6 +138,21 @@ path. Other expert backends and choosing a production threshold remain
 follow-up work.
 Coordinate with existing PR #51589, which already reconstructs sync-less
 expanded metadata.
+
+Eight-B200 NVLink serving validation with DeepSeek-V4.1-Flash compared
+non-expanded, expanded direct with unfused preparation, and expanded direct
+with fused preparation on the same padding-aware stack. At fixed 8192 input /
+1024 output tokens and concurrency eight, median TPOT across three rounds was
+10.744 / 13.425 / 12.613 ms. Fusion improved expanded TPOT by about 6%, but
+non-expanded remained faster. TTFT was 524.59 / 576.19 / 588.45 ms; sampled
+total GPU memory was 547.90 / 572.80 / 574.24 GiB. There is no TTFT or memory
+improvement demonstrated by this experiment. Full GSM8K scores were
+1271 / 1277 / 1278 correct out of 1319, with truncations counted as incorrect.
+These scores do not establish output equivalence. All configurations used
+no CPU sync and graph decode; cases ran sequentially rather than interleaved.
+The subsequent runtime-row-count and 64-bit preparation-offset fix passed
+GPU correctness and profiling checks, but did not receive another full serving
+rerun. Neither expansion nor CPU sync is enabled by default.
 
 Reference implementation:
 <https://github.com/deepseek-ai/DeepEP/blob/d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb/csrc/elastic/buffer.hpp>
