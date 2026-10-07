@@ -290,7 +290,8 @@ def _gather_block_tables_kernel(
     group_id = tl.program_id(0)
     batch_idx = tl.program_id(1)
 
-    stride = tl.load(block_table_strides + group_id)
+    # keep row-offset arithmetic 32-bit (int64 stride miscompiles on gfx1250/Triton 3.8)
+    stride = tl.load(block_table_strides + group_id).to(tl.int32)
     max_num_blocks = stride  # stride equals max_num_blocks for this group.
     dst_block_table_ptr = _load_ptr(dst_block_table_ptrs + group_id, tl.int32)
     dst_row_ptr = dst_block_table_ptr + batch_idx * stride
@@ -303,6 +304,12 @@ def _gather_block_tables_kernel(
         return
 
     req_idx = tl.load(batch_idx_to_req_idx + batch_idx)
+    if req_idx < 0:
+        # zero the row instead of indexing row -1, which faults on gfx1250
+        for i in tl.range(0, max_num_blocks, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            tl.store(dst_row_ptr + offset, 0, mask=offset < max_num_blocks)
+        return
     group_num_blocks_ptr = num_blocks_ptr + group_id * num_blocks_stride
     num_blocks = tl.load(group_num_blocks_ptr + req_idx)
 
