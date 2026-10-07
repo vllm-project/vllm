@@ -117,7 +117,7 @@ _QUARK_MXFP4_CONFIG = {
 }
 
 
-class _StubGlm5NextAttention(torch.nn.Module):
+class _StubAttention(torch.nn.Module):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__()
         self.o_proj = SimpleNamespace(reduce_results=True)
@@ -168,16 +168,41 @@ def _write_minimal_moe_config(model_path: Path, architecture: str) -> None:
         config["model_type"] = "axk1"
     elif architecture == "Glm4MoeForCausalLM":
         config["model_type"] = "glm4_moe"
-    elif architecture == "Qwen3NextForCausalLM":
+    elif architecture == "Glm4MoeLiteForCausalLM":
+        config["model_type"] = "glm4_moe_lite"
+    elif architecture in ("Qwen3NextForCausalLM", "Qwen3_5MoeForCausalLM"):
         config.update(
-            model_type="qwen3_next",
-            layer_types=["linear_attention"],
+            model_type=(
+                "qwen3_next"
+                if architecture == "Qwen3NextForCausalLM"
+                else "qwen3_5_moe_text"
+            ),
+            layer_types=[
+                "linear_attention"
+                if architecture == "Qwen3NextForCausalLM"
+                else "full_attention"
+            ],
             head_dim=64,
             linear_key_head_dim=64,
             linear_value_head_dim=64,
             linear_num_key_heads=4,
             linear_num_value_heads=4,
             shared_expert_intermediate_size=256,
+        )
+    elif architecture == "Qwen4ExpForCausalLM":
+        config.update(
+            model_type="qwen4_exp_text",
+            layer_types=["full_attention"],
+            head_dim=64,
+            linear_key_head_dim=64,
+            linear_value_head_dim=64,
+            linear_num_key_heads=4,
+            linear_num_value_heads=4,
+            shared_expert_intermediate_size=256,
+            eos_token_id=1,
+            hc_count=2,
+            hc_lowrank=4,
+            ple_layer_ids=[],
         )
     elif architecture == "Glm5NextForCausalLM":
         config.update(
@@ -193,8 +218,14 @@ def _write_minimal_moe_config(model_path: Path, architecture: str) -> None:
             mhc=False,
         )
     else:
-        config["model_type"] = "deepseek_v3" if "V3" in architecture else "deepseek_v2"
-        if architecture == "GlmMoeDsaForCausalLM":
+        config["model_type"] = (
+            "deepseek_v3"
+            if "V3" in architecture
+            else "deepseek_v32"
+            if architecture == "DeepseekV32ForCausalLM"
+            else "deepseek_v2"
+        )
+        if architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"):
             config.update(
                 index_topk=1,
                 index_kpool=1,
@@ -373,11 +404,15 @@ def test_online_shared_expert_reload_compatibility(
         "AXK1ForCausalLM",
         "DeepseekForCausalLM",
         "DeepseekV2ForCausalLM",
+        "DeepseekV32ForCausalLM",
         "DeepseekV3ForCausalLM",
         "Glm4MoeForCausalLM",
+        "Glm4MoeLiteForCausalLM",
         "Glm5NextForCausalLM",
         "GlmMoeDsaForCausalLM",
         "Qwen3NextForCausalLM",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen4ExpForCausalLM",
     ],
 )
 def test_online_quantization(
@@ -395,13 +430,32 @@ def test_online_quantization(
         from vllm.models.glm5next.common import model as glm5_next_model
 
         for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
-            monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
+            monkeypatch.setattr(glm5_next_model, attention, _StubAttention)
         monkeypatch.setattr(
             glm5_next_model, "_fused_shared_experts_tuned", lambda _: True
         )
+    elif architecture == "Glm4MoeLiteForCausalLM":
+        from vllm.model_executor.models import glm4_moe_lite
+
+        monkeypatch.setattr(glm4_moe_lite, "Glm4MoeLiteAttention", _StubAttention)
+        monkeypatch.setattr(glm4_moe_lite, "Glm4MoeLiteMLAAttention", _StubAttention)
+    elif architecture == "DeepseekV32ForCausalLM":
+        from vllm.models.deepseek_v32.amd import model as deepseek_v32_model
+
+        monkeypatch.setattr(
+            deepseek_v32_model, "DeepseekV32MLAAttention", _StubAttention
+        )
+    elif architecture == "Qwen3_5MoeForCausalLM":
+        from vllm.model_executor.models import qwen3_5
+
+        monkeypatch.setattr(qwen3_5, "Qwen3NextAttention", _StubAttention)
+    elif architecture == "Qwen4ExpForCausalLM":
+        from vllm.models.qwen4_exp.amd import model as qwen4_exp_model
+
+        monkeypatch.setattr(qwen4_exp_model, "Qwen3NextAttention", _StubAttention)
     _write_minimal_moe_config(tmp_path, architecture)
     expected_shared_expert_name = (
-        "shared_expert" if architecture == "Qwen3NextForCausalLM" else "shared_experts"
+        "shared_expert" if architecture.startswith("Qwen") else "shared_experts"
     )
     target_pattern = f"*{expected_shared_expert_name}*"
 
