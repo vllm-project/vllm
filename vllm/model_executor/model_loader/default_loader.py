@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     multi_thread_safetensors_weights_iterator,
     np_cache_weights_iterator,
     pt_weights_iterator,
+    record_checkpoint_files,
     resolve_mm_encoder_only_lm_prefixes,
     safetensors_weights_iterator,
 )
@@ -283,6 +284,8 @@ class DefaultModelLoader(BaseModelLoader):
                     f"`{source.model_or_path}`; check language_model prefixes "
                     f"{self._encoder_only_lm_prefixes}"
                 )
+        if self.load_config.release_weight_page_cache:
+            record_checkpoint_files(hf_weights_files)
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
