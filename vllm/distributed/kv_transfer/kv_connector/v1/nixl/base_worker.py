@@ -55,7 +55,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
     _is_attention_spec,
     _is_ssm_spec,
-    compute_head_offset,
     compute_tp_mapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
@@ -995,7 +994,9 @@ class NixlBaseConnectorWorker:
         self._transfer_layer_group_ids = tuple[int, ...]()
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
+        # GQA draft under an MLA target: its SPLIT regions use a draft TP mapping.
         self._head_sharded_draft_kv_heads = self._resolve_head_sharded_draft_kv_heads()
+        self.draft_tp_mappings: dict[EngineId, TPMapping] = {}
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
@@ -2133,8 +2134,6 @@ class NixlBaseConnectorWorker:
         fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
-        # SPLIT regions use the same source ranks, including a GQA draft under MLA.
-        split_reads = len(plan.source_ranks_per_group[fa_group_idx])
         region_num_blocks = nixl_agent_meta.region_num_blocks or [
             nixl_agent_meta.num_blocks
         ] * len(nixl_agent_meta.kv_caches_base_addr)
@@ -2154,20 +2153,18 @@ class NixlBaseConnectorWorker:
                 # ..using remote kv_block_len as transfer unit
                 local_block_len = remote_kv_block_len
 
-            offset = plan.rank_offset_factor
-            if local_region in self._head_sharded_draft_regions:
-                assert self._head_sharded_draft_kv_heads is not None
-                remote_info = self.transfer_topo.get_engine_info(
-                    nixl_agent_meta.engine_id
+            # REPLICATE reads the whole block once at offset 0; SPLIT gathers
+            # its head slice from each source rank at a per-rank offset.
+            if replicated:
+                num_reads, rank_offset = 1, 0
+            else:
+                region_plan = (
+                    self.draft_tp_mappings[nixl_agent_meta.engine_id]
+                    if local_region in self._head_sharded_draft_regions
+                    else plan
                 )
-                offset = compute_head_offset(
-                    self.transfer_topo.tp_rank,
-                    self.transfer_topo.tp_size,
-                    remote_info.remote_tp_size,
-                    self._head_sharded_draft_kv_heads,
-                )
-            num_reads = 1 if replicated else split_reads
-            rank_offset = 0 if replicated else offset * remote_kv_block_len
+                num_reads = len(region_plan.source_ranks_per_group[fa_group_idx])
+                rank_offset = region_plan.rank_offset_factor * remote_kv_block_len
             local_block_len = local_block_len // num_reads
 
             block_arange = np.arange(region_num_blocks[i], dtype=np.uint64)
@@ -2381,6 +2378,14 @@ class NixlBaseConnectorWorker:
             group_spec_types=self._group_spec_types,
             remote_dcp_size=remote_dcp_size,
         )
+        if self._head_sharded_draft_regions:
+            self.draft_tp_mappings[engine_id] = compute_tp_mapping(
+                transfer_topology=transfer_topo,
+                remote_tp_size=remote_tp_size,
+                group_spec_types=self._group_spec_types,
+                remote_dcp_size=remote_dcp_size,
+                head_sharded_kv_heads=self._head_sharded_draft_kv_heads,
+            )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
@@ -3860,6 +3865,7 @@ class NixlBaseConnectorWorker:
         self.dst_uses_region_group_mapping.pop(engine_id, None)
         self.dst_region_mem_types.pop(engine_id, None)
         self.tp_mappings.pop(engine_id, None)
+        self.draft_tp_mappings.pop(engine_id, None)
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 
