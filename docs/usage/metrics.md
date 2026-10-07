@@ -129,6 +129,18 @@ enabled.
     and query costs. Keep custom lists short, and only override the families
     you actively monitor.
 
+## Grafana Dashboards
+
+vLLM ships [Grafana dashboards](../../examples/observability/dashboards/grafana/README.md)
+for these metrics: a service overview with latency SLOs, a per-instance
+drill-down, and dashboards for the KV cache and speculative decoding. The
+[Prometheus and Grafana example](../../examples/observability/prometheus_grafana/README.md)
+runs them locally with Docker Compose.
+
+The overview's SLO attainment tiles count requests below a histogram bucket
+boundary, so an SLO threshold that is not a default boundary requires a custom
+bucket list (see above).
+
 ## Deprecation Policy
 
 Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`

@@ -377,11 +377,13 @@ def table(
     *,
     column_overrides: list[JSON] | None = None,
     sort_by: str | None = None,
+    column_width: int = 120,
 ) -> JSON:
     """A table joining one instant query per column on label columns.
 
     `labels` maps each label the queries aggregate by to its column name, and
-    each column is a (name, PromQL, unit) tuple.
+    each column is a (name, PromQL, unit) tuple. The first label column takes
+    the width left by the fixed-width columns.
     """
     targets = [target(expr, instant=True, fmt="table") for _, expr, _ in columns]
     panel = _panel("table", title, description, targets)
@@ -404,24 +406,27 @@ def table(
     overrides = [
         {
             "matcher": {"id": "byName", "options": name},
-            "properties": [{"id": "custom.minWidth", "value": 260 if i == 0 else 160}],
+            "properties": [
+                {"id": "custom.minWidth", "value": 260}
+                if i == 0
+                else {"id": "custom.width", "value": 160}
+            ],
         }
         for i, name in enumerate(labels.values())
     ]
     overrides += [
         {
             "matcher": {"id": "byName", "options": name},
-            "properties": [{"id": "unit", "value": unit}],
+            "properties": [
+                {"id": "unit", "value": unit},
+                {"id": "custom.width", "value": column_width},
+            ],
         }
         for name, _, unit in columns
     ]
     panel["fieldConfig"] = {
         "defaults": {
-            "custom": {
-                "align": "auto",
-                "cellOptions": {"type": "auto"},
-                "minWidth": 80,
-            },
+            "custom": {"align": "auto", "cellOptions": {"type": "auto"}},
             "mappings": [NO_TRAFFIC],
         },
         "overrides": overrides + (column_overrides or []),
@@ -1511,6 +1516,7 @@ def instances() -> JSON:
                 cell_color_override("Preempt/s", LOW_IS_GOOD["rate"]),
             ],
             sort_by="Running",
+            column_width=100,
         ),
         24,
         8,

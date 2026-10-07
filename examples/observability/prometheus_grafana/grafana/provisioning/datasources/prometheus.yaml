@@ -1,0 +1,14 @@
+# Prometheus data source used by the vLLM dashboards.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      # Keep in sync with the scrape interval in prometheus.yaml so that
+      # $__rate_interval covers enough samples.
+      timeInterval: 5s

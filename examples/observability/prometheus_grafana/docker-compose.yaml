@@ -1,6 +1,4 @@
 # docker-compose.yaml
-version: "3"
-
 services:
   prometheus:
     image: prom/prometheus:latest
@@ -9,7 +7,7 @@ services:
     ports:
       - "9090:9090"   # the default port used by Prometheus
     volumes:
-      - ${PWD}/prometheus.yaml:/etc/prometheus/prometheus.yml # mount Prometheus config file
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yml # mount Prometheus config file
 
   grafana:
     image: grafana/grafana:latest
@@ -17,3 +15,6 @@ services:
       - prometheus
     ports:
       - "3000:3000" # the default port used by Grafana
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning # Prometheus data source and dashboard provider
+      - ../dashboards/grafana:/var/lib/grafana/dashboards/vllm # vLLM dashboards
