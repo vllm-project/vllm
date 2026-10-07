@@ -39,7 +39,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
-from vllm.tool_parsers.utils import get_function_tools, require_function_tools
+from vllm.tool_parsers.utils import (
+    flat_namespace_tool_name,
+    get_function_tools,
+    require_function_tools,
+)
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -307,10 +311,9 @@ def _dump_tool_choice_for_xgrammar(
         return tool_choice.model_dump(mode="json", exclude_none=True)
 
     if isinstance(tool_choice, ToolChoiceFunction):
-        return {
-            "type": "function",
-            "function": {"name": tool_choice.name},
-        }
+        return _dump_allowed_tool_ref_for_xgrammar(
+            tool_choice.model_dump(mode="json", exclude_none=True)
+        )
 
     if isinstance(tool_choice, ToolChoiceAllowed):
         return {
@@ -333,9 +336,13 @@ def _dump_allowed_tool_ref_for_xgrammar(tool_ref: AllowedToolRef) -> AllowedTool
         and "function" not in tool_ref
         and "name" in tool_ref
     ):
+        name = tool_ref["name"]
+        namespace = tool_ref.get("namespace")
+        if isinstance(namespace, str) and isinstance(name, str):
+            name = flat_namespace_tool_name(namespace, name)
         return {
             "type": "function",
-            "function": {"name": tool_ref["name"]},
+            "function": {"name": name},
         }
     return tool_ref
 

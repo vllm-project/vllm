@@ -100,6 +100,8 @@ vLLM supports the `tool_choice='required'` option in the chat completion API. Si
 
 When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
 
+In the JSON-guided tool-calling path (for example, with `VLLM_ENFORCE_STRICT_TOOL_CALLING=0`), Responses API namespace functions support local `$ref` references to `$defs` with `tool_choice='required'`, just like top-level function tools. Definitions are shared across the combined tool schema, so a definition name used by multiple tools must have the same schema.
+
 ## None Function Calling
 
 vLLM supports the `tool_choice='none'` option in the chat completion API. When this option is set, the model will not generate any tool calls and will respond with regular text content only, even if tools are defined in the request.
@@ -125,6 +127,8 @@ For parsers using schema-derived JSON constraints, required and named calls cont
 ### Strict Mode
 
 Structural-tag constraints have two layers. The tool-call *envelope* (markup and function name) is constrained whenever a structural tag applies: always for `tool_choice="required"` and named function calling, and for `tool_choice="auto"` once at least one tool sets `strict: true` or the server raises the floor. The *argument schema* of an individual tool is pinned only when that tool sets `strict: true` (or under `--tool-strict-level parameter`); a tool that omits `strict` keeps its arguments unconstrained, even when another tool in the same request is strict. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.
+
+In the Responses API, these rules also apply to function tools inside a `namespace` tool. Set `strict` on the nested function, not on the namespace. Structural-tag constraints use the same `namespace__function` names as the model's tool prompt, while Responses output items report the original function `name` and `namespace` separately.
 
 For best compatibility with strict schema enforcement, define tool parameter schemas in the OpenAI strict-schema style:
 
