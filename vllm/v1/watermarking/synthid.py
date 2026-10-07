@@ -77,6 +77,13 @@ class SynthIDWatermarker(Watermarker):
         logits: torch.Tensor,
         contexts: torch.Tensor,
     ) -> torch.Tensor:
+        if type(self.prf) is PhiloxPRF and logits.device.type == "cuda":
+            from vllm.v1.worker.gpu.sample.watermark import synthid_watermark_logits
+
+            # Masked tokens stay -inf, as below.
+            return synthid_watermark_logits(
+                logits, contexts, self.prf.key, self.depth, stream=_STREAM_DOMAIN
+            )
         vocabulary = torch.arange(logits.shape[-1], device=logits.device)
         probs = torch.softmax(logits, dim=1, dtype=torch.float32)  # [B, V]
 
