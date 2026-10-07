@@ -37,6 +37,80 @@ NUM_BLOCKS = [32768, 2048]
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(100),
+    reason="Exercises the Blackwell large-head attention tuning path",
+)
+@pytest.mark.parametrize("head_size,num_kv_heads", [(256, 4), (512, 1)])
+@pytest.mark.parametrize("context_length", [32, 65, 1024, 1025, 2048])
+@pytest.mark.parametrize("query_length", [2, 8])
+@torch.inference_mode()
+def test_batch_invariant_multi_query_matches_single_query(
+    monkeypatch: pytest.MonkeyPatch,
+    head_size: int,
+    num_kv_heads: int,
+    context_length: int,
+    query_length: int,
+) -> None:
+    """Each causal query must be exact alone and with future proposals."""
+    import vllm.v1.attention.ops.triton_unified_attention as attention
+
+    monkeypatch.setattr(attention, "is_batch_invariant", True)
+    set_random_seed(42)
+    query = torch.randn(
+        query_length, 8, head_size, device=DEVICE_TYPE, dtype=torch.bfloat16
+    )
+    block_size = 16
+    # context_length includes the first query's KV entry.
+    kv_length = context_length + query_length - 1
+    num_blocks = (kv_length + block_size - 1) // block_size
+    key = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        device=DEVICE_TYPE,
+        dtype=torch.bfloat16,
+    )
+    value = torch.randn_like(key)
+    block_table = torch.arange(num_blocks, device=DEVICE_TYPE, dtype=torch.int32)[None]
+
+    def run(query_slice: torch.Tensor, kv_length: int) -> torch.Tensor:
+        length = query_slice.shape[0]
+        output = torch.empty_like(query_slice)
+        attention.unified_attention(
+            q=query_slice,
+            k=key,
+            v=value,
+            out=output,
+            cu_seqlens_q=torch.tensor(
+                [0, length], device=DEVICE_TYPE, dtype=torch.int32
+            ),
+            max_seqlen_q=length,
+            seqused_k=torch.tensor([kv_length], device=DEVICE_TYPE, dtype=torch.int32),
+            max_seqlen_k=kv_length,
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            window_size=(1023, 0) if head_size == 256 else (-1, -1),
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+        )
+        return output
+
+    single_outputs = torch.cat(
+        [
+            run(query[index : index + 1], context_length + index)
+            for index in range(query_length)
+        ]
+    )
+    block_output = run(query, kv_length)
+    torch.testing.assert_close(single_outputs, block_output, rtol=0, atol=0)
+
+
 @triton.jit
 def _compute_clamped_mm_tile_bounds(
     output_ptr,
