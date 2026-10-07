@@ -27,10 +27,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.hisparse import runtime as runtime_module
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    HiSparseResidencyTable,
+    update_hisparse_residency,
+)
 from vllm.v1.hisparse.types import (
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
+    SparseKVResidencyUpdate,
     SparseKVRowMirror,
 )
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
@@ -412,3 +417,30 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
     assert update.block_ids[0][:3] == copy_ids[:3]
     assert manager.get_block_ids(resumed.request_id)[2] == core_row
     assert core_row[:3] == [0, 0, 0]
+
+
+def test_residency_updates_persist_by_state_row_and_gather_by_batch_row():
+    """Updates name requests, are stored by state row, and are read by batch row.
+
+    A suffix update for a lost page must leave the earlier pages and the other
+    request's row intact across steps that reorder the batch.
+    """
+    tables = [HiSparseResidencyTable(4, 4, torch.device("cpu")) for _ in range(2)]
+    update_hisparse_residency(
+        tables,
+        {
+            "a": SparseKVResidencyUpdate(0, ([1, 2, 3], [11, 12, 13])),
+            "b": SparseKVResidencyUpdate(0, ([4, 5], [14, 15])),
+        },
+        ["a", "b"],
+        torch.tensor([2, 0], dtype=torch.int32),
+    )
+    update_hisparse_residency(
+        tables,
+        {"a": SparseKVResidencyUpdate(1, ([0, 3, 6], [0, 13, 16]))},
+        ["b", "a"],
+        torch.tensor([0, 2], dtype=torch.int32),
+    )
+
+    assert tables[0].batch_rows[:2].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
+    assert tables[1].batch_rows[:2].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
