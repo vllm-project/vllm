@@ -34,6 +34,7 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_block_hashes,
     resolve_dcp_kv_block_size,
+    to_event_extra_keys,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -215,6 +216,7 @@ class SimpleCPUOffloadScheduler:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             allow_partial_hash_hits=not lazy_offload,
+            num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
         )
         self.group_block_sizes = self.cpu_coordinator.group_block_sizes
         # FA group's own resolved block_size; divides scheduler_block_size (the
@@ -737,14 +739,19 @@ class SimpleCPUOffloadScheduler:
             if scheduled_for_req:
                 req_ids.append(req_id)
 
-        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+        # Preemption frees the request's blocks. It resumes with a full new
+        # block table (MRV1 resumed-cached, MRV2 NewRequestData).
+        for req_id in preempted_req_ids:
+            state = self._reqs_to_store.get(req_id)
+            if state is not None:
+                state.block_ids = tuple([] for _ in range(num_groups))
+                state.num_stored_blocks = [0] * num_groups
+
+        for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
             if state is None or state.finished:
                 continue
 
-            if preempted:
-                state.block_ids = tuple([] for _ in range(num_groups))
-                state.num_stored_blocks = [0] * num_groups
             if new_block_id_groups:
                 for g in range(min(num_groups, len(new_block_id_groups))):
                     if new_block_id_groups[g] is not None:
@@ -831,19 +838,6 @@ class SimpleCPUOffloadScheduler:
         )
         request = state.request
         confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
-        # Truncate to the granularity a lookup can actually land on. With
-        # fine-grained hits that is hash_block_size; otherwise hits only land on
-        # the scheduler block (the group LCM). Using the LCM unconditionally
-        # would drop whole blocks that sit between the last LCM boundary and a
-        # reachable fine-grained boundary, so the other groups would hold that
-        # boundary and this one would not, and the joint hybrid lookup would
-        # reconcile to zero.
-        store_alignment = (
-            self.hash_block_size
-            if self.cpu_coordinator.enable_partial_hash_hits
-            else self.block_size
-        )
-        aligned_tokens = confirmed_tokens // store_alignment * store_alignment
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
@@ -858,7 +852,11 @@ class SimpleCPUOffloadScheduler:
             # num_stored_blocks can be stale and omit evicted blocks in
             # the middle of the request.
             group_size = self.group_block_sizes[g]
-            ready = min(len(group_gpu_ids), aligned_tokens // group_size)
+            # Mimic the GPU KV cache manager's cacheable prefix.
+            cacheable_tokens = self.cpu_coordinator.get_num_cacheable_tokens(
+                confirmed_tokens, g
+            )
+            ready = min(len(group_gpu_ids), cacheable_tokens // group_size)
             resolved_hashes = resolve_block_hashes(
                 request.block_hashes, self.hash_block_size, group_size
             )
@@ -1147,9 +1145,7 @@ class SimpleCPUOffloadScheduler:
                             lora_id=meta.lora_id if meta else None,
                             medium=self.kv_event_medium,
                             lora_name=meta.lora_name if meta else None,
-                            extra_keys=(
-                                [extra_keys] if extra_keys is not None else None
-                            ),
+                            extra_keys=to_event_extra_keys(extra_keys and [extra_keys]),
                             group_idx=group_idx,
                             kv_cache_spec_kind=get_kv_cache_spec_kind(spec).value,
                             kv_cache_spec_sliding_window=(
@@ -1396,6 +1392,10 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
+        for pending in self._pending_cpu_hits.values():
+            self._free_pending_cpu_hit(pending)
+        self._pending_cpu_hits.clear()
+
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
         for transfer in self._pending_finished_stores:
             self._release_transfer_refs(transfer)
