@@ -473,7 +473,7 @@ def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
 
     transformed_l1 = experts._transformed_l1_weights
     experts.finalize_weights()
-    assert experts._transformed_l1_weights is transformed_l1
+    assert all(a is b for a, b in zip(experts._transformed_l1_weights, transformed_l1))
 
 
 @pytest.mark.parametrize(
@@ -636,18 +636,22 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
         assert torch.equal(transformed[0].view(torch.uint8), weight)
         assert torch.equal(actual_scale[0], scale)
     assert shared_experts.gate_up_proj.weight.data_ptr() != original_gate_up_ptr
-    assert (
-        experts._transformed_shared_l1_weights[0].data_ptr()
-        == shared_experts.gate_up_proj.weight.data_ptr()
-    )
-    assert (
-        experts._transformed_shared_l2_weights[0].data_ptr()
-        == shared_experts.down_proj.weight.data_ptr()
-    )
+    registered = {tensor.data_ptr() for _, tensor in experts.named_buffers()}
+    for pair in (
+        experts._transformed_l1_weights,
+        experts._transformed_l2_weights,
+        experts._transformed_shared_l1_weights,
+        experts._transformed_shared_l2_weights,
+    ):
+        assert all(tensor.data_ptr() in registered for tensor in pair)
+    assert shared_experts.gate_up_proj.weight.numel() == 0
+    assert shared_experts.down_proj.weight.numel() == 0
 
     transformed_l1 = experts._transformed_shared_l1_weights
     experts.finalize_weights(shared_experts)
-    assert experts._transformed_shared_l1_weights is transformed_l1
+    assert all(
+        a is b for a, b in zip(experts._transformed_shared_l1_weights, transformed_l1)
+    )
 
 
 @pytest.mark.parametrize("fused", [False, True])
@@ -982,3 +986,65 @@ def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding(
         fused_topk_weights.view(torch.uint8),
         ref_topk_weights.view(torch.uint8),
     )
+
+
+def test_mega_moe_staged_reload_refreshes_routed_buffers(monkeypatch):
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.model_executor.utils import register_derived_buffer
+
+    experts = object.__new__(DeepseekV4MegaMoEExperts)
+    torch.nn.Module.__init__(experts)
+    experts.intermediate_size = 1
+    experts.hidden_size = 2
+    experts.num_local_experts = 1
+    experts.num_shared_experts = 0
+    experts._vllm_defer_weights_reload = True
+    names = ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
+    for name in names:
+        setattr(
+            experts,
+            name,
+            torch.nn.Parameter(
+                torch.ones(1, 2, 2, dtype=torch.uint8), requires_grad=False
+            ),
+        )
+    for name in (
+        "_mega_l1_packed",
+        "_mega_l1_scale",
+        "_mega_l2_packed",
+        "_mega_l2_scale",
+    ):
+        register_derived_buffer(experts, name)
+    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm._import_deep_gemm",
+        lambda: SimpleNamespace(
+            transform_sf_into_required_layout=lambda sf, *args: sf,
+            transform_weights_for_mega_moe=lambda l1, l2: (
+                (l1[0].clone(), l1[1].clone()),
+                (l2[0].clone(), l2[1].clone()),
+            ),
+        ),
+    )
+    record_metadata_for_reloading(experts)
+    experts.finalize_weights()
+    stable = dict(experts.named_buffers())
+    for value in (1, 3, 1):
+        initialize_layerwise_reload(experts)
+        for name in names:
+            param = getattr(experts, name)
+            loaded = torch.full_like(
+                param, 127 + value if "scale" in name else value, device="cpu"
+            )
+            param.weight_loader(param, loaded)
+        assert experts.w13_weight is not None
+        finalize_layerwise_reload(experts, SimpleNamespace(dtype=torch.float32))
+        assert all(getattr(experts, name) is None for name in names)
+        for name, buffer in stable.items():
+            assert getattr(experts, name) is buffer
+            expected = 2.0**value if "scale" in name else value
+            torch.testing.assert_close(buffer, torch.full_like(buffer, expected))
