@@ -1369,7 +1369,7 @@ async fn unary_generate_invalid_sampling_params_returns_invalid_argument() {
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             sampling: Some(pb::RandomSampling {
-                top_p: 2.0,
+                top_p: Some(2.0),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1516,7 +1516,7 @@ async fn unary_generate_with_sampling_params() {
             temperature: Some(0.7),
             sampling: Some(pb::RandomSampling {
                 top_k: Some(50),
-                top_p: 0.9,
+                top_p: Some(0.9),
                 seed: Some(42),
                 ..Default::default()
             }),

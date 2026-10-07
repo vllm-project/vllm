@@ -76,7 +76,7 @@ message KVHintAction {
 message RandomSampling {
   uint32 num_sequences = 1;  // "n", default (0) means 1
   optional uint32 top_k = 2;  // Omitted means default; 0 disables top-k.
-  float top_p = 3;  // 0 means default
+  optional float top_p = 3;  // Omitted or 0 means default.
   optional float min_p = 4;  // Omitted means default; 0 disables min-p.
   optional int64 seed = 5;
 }
@@ -133,7 +133,7 @@ message ResponseOptions {
 }
 
 message KVCacheParameters {
-  optional bool bypass_prefix_cache = 1;
+  bool bypass_prefix_cache = 1;
   string cache_salt = 2;
 
   // KV Connector transfer parameters
