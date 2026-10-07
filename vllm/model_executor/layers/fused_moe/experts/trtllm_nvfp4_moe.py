@@ -21,11 +21,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_int,
-    has_flashinfer_situ_activation,
-    quantize_nvfp4_per_token_input,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -34,7 +29,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    activation_to_flashinfer_int,
+    has_flashinfer_situ_activation,
+    has_flashinfer_trtllm_fused_moe,
+    quantize_nvfp4_per_token_input,
+)
 
 logger = init_logger(__name__)
 
