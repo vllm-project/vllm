@@ -602,9 +602,38 @@ def has_flashinfer_b12x_w4a16_moe() -> bool:
     wrapper = getattr(mod, "B12xMoEWrapper", None)
     if wrapper is None:
         return False
+    if _flashinfer_b12x_w4a16_moe_is_broken():
+        return False
     import inspect
 
     return "quant_mode" in inspect.signature(wrapper.__init__).parameters
+
+
+def _flashinfer_b12x_w4a16_moe_is_broken() -> bool:
+    """FlashInfer 0.6.18 through 0.7.0.post1 reject their own TC-decode
+    "ultra" fc2 tile (tile_k=32) in the ``force_tile_config`` re-validation
+    (``_candidate_tile_fits`` applies a generic ``tile_k >= 64`` floor), so
+    any W4A16 launch crossing the custom-op boundary fails during CUDA graph
+    capture with "force_tile_config fc2 tile ... does not fit problem".
+    """
+    from packaging.version import InvalidVersion, Version
+
+    import flashinfer
+
+    try:
+        version = Version(flashinfer.__version__)
+    except (AttributeError, InvalidVersion):
+        return False
+    if Version("0.6.18") <= version <= Version("0.7.0.post1"):
+        logger.warning_once(
+            "FlashInfer %s has a broken SM12x W4A16 fused MoE "
+            "(force_tile_config rejects the TC-decode fc2 tile); disabling "
+            "the b12x W4A16 path. Use flashinfer-python 0.6.16.post3 or a "
+            "release with the forced-tile validation fix.",
+            version,
+        )
+        return True
+    return False
 
 
 @functools.cache

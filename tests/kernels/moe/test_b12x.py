@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the b12x tensor-parallel MoE integration."""
 
+import sys
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
@@ -1272,3 +1273,28 @@ def test_b12x_moe_cuda_graph_replay(
     assert torch.isfinite(expected).all()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    ("version", "broken"),
+    [
+        ("0.6.16.post3", False),
+        ("0.6.18", True),
+        ("0.6.18.post1", True),
+        ("0.7.0.post1", True),
+        ("0.7.1", False),
+        ("not-a-version", False),
+    ],
+)
+def test_b12x_w4a16_broken_flashinfer_version_guard(
+    monkeypatch: pytest.MonkeyPatch, version: str, broken: bool
+) -> None:
+    """FlashInfer 0.6.18..0.7.0.post1 reject their own TC-decode fc2 tile in
+    the forced-tile re-validation, crashing W4A16 at CUDA graph capture; the
+    guard must blocklist exactly that range."""
+    import vllm.utils.flashinfer as flashinfer_utils
+
+    monkeypatch.setitem(
+        sys.modules, "flashinfer", SimpleNamespace(__version__=version)
+    )
+    assert flashinfer_utils._flashinfer_b12x_w4a16_moe_is_broken() is broken
