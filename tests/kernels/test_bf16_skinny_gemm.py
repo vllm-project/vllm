@@ -215,7 +215,6 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
         *k3_gemm.KIMI_K3_PROJECTIONS_SM100.values(),
         *k3_gemm.KIMI_K3_PROJECTIONS_SM90.values(),
         glm52_gemm.GLM52_QKV_A_PROJECTION,
-        glm52_gemm.GLM52_Q_B_PROJECTION,
     ]
     missing = sorted(
         (spec.n, spec.k)
@@ -430,20 +429,22 @@ def test_kda_qkvg_autotune_enables_full_overlap(
 
 def test_glm52_projection_plans_are_separate() -> None:
     qkv_a = glm52_gemm.GLM52_QKV_A_PROJECTION
-    q_b = glm52_gemm.GLM52_Q_B_PROJECTION
+    gate_up = glm52_gemm.GLM52_DENSE_GATE_UP_PROJECTION
 
     qkv_a_plan = qkv_a.build_plan()
-    q_b_plan = q_b.build_plan()
+    gate_up_plan = gate_up.build_plan()
 
     assert (qkv_a.n, qkv_a.k, set(qkv_a_plan)) == (
         2624,
         6144,
-        set(range(1, 17)),
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
     )
-    assert (q_b.n, q_b.k, set(q_b_plan)) == (
-        2048,
-        2048,
-        set(range(1, 17)),
+    # Dense gate_up is a cute-only M=1 spec: no dsv3_tokens (the C++ kernel
+    # has no (6144,6144) specialization) so M>1 falls back to F.linear.
+    assert (gate_up.n, gate_up.k, set(gate_up_plan)) == (
+        6144,
+        6144,
+        {1},
     )
     assert {
         num_tokens
@@ -454,15 +455,11 @@ def test_glm52_projection_plans_are_separate() -> None:
         num_tokens
         for num_tokens, (backend, _) in qkv_a_plan.items()
         if backend == "dsv3_fused_a"
-    } == set(range(3, 17))
+    } == {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
     assert {
-        num_tokens for num_tokens, (backend, _) in q_b_plan.items() if backend == "cute"
-    } == {1, 2}
-    assert {
-        num_tokens
-        for num_tokens, (backend, _) in q_b_plan.items()
-        if backend == "dsv3_fused_a"
-    } == set(range(3, 17))
+        num_tokens for num_tokens, (backend, _) in gate_up_plan.items() if backend == "cute"
+    } == {1}
+    assert all(backend == "cute" for backend, _ in gate_up_plan.values())
 
     eh = glm52_gemm.GLM52_EH_PROJECTION
     eh_plan = eh.build_plan()
@@ -501,29 +498,32 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
                 )
             )
             self.quant_method = quant_method
+            # The enabler's Step-0 diagnostic reads ``child.prefix`` (LinearBase
+            # has no public name accessor), so the fixture provides one.
+            self.prefix = "fake.proj"
 
     qkv_a = glm52_gemm.GLM52_QKV_A_PROJECTION
-    q_b = glm52_gemm.GLM52_Q_B_PROJECTION
+    gate_up = glm52_gemm.GLM52_DENSE_GATE_UP_PROJECTION
     root = nn.Module()
     root.attn = nn.Module()
     root.attn.fused_qkv_a_proj = FakeLinearBase(
         qkv_a.n, qkv_a.k, glm52_gemm.UnquantizedLinearMethod()
     )
-    root.attn.q_b_proj = FakeLinearBase(
-        q_b.n, q_b.k, glm52_gemm.UnquantizedLinearMethod()
+    root.attn.gate_up_proj = FakeLinearBase(
+        gate_up.n, gate_up.k, glm52_gemm.UnquantizedLinearMethod()
     )
     root.same_shape_other_name = FakeLinearBase(
         qkv_a.n, qkv_a.k, glm52_gemm.UnquantizedLinearMethod()
     )
     root.quantized = nn.Module()
     quantized_method = object()
-    root.quantized.q_b_proj = FakeLinearBase(q_b.n, q_b.k, quantized_method)
+    root.quantized.gate_up_proj = FakeLinearBase(gate_up.n, gate_up.k, quantized_method)
     root.wrong_shape = nn.Module()
     root.wrong_shape.fused_qkv_a_proj = FakeLinearBase(
         qkv_a.n + 1, qkv_a.k, glm52_gemm.UnquantizedLinearMethod()
     )
     monkeypatch.setattr(glm52_gemm, "LinearBase", FakeLinearBase)
-    monkeypatch.setattr(glm52_gemm, "_is_sm103", lambda: True)
+    monkeypatch.setattr(glm52_gemm, "_is_sm10x", lambda: True)
     monkeypatch.setattr(
         glm52_gemm.shape_dynamic_skinny_gemm,
         "is_available",
@@ -540,16 +540,16 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
         glm52_gemm.GLM52LowLatencyLinearMethod,
     )
     assert isinstance(
-        root.attn.q_b_proj.quant_method,
+        root.attn.gate_up_proj.quant_method,
         glm52_gemm.GLM52LowLatencyLinearMethod,
     )
     assert root.attn.fused_qkv_a_proj.quant_method._plan == qkv_a.build_plan()
-    assert root.attn.q_b_proj.quant_method._plan == q_b.build_plan()
+    assert root.attn.gate_up_proj.quant_method._plan == gate_up.build_plan()
     assert isinstance(
         root.same_shape_other_name.quant_method,
         glm52_gemm.GLM52LowLatencyLinearMethod,
     )
-    assert root.quantized.q_b_proj.quant_method is quantized_method
+    assert root.quantized.gate_up_proj.quant_method is quantized_method
     assert (
         type(root.wrong_shape.fused_qkv_a_proj.quant_method)
         is glm52_gemm.UnquantizedLinearMethod
@@ -883,12 +883,36 @@ def _require_sm103_and_cute() -> None:
     _require_capability_and_cute((10, 3))
 
 
+def _require_sm10x_and_cute() -> None:
+    """Skip unless the GLM-5.2 low-latency GEMM plan can actually run.
+
+    Unlike the Kimi-K3 helpers (which are pinned to SM103), the GLM-5.2 plan
+    targets the whole SM10x family (including B200 / SM100), so the gate is
+    ``is_device_capability_family(100)`` rather than an exact (10, 3) match.
+    """
+    if not torch.cuda.is_available() or not current_platform.is_device_capability_family(
+        100
+    ):
+        pytest.skip("GLM-5.2 low-latency GEMM requires SM10x")
+    if not glm52_gemm.shape_dynamic_skinny_gemm.is_available():
+        pytest.skip("CuTe DSL is not available")
+
+
+def _require_sm10x_and_dsv3() -> None:
+    if not torch.cuda.is_available() or not current_platform.is_device_capability_family(
+        100
+    ):
+        pytest.skip("GLM-5.2 low-latency GEMM requires SM10x")
+    if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
+        pytest.skip("dsv3_fused_a_gemm was not built")
+
+
 @pytest.mark.parametrize("spec,config", GLM_CUTE_CASES)
 def test_glm_cute_selected_shapes(
     spec: glm52_gemm.GLM52ProjectionSpec,
     config: SkinnyGemmConfig,
 ) -> None:
-    _require_sm103_and_cute()
+    _require_sm10x_and_cute()
     torch.manual_seed(42)
     x = torch.randn(
         config.num_rows,
@@ -975,19 +999,14 @@ def test_qwen4_exp_sm121_selected_shapes(
     assert cosine > 0.999
 
 
-def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
-    _require_sm103_and_cute()
-    spec = glm52_gemm.GLM52_Q_B_PROJECTION
-    storage = torch.randn(
-        1,
-        glm52_gemm.GLM52_QKV_A_PROJECTION.n,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
+def test_glm52_gate_up_nonpacked_single_row_falls_back() -> None:
+    _require_sm10x_and_cute()
+    spec = glm52_gemm.GLM52_DENSE_GATE_UP_PROJECTION
+    storage = torch.randn(1, spec.k + 16, dtype=torch.bfloat16, device="cuda")
     x = storage[:, : spec.k]
     weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
 
-    assert x.stride() == (glm52_gemm.GLM52_QKV_A_PROJECTION.n, 1)
+    assert x.stride() == (spec.k + 16, 1)
     assert not glm52_gemm._runtime_ok(x, weight)
     output = glm52_gemm.run_glm52_plan(spec.build_plan(), x, weight)
 
@@ -999,7 +1018,7 @@ def test_glm_cute_selected_shapes_cuda_graph_capture(
     spec: glm52_gemm.GLM52ProjectionSpec,
     config: SkinnyGemmConfig,
 ) -> None:
-    _require_sm103_and_cute()
+    _require_sm10x_and_cute()
     x = torch.randn(
         config.num_rows,
         spec.k,
@@ -1120,7 +1139,6 @@ GLM_DSV3_CASES = [
     (num_tokens, spec)
     for spec in (
         glm52_gemm.GLM52_QKV_A_PROJECTION,
-        glm52_gemm.GLM52_Q_B_PROJECTION,
     )
     for num_tokens in sorted(_dsv3_probe_tokens(spec.dsv3_tokens))
 ]
@@ -1150,7 +1168,7 @@ def test_glm_dsv3_selected_shapes(
     num_tokens: int,
     spec: glm52_gemm.GLM52ProjectionSpec,
 ) -> None:
-    _require_sm103_and_dsv3()
+    _require_sm10x_and_dsv3()
     torch.manual_seed(42)
     x = torch.randn(num_tokens, spec.k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
