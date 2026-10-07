@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import importlib
-import inspect
 import math
 from collections.abc import Callable
 from importlib.util import find_spec
@@ -49,30 +48,15 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
 
 @functools.cache
 def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
-    """gfx942 prefill kernel, when that launch is installed.
+    """gfx942 prefill kernel when AITER is enabled."""
+    from vllm._aiter_ops import rocm_aiter_ops
 
-    Missing that launch keeps the in-tree kernel.
-    """
-    if not _ON_GFX942:
+    if not _ON_GFX942 or not rocm_aiter_ops.is_enabled():
         return None
-    try:
-        from aiter.ops.triton.attention import pa_prefill_sparse as pa_mod
-    except ImportError:
-        return None
-    try:
-        source = inspect.getsource(pa_mod)
-    except OSError:
-        return None
-    # An older pa_prefill_sparse still imports and would run a different
-    # kernel, so stay on the in-tree path.
-    if 'DEVICE_ARCH == "gfx942"' not in source:
-        logger.info_once(
-            "AITER pa_prefill_sparse has no gfx942 kernel; "
-            "using the in-tree sparse prefill kernel"
-        )
-        return None
+    from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+
     logger.info_once("Using AITER pa_prefill_sparse for sparse MLA prefill on gfx942")
-    return pa_mod.pa_prefill_sparse
+    return pa_prefill_sparse
 
 
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
