@@ -65,7 +65,6 @@ class KimiK3Parser(DelegatingParser):
         tool_call_idx: int | None = None,
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
-        required_sent_args: dict[int, int] | None = None,
     ) -> tuple[DeltaMessage | None, bool]:
         if request.tool_choice != "none":
             return super()._extract_tool_calls_streaming(
@@ -79,7 +78,6 @@ class KimiK3Parser(DelegatingParser):
                 tool_call_idx=tool_call_idx,
                 tool_call_id_type=tool_call_id_type,
                 function_name_returned=function_name_returned,
-                required_sent_args=required_sent_args,
             )
 
         delta_message = self.extract_tool_calls_streaming(

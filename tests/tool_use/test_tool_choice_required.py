@@ -290,45 +290,61 @@ def test_structured_outputs_json_without_parameters(
     )
 
 
-def _collect_required_tool_streaming_json(output_json: str, delta_len: int) -> str:
+def _stream_required_tool_calls(
+    output_json: str,
+    deltas: list[str],
+    tool_call_id_type: str = "random",
+    tool_call_idx: int | None = None,
+) -> list[dict]:
+    """Feed ``deltas`` (which concatenate to ``output_json``) through the
+    required-tool streaming helper and rebuild the calls per array index,
+    checking that every index gets exactly one id/name chunk first."""
+    assert "".join(deltas) == output_json
     previous_text = ""
-    sent_args: dict[int, int] = {}
-    messages = []
-    for i in range(0, len(output_json), delta_len):
-        delta_text = output_json[i : i + delta_len]
+    calls: dict[int, dict] = {}
+    for delta_text in deltas:
         current_text = previous_text + delta_text
-
-        delta_message, sent_args = extract_required_tool_call_streaming(
+        delta_message, _ = extract_required_tool_call_streaming(
+            previous_text=previous_text,
             current_text=current_text,
-            sent_args=sent_args,
-            tool_call_idx=None,
-            tool_call_id_type="random",
+            tool_call_idx=tool_call_idx,
+            tool_call_id_type=tool_call_id_type,
         )
-
-        if delta_message:
-            messages.append(delta_message)
-
         previous_text = current_text
-
-    assert len(messages) > 0
-
-    combined_messages = "["
-    for message in messages:
-        assert message.tool_calls is not None
-        for tool_call in message.tool_calls:
-            fn = tool_call.function
-            assert fn is not None
-            if fn.name:
-                if len(combined_messages) > 1:
-                    combined_messages += "},"
-
-                combined_messages += (
-                    '{"name": "' + fn.name + '", "parameters": ' + (fn.arguments or "")
-                )
+        if delta_message is None:
+            continue
+        assert delta_message.tool_calls
+        for tc in delta_message.tool_calls:
+            assert tc.function is not None
+            if tc.id is not None:
+                assert tc.index not in calls, "id/name sent twice for one index"
+                assert tc.type == "function"
+                assert tc.function.name
+                calls[tc.index] = {
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments or "",
+                }
             else:
-                combined_messages += fn.arguments or ""
-    combined_messages += "}]"
-    return combined_messages
+                assert tc.index in calls, "arguments before id/name"
+                assert tc.function.name is None
+                assert tc.function.arguments
+                calls[tc.index]["arguments"] += tc.function.arguments
+    assert list(calls) == list(range(len(calls)))
+    return [calls[i] for i in range(len(calls))]
+
+
+def _fixed_len_deltas(text: str, delta_len: int) -> list[str]:
+    return [text[i : i + delta_len] for i in range(0, len(text), delta_len)]
+
+
+def _assert_streams_to(output: list[dict], deltas: list[str]) -> None:
+    calls = _stream_required_tool_calls(json.dumps(output), deltas)
+    assert [
+        {"name": c["name"], "parameters": json.loads(c["arguments"])} for c in calls
+    ] == output
+    for call, expected in zip(calls, output):
+        assert call["arguments"] == json.dumps(expected["parameters"])
 
 
 @pytest.mark.parametrize("output", VALID_TOOLS)
@@ -338,11 +354,7 @@ def test_streaming_output_valid(output, empty_params, delta_len):
     output = deepcopy(output)
     if empty_params:
         output = [{"name": o["name"], "parameters": {}} for o in output]
-    output_json = json.dumps(output)
-
-    combined_messages = _collect_required_tool_streaming_json(output_json, delta_len)
-    assert json.loads(combined_messages) == output
-    assert json.dumps(json.loads(combined_messages)) == output_json
+    _assert_streams_to(output, _fixed_len_deltas(json.dumps(output), delta_len))
 
 
 @pytest.mark.parametrize(
@@ -353,164 +365,105 @@ def test_streaming_output_valid(output, empty_params, delta_len):
         "a }} b",
         'a " } b',
         r"a \ } b",
+        # Text that looks like the end of one call and the start of another.
+        '"}}, {"name": "get_forecast", "parameters": {"city": "x',
     ],
 )
 @pytest.mark.parametrize("delta_len", [1, 2, 3, 8, 9999])
 def test_streaming_output_valid_with_braces_in_string(city, delta_len):
-    output = [{"name": "get_current_weather", "parameters": {"city": city}}]
-    output_json = json.dumps(output)
-    combined_messages = _collect_required_tool_streaming_json(output_json, delta_len)
-    assert json.loads(combined_messages) == output
-    assert json.dumps(json.loads(combined_messages)) == output_json
+    output = [
+        {"name": "get_current_weather", "parameters": {"city": city}},
+        {"name": "get_forecast", "parameters": {"city": city, "days": 1}},
+    ]
+    _assert_streams_to(output, _fixed_len_deltas(json.dumps(output), delta_len))
 
 
 def test_streaming_output_valid_with_trailing_extra_data():
     output = [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}]
     output_json = json.dumps(output) + "\nDONE"
-    combined_messages = _collect_required_tool_streaming_json(output_json, delta_len=3)
-    assert json.loads(combined_messages) == output
+    calls = _stream_required_tool_calls(output_json, _fixed_len_deltas(output_json, 3))
+    assert [
+        {"name": c["name"], "parameters": json.loads(c["arguments"])} for c in calls
+    ] == output
 
 
-def _stream_required_tool_call_deltas(
-    output_json: str, deltas: list[str]
-) -> tuple[list, dict[int, int]]:
-    """Drive extract_required_tool_call_streaming over explicit deltas."""
-    sent_args: dict[int, int] = {}
-    messages = []
-    current_text = ""
-    for delta_text in deltas:
-        current_text += delta_text
-        delta_message, sent_args = extract_required_tool_call_streaming(
-            current_text=current_text,
-            sent_args=sent_args,
-            tool_call_idx=None,
-            tool_call_id_type="random",
-        )
-        if delta_message is not None:
-            messages.append(delta_message)
-    return messages, sent_args
+TWO_CALLS = [
+    {"name": "get_current_weather", "parameters": {"city": "Dallas"}},
+    {"name": "get_forecast", "parameters": {"city": "Dallas", "days": 3}},
+]
+THREE_CALLS = TWO_CALLS + [
+    {"name": "get_current_weather", "parameters": {"city": "Berlin"}},
+]
 
 
-def _reassemble_streamed_tool_calls(
-    messages,
-) -> tuple[dict[int, str], dict[int, str]]:
-    """Reassemble streamed (name, arguments) per tool-call index.
-
-    Also asserts the streaming protocol invariants: each index's name is
-    streamed exactly once (carrying the tool-call id), and arguments chunks
-    only follow the name.
-    """
-    names: dict[int, str] = {}
-    arguments: dict[int, str] = {}
-    ids: dict[int, str] = {}
-    for message in messages:
-        assert message.tool_calls is not None
-        for tool_call in message.tool_calls:
-            fn = tool_call.function
-            assert fn is not None
-            index = tool_call.index
-            assert index is not None
-            if fn.name:
-                assert index not in names, f"name for index {index} streamed twice"
-                assert tool_call.id is not None
-                assert tool_call.id not in ids.values(), "duplicate tool call id"
-                names[index] = fn.name
-                arguments[index] = fn.arguments or ""
-                ids[index] = tool_call.id
-            else:
-                assert index in names, (
-                    f"arguments for index {index} streamed before its name"
-                )
-                assert tool_call.id is None
-                arguments[index] += fn.arguments or ""
-    return names, arguments
+def _split_at(text: str, cuts: list[int]) -> list[str]:
+    bounds = [0, *cuts, len(text)]
+    return [text[a:b] for a, b in zip(bounds, bounds[1:])]
 
 
-class TestRequiredStreamingMultipleToolCalls:
-    """Regression tests for https://github.com/vllm-project/vllm/issues/60351.
+def test_streaming_multiple_calls_completed_in_one_delta():
+    """Regression test for #60351: a delta that completes more than one
+    call must stream every call, not only the last one."""
+    text = json.dumps(TWO_CALLS)
+    _assert_streams_to(TWO_CALLS, [text[:1], text[1:]])
+    _assert_streams_to(TWO_CALLS, [text])
+    _assert_streams_to(THREE_CALLS, [json.dumps(THREE_CALLS)])
 
-    When one delta completes more than one tool call, every call must be
-    streamed with its name and arguments, however the text is split.
-    """
 
-    TWO_CALLS = [
-        {"name": "get_weather", "parameters": {"city": "Dallas"}},
-        {"name": "get_time", "parameters": {"tz": "UTC"}},
+def test_streaming_delta_crossing_call_boundary():
+    """A delta that closes one call and opens the next must attribute the
+    closing argument text to the first call and still announce the next."""
+    text = json.dumps(TWO_CALLS)
+    boundary = text.index("}, {") + 1
+    name_end = text.index('"get_forecast"') + 6
+    for cuts in (
+        [boundary - 1, name_end],  # '}, {"name": "get_f' in one delta
+        [boundary - 2, boundary + 2],  # '"}}, {' then the rest
+        [boundary + 2],  # opening brace of the next call ends a delta
+    ):
+        _assert_streams_to(TWO_CALLS, _split_at(text, cuts))
+
+
+def test_streaming_delta_spanning_a_whole_middle_call():
+    text = json.dumps(THREE_CALLS)
+    first_end = text.index("}, {") + 1
+    last_start = text.rindex('"Berlin"')
+    _assert_streams_to(THREE_CALLS, _split_at(text, [first_end - 1, last_start]))
+
+
+def test_streaming_every_delta_length():
+    text = json.dumps(THREE_CALLS)
+    for delta_len in range(1, len(text) + 1):
+        _assert_streams_to(THREE_CALLS, _fixed_len_deltas(text, delta_len))
+
+
+def test_streaming_random_cuts():
+    import random
+
+    rng = random.Random(60351)
+    text = json.dumps(THREE_CALLS)
+    for _ in range(300):
+        cuts = sorted(rng.sample(range(1, len(text)), rng.randint(0, 12)))
+        _assert_streams_to(THREE_CALLS, _split_at(text, cuts))
+
+
+def test_streaming_invalid_name_string_is_never_announced():
+    """A closed name that is not a valid JSON string must not be streamed
+    (the non-streaming path rejects such an array as well)."""
+    text = '[{"name": "bad\\x", "parameters": {"city": "x"}}]'
+    assert _stream_required_tool_calls(text, _fixed_len_deltas(text, 4)) == []
+
+
+def test_streaming_tool_call_idx_increments_per_started_call():
+    """kimi_k2 ids number the calls started in one delta consecutively."""
+    text = json.dumps(TWO_CALLS)
+    calls = _stream_required_tool_calls(
+        text, [text], tool_call_id_type="kimi_k2", tool_call_idx=5
+    )
+    assert [c["id"] for c in calls] == [
+        "functions.get_current_weather:5",
+        "functions.get_forecast:6",
     ]
-    THREE_CALLS = [
-        {"name": "get_weather", "parameters": {"city": "Dallas"}},
-        {"name": "get_time", "parameters": {"tz": "UTC"}},
-        {"name": "get_weather", "parameters": {"city": "Berlin"}},
-    ]
-
-    def _assert_full_stream(self, calls, deltas):
-        messages, _ = _stream_required_tool_call_deltas(json.dumps(calls), deltas)
-        names, arguments = _reassemble_streamed_tool_calls(messages)
-        assert names == {i: c["name"] for i, c in enumerate(calls)}
-        assert arguments == {
-            i: json.dumps(c["parameters"]) for i, c in enumerate(calls)
-        }
-
-    def test_issue_reproducer_two_deltas(self):
-        # The exact reproducer from the issue: the second delta completes
-        # both calls, so get_weather (index 0) must not be dropped.
-        output_json = json.dumps(self.TWO_CALLS)
-        self._assert_full_stream(self.TWO_CALLS, [output_json[:1], output_json[1:]])
-
-    def test_single_delta_whole_array(self):
-        output_json = json.dumps(self.TWO_CALLS)
-        messages, _ = _stream_required_tool_call_deltas(output_json, [output_json])
-        assert len(messages) == 1
-        assert messages[0].tool_calls is not None
-        assert [tc.index for tc in messages[0].tool_calls] == [0, 1]
-        self._assert_full_stream(self.TWO_CALLS, [output_json])
-
-    @pytest.mark.parametrize("n_deltas", [1, 2, 3, 7])
-    def test_three_calls_even_splits(self, n_deltas):
-        output_json = json.dumps(self.THREE_CALLS)
-        size = (len(output_json) + n_deltas - 1) // n_deltas
-        deltas = [output_json[i : i + size] for i in range(0, len(output_json), size)]
-        self._assert_full_stream(self.THREE_CALLS, deltas)
-
-    def test_split_exactly_at_call_boundary(self):
-        output_json = json.dumps(self.TWO_CALLS)
-        boundary = output_json.index("},") + 2
-        self._assert_full_stream(
-            self.TWO_CALLS, [output_json[:boundary], output_json[boundary:]]
-        )
-
-    def test_split_inside_second_call_name(self):
-        output_json = json.dumps(self.TWO_CALLS)
-        cut = output_json.index('"get_time"') + 5
-        self._assert_full_stream(self.TWO_CALLS, [output_json[:cut], output_json[cut:]])
-
-    def test_per_character_streaming(self):
-        output_json = json.dumps(self.THREE_CALLS)
-        self._assert_full_stream(self.THREE_CALLS, list(output_json))
-
-    def test_arguments_attributed_to_correct_index(self):
-        # A delta finishing call 0 and starting call 1 must attribute each
-        # arguments slice to its own index.
-        output_json = json.dumps(self.TWO_CALLS)
-        cut = output_json.index("},") + len('}, {"name": "get_time", ')
-        messages, _ = _stream_required_tool_call_deltas(
-            output_json, [output_json[:cut], output_json[cut:]]
-        )
-        names, arguments = _reassemble_streamed_tool_calls(messages)
-        assert names == {0: "get_weather", 1: "get_time"}
-        assert arguments[0] == json.dumps({"city": "Dallas"})
-        assert arguments[1] == json.dumps({"tz": "UTC"})
-
-    def test_single_closed_tool_without_parameters(self):
-        # A lone parameter-less tool call closing within one chunk must not
-        # crash and must still stream its name.
-        messages, sent_args = _stream_required_tool_call_deltas(
-            '[{"name": "f"}]', ['[{"name": "f"', "}]"]
-        )
-        names, arguments = _reassemble_streamed_tool_calls(messages)
-        assert names == {0: "f"}
-        assert arguments == {0: ""}
-        assert sent_args == {0: 0}
 
 
 FUNCTION_TOOL = FunctionTool(

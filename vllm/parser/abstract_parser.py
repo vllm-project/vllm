@@ -75,13 +75,9 @@ class StreamState:
     history_tool_call_cnt: int = 0
     history_tool_call_cnt_initialized: bool = False
     tool_call_id_type: str = "random"
-    # only used for "named tool" choice,
+    # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
-    # only used for tool_choice="required" streaming: maps each tool-call
-    # index to the number of "parameters" characters streamed for it so far.
-    # Key presence records that the (id, name) chunk for the index went out.
-    required_sent_args: dict[int, int] = field(default_factory=dict)
     engine_based: bool = False
 
     def advance(
@@ -699,7 +695,6 @@ class DelegatingParser(Parser):
         tool_call_idx: int | None = None,
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
-        required_sent_args: dict[int, int] | None = None,
     ) -> tuple[DeltaMessage | None, bool]:
         assert self._tool_parser is not None
         supports_required_and_named = self._tool_parser.supports_required_and_named
@@ -742,14 +737,15 @@ class DelegatingParser(Parser):
             return delta_message, function_name_returned
 
         if supports_required_and_named and request.tool_choice == "required":
-            sent_args = required_sent_args if required_sent_args is not None else {}
-            delta_message, _ = extract_required_tool_call_streaming(
-                current_text=current_text,
-                sent_args=sent_args,
-                tool_call_idx=tool_call_idx,
-                tool_call_id_type=tool_call_id_type,
+            delta_message, function_name_returned = (
+                extract_required_tool_call_streaming(
+                    previous_text=previous_text,
+                    current_text=current_text,
+                    tool_call_idx=tool_call_idx,
+                    tool_call_id_type=tool_call_id_type,
+                )
             )
-            return delta_message, bool(sent_args)
+            return delta_message, function_name_returned
         return self.extract_tool_calls_streaming(
             previous_text,
             current_text,
@@ -936,7 +932,6 @@ class DelegatingParser(Parser):
                     tool_call_idx=state.history_tool_call_cnt,
                     tool_call_id_type=state.tool_call_id_type,
                     function_name_returned=state.function_name_returned,
-                    required_sent_args=state.required_sent_args,
                 )
             )
 
@@ -946,12 +941,13 @@ class DelegatingParser(Parser):
                 elif not delta_message.reasoning:
                     delta_message.reasoning = reasoning_from_this_batch
 
-            if (
-                delta_message
-                and delta_message.tool_calls
-                and delta_message.tool_calls[0].id is not None
-            ):
-                state.history_tool_call_cnt += 1
+            if delta_message and delta_message.tool_calls:
+                # A delta may start several tool calls at once (e.g. the
+                # "required" path when one delta completes more than one
+                # call), so count every id rather than only the first.
+                state.history_tool_call_cnt += sum(
+                    tc.id is not None for tc in delta_message.tool_calls
+                )
 
         # No phase active: pass through as content.
         # Skip when reasoning just ended in this delta — the engine already
