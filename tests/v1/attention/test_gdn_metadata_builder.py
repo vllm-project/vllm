@@ -7,7 +7,6 @@ Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 
 from dataclasses import dataclass
 
-import numpy as np
 import pytest
 import torch
 
@@ -18,6 +17,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -60,6 +60,17 @@ GDN_BUILD_TEST_CASES = {
         seq_lens=[50, 30],
         query_lens=[3, 3],
         num_decode_draft_tokens=[2, 2],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=0,
+        expected_num_prefill_tokens=0,
+        expected_num_spec_decodes=2,
+    ),
+    # Padded (CUDA graph) sequences trail the spec decodes
+    "pure_spec_decode_with_padding": GDNBuildTestCase(
+        seq_lens=[50, 30, 16],
+        query_lens=[3, 3, 0],
+        num_decode_draft_tokens=[2, 2, -1],
         num_speculative_tokens=2,
         expected_num_decodes=0,
         expected_num_prefills=0,
@@ -144,8 +155,9 @@ def _create_gdn_builder(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
-    if full_cuda_graph:
-        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    vllm_config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
+    )
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -198,6 +210,8 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_prefills == test_case.expected_num_prefills
     assert meta.num_prefill_tokens == test_case.expected_num_prefill_tokens
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
+    if meta.spec_state_indices_tensor is not None:
+        assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
@@ -370,14 +384,9 @@ def test_cudagraph_capture_batch_stays_decode_only():
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
 
 
-@pytest.mark.parametrize("num_spec", [0, 3])
-@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
-def test_checkpoint_metadata_preserves_non_spec_order(
-    num_spec, prefix_match_unit, expected_offset
-):
-    """Only eligible non-spec rows get a checkpoint in their reserved page."""
-    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-
+def _create_checkpoint_builder_and_batch(
+    num_spec: int, prefix_match_unit: int = 16
+) -> tuple[GDNAttentionMetadataBuilder, CommonAttentionMetadata, dict]:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
@@ -418,7 +427,20 @@ def test_checkpoint_metadata_preserves_non_spec_order(
             num_decode_draft_tokens_cpu=torch.tensor([2, -1, -1], dtype=torch.int32),
             num_accepted_tokens=torch.ones(3, dtype=torch.int32),
         )
+    return builder, common, kwargs
 
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
+def test_checkpoint_metadata_preserves_non_spec_order(
+    num_spec, prefix_match_unit, expected_offset
+):
+    """Only eligible non-spec rows get a checkpoint in their reserved page."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    builder, common, kwargs = _create_checkpoint_builder_and_batch(
+        num_spec, prefix_match_unit
+    )
     actual = builder.build(0, common, **kwargs)
     assert actual.checkpoint is not None
     offsets = [expected_offset, 0] if num_spec else [0, expected_offset, 0]
@@ -433,22 +455,56 @@ def test_checkpoint_metadata_preserves_non_spec_order(
     )
 
 
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_update_block_table_regathers_checkpoint(num_spec):
+    """Checkpoint pages come from the target group's block table, not the
+    source group's (otherwise the target group's checkpoint page is never
+    written while the prefix cache treats it as valid)."""
+    src, common, kwargs = _create_checkpoint_builder_and_batch(num_spec)
+    dst, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    ref, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    other_table = common.block_table_tensor + 100
+    other = common.replace(block_table_tensor=other_table)
+    dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        other_table, other.seq_lens, dst.kv_cache_spec, "align"
+    )
+
+    source = src.build(0, common, **kwargs)
+    expected = ref.build(0, other, **kwargs)
+    actual = dst.update_block_table(source, other_table, other.slot_mapping)
+
+    assert source.checkpoint is not None and expected.checkpoint is not None
+    assert actual.checkpoint is not None
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices, expected.checkpoint.state_indices
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets, expected.checkpoint.checkpoint_offsets
+    )
+    assert not torch.equal(
+        actual.checkpoint.state_indices, source.checkpoint.state_indices
+    )
+
+
 # ---------------------------------------------------------------------------
 # Equivalence of the numpy-view classification arithmetic (#58732).
 #
-# `build()` derives six scalars from `query_lens_cpu` and the spec mask. Those
+# `build()` derives five scalars from `query_lens_cpu` and the spec mask. Those
 # used to be chains of `.sum().item()` on CPU tensors; they are now reductions
 # over zero-copy numpy views of the same memory. The values must be identical
 # for every batch shape, so sweep the space exhaustively rather than spot-check
 # it. This is pure CPU arithmetic and needs no GPU.
+#
+# NOTE: #56531 removed the `num_draft[mask].sum() == 0` early-out -- a batch
+# whose rows all drafted nothing still has to run the speculative path. These
+# helpers track that, so they classify on the mask alone.
 # ---------------------------------------------------------------------------
 
 
-def _classify_torch(query_lens_cpu, spec_mask_cpu, num_draft_cpu):
-    """The pre-#58732 expressions, verbatim."""
+def _classify_torch(query_lens_cpu, spec_mask_cpu):
+    """The pre-#58732 expressions, verbatim, on post-#56531 semantics."""
     num_spec_decodes = spec_mask_cpu.sum().item()
-    if num_spec_decodes == 0 or num_draft_cpu[spec_mask_cpu].sum().item() == 0:
-        num_spec_decodes = 0
+    if num_spec_decodes == 0:
         non_spec_mask = torch.ones_like(spec_mask_cpu)
     else:
         non_spec_mask = ~spec_mask_cpu
@@ -471,12 +527,13 @@ def _classify_torch(query_lens_cpu, spec_mask_cpu, num_draft_cpu):
     )
 
 
-def _classify_numpy(query_lens_cpu, spec_mask_cpu, num_draft_cpu):
+def _classify_numpy(query_lens_cpu, spec_mask_cpu):
     """The post-#58732 expressions, verbatim."""
+    import numpy as np
+
     spec_np = spec_mask_cpu.numpy()
     num_spec_decodes = int(spec_np.sum())
-    if num_spec_decodes == 0 or int(num_draft_cpu.numpy()[spec_np].sum()) == 0:
-        num_spec_decodes = 0
+    if num_spec_decodes == 0:
         non_spec_np = np.ones_like(spec_np)
     else:
         non_spec_np = ~spec_np
@@ -509,19 +566,12 @@ def test_numpy_classification_matches_torch(num_reqs, max_query_len):
     checked = 0
     for query_lens in itertools.product(range(0, max_query_len + 1), repeat=num_reqs):
         for mask_bits in itertools.product([False, True], repeat=num_reqs):
-            for draft_choice in ({0}, {2}, {0, 2}):
-                drafts = [
-                    (sorted(draft_choice)[i % len(draft_choice)] if m else -1)
-                    for i, m in enumerate(mask_bits)
-                ]
-                q = torch.tensor(query_lens, dtype=torch.int32)
-                m = torch.tensor(mask_bits, dtype=torch.bool)
-                d = torch.tensor(drafts, dtype=torch.int32)
-                assert _classify_numpy(q, m, d) == _classify_torch(q, m, d), (
-                    f"mismatch: query_lens={query_lens} mask={mask_bits} "
-                    f"drafts={drafts}"
-                )
-                checked += 1
+            q = torch.tensor(query_lens, dtype=torch.int32)
+            m = torch.tensor(mask_bits, dtype=torch.bool)
+            assert _classify_numpy(q, m) == _classify_torch(q, m), (
+                f"mismatch: query_lens={query_lens} mask={mask_bits}"
+            )
+            checked += 1
     assert checked > 0
 
 
@@ -536,7 +586,6 @@ def test_numpy_views_share_memory_and_need_no_contiguity():
     assert t.numpy().base is not None or t.numpy().flags.owndata is False
     strided = torch.arange(20, dtype=torch.int32)[::2]
     assert not strided.is_contiguous()
-    # Must not raise, and must agree with the torch reduction.
     assert int(strided.numpy().sum()) == int(strided.sum().item())
     transposed = torch.arange(12, dtype=torch.int32).reshape(3, 4).T
     assert not transposed.is_contiguous()

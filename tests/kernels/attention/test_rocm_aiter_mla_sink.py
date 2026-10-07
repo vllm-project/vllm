@@ -170,7 +170,7 @@ def test_sparse_mla_sink_matches_ragged_reference(
         SimpleNamespace(_q_scale=q_scale, _k_scale=kv_scale),
         q,
         kv,
-        metadata,  # type: ignore[arg-type]
+        metadata,
     )
     kv_flat = kv_ref[:, 0]
     references = []
@@ -244,7 +244,7 @@ def test_sparse_mla_sink_rejects_unsupported_aiter_dtypes(
             SimpleNamespace(_q_scale=None, _k_scale=None),
             torch.empty(1, 16, Q_HEAD_DIM, dtype=q_dtype),
             torch.empty(1, 1, Q_HEAD_DIM, dtype=kv_dtype),
-            metadata,  # type: ignore[arg-type]
+            metadata,
         )
 
 
@@ -384,7 +384,7 @@ def test_sparse_mla_sink_matches_dense_attention_with_empty_rows_and_paged_cache
         paged_kv_indices=torch.tensor(indices, dtype=torch.int32, device="cuda"),
         paged_kv_indptr=lengths.cumsum(0).to(device="cuda", dtype=torch.int32),
     )
-    impl = ROCMAiterMLASparseImpl.__new__(ROCMAiterMLASparseImpl)  # type: ignore[arg-type]
+    impl = ROCMAiterMLASparseImpl.__new__(ROCMAiterMLASparseImpl)
     impl.num_heads = num_heads
     impl.head_size = head_dim
     impl.kv_lora_rank = value_dim
@@ -441,9 +441,9 @@ def test_sparse_mla_backend_resolves_only_contiguous_layer_layouts(monkeypatch, 
     ]
     if layout == "BLNHC":
         with pytest.raises(ValueError, match="does not satisfy"):
-            resolve_kv_cache_layout(config, supported)  # type: ignore[arg-type]
+            resolve_kv_cache_layout(config, supported)
     else:
-        assert resolve_kv_cache_layout(config, supported).name == layout  # type: ignore[arg-type]
+        assert resolve_kv_cache_layout(config, supported).name == layout
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -494,7 +494,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
     actual, _ = impl.forward_mqa(
         (q[..., :V_HEAD_DIM], q[..., V_HEAD_DIM:]),
         kv,
-        metadata,  # type: ignore[arg-type]
+        metadata,
         SimpleNamespace(_q_scale=None, _k_scale=None),
     )
     references = [

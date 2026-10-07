@@ -530,7 +530,7 @@ steps:
   - vllm/v1/
   - vllm/version.py
   - cmake/utils.cmake
-  - tests/test_access_log_filter.py
+  - tests/test_uvicorn_logging.py
   - tests/test_attention_backend_registry.py
   - tests/test_audio_media_size_precheck.py
   - tests/test_cmake_utils.py
@@ -560,6 +560,8 @@ steps:
   - tools/pre_commit/check_test_tethering.py
   - tools/pre_commit/test_tethering_allowlist.txt
   - tests/tools/test_check_test_tethering.py
+  - tools/pre_commit/check_agent_files.py
+  - tests/tools/test_check_agent_files.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -571,7 +573,7 @@ steps:
   - pip install cmake # test_cmake_utils.py shells out to cmake; the CPU image has none
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s device_allocator
-  - pytest -v -s test_access_log_filter.py
+  - pytest -v -s test_uvicorn_logging.py
   - pytest -v -s test_attention_backend_registry.py
   - pytest -v -s test_audio_media_size_precheck.py
   - pytest -v -s test_cmake_utils.py
@@ -609,6 +611,7 @@ steps:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
   - pytest -v -s tools/test_check_test_tethering.py
+  - pytest -v -s tools/test_check_agent_files.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
@@ -652,12 +655,14 @@ steps:
   source_file_dependencies:
     - vllm/v1/attention
     - vllm/model_executor/layers
+    - vllm/lora/ops/triton_ops
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+    - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:
@@ -687,12 +692,14 @@ steps:
   source_file_dependencies:
     - vllm/v1/attention
     - vllm/model_executor/layers
+    - vllm/lora/ops/triton_ops
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+    - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
     - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN

@@ -23,12 +23,12 @@ from vllm.platforms.interface import DeviceCapability
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
 else:
-    CudaPlatform = None  # type: ignore[assignment]  # Unavailable platform import.
+    CudaPlatform = None
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import RocmPlatform
 else:
-    RocmPlatform = None  # type: ignore[misc, assignment]  # Unavailable platform import.
+    RocmPlatform = None  # type: ignore[misc]  # Unavailable platform import.
 
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -356,14 +356,14 @@ def test_invalid_backend():
 def test_auto_backend_string(auto_value: str):
     """Test that 'auto' string value triggers automatic backend selection."""
     # Using "auto" should result in backend=None (automatic selection)
-    attention_config = AttentionConfig(backend=auto_value)  # type: ignore[arg-type]
+    attention_config = AttentionConfig(backend=auto_value)
     assert attention_config.backend is None
 
 
 def test_auto_backend_selection_behavior():
     """Test that 'auto' backend behaves same as None (automatic selection)."""
     # Create config with explicit "auto"
-    auto_config = AttentionConfig(backend="auto")  # type: ignore[arg-type]
+    auto_config = AttentionConfig(backend="auto")
 
     # Create config with None (default)
     none_config = AttentionConfig(backend=None)
@@ -453,6 +453,31 @@ def test_per_head_quant_scales_backend_selection(
                     use_per_head_quant_scales=True,
                 )
             assert backend_name in str(exc_info.value)
+
+
+@pytest.mark.skipif(
+    CudaPlatform is None, reason="CUDA platform is required for this test"
+)
+@pytest.mark.parametrize("head_size", [64, 80, 96, 128, 192, 256])
+def test_int4_per_token_head_head_size_selection(head_size: int):
+    """INT4 per-token-head KV cache is selectable at any even head size.
+
+    The Hadamard rotation the INT4 write path applies is now defined for
+    non-power-of-two rows as well (it runs block-diagonally, see
+    ``fast_hadamard_transform``), so a model such as Phi-3 (head_size=96) must
+    keep selecting TRITON_ATTN instead of being rejected.
+    """
+    vllm_config = VllmConfig(cache_config=CacheConfig(block_size=64))
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        backend = get_attn_backend(
+            head_size=head_size,
+            dtype=torch.float16,
+            kv_cache_dtype="int4_per_token_head",
+        )
+        assert backend.get_name() == "TRITON_ATTN"
 
 
 @pytest.mark.parametrize(
