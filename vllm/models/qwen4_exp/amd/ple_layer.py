@@ -35,6 +35,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
+    Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
 )
 
@@ -244,6 +245,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             embedding_prefix,
             getattr(config, "ple_embedding_dtype", None),
         )
+        if isinstance(embedding_quant_method, Qwen4ExpPLENvFp4EmbeddingMethod):
+            raise NotImplementedError(
+                "NVFP4 Qwen4Exp PLE tables are not supported on ROCm yet; use a "
+                "checkpoint with a BF16 or FP8 PLE table."
+            )
         engram_config = get_current_vllm_config().engram_config
         embedding_cls = (
             Qwen4ExpPLEPinnedHostEmbedding

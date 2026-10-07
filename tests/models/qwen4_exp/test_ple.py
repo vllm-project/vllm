@@ -27,6 +27,9 @@ from vllm.model_executor.layers.quantization.modelopt import (
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    _e4m3_inline,
+)
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -46,6 +49,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
@@ -428,6 +432,60 @@ def test_nvfp4_ple_rejects_missing_or_invalid_global_scale(monkeypatch, scale):
         layer.weight_scale_2.data.fill_(scale)
     with pytest.raises(ValueError, match="finite positive global scale"):
         layer.embedding_method.process_weights_after_loading(layer)
+
+
+def test_nvfp4_ple_skips_load_checks_for_dummy_weights(monkeypatch):
+    """--load-format dummy never calls load_weights, so nothing is validated."""
+    monkeypatch.setattr(
+        ngram_embedding_module,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(load_config=SimpleNamespace(load_format="dummy")),
+    )
+    module, _, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
+    layer = module.ngram_embedding
+    layer.embedding_method.process_weights_after_loading(layer)
+
+
+@triton.jit
+def _decode_e4m3_kernel(src, dst, BLOCK: tl.constexpr):
+    offsets = tl.arange(0, BLOCK)
+    tl.store(dst + offsets, _e4m3_inline(tl.load(src + offsets)))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_e4m3_inline_matches_torch_for_every_byte():
+    src = torch.arange(256, dtype=torch.int32).to(torch.uint8).cuda()
+    out = torch.empty(256, dtype=torch.float32, device="cuda")
+    _decode_e4m3_kernel[(1,)](src, out, BLOCK=256)
+    expected = src.view(torch.float8_e4m3fn).float()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0, equal_nan=True)
+
+
+def test_amd_rejects_nvfp4_ple(monkeypatch):
+    _mock_etp_group(monkeypatch)
+    config = Qwen4ExpTextConfig(
+        ngram_size=3,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=5,
+        make_ngram_vocab_size_divisible_by=8,
+        split_ngram_parts=2,
+        ple_embed_dim=32,
+        eos_token_id=0,
+        vocab_size=64,
+    )
+    config.ple_embedding_dtype = "nvfp4"
+    with pytest.raises(NotImplementedError, match="not supported on ROCm"):
+        amd_ple_layer.Qwen4ExpNGramEmbedding(
+            config,
+            embedding_dim=config.ple_embed_dim,
+            ple_dense_layer_id=0,
+            max_total_tokens=4,
+            max_num_reqs=2,
+            prefix="test.ple_embedding",
+            layer_name="test.ple",
+            quant_config=None,
+            params_dtype=torch.bfloat16,
+        )
 
 
 @pytest.mark.parametrize("suffix", ["weight", "weight_scale"])

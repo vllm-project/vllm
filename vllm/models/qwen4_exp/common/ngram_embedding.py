@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import get_dp_group, get_etp_group, get_tp_group
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
@@ -38,6 +39,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     _e2m1_inline,
+    _e4m3_inline,
     dequantize_to_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -260,14 +262,15 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         output: torch.Tensor,
     ) -> None:
         """Copy the ETP-owned rows for ``ids`` from pinned host memory."""
+        row_bytes = layer.embedding_dim * layer.weight.element_size()
         _lookup_ple_embedding_from_pinned_kernel[(ids.numel(),)](
             layer._uva_weight,
             ids,
             output,
-            layer._row_bytes,
+            row_bytes,
             layer.shard_indices.org_vocab_start_index,
             layer.shard_indices.org_vocab_end_index,
-            BLOCK_D=layer._block_d,
+            BLOCK_D=triton.next_power_of_2(row_bytes),
         )
 
     @abstractmethod
@@ -392,6 +395,10 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
             "weight": set(),
             "weight_scale": set(),
         }
+        vllm_config = get_current_vllm_config_or_none()
+        self._dummy_load = (
+            vllm_config is not None and vllm_config.load_config.load_format == "dummy"
+        )
 
     def create_weights(
         self,
@@ -464,6 +471,9 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Reject a missing global scale and any local rows left unloaded."""
+        if self._dummy_load:
+            # Dummy weights never go through load_weights.
+            return
         scale = layer.weight_scale_2
         if not torch.all(torch.isfinite(scale) & (scale > 0)):
             raise ValueError(
@@ -508,7 +518,7 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
             # Device rows are already local, so every ID in range is owned.
             _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
                 layer.weight,
-                layer.weight_scale,
+                layer.weight_scale.view(torch.uint8),
                 layer.weight_scale_2,
                 ids,
                 output,
@@ -527,7 +537,7 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     ) -> None:
         _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
             layer._uva_weight,
-            self._uva_weight_scale,
+            self._uva_weight_scale.view(torch.uint8),
             layer.weight_scale_2,
             ids,
             output,
@@ -561,7 +571,7 @@ def _lookup_nvfp4_ple_embedding_kernel(
     BLOCK_D: tl.constexpr,
 ):
     """Decode owned NVFP4 PLE rows; write zeros for rows another rank owns."""
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     idx = tl.load(ids_ptr + row).to(tl.int64)
     owned = (idx >= vocab_start) & (idx < vocab_end)
     local_idx = tl.where(owned, idx - vocab_start, 0)
@@ -575,11 +585,13 @@ def _lookup_nvfp4_ple_embedding_kernel(
     )
     # The low nibble holds the even element and the high nibble the odd one.
     codes = (packed >> ((offsets % 2) * 4)) & 0xF
-    scales = tl.load(
-        scale_ptr + local_idx * (embedding_dim // 16) + offsets // 16,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
+    scales = _e4m3_inline(
+        tl.load(
+            scale_ptr + local_idx * (embedding_dim // 16) + offsets // 16,
+            mask=mask,
+            other=0,
+        )
+    )
     global_scale = tl.load(global_scale_ptr).to(tl.float32)
     values = _e2m1_inline(codes) * scales * global_scale
     tl.store(output_ptr + row * embedding_dim + offsets, values, mask=in_row)
@@ -683,8 +695,6 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             data_parallel_rank=data_parallel_rank,
         )
         self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
-        self._row_bytes = self.embedding_dim * self.weight.element_size()
-        self._block_d = triton.next_power_of_2(self._row_bytes)
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetch_buffer: torch.Tensor | None = None
         self._prefetch_alloc_lock = threading.Lock()
