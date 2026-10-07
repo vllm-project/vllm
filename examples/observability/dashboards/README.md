@@ -31,7 +31,16 @@ deployment methods:
 
 ## Dashboard Contents
 
-Both platforms provide equivalent monitoring capabilities:
+### Grafana
+
+| Dashboard | Description |
+| --------- | ----------- |
+| **vLLM / Overview** | Service health and latency SLOs: traffic, errors, latency, throughput, saturation and caching |
+| **vLLM / Instances** | Per-instance and per-engine drill-down: load balance, latency outliers, scheduler, process and configuration |
+| **vLLM / KV Cache** | KV cache pressure, prefix caching, KV block residency, and KV transfer and offloading |
+| **vLLM / Speculative Decoding** | Draft acceptance rate, acceptance length and draft token flow |
+
+### Perses
 
 | Dashboard | Description |
 | --------- | ----------- |
@@ -51,10 +60,15 @@ cd examples/observability/dashboards
 Import the JSON directly into the Grafana UI, or use the API:
 
 ```bash
-curl -X POST http://grafana/api/dashboards/db \
-  -H "Content-Type: application/json" \
-  -d @grafana/performance_statistics.json
+jq '{dashboard: ., overwrite: true}' grafana/vllm_overview.json |
+  curl -X POST http://grafana/api/dashboards/db \
+    -H "Content-Type: application/json" \
+    --data @-
 ```
+
+To try the Grafana dashboards locally, run the
+[Prometheus and Grafana example](../prometheus_grafana/README.md), which
+provisions them automatically.
 
 ### Perses
 
@@ -82,6 +96,8 @@ For detailed deployment instructions and platform-specific options, see:
 When adding new dashboards, please:
 
 1. Provide native formats (JSON for Grafana, YAML specs for Perses)
-2. Update platform-specific README files
-3. Ensure dashboards work across deployment methods
-4. Test with the latest platform versions
+2. Generate the Grafana JSON with `tools/generate_grafana_dashboards.py`
+   instead of editing it by hand
+3. Update platform-specific README files
+4. Ensure dashboards work across deployment methods
+5. Test with the latest platform versions
