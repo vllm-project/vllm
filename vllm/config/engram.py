@@ -21,6 +21,11 @@ _NGRAM_LAYER_FIELDS = {
 }
 
 
+def architecture_has_ngram_layers(architecture: str | None) -> bool:
+    """Whether models of this architecture carry n-gram embedding layers at all."""
+    return architecture in _NGRAM_LAYER_FIELDS
+
+
 def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
     """Whether the model carries n-gram embedding layers."""
     if model_config is None:
@@ -54,6 +59,17 @@ class EngramConfig:
     """Back private CPU-offloaded tables with transparent huge pages (best
     effort, falls back to ordinary pinned pages). Prefaulting the tables at
     startup takes longer. Requires cpu_offload without dp_shared_memory."""
+    shared_host_table_dir: str | None = None
+    """Share CPU-offloaded tables between **independent** engine processes on
+    this host through files in this directory (a tmpfs such as /dev/shm),
+    named by model, layer and shape. The first process to create a file loads
+    the table and marks it ready; later ones map it, skip the load and wait
+    for the mark. No process group is involved, so two single-card replicas
+    of a model whose table does not fit twice in host memory can share it,
+    and a restart maps the loaded table instead of reading it again. The
+    files outlive the processes: remove them to free the memory or after a
+    checkpoint change (the name carries the shape, not the contents).
+    Requires cpu_offload."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
@@ -63,6 +79,8 @@ class EngramConfig:
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
             )
+        if self.shared_host_table_dir is not None and not self.cpu_offload:
+            raise ValueError("shared_host_table_dir requires cpu_offload=True")
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:

@@ -1656,6 +1656,15 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+def test_engram_shared_host_table_dir_requires_cpu_offload():
+    with pytest.raises(ValueError, match="shared_host_table_dir requires cpu_offload"):
+        EngramConfig(cpu_offload=False, shared_host_table_dir="/dev/shm")
+    assert (
+        EngramConfig(shared_host_table_dir="/dev/shm").shared_host_table_dir
+        == "/dev/shm"
+    )
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",

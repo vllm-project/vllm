@@ -40,9 +40,12 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
+    Qwen4ExpPLEFileSharedHostEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
+    Qwen4ExpPLESharedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    select_ple_embedding_cls,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.utils.torch_utils import weak_ref_tensor
@@ -2224,3 +2227,162 @@ def test_amd_pinned_embedding_output_written_under_cudagraph_capture(
 
         expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
         torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+def _fake_edp_group(rank_in_group: int, world_size: int = 2) -> SimpleNamespace:
+    """A node-local Engram DP group whose leader's decision reaches every rank."""
+    return SimpleNamespace(
+        rank_in_group=rank_in_group,
+        world_size=world_size,
+        cpu_group=object(),
+        broadcast_object=lambda obj=None, src=0: obj,
+    )
+
+
+@pytest.mark.parametrize(
+    ("cpu_offload", "dp_shared_memory", "group", "shm_ok", "expected"),
+    [
+        (False, True, True, True, Qwen4ExpPLEDeviceEmbedding),
+        (True, False, True, True, Qwen4ExpPLEPinnedHostEmbedding),
+        (True, True, False, True, Qwen4ExpPLEPinnedHostEmbedding),
+        (True, True, True, False, Qwen4ExpPLEPinnedHostEmbedding),
+        (True, True, True, True, Qwen4ExpPLESharedHostEmbedding),
+    ],
+)
+def test_ple_embedding_class_is_shared_only_where_the_table_can_be(
+    monkeypatch: pytest.MonkeyPatch,
+    cpu_offload: bool,
+    dp_shared_memory: bool,
+    group: bool,
+    shm_ok: bool,
+    expected: type,
+) -> None:
+    """Resident, pinned per rank, or one shared table — never a shared table
+    without a co-located group or without room in /dev/shm for it."""
+    # One decision per process in production; here each case decides afresh.
+    monkeypatch.setattr(ngram_embedding_module, "_PLE_SHARE_DECISIONS", {})
+    fake_group = _fake_edp_group(0) if group else None
+    monkeypatch.setattr(
+        ngram_embedding_module, "get_engram_dp_group", lambda: fake_group
+    )
+
+    def check_shm_free_space(required_bytes, *args, **kwargs):
+        if not shm_ok:
+            raise RuntimeError("too small")
+
+    monkeypatch.setattr(
+        ngram_embedding_module, "check_shm_free_space", check_shm_free_space
+    )
+    monkeypatch.setattr(ngram_embedding_module.os.path, "isdir", lambda _p: True)
+    engram_config = SimpleNamespace(
+        cpu_offload=cpu_offload, dp_shared_memory=dp_shared_memory
+    )
+    assert select_ple_embedding_cls(engram_config, table_bytes=1 << 20) is expected
+
+
+def test_ple_embedding_resident_when_engram_is_unconfigured() -> None:
+    assert select_ple_embedding_cls(None, table_bytes=1) is Qwen4ExpPLEDeviceEmbedding
+
+
+@pytest.mark.parametrize("rank_in_group", [0, 1])
+def test_shared_ple_loader_writes_once_and_fences_every_rank(
+    monkeypatch: pytest.MonkeyPatch, rank_in_group: int
+) -> None:
+    """Rank 0 copies the shard into the shared table; every rank barriers so
+    the table is complete when the last loader call returns; the per-rank FP8
+    scale is loaded by every rank and needs no fence."""
+    embedding = Qwen4ExpPLESharedHostEmbedding.__new__(Qwen4ExpPLESharedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._shared_group = _fake_edp_group(rank_in_group)
+    embedding.weight = nn.Parameter(torch.zeros(4, 2), requires_grad=False)
+    embedding.weight_scale = nn.Parameter(torch.zeros(1), requires_grad=False)
+    parent_calls: list[tuple[str, int | None]] = []
+    barriers: list[object] = []
+
+    def parent_loader(self, param, loaded_weight, checkpoint_start=None):
+        parent_calls.append(
+            ("weight" if param is self.weight else "scale", checkpoint_start)
+        )
+
+    monkeypatch.setattr(Qwen4ExpPLEPinnedHostEmbedding, "weight_loader", parent_loader)
+    monkeypatch.setattr(
+        torch.distributed, "barrier", lambda group=None: barriers.append(group)
+    )
+
+    embedding.weight_loader(embedding.weight, torch.ones(2, 2), checkpoint_start=2)
+    embedding.weight_loader(embedding.weight_scale, torch.tensor([0.5]))
+
+    expected_weight_calls = [("weight", 2)] if rank_in_group == 0 else []
+    assert parent_calls == [*expected_weight_calls, ("scale", None)]
+    assert barriers == [embedding._shared_group.cpu_group]
+
+
+def test_ple_embedding_file_sharing_takes_precedence(tmp_path) -> None:
+    """A shared_host_table_dir names a file; the factory binds its path."""
+    engram_config = SimpleNamespace(cpu_offload=True, dp_shared_memory=True)
+    factory = select_ple_embedding_cls(
+        engram_config, table_bytes=1, table_path=str(tmp_path / "t")
+    )
+    assert factory.func is Qwen4ExpPLEFileSharedHostEmbedding
+    assert factory.keywords == {"table_path": str(tmp_path / "t")}
+
+
+def test_shared_ple_table_path_names_model_layer_and_shape() -> None:
+    from vllm.models.qwen4_exp.common.ngram_embedding import shared_ple_table_path
+
+    a = shared_ple_table_path("/dev/shm", "m", "r1", "l.1", (8, 2), torch.float8_e4m3fn)
+    b = shared_ple_table_path("/dev/shm", "m", "r1", "l.2", (8, 2), torch.float8_e4m3fn)
+    c = shared_ple_table_path("/dev/shm", "m", "r1", "l.1", (9, 2), torch.float8_e4m3fn)
+    assert a.startswith("/dev/shm/vllm_ple_")
+    assert len({a, b, c}) == 3
+    assert a == shared_ple_table_path(
+        "/dev/shm", "m", "r1", "l.1", (8, 2), torch.float8_e4m3fn
+    )
+
+
+def _file_shared_embedding(
+    path: str, writer: bool
+) -> Qwen4ExpPLEFileSharedHostEmbedding:
+    embedding = Qwen4ExpPLEFileSharedHostEmbedding.__new__(
+        Qwen4ExpPLEFileSharedHostEmbedding
+    )
+    nn.Module.__init__(embedding)
+    embedding._table_path = path
+    embedding._table_is_writer = writer
+    embedding._table_bytes = 16
+    embedding.weight = nn.Parameter(torch.zeros(4, 2), requires_grad=False)
+    embedding.weight_scale = nn.Parameter(torch.zeros(1), requires_grad=False)
+    return embedding
+
+
+@pytest.mark.parametrize("writer", [True, False])
+def test_file_shared_ple_loader_writes_only_in_the_creating_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, writer: bool
+) -> None:
+    embedding = _file_shared_embedding(str(tmp_path / "table"), writer)
+    parent_calls: list[str] = []
+
+    def parent_loader(self, param, loaded_weight, checkpoint_start=None):
+        parent_calls.append("weight" if param is self.weight else "scale")
+
+    monkeypatch.setattr(Qwen4ExpPLEPinnedHostEmbedding, "weight_loader", parent_loader)
+    embedding.weight_loader(embedding.weight, torch.ones(2, 2), checkpoint_start=0)
+    embedding.weight_loader(embedding.weight_scale, torch.tensor([0.5]))
+    assert parent_calls == (["weight", "scale"] if writer else ["scale"])
+
+
+def test_file_shared_ple_ready_mark_is_published_then_awaited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The writer publishes the mark after loading; a reader returns once it
+    exists and fails, naming the file, when it never appears."""
+    path = str(tmp_path / "table")
+    writer = _file_shared_embedding(path, writer=True)
+    reader = _file_shared_embedding(path, writer=False)
+    # The post-load hook of either embedding method reaches the mark protocol.
+    monkeypatch.setattr(ngram_embedding_module, "PLE_SHARED_TABLE_READY_TIMEOUT_S", 0)
+    with pytest.raises(RuntimeError, match="never marked ready"):
+        Qwen4ExpPLEUnquantizedEmbeddingMethod().process_weights_after_loading(reader)
+    Qwen4ExpPLEUnquantizedEmbeddingMethod().process_weights_after_loading(writer)
+    assert (tmp_path / "table.ready").read_text() == "16"
+    Qwen4ExpPLEUnquantizedEmbeddingMethod().process_weights_after_loading(reader)

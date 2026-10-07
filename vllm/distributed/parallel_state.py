@@ -2011,6 +2011,26 @@ def _engram_dp_shard_size(
     return shard_size
 
 
+def _engram_table_can_be_shared(model_config, engram_config) -> bool:
+    """Whether co-located DP replicas of this model can share one host table.
+
+    DeepSeek V4.1's Engram always builds the node-local group (it also uses
+    it to shard the heads). The Qwen4Exp PLE table is shared the same way
+    (Qwen4ExpPLESharedHostEmbedding) when it is offloaded to the host and
+    not already spread over the DP ranks by `embedding_across_dp`, which
+    puts a different slice on every rank and leaves nothing to share.
+    """
+    from vllm.config.engram import architecture_has_ngram_layers
+
+    if model_config is None or not architecture_has_ngram_layers(
+        model_config.architecture
+    ):
+        return False
+    if model_config.architecture == "DeepseekV41ForCausalLM":
+        return True
+    return engram_config.cpu_offload and not engram_config.embedding_across_dp
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2145,7 +2165,7 @@ def initialize_model_parallel(
     if (
         engram_config is not None
         and config.model_config is not None
-        and config.model_config.architecture == "DeepseekV41ForCausalLM"
+        and _engram_table_can_be_shared(config.model_config, engram_config)
         and not enable_elastic_ep
     ):
         engram_dp_size = _engram_dp_shard_size(
