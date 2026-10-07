@@ -5,8 +5,10 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import json
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -24,7 +26,6 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     flashinfer_autotune_artifact_key,
     resolve_flashinfer_autotune_file,
     try_load_flashinfer_autotune_configs,
-    write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     autotune_hisparse_flashinfer_attention,
@@ -51,6 +52,8 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
+    from flashinfer.autotuner import AutoTuner
+
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         ArtifactCacheKey,
@@ -229,6 +232,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     if process_local_only:
         return
+
+    if current_platform.is_rocm():
+        from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
+            rocm_segmented_attn_autotune_warmup,
+        )
+
+        rocm_segmented_attn_autotune_warmup(worker)
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
@@ -411,6 +421,26 @@ def _run_flashinfer_bf16_autotune_dummy_run(
         )
 
 
+def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
+    """Identify a saved autotune file by its FlashInfer metadata and size."""
+    try:
+        configs = json.loads(path.read_text())
+        metadata = configs.pop("_metadata", None)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return json.dumps(metadata, sort_keys=True), len(configs)
+
+
+def _all_ranks_have_matching_cache(path: Path, group) -> bool:
+    """True iff every rank in ``group`` has its own, mutually consistent file."""
+    fingerprint = _autotune_cache_fingerprint(path)
+    if group.world_size == 1:
+        return fingerprint is not None
+    gathered: list[tuple[str, int] | None] = [None] * group.world_size
+    torch.distributed.all_gather_object(gathered, fingerprint, group=group.cpu_group)
+    return fingerprint is not None and all(f == fingerprint for f in gathered)
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
@@ -424,6 +454,12 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     so each stage's TP group tunes separately with its own cache file;
     otherwise the world group tunes together. Per-tactic timings are
     averaged over the tuning group so all its ranks select the same tactic.
+
+    Results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
+    (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
+    rank. A rank with a cache hit skips the per-tactic reduce the others block
+    in, so ranks keep loaded configs only if every rank in the tuning group
+    has a matching file and successfully loads it.
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
@@ -435,8 +471,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     )
 
     world = get_world_group()
-    pp_group = get_pp_group()
-    pp_size = pp_group.world_size
+    pp_size = get_pp_group().world_size
     tune_group = get_tp_group() if pp_size > 1 else world
     is_leader = tune_group.rank_in_group == 0
     tuner = AutoTuner.get()
@@ -450,15 +485,16 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         )
         autotune_kwargs["skip_ops"] = skip_ops
 
+    # The world group only spans DP ranks when vLLM folds DP into it.
+    dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
+    rank_id = f"dp{dp_rank}_rank{world.rank_in_group}"
     daemon_cache = DaemonArtifactCache.from_vllm_config(runner.vllm_config)
     artifact_key = (
-        flashinfer_autotune_artifact_key(runner, skip_ops, pp_group.rank_in_group)
+        flashinfer_autotune_artifact_key(runner, skip_ops, rank_id)
         if daemon_cache is not None
         else None
     )
-    if _load_preloaded_autotune_table(
-        daemon_cache, artifact_key, tune_group, is_leader
-    ):
+    if _load_preloaded_autotune_table(daemon_cache, artifact_key, tune_group, tuner):
         # Besides tuning, this raises the KDA projection-overlap limit on the
         # model, which the table does not carry.
         with torch.inference_mode():
@@ -470,11 +506,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         return
 
     cache_path = resolve_flashinfer_autotune_file(runner)
-    if pp_size > 1:
-        ranks = "-".join(str(rank) for rank in tune_group.ranks)
-        cache_path = cache_path.with_name(
-            f"{cache_path.stem}_tp_{ranks}{cache_path.suffix}"
-        )
+    cache_path = cache_path.with_name(f"{cache_path.stem}_{rank_id}{cache_path.suffix}")
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
@@ -483,16 +515,16 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    # Read cached autotune results and broadcast within the tuning group.
-    cached_results: bytes | None = None
-    if is_leader and cache_path.exists():
-        with open(cache_path, "rb") as f:
-            cached_results = f.read()
-    cached_results = tune_group.broadcast_object(cached_results, src=0)
-    if cached_results is not None:
-        write_flashinfer_autotune_cache(cache_path, cached_results)
-        tune_group.barrier()
-        tuner.load_configs(str(cache_path))
+    if _all_ranks_have_matching_cache(cache_path, tune_group):
+        loaded = tuner.load_configs(str(cache_path))
+        if tune_group.world_size > 1:
+            loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
+            torch.distributed.all_gather_object(
+                loaded_by_rank, loaded, group=tune_group.cpu_group
+            )
+            loaded = all(loaded_by_rank)
+        if not loaded:
+            tuner.clear_cache()
 
     group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)
@@ -520,46 +552,46 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     if world.world_size > 1:
         world.barrier()
-    if is_leader:
+    # Skip the rewrite when nothing was tuned this start (every entry came from
+    # the file). FlashInfer gates its own autotune(cache=...) save the same way.
+    if tuner._dirty:
         tuner.save_configs(str(cache_path))
-    _publish_autotune_table(daemon_cache, artifact_key, tune_group, is_leader)
+    _publish_autotune_table(daemon_cache, artifact_key)
 
 
 def _load_preloaded_autotune_table(
     daemon_cache: DaemonArtifactCache | None,
     artifact_key: "ArtifactCacheKey | None",
     tune_group: "GroupCoordinator",
-    is_leader: bool,
+    tuner: "AutoTuner",
 ) -> bool:
-    """Adopt a weight cache daemon's tuned table, skipping the whole pass.
+    """Adopt this rank's tuned table from its weight cache daemon.
 
-    A daemon only holds a table that a full pass produced for this exact key,
-    so a hit means every tactic this engine would profile is already chosen.
-    Only the leader is consulted, and its table is broadcast: the pass
-    averages its timings over the tuning group, so the tactics are the same
-    on every rank of it, and one collective keeps them on the same branch. A
-    rank that runs the pass while another skips it would deadlock on the
-    tuner's timing all-reduce.
+    A daemon only holds a table that a full pass produced for this exact key
+    and rank, so a hit means every tactic this rank would profile is already
+    chosen. As with the per-rank cache files, the pass is skipped only if
+    every rank of the tuning group loads its table: a rank that skipped it
+    would leave the others blocked in the per-tactic reduce. Otherwise the
+    loaded entries are dropped and the whole group tunes.
     """
     if daemon_cache is None or artifact_key is None:
         return False
-    table: bytes | None = None
-    if is_leader:
-        table = daemon_cache.get(artifact_key)
-        # Validate on the leader so a table from a foreign environment costs
-        # a full pass rather than a failed start. A rejected table leaves the
-        # tuner untouched, so falling through is safe.
-        if table is not None and not try_load_flashinfer_autotune_configs(table):
-            table = None
-    table = tune_group.broadcast_object(table, src=0)
-    if table is None:
-        return False
-    if not is_leader and not try_load_flashinfer_autotune_configs(table):
-        raise RuntimeError(
-            "The weight cache daemon's FlashInfer autotune table loaded on "
-            f"rank 0 but not on rank {tune_group.rank_in_group}; the ranks disagree "
-            "on their FlashInfer/CUDA environment or GPU model"
+    table = daemon_cache.get(artifact_key)
+    # A table from a foreign environment is rejected before anything is
+    # loaded, so it costs a full pass rather than a failed start.
+    loaded = table is not None and try_load_flashinfer_autotune_configs(table)
+    all_loaded = loaded
+    if tune_group.world_size > 1:
+        loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
+        torch.distributed.all_gather_object(
+            loaded_by_rank, loaded, group=tune_group.cpu_group
         )
+        all_loaded = all(loaded_by_rank)
+    if not all_loaded:
+        if table is not None:
+            tuner.clear_cache()
+        return False
+    assert table is not None
     logger.info_once(
         "Adopted the preloaded FlashInfer autotune table from the weight "
         "cache daemon (%d bytes); skipping the autotune pass.",
@@ -571,26 +603,21 @@ def _load_preloaded_autotune_table(
 def _publish_autotune_table(
     daemon_cache: DaemonArtifactCache | None,
     artifact_key: "ArtifactCacheKey | None",
-    tune_group: "GroupCoordinator",
-    is_leader: bool,
 ) -> None:
-    """Hand the freshly tuned table to every rank's weight cache daemon.
+    """Hand this rank's tuned table to its weight cache daemon.
 
     The daemons outlive the engine, so the next restart skips the pass
-    instead of repeating it. Each rank stores the leader's table on its own
-    daemon, so any of them can later serve it to a process that does not own
-    that GPU.
+    instead of repeating it. FlashInfer keys MoE entries by tp/ep rank, so
+    each rank publishes its own table rather than the leader's.
     """
     if daemon_cache is None or artifact_key is None:
         return
-    table: bytes | None = None
-    if is_leader:
-        try:
-            table = dump_flashinfer_autotune_configs()
-        except Exception:
-            logger.exception("Failed to serialize the FlashInfer autotune table")
-    table = tune_group.broadcast_object(table, src=0)
-    if table is not None and daemon_cache.put(artifact_key, table):
+    try:
+        table = dump_flashinfer_autotune_configs()
+    except Exception:
+        logger.exception("Failed to serialize the FlashInfer autotune table")
+        return
+    if daemon_cache.put(artifact_key, table):
         logger.info_once(
             "Handed the FlashInfer autotune table (%d bytes) to the weight "
             "cache daemon; engine restarts will skip the autotune pass.",

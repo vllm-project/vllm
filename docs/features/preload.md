@@ -91,8 +91,11 @@ measured on, and an engine whose flags differ recomputes it. A failed warmup is
 reported but not fatal, since the daemons keep serving the weights they hold.
 
 The key covers the engine's configuration hash, the FlashInfer build that
-measured the tactics, and the set of ops the pass skipped, so an engine never
-adopts a table that was not tuned for exactly what it runs. `--load-format` and
+measured the tactics, the set of ops the pass skipped, and the rank, so an
+engine never adopts a table that was not tuned for exactly what it runs.
+FlashInfer keys MoE tactics by rank, so each rank keeps its own table on its
+own daemon, and the pass is skipped only when every rank of a tuning group
+has one; otherwise the whole group tunes. `--load-format` and
 `--gpu-memory-utilization` are not part of it, which is why the daemon and the
 engine match despite differing there.
 

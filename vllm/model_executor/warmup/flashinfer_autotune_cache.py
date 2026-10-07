@@ -61,22 +61,22 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 def flashinfer_autotune_artifact_key(
     runner: "GPUModelRunner",
     skip_ops: Iterable[str] | None = None,
-    pp_rank: int = 0,
+    rank_id: str = "",
 ) -> ArtifactCacheKey:
     """Key the tuned table is cached under on the weight cache daemon.
 
-    A hit means every tactic this engine would profile is already chosen, so
+    A hit means every tactic this rank would profile is already chosen, so
     the whole autotune pass can be skipped. That is only true when the table
-    was produced for the same computation graph and pipeline stage, by the
-    same FlashInfer build, and without skipping any op this engine does tune,
-    so all of these go into the hash. The vLLM version is carried by
-    ``ArtifactCacheKey`` itself.
+    was produced for the same computation graph and rank (FlashInfer keys MoE
+    entries by tp/ep rank), by the same FlashInfer build, and without
+    skipping any op this engine does tune, so all of these go into the hash.
+    The vLLM version is carried by ``ArtifactCacheKey`` itself.
     """
     parts = [
         flashinfer_autotune_cache_hash(runner),
         _flashinfer_workspace_id(),
         ",".join(sorted(skip_ops or ())),
-        str(pp_rank),
+        rank_id,
     ]
     return ArtifactCacheKey(
         kind=FLASHINFER_AUTOTUNE_ARTIFACT,
