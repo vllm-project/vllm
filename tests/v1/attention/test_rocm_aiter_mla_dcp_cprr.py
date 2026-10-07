@@ -154,6 +154,11 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
         lambda *args: segmented_supported,
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
+    # These cases pick between cprr and segmented. On a gfx942 runner the real
+    # arch would add the Triton verify route, which this stub cannot build.
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx942", lambda: False)
     monkeypatch.setattr(
         rocm_aiter_mla, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0)
     )

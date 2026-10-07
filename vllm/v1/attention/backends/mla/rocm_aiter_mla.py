@@ -784,9 +784,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         dcp_local_max_seq_len = (
             cdiv(
                 vllm_config.model_config.max_model_len,
-                self.dcp_world_size * self.cp_kv_cache_interleave_size,
+                self.dcp_world_size * parallel_config.cp_kv_cache_interleave_size,
             )
-            * self.cp_kv_cache_interleave_size
+            * parallel_config.cp_kv_cache_interleave_size
         )
 
         # In the flat view (.view(-1,1,1,H)), each token is its own page,
