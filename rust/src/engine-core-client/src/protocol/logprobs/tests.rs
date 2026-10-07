@@ -514,3 +514,99 @@ fn zero_sampled_rank_does_not_fail_frame_mates() {
     "#]]
     .assert_debug_eq(&(&**bad, &**prompt, &**good));
 }
+
+fn i64_raw_view(values: &[i64]) -> Value {
+    Value::Ext(3, values.iter().flat_map(|v| v.to_le_bytes()).collect())
+}
+
+fn f32_raw_view(values: &[f32]) -> Value {
+    Value::Ext(3, values.iter().flat_map(|v| v.to_le_bytes()).collect())
+}
+
+#[test]
+fn decodes_per_token_ranks() {
+    // `logprob_token_ids` payloads carry the vocab rank of every entry, and the
+    // entries come in request order rather than top-k order.
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        Some(Value::Array(vec![
+            ndarray_value("<i8", &[2, 3], i64_raw_view(&[5, 9, 7, 8, 8, 2])),
+            ndarray_value(
+                "<f4",
+                &[2, 3],
+                f32_raw_view(&[-0.5, -4.0, -2.0, -1.0, -1.0, -9.0]),
+            ),
+            ndarray_value("<i8", &[2, 3], i64_raw_view(&[1, 9, 3, 2, 2, 115])),
+            Value::Nil,
+        ])),
+        None,
+    )))];
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let logprobs = decoded.outputs[0].new_logprobs.as_ref().unwrap();
+    expect_test::expect![[r#"
+        Logprobs {
+            positions: [
+                PositionLogprobs {
+                    entries: [
+                        TokenLogprob {
+                            token_id: 5,
+                            logprob: -0.5,
+                            rank: 1,
+                        },
+                        TokenLogprob {
+                            token_id: 9,
+                            logprob: -4.0,
+                            rank: 9,
+                        },
+                        TokenLogprob {
+                            token_id: 7,
+                            logprob: -2.0,
+                            rank: 3,
+                        },
+                    ],
+                },
+                PositionLogprobs {
+                    entries: [
+                        TokenLogprob {
+                            token_id: 8,
+                            logprob: -1.0,
+                            rank: 2,
+                        },
+                        TokenLogprob {
+                            token_id: 8,
+                            logprob: -1.0,
+                            rank: 2,
+                        },
+                        TokenLogprob {
+                            token_id: 2,
+                            logprob: -9.0,
+                            rank: 115,
+                        },
+                    ],
+                },
+            ],
+        }
+    "#]]
+    .assert_debug_eq(&**logprobs);
+}
+
+#[test]
+fn rejects_per_token_ranks_with_mismatched_shape() {
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        Some(Value::Array(vec![
+            ndarray_value("<i8", &[1, 2], i64_raw_view(&[5, 9])),
+            ndarray_value("<f4", &[1, 2], f32_raw_view(&[-0.5, -4.0])),
+            ndarray_value("<i8", &[1, 3], i64_raw_view(&[1, 9, 3])),
+            Value::Nil,
+        ])),
+        None,
+    )))];
+
+    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let crate::error::Error::ExtValueDecode { message } = &error else {
+        panic!("expected ExtValueDecode");
+    };
+    assert_eq!(
+        message,
+        "new_logprobs: token_ranks shape (1, 3) does not match token ids (1, 2)"
+    );
+}
