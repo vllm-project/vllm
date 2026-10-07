@@ -175,6 +175,48 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
 
 
 @pytest.mark.parametrize(
+    "full_cudagraph,piecewise_cudagraph,expected_mode",
+    [
+        (True, False, CUDAGraphMode.NONE),
+        (False, True, CUDAGraphMode.PIECEWISE),
+        (False, False, CUDAGraphMode.NONE),
+    ],
+)
+def test_capture_passes_piecewise_mode_to_model_state(
+    full_cudagraph, piecewise_cudagraph, expected_mode
+):
+    """PIECEWISE captures prepare attention as PIECEWISE steps do at runtime."""
+    num_tokens = num_reqs = 8
+    buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
+    block_tables = MagicMock()
+    block_tables.cp_size = 1
+    block_tables.get_dummy_block_tables.return_value = ()
+    block_tables.get_dummy_slot_mappings.return_value = torch.empty(
+        0, num_tokens, dtype=torch.int64
+    )
+    model_state = MagicMock()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+
+    gpu_cudagraph_utils.prepare_inputs_to_capture(
+        num_reqs,
+        num_tokens,
+        model_state,
+        buffers,
+        block_tables,
+        [],
+        kv_cache_config,
+        full_cudagraph=full_cudagraph,
+        piecewise_cudagraph=piecewise_cudagraph,
+    )
+
+    call = model_state.prepare_attn.call_args
+    assert call.args[1] == expected_mode
+    assert call.kwargs["for_capture"] == full_cudagraph
+
+
+@pytest.mark.parametrize(
     "full_cudagraph,max_query_len,expected_max_query_len",
     [(False, None, None), (True, None, 8), (True, 1, 1), (True, 3, 3)],
 )
