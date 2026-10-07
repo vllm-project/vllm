@@ -221,6 +221,7 @@ _EMBEDDING_MODELS = {
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
+    "JinaBertForMaskedLM": ("jina_bert", "JinaBertModel"),
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),

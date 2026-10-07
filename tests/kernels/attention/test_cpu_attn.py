@@ -201,6 +201,8 @@ def ref_paged_attn(
             q_pos = q_start_pos + torch.arange(0, query_len)[None, :, None]
             kv_pos = torch.arange(0, kv_len)[None, None, :]
             dist = q_pos - kv_pos
+            if dynamic_causal is not None and not dynamic_causal[i]:
+                dist = dist.abs()
             alibi_bias = -alibi_slopes * dist
             attn += alibi_bias
 
@@ -1492,3 +1494,22 @@ def test_amx_fp8_qk_covers_full_64_token_group() -> None:
     )
 
     torch.testing.assert_close(output, torch.ones_like(output), atol=0.05, rtol=0)
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("dtype", QTYPES)
+def test_bidirectional_alibi(causal: bool, dtype: torch.dtype) -> None:
+    varlen_with_paged_kv(
+        seq_lens=[(17, 17), (65, 65), (4, 4)],
+        num_heads=(8, 8),
+        head_size=64,
+        sliding_window=None,
+        dtype=dtype,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=8,
+        use_alibi=True,
+        use_sink=False,
+        isa="vec",
+        dynamic_causal=[causal] * 3,
+    )

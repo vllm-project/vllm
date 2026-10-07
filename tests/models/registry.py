@@ -599,6 +599,14 @@ _EMBEDDING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["GteNewModel"]},
     ),
+    "JinaBertForMaskedLM": _HfExamplesInfo(
+        "jinaai/jina-embeddings-v2-small-en",
+        trust_remote_code=False,
+        max_transformers_version="4.57.6",
+        transformers_version_reason={
+            "hf": "Upstream Jina remote code imports transformers.onnx, removed in v5."
+        },
+    ),
     "JinaEmbeddingsV5Model": _HfExamplesInfo(
         "jinaai/jina-embeddings-v5-text-small",
         trust_remote_code=True,
