@@ -582,7 +582,13 @@ def _rejection_kernel(
                 )
                 if SYNTHETIC_MODE:
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
-                    accepted = u < rate
+                    # Never accept a draft the target masks out (e.g. grammar).
+                    target_logit = tl.load(
+                        target_logits_ptr
+                        + logit_idx * target_logits_stride
+                        + draft_sampled
+                    )
+                    accepted = (u < rate) & (target_logit > float("-inf"))
                 else:
                     accepted = target_argmax == draft_sampled
                 accepted &= is_valid_draft
@@ -655,7 +661,7 @@ def _rejection_kernel(
                 )
                 if SYNTHETIC_MODE:
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
-                    accepted = u < rate
+                    accepted = (u < rate) & (target_logprob > float("-inf"))
                 else:
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)

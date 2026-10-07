@@ -42,9 +42,12 @@ def grammar_invalid_drafts(
 ) -> torch.Tensor | None:
     """Mask over logit rows whose draft was verified against a permissive row.
 
-    Draft i sits at local position i + 1, and drafts from `num_acceptable_drafts`
-    on met `_full_mask`. Local positions come from the device `cu_num_logits`, so
-    this stays right when adaptive verification trims drafts on device.
+    Draft i sits at local position i + 1 and is verified by row i. Row
+    `num_acceptable_drafts` still has a real mask, so its draft keeps its id:
+    verification rejects it and resamples from the residual max(p - q, 0).
+    Later drafts met `_full_mask`. Local positions come from the device
+    `cu_num_logits`, so this stays right when adaptive verification trims drafts
+    on device.
     Returns None when there is nothing to invalidate.
     """
     if not grammar_req_ids or input_batch.num_draft_tokens == 0:
@@ -56,7 +59,7 @@ def grammar_invalid_drafts(
         if req_idx is not None:
             # None (an older scheduler, or warmup): invalidate the whole window.
             limit[req_idx] = (
-                num_acceptable_drafts[i] if num_acceptable_drafts is not None else 0
+                num_acceptable_drafts[i] + 1 if num_acceptable_drafts is not None else 0
             )
     # Adaptive verification only trims drafts, so this bound holds either way.
     num_drafts = input_batch.num_draft_tokens_per_req
