@@ -206,7 +206,7 @@ def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
     import vllm.platforms.rocm as rocm
 
     monkeypatch.setenv("VLLM_ROCM_DSV41_MONO_DECODE", "1")
-    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
+    monkeypatch.setattr(rocm, "get_cdna_version", lambda: 4)
     monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
     runner = "vllm.models.deepseek_v41.amd.mono.runner"
     monkeypatch.setitem(sys.modules, runner, ModuleType(runner))
@@ -246,3 +246,16 @@ def test_other_steps_reduce_wo_b_themselves(run, case):
     case.setdefault("metadata", {"swa": _swa()})
     out, calls = run(ffn_only=True, **case)
     assert out is None and not calls
+
+
+@pytest.mark.parametrize("cdna", [3, 5])
+def test_opt_in_outside_the_kernels_cdna_raises(monkeypatch, cdna):
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setenv("VLLM_ROCM_DSV41_MONO_DECODE", "1")
+    monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40))
+    )
+    with pytest.raises(ValueError, match="needs CDNA4"):
+        md.MonoDecodeLayer.create(_decoder_layer(), config)

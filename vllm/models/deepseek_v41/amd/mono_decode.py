@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1 mono decode layer on ROCm gfx950 (``VLLM_ROCM_DSV41_MONO_DECODE=1``).
+"""DeepSeek-V4.1 mono decode layer on ROCm CDNA4 (``VLLM_ROCM_DSV41_MONO_DECODE=1``).
 
 A decode step's backbone layer -- the attention seam, the attention, its TP
 all-reduce, the FFN seam, the MoE and its all-reduce -- runs as two persistent
@@ -45,6 +45,8 @@ logger = init_logger(__name__)
 RECORD = 584  # an fp8_ds_mla KV record: 576 data bytes, 8 scale bytes
 SWA_WIDTH = 128  # a causal decode token's window slots
 MAX_ROWS = 48  # the kernels' step rows at most: 8 requests x (1 + 5 DSpark drafts)
+# the kernels' ISA: CDNA4 (gfx950) scaled MFMA and MX formats
+CDNA_VERSIONS = (4,)
 
 _runner = None
 
@@ -102,12 +104,12 @@ class MonoDecodeLayer:
     ) -> "MonoDecodeLayer | None":
         if not envs.VLLM_ROCM_DSV41_MONO_DECODE:
             return None
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import get_cdna_version
 
         # the deployment: an explicit opt-in that cannot run is an error
         why = None
-        if not on_gfx950():
-            why = "needs gfx950"
+        if get_cdna_version() not in CDNA_VERSIONS:
+            why = f"needs CDNA{'/'.join(map(str, CDNA_VERSIONS))}"
         elif get_tensor_model_parallel_world_size() not in (2, 4):
             why = "needs tensor parallel size 2 or 4"
         else:
