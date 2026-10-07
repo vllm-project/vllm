@@ -50,7 +50,7 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
 from vllm.entrypoints.serve.exception_handling.handlers.vllm_error import (
     vllm_error_handler,
 )
-from vllm.exceptions import VLLMError
+from vllm.exceptions import VLLMError, VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 
@@ -78,7 +78,7 @@ class _Handler:
     * a :class:`CohereChatV2Response` (non-streaming JSON path);
     * an async generator yielding SSE frames (streaming path);
     * an :class:`ErrorResponse` (error envelope path); or
-    * an exception (router-level 500 path).
+    * an exception (router-level error path).
     """
 
     def __init__(self, result):
@@ -371,6 +371,22 @@ class TestEndpoint:
         body = r.json()
         assert body == {"message": "kaboom"}
 
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            VLLMValidationError("bad temperature", parameter="temperature"),
+            ValueError("bad temperature"),
+        ],
+        ids=["vllm_validation_error", "value_error"],
+    )
+    def test_handler_client_error_returns_400_envelope(self, exc):
+        """Client-caused handler errors are 4xx, matching the OpenAI routes."""
+        app = _build_app(handler=_Handler(exc))
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        assert "bad temperature" in r.json()["message"]
+
     def test_non_json_content_type_rejected(self):
         """The ``validate_json_request`` dependency raises
         ``RequestValidationError`` (HTTP 422) for non-JSON content
@@ -525,10 +541,10 @@ class TestRenderEndpoint:
         assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
         assert r.json() == {"message": "tokenizer exploded"}
 
-    def test_conversion_exception_returns_500_envelope(self):
+    def test_conversion_client_error_returns_400_envelope(self):
         """Conversion runs inside the same ``try`` as the render call, so
-        a bad v2 body that slips past Pydantic still yields the Cohere
-        error envelope rather than an unhandled 500 with vLLM's shape.
+        a bad v2 body that slips past Pydantic still yields a 4xx in the
+        Cohere error envelope rather than an unhandled 500 with vLLM's shape.
         """
 
         class _Boom:
@@ -538,7 +554,7 @@ class TestRenderEndpoint:
         app = _build_render_app(_Boom(), _RenderHandler(_generate_request()))
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
-        assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert r.status_code == HTTPStatus.BAD_REQUEST
         assert r.json() == {"message": "unconvertible message"}
 
     def test_invalid_body_returns_422(self):
