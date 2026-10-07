@@ -2577,16 +2577,10 @@ class NixlBaseConnectorWorker:
             draft_remote_heads = max(
                 1, self._head_sharded_draft_kv_heads // remote_tp_size
             )
-            if self._TRANSFER_MODE == "push" and tp_ratio != 1:
-                raise NotImplementedError(
-                    "NIXL push mode does not support a head-sharded draft's KV "
-                    "under an MLA target with heterogeneous TP. Use pull mode."
-                )
-            # In pull mode local is decode and remote is prefill.
             if tp_ratio < 0 or self.dcp_size > 1 or remote_dcp_size > 1:
                 raise NotImplementedError(
-                    "NIXL cannot transfer a head-sharded draft's KV under an MLA "
-                    "target when prefill TP exceeds decode TP or with DCP: "
+                    "NIXL head-sharded draft KV under an MLA target requires "
+                    "local TP >= remote TP and no DCP: "
                     f"local TP={self.transfer_topo.tp_size}, "
                     f"remote TP={remote_tp_size}, "
                     f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
