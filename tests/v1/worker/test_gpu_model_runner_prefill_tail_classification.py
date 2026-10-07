@@ -23,9 +23,10 @@ keeps the assertions targeted at the mask fix alone, not the unrelated
 landed in the same patch.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
-import torch
 
 from vllm.config import (
     CacheConfig,
@@ -37,7 +38,9 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -50,7 +53,6 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
-DEVICE_TYPE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _get_vllm_config() -> VllmConfig:
@@ -74,6 +76,17 @@ def _get_vllm_config() -> VllmConfig:
         # the speculative-decoding-free one in test_gpu_model_runner.py.
         speculative_config=SpeculativeConfig(method="ngram", num_speculative_tokens=3),
     )
+
+
+def _make_model_runner(vllm_config: VllmConfig) -> GPUModelRunner:
+    """Build the V1 runner the platform's worker would, without starting it."""
+    worker_cls = resolve_obj_by_qualname(vllm_config.parallel_config.worker_cls)
+    worker = SimpleNamespace(
+        vllm_config=vllm_config,
+        device=current_platform.device_type,
+        use_v2_model_runner=False,
+    )
+    return worker_cls._make_model_runner(worker)
 
 
 def _initialize_kv_cache(runner: GPUModelRunner) -> None:
@@ -124,7 +137,7 @@ def spec_decode_model_runner(dist_init):
         vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
             num_heads, head_size, 0.1
         )
-        runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
+        runner = _make_model_runner(vllm_config)
         _initialize_kv_cache(runner)
         yield runner
 

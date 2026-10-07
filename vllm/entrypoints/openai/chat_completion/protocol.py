@@ -1093,7 +1093,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     model: str | None = None
 
     # Shared sampling / generation fields — mirror ChatCompletionRequest.
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
     top_logprobs: TopLogprobsParam = 0
@@ -1108,7 +1108,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     n: int | None = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = Field(default_factory=list)

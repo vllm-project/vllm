@@ -85,6 +85,7 @@ def test_dspark_markov_head_is_replicated(
     assert head.markov_w2.tp_size == 1
     assert head.markov_w1.weight.shape == (128, 8)
     assert head.markov_w2.weight.shape == (128, 8)
+    head.markov_w2.quant_method.process_weights_after_loading(head.markov_w2)
 
     def fail_collective(*args, **kwargs):
         raise AssertionError("replicated Markov head must not invoke TP collectives")
