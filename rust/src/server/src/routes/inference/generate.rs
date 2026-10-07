@@ -22,7 +22,8 @@ use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
+    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _,
+    RequestTimingStats, TokenUsage,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
@@ -65,6 +66,11 @@ pub async fn generate(
         None
     };
 
+    let prefill_metrics = body
+        .kv_transfer_params
+        .as_ref()
+        .and_then(|params| params.get("prefill_metrics"))
+        .cloned();
     let prepared =
         match prepare_generate_request(body, &lora_resolution, request_context, mm_features) {
             Ok(prepared) => prepared,
@@ -98,6 +104,7 @@ pub async fn generate(
             prepared.request_id,
             api_server_options,
             prepared.options,
+            prefill_metrics,
         );
         let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
 
@@ -120,6 +127,7 @@ pub async fn generate(
         prepared.request_id,
         api_server_options,
         prepared.options,
+        prefill_metrics,
     ) {
         Ok(response) => response,
         Err(error) => return error.into_response(),
@@ -134,6 +142,7 @@ async fn generate_chunk_stream(
     request_id: String,
     ApiServerOptions {
         enable_log_requests,
+        enable_per_request_metrics,
         enable_prompt_tokens_details,
         ..
     }: ApiServerOptions,
@@ -144,15 +153,27 @@ async fn generate_chunk_stream(
         // Ignored: raw generate streaming has no prompt-logprobs wire shape.
         include_prompt_logprobs: _,
     }: ResponseOptions,
+    prefill_metrics: Option<serde_json::Value>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
     let mut prompt_tokens = None;
     let mut usage = TokenUsage::default();
+    let mut metrics = serde_json::Map::new();
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
+                if output.finish_reason.is_some() {
+                    metrics = build_per_request_metrics(
+                        enable_per_request_metrics,
+                        output.request_timings,
+                        output.remote_kv_wait_time,
+                        output.kv_transfer_metrics.as_ref(),
+                        prefill_metrics.as_ref(),
+                    );
+                    metrics.retain(|_, value| !value.is_null());
+                }
                 if prompt_tokens.is_none() {
                     prompt_tokens =
                         output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len());
@@ -205,6 +226,7 @@ async fn generate_chunk_stream(
                     }],
                     usage: include_continuous_usage
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+                    metrics: None,
                 })
                 .await;
             }
@@ -223,6 +245,7 @@ async fn generate_chunk_stream(
             request_id,
             choices: Vec::new(),
             usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+            metrics: (!metrics.is_empty()).then_some(metrics),
         })
         .await;
     }
@@ -235,6 +258,7 @@ fn collect_generate(
     request_id: String,
     ApiServerOptions {
         enable_log_requests,
+        enable_per_request_metrics,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -245,6 +269,7 @@ fn collect_generate(
         include_logprobs,
         include_prompt_logprobs,
     }: ResponseOptions,
+    prefill_metrics: Option<serde_json::Value>,
 ) -> Result<GenerateResponse, ApiError> {
     let logprobs = if include_logprobs {
         let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
@@ -283,6 +308,59 @@ fn collect_generate(
         );
     }
 
+    let metrics = build_per_request_metrics(
+        enable_per_request_metrics,
+        collected.request_timings,
+        collected.remote_kv_wait_time,
+        collected.kv_transfer_metrics.as_ref(),
+        prefill_metrics.as_ref(),
+    );
+    let mut kv_transfer_params = collected.kv_transfer_params;
+    if enable_per_request_metrics {
+        if let Some(serde_json::Value::Object(params)) = kv_transfer_params.as_mut() {
+            let prefill = [
+                "queue_time_ms",
+                "time_to_first_token_ms",
+                "kv_allocation_wait_time_ms",
+                "kv_initial_queue_wait_time_ms",
+            ]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    metrics.get(name).cloned().unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect();
+            params.insert("prefill_metrics".into(), serde_json::Value::Object(prefill));
+        }
+    }
+    let metrics = (!metrics.is_empty()).then(|| {
+        let mut metrics = metrics;
+        metrics.insert("speculative_decoding".into(), serde_json::Value::Null);
+        for name in [
+            "time_to_first_token_ms",
+            "generation_time_ms",
+            "queue_time_ms",
+            "mean_itl_ms",
+            "tokens_per_second",
+            "remote_kv_wait_time_ms",
+            "kv_initial_queue_wait_time_ms",
+            "kv_post_receive_queue_wait_time_ms",
+            "kv_allocation_wait_time_ms",
+            "kv_handshake_wait_worker_time_ms",
+            "kv_transfer_worker_time_ms",
+            "kv_transfer_post_worker_time_ms",
+            "kv_transfer_bytes",
+            "prefill_queue_time_ms",
+            "prefill_time_to_first_token_ms",
+            "prefill_kv_allocation_wait_time_ms",
+            "prefill_kv_initial_queue_wait_time_ms",
+        ] {
+            metrics.entry(name).or_insert(serde_json::Value::Null);
+        }
+        metrics
+    });
     Ok(GenerateResponse {
         request_id,
         choices: vec![GenerateResponseChoice {
@@ -292,9 +370,71 @@ fn collect_generate(
             token_ids: collected.token_ids,
         }],
         prompt_logprobs,
-        kv_transfer_params: collected.kv_transfer_params,
+        kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
+        metrics,
     })
+}
+
+fn build_per_request_metrics(
+    enabled: bool,
+    timings: Option<RequestTimingStats>,
+    remote_kv_wait_time: Option<f64>,
+    metrics: Option<&serde_json::Value>,
+    prefill_metrics: Option<&serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    if !enabled {
+        return serde_json::Map::new();
+    }
+    let mut metrics = metrics.and_then(serde_json::Value::as_object).cloned().unwrap_or_default();
+    if let Some(timings) = timings {
+        let duration = |start, end| (start > 0.0 && end > 0.0).then_some((end - start) * 1000.0);
+        let generation_time = duration(timings.first_token_ts, timings.last_token_ts);
+        for (name, value) in [
+            (
+                "time_to_first_token_ms",
+                duration(timings.scheduled_ts, timings.first_token_ts),
+            ),
+            ("generation_time_ms", generation_time),
+            (
+                "queue_time_ms",
+                duration(timings.queued_ts, timings.scheduled_ts),
+            ),
+            (
+                "mean_itl_ms",
+                generation_time
+                    .filter(|_| timings.num_generation_tokens > 1)
+                    .map(|elapsed| elapsed / (timings.num_generation_tokens - 1) as f64),
+            ),
+            (
+                "tokens_per_second",
+                duration(timings.scheduled_ts, timings.last_token_ts)
+                    .filter(|elapsed| *elapsed > 0.0)
+                    .map(|elapsed| timings.num_generation_tokens as f64 * 1000.0 / elapsed),
+            ),
+        ] {
+            metrics.insert(name.into(), serde_json::json!(value));
+        }
+    }
+    if let Some(wait) = remote_kv_wait_time {
+        metrics.insert(
+            "remote_kv_wait_time_ms".into(),
+            serde_json::json!(wait * 1000.0),
+        );
+    }
+    if let Some(prefill) = prefill_metrics {
+        for name in [
+            "queue_time_ms",
+            "time_to_first_token_ms",
+            "kv_allocation_wait_time_ms",
+            "kv_initial_queue_wait_time_ms",
+        ] {
+            if let Some(value) = prefill.get(name) {
+                metrics.insert(format!("prefill_{name}"), value.clone());
+            }
+        }
+    }
+    metrics
 }
 
 fn raw_logprobs_to_openai_chat(logprobs: &Logprobs) -> Result<ChatLogProbs, ApiError> {
@@ -424,6 +564,84 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn pd_metrics_preserve_phase_owners_and_response_mode() {
+        let output = GenerateOutput {
+            request_id: "pd-test".to_string(),
+            prompt_info: None,
+            token_ids: vec![33, 44],
+            logprobs: None,
+            finish_reason: Some(FinishReason::Length),
+            cached_token_count: 0,
+            kv_transfer_params: Some(serde_json::json!({"do_remote_decode": true})),
+            ec_transfer_params: None,
+            remote_kv_wait_time: Some(0.125),
+            kv_transfer_metrics: Some(
+                serde_json::json!({"kv_transfer_bytes": 64, "kv_allocation_wait_time_ms": 7.0}),
+            ),
+            request_timings: Some(RequestTimingStats {
+                queued_ts: 1.0,
+                scheduled_ts: 3.0,
+                first_token_ts: 4.0,
+                last_token_ts: 5.0,
+                num_generation_tokens: 2,
+            }),
+        };
+        for enabled in [false, true] {
+            let options = ApiServerOptions {
+                enable_per_request_metrics: enabled,
+                ..Default::default()
+            };
+            let incoming = Some(serde_json::json!({"queue_time_ms": 2.5}));
+            let chunks: Vec<_> = generate_chunk_stream(
+                stream::iter([Ok(output.clone())]),
+                "pd-test".to_string(),
+                options,
+                ResponseOptions {
+                    include_usage: true,
+                    ..Default::default()
+                },
+                incoming.clone(),
+            )
+            .try_collect()
+            .await
+            .expect("stream chunks");
+            assert_eq!(chunks.len(), 2);
+            assert!(chunks[0].metrics.is_none());
+            let collected = stream::iter([Ok(output.clone())])
+                .collect_output()
+                .await
+                .expect("collect output");
+            let response = collect_generate(
+                collected,
+                "pd-test".to_string(),
+                options,
+                ResponseOptions::default(),
+                incoming,
+            )
+            .expect("response");
+            if enabled {
+                let metrics = response.metrics.expect("metrics enabled");
+                assert_eq!(metrics.len(), 18);
+                assert_eq!(metrics["queue_time_ms"], 2000.0);
+                assert_eq!(metrics["prefill_queue_time_ms"], 2.5);
+                assert_eq!(metrics["remote_kv_wait_time_ms"], 125.0);
+                assert_eq!(metrics["kv_transfer_bytes"], 64);
+                assert!(metrics["kv_handshake_wait_worker_time_ms"].is_null());
+                let streamed = chunks[1].metrics.as_ref().expect("final metrics");
+                assert!(streamed.values().all(|value| !value.is_null()));
+                assert_eq!(streamed["prefill_queue_time_ms"], 2.5);
+                assert_eq!(
+                    response.kv_transfer_params.expect("P metadata")["prefill_metrics"]["queue_time_ms"],
+                    2000.0
+                );
+            } else {
+                assert!(response.metrics.is_none());
+                assert!(chunks[1].metrics.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn generate_chunk_stream_captures_late_prompt_info() {
         let stream = stream::iter(vec![
             Ok(GenerateOutput {
@@ -435,6 +653,9 @@ mod tests {
                 cached_token_count: 0,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                remote_kv_wait_time: None,
+                kv_transfer_metrics: None,
+                request_timings: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -448,6 +669,9 @@ mod tests {
                 cached_token_count: 2,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                remote_kv_wait_time: None,
+                kv_transfer_metrics: None,
+                request_timings: None,
             }),
         ]);
 
@@ -463,6 +687,7 @@ mod tests {
                 include_continuous_usage: true,
                 ..Default::default()
             },
+            None,
         )
         .try_collect()
         .await
@@ -514,6 +739,9 @@ mod tests {
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
+            remote_kv_wait_time: None,
+            kv_transfer_metrics: None,
+            request_timings: None,
             prompt_token_ids,
         };
 
@@ -525,6 +753,7 @@ mod tests {
                 include_prompt_logprobs: true,
                 ..Default::default()
             },
+            None,
         )
         .expect("single-token prompt without payload maps to [None]");
         let prompt_logprobs = response.prompt_logprobs.expect("prompt logprobs present");
@@ -539,6 +768,7 @@ mod tests {
                 include_prompt_logprobs: true,
                 ..Default::default()
             },
+            None,
         )
         .expect_err("multi-token prompt without payload is an engine failure");
     }

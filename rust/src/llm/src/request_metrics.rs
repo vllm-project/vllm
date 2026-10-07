@@ -12,7 +12,7 @@ use vllm_metrics::{
     U64Counter,
 };
 
-use crate::FinishReason;
+use crate::{FinishReason, RequestTimingStats};
 
 const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
 const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
@@ -148,6 +148,16 @@ impl RequestMetricsTracker {
             }
 
             self.last_token_ts = batch_timestamp;
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> RequestTimingStats {
+        RequestTimingStats {
+            queued_ts: self.queued_ts,
+            scheduled_ts: self.scheduled_ts,
+            first_token_ts: self.first_token_ts,
+            last_token_ts: self.last_token_ts,
+            num_generation_tokens: self.num_generation_tokens,
         }
     }
 

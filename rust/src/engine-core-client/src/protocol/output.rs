@@ -134,7 +134,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub remote_kv_wait_time: Option<f64>,
     #[serde(default)]
-    pub kv_transfer_metrics: Option<OpaqueValue>,
+    pub kv_transfer_metrics: Option<serde_json::Value>,
 }
 
 impl EngineCoreOutput {

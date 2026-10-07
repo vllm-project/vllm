@@ -300,6 +300,10 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
+    #[arg(long)]
+    #[serde(default)]
+    pub enable_per_request_metrics: bool,
+
     /// Include prompt_tokens_details in usage when cached prompt tokens are
     /// present.
     #[arg(
@@ -563,6 +567,7 @@ impl SharedRuntimeArgs {
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
+            enable_per_request_metrics: self.enable_per_request_metrics,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
         }

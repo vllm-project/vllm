@@ -29,6 +29,15 @@ pub struct TokenUsage {
     pub cached_token_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RequestTimingStats {
+    pub queued_ts: f64,
+    pub scheduled_ts: f64,
+    pub first_token_ts: f64,
+    pub last_token_ts: f64,
+    pub num_generation_tokens: u32,
+}
+
 /// Final raw token output plus terminal stream metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectedGenerateOutput {
@@ -44,6 +53,9 @@ pub struct CollectedGenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    pub remote_kv_wait_time: Option<f64>,
+    pub kv_transfer_metrics: Option<serde_json::Value>,
+    pub request_timings: Option<RequestTimingStats>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -155,6 +167,9 @@ pub struct GenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    pub remote_kv_wait_time: Option<f64>,
+    pub kv_transfer_metrics: Option<serde_json::Value>,
+    pub request_timings: Option<RequestTimingStats>,
 }
 
 impl GenerateOutput {
@@ -202,6 +217,9 @@ impl GenerateOutput {
             cached_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            remote_kv_wait_time: None,
+            kv_transfer_metrics: None,
+            request_timings: None,
         }
     }
 }
@@ -281,6 +299,7 @@ impl Stream for GenerateOutputStream {
         if let Some(finish_reason) = finish_reason.as_ref() {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
+        let request_timings = finish_reason.as_ref().map(|_| self.request_metrics.snapshot());
 
         let output = GenerateOutput {
             request_id: raw.request_id,
@@ -291,6 +310,9 @@ impl Stream for GenerateOutputStream {
             cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
+            remote_kv_wait_time: raw.remote_kv_wait_time,
+            kv_transfer_metrics: raw.kv_transfer_metrics,
+            request_timings,
         };
 
         Poll::Ready(Some(Ok(output)))
@@ -374,6 +396,9 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
+                        remote_kv_wait_time: None,
+                        kv_transfer_metrics: None,
+                        request_timings: None,
                     });
                 }
 
@@ -387,6 +412,9 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     };
                     collected.kv_transfer_params = output.kv_transfer_params;
                     collected.ec_transfer_params = output.ec_transfer_params;
+                    collected.remote_kv_wait_time = output.remote_kv_wait_time;
+                    collected.kv_transfer_metrics = output.kv_transfer_metrics;
+                    collected.request_timings = output.request_timings;
                     return Ok(collected);
                 }
             }
