@@ -312,6 +312,14 @@ requests, median P99 TTFT/TPOT satisfy the supplied objectives, and
 duration-weighted combined compliance meets the minimum ratio (`0.99` by
 default).
 
+Adaptive concurrency uses a `1800` second server-readiness timeout by default,
+which is intentionally longer than the generic benchmark helper default for
+CPU model loading and initialization. `run_full_sweep.sh
+--server-ready-timeout VALUE` also exports the selected timeout explicitly to
+the generated concurrency runner, in addition to forwarding the CLI option.
+This avoids falling back to a shorter adaptive-helper timeout when the
+concurrency stage is invoked through the full staged workflow.
+
 The default growth factor is `2` and the default hard cap is `1000`.
 Generated runners accept `--growth-factor VALUE` and
 `--max-concurrency-cap VALUE`.

@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_GROWTH_FACTOR,
     )
     parser.add_argument("--num-runs", type=int, default=3)
-    parser.add_argument("--server-ready-timeout", type=int, default=300)
+    parser.add_argument("--server-ready-timeout", type=int, default=1800)
     parser.add_argument("--show-stdout", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument("--resume", action="store_true")

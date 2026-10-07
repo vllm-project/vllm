@@ -1119,6 +1119,7 @@ fi
 # completed work or force a manual restart.
 SWEEP_RETRY_COUNT="${{VLLM_RECIPE_SWEEP_RETRY_COUNT:-0}}"
 MAX_SWEEP_RETRIES="${{VLLM_RECIPE_SWEEP_RETRIES:-2}}"
+SERVER_READY_TIMEOUT="${{VLLM_RECIPE_SERVER_READY_TIMEOUT:-1800}}"
 
 run_concurrency_sweep() {{
   if [[ "{int(use_adaptive_sla_search)}" == "1" ]]; then
@@ -1127,6 +1128,7 @@ run_concurrency_sweep() {{
       --bench-cmd "{bench_cmd}" \
       --results-dir "${{SCRIPT_DIR}}/results/concurrency-tuning" \
       {adaptive_args_text} \
+      --server-ready-timeout "${{SERVER_READY_TIMEOUT}}" \
       ${{CONTINUE_ON_ERROR_ARG}} \
       "$@"
   else
@@ -1254,6 +1256,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${{BASH_SOURCE[0]}}")" && pwd)"
 STAGES=all
 RUN_ARGS=()
+SERVER_READY_TIMEOUT="${{VLLM_RECIPE_SERVER_READY_TIMEOUT:-1800}}"
 RECOMMEND_SLA_ARGS=({recommend_sla_args})
 while (($#)); do
   case "$1" in
@@ -1266,6 +1269,20 @@ while (($#)); do
       shift 2
       ;;
     --stages=*) STAGES="${{1#*=}}"; shift ;;
+    --server-ready-timeout)
+      if (($# < 2)); then
+        echo "--server-ready-timeout requires a value." >&2
+        exit 2
+      fi
+      SERVER_READY_TIMEOUT="$2"
+      RUN_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --server-ready-timeout=*)
+      SERVER_READY_TIMEOUT="${{1#*=}}"
+      RUN_ARGS+=("$1")
+      shift
+      ;;
     --help|-h)
       echo "Usage: $0 [--stages all|parallel-layout,concurrency,scheduler] [sweep args]"
       echo "Selected stages always run in dependency order. Default: all."
@@ -1286,6 +1303,10 @@ for stage in "${{SELECTED_STAGES[@]}}"; do
   esac
 done
 has_stage() {{ [[ ",$STAGES," == *",$1,"* ]]; }}
+
+# Keep the concurrency runner's server-start timeout explicit even when sweep
+# arguments pass through multiple generated wrapper scripts.
+export VLLM_RECIPE_SERVER_READY_TIMEOUT="${{SERVER_READY_TIMEOUT}}"
 
 # Check dependencies before starting any benchmarks.
 if has_stage scheduler && ! has_stage concurrency &&
