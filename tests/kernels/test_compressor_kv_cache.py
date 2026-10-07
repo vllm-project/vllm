@@ -28,7 +28,10 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _launch_two_stage_sparse_attn_compressor,
     compress_norm_rope_store_triton,
 )
-from vllm.models.deepseek_v4.compressor import _get_c128_boundary
+from vllm.models.deepseek_v4.compressor import (
+    CompressorMetadataBuilder,
+    _get_c128_boundary,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
@@ -39,6 +42,17 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+
+
+@pytest.mark.parametrize("block_size,expected_boundary", [(8, None), (256, True)])
+def test_compressor_graph_capture_discards_c128_boundary(
+    monkeypatch: pytest.MonkeyPatch, block_size: int, expected_boundary: bool | None
+) -> None:
+    builder = object.__new__(CompressorMetadataBuilder)
+    builder.block_size = block_size
+    metadata = SimpleNamespace(c128_boundary=True)
+    monkeypatch.setattr(CompressorMetadataBuilder, "build", lambda *a, **k: metadata)
+    assert builder.build_for_cudagraph_capture(None).c128_boundary is expected_boundary
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
