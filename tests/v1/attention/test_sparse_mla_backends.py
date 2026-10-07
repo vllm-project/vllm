@@ -3354,6 +3354,9 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
             num_decodes, 1, dtype=torch.int32, device=device
         ),
         swap_in=MagicMock(side_effect=swap_in),
+        all_context_pages_resident=True,
+        num_decode_tokens=num_tokens,
+        num_actual_tokens=num_tokens,
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
