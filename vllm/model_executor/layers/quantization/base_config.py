@@ -90,7 +90,8 @@ class QuantizeMethodBase(ABC):
         """Materialize a serialized quantized weight for requantization."""
         raise NotImplementedError(
             f"The quantization method {type(self)} does not implement "
-            "dequantize_weight. Please open an issue."
+            "dequantize_weight, so re-quantization from this checkpoint is "
+            "not supported. Please open an issue."
         )
 
 

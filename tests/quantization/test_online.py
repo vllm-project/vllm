@@ -56,6 +56,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
+    CompressedTensorsW4A4Nvfp4MoEMethod,
+)
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptLinearMethod,
@@ -114,9 +117,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.granitemoe import (
     GraniteMoeModel,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -517,6 +527,213 @@ def test_online_quantization_configures_prequantized_moe(
 
     assert isinstance(layer._quant_method, Mxfp4OnlineMoEMethod)
     assert layer._quant_method.requantization_source is not None
+
+
+def _pack_e2m1(values: torch.Tensor) -> torch.Tensor:
+    codes = torch.zeros_like(values, dtype=torch.uint8)
+    for code, magnitude in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)):
+        codes[values.abs() == magnitude] = code
+    codes |= (values < 0).to(torch.uint8) << 3
+    return codes[..., 0::2] | (codes[..., 1::2] << 4)
+
+
+def _serialize_nvfp4_experts(
+    weights: torch.Tensor, global_scales: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    packed_weights = []
+    block_scales = []
+    reconstructed_weights = []
+    for weight, global_scale in zip(weights, global_scales, strict=True):
+        fp4_values, block_scale = ref_nvfp4_quant(weight, global_scale, block_size=16)
+        packed_weights.append(_pack_e2m1(fp4_values))
+        block_scales.append(block_scale.to(torch.float8_e4m3fn))
+        reconstructed_weights.append(
+            (
+                fp4_values.reshape(*fp4_values.shape[:-1], -1, 16)
+                * (block_scale / global_scale).unsqueeze(-1)
+            )
+            .reshape_as(weight)
+            .to(weight.dtype)
+        )
+    return (
+        torch.stack(packed_weights),
+        torch.stack(block_scales),
+        torch.stack(reconstructed_weights),
+    )
+
+
+def test_online_requantized_moe_reload(
+    default_vllm_config,
+    monkeypatch,
+) -> None:
+    """Reload NVFP4 source weights into existing online-quantized FP8 weights.
+
+    The reload interface remains the original checkpoint format. It restores
+    the deleted NVFP4 source parameters, loads new NVFP4 values, dequantizes
+    them to BF16, and reruns online FP8 quantization. The resulting FP8 values
+    must update the existing target parameters in place so kernel and graph
+    references remain valid.
+    """
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    moe = SimpleNamespace(
+        w13_num_shards=2,
+        has_bias=False,
+        is_act_and_mul=True,
+        tp_size=1,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4."
+        "select_nvfp4_moe_backend",
+        lambda **kwargs: (object(), None),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4."
+        "is_global_sf_supported_for_nvfp4_backend",
+        lambda backend: False,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.fp8.select_fp8_moe_backend",
+        lambda **kwargs: (object(), None),
+    )
+    source = CompressedTensorsW4A4Nvfp4MoEMethod(moe)
+    method = Fp8PerTensorOnlineMoEMethod(moe=moe)
+
+    def setup_kernel(
+        layer,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        w13_input_scale,
+        w2_input_scale,
+    ) -> None:
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+    method._setup_kernel = setup_kernel
+    method.set_requantization_source(source)
+
+    device = current_platform.device_type
+    with torch.device(device):
+        layer = torch.nn.Module()
+        layer.local_num_experts = 2
+        layer.quant_method = method
+        layer.quant_config = SimpleNamespace(online_quantization_config=None)
+        method.create_weights(
+            layer,
+            num_experts=2,
+            hidden_size=32,
+            intermediate_size_per_partition=32,
+            params_dtype=torch.bfloat16,
+            weight_loader=default_weight_loader,
+        )
+        record_metadata_for_reloading(layer)
+
+        source_parameters = dict(method.requantization_source_parameters)
+        source_names = set(source_parameters)
+
+        def serialized_weights(value: float) -> dict[str, torch.Tensor]:
+            shape = (2, 32, 32)
+            w1 = torch.full(shape, value, device=device, dtype=torch.bfloat16)
+            w3 = torch.full(shape, value * 2, device=device, dtype=torch.bfloat16)
+            w2 = torch.full(shape, value * 3, device=device, dtype=torch.bfloat16)
+            w1_global_scale = torch.tensor([96.0, 160.0], device=device)
+            w3_global_scale = torch.tensor([40.0, 72.0], device=device)
+            w2_global_scale = torch.tensor([128.0, 56.0], device=device)
+            w1_packed, w1_scale, _ = _serialize_nvfp4_experts(w1, w1_global_scale)
+            w3_packed, w3_scale, _ = _serialize_nvfp4_experts(w3, w3_global_scale)
+            w2_packed, w2_scale, _ = _serialize_nvfp4_experts(w2, w2_global_scale)
+            return {
+                "w13_weight_packed": torch.cat((w1_packed, w3_packed), dim=1),
+                "w2_weight_packed": w2_packed,
+                "w13_weight_scale": torch.cat((w1_scale, w3_scale), dim=1),
+                "w2_weight_scale": w2_scale,
+                "w13_weight_global_scale": torch.stack(
+                    (w1_global_scale, w3_global_scale), dim=1
+                ),
+                "w2_weight_global_scale": w2_global_scale,
+                "w13_input_global_scale": torch.ones(2, 2, device=device),
+                "w2_input_global_scale": torch.ones(2, device=device),
+            }
+
+        def load_serialized_weights(
+            weights: dict[str, torch.Tensor], *, reload: bool
+        ) -> None:
+            for name, loaded_weight in weights.items():
+                parameter = getattr(layer, name)
+                if reload:
+                    parameter.weight_loader(parameter, loaded_weight)
+                else:
+                    parameter.data.copy_(loaded_weight)
+
+        # Initial checkpoint load: NVFP4 source parameters become FP8 runtime
+        # parameters and are then removed from the live layer.
+        load_serialized_weights(serialized_weights(0.25), reload=False)
+        method.process_weights_after_loading(layer)
+        finalize_layerwise_reload(layer, default_vllm_config.model_config)
+
+        # Initial conversion must release references to the NVFP4 parameters.
+        assert not method.requantization_source_parameters
+
+        for name, parameter in source_parameters.items():
+            # No original NVFP4 parameter object may remain attached to the layer.
+            assert getattr(layer, name, None) is not parameter
+
+        target_parameters = {
+            "w13_weight": layer.w13_weight,
+            "w2_weight": layer.w2_weight,
+            "w13_weight_scale": layer.w13_weight_scale,
+            "w2_weight_scale": layer.w2_weight_scale,
+        }
+        first_weights = {
+            name: parameter.clone() for name, parameter in target_parameters.items()
+        }
+
+        def expert_output() -> torch.Tensor:
+            inputs = torch.ones(2, 32, device=device)
+            w13 = layer.w13_weight.float() * layer.w13_weight_scale[:, None, None]
+            w2 = layer.w2_weight.float() * layer.w2_weight_scale[:, None, None]
+            gate_up = torch.einsum("eh,eih->ei", inputs, w13)
+            gate, up = gate_up.chunk(2, dim=-1)
+            hidden = torch.nn.functional.silu(gate) * up
+            return torch.einsum("ei,ehi->eh", hidden, w2)
+
+        first_output = expert_output()
+
+        # Reload restores the original NVFP4 checkpoint-facing layout, not the
+        # already-converted FP8 runtime layout.
+        initialize_layerwise_reload(layer)
+
+        # Reload must recreate every NVFP4 source parameter on the meta device.
+        assert all(getattr(layer, name).is_meta for name in source_names)
+
+        load_serialized_weights(serialized_weights(0.75), reload=True)
+        finalize_layerwise_reload(layer, default_vllm_config.model_config)
+
+    # Reload must not retain references to temporary NVFP4 source parameters.
+    assert not method.requantization_source_parameters
+
+    source_only_names = source_names - target_parameters.keys()
+
+    # NVFP4-only staging parameters must be absent after reload processing.
+    assert source_only_names.isdisjoint(layer._parameters)
+
+    for name, parameter in target_parameters.items():
+        # Reload must update each FP8 target without replacing its Parameter object.
+        assert getattr(layer, name) is parameter
+
+    # The second checkpoint must produce different FP8 weights or scales.
+    assert any(
+        not torch.equal(parameter, first_weights[name])
+        for name, parameter in target_parameters.items()
+    )
+
+    # The updated FP8 weights must change the observable expert computation.
+    assert not torch.equal(expert_output(), first_output)
 
 
 def test_activation_only_override_applies_to_checkpoint_method(
@@ -1583,60 +1800,34 @@ def _quantize_moe(weight, scheme, moe_tp_size):
 )
 def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics() -> None:
     """NVFP4 checkpoint weights survive dequantization and FP8 requantization."""
-
-    def pack_e2m1(values: torch.Tensor) -> torch.Tensor:
-        codes = torch.zeros_like(values, dtype=torch.uint8)
-        for code, magnitude in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)):
-            codes[values.abs() == magnitude] = code
-        codes |= (values < 0).to(torch.uint8) << 3
-        return codes[..., 0::2] | (codes[..., 1::2] << 4)
-
-    def serialize_experts(
-        weights: torch.Tensor, global_scales: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        packed_weights = []
-        block_scales = []
-        reconstructed_weights = []
-        for weight, global_scale in zip(weights, global_scales, strict=True):
-            fp4_values, block_scale = ref_nvfp4_quant(
-                weight, global_scale, block_size=16
-            )
-            packed_weights.append(pack_e2m1(fp4_values))
-            block_scales.append(block_scale.to(torch.float8_e4m3fn))
-            reconstructed_weights.append(
-                (
-                    fp4_values.reshape(*fp4_values.shape[:-1], -1, 16)
-                    * (block_scale / global_scale).unsqueeze(-1)
-                )
-                .reshape_as(weight)
-                .to(weight.dtype)
-            )
-        return (
-            torch.stack(packed_weights),
-            torch.stack(block_scales),
-            torch.stack(reconstructed_weights),
-        )
-
     torch.manual_seed(11)
     num_experts = 2
     hidden_size = intermediate_size = 32
     device = current_platform.device_type
 
-    w1 = torch.randn(
-        num_experts,
-        intermediate_size,
-        hidden_size,
-        device=device,
-        dtype=torch.bfloat16,
-    ) * 0.35 + 0.2
+    w1 = (
+        torch.randn(
+            num_experts,
+            intermediate_size,
+            hidden_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        * 0.35
+        + 0.2
+    )
     w3 = torch.randn_like(w1) * 1.7 - 0.15
-    w2 = torch.randn(
-        num_experts,
-        hidden_size,
-        intermediate_size,
-        device=device,
-        dtype=torch.bfloat16,
-    ) * 0.8 + 0.05
+    w2 = (
+        torch.randn(
+            num_experts,
+            hidden_size,
+            intermediate_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        * 0.8
+        + 0.05
+    )
 
     # Checkpoints store encode scales. Deliberately use distinct values for
     # every expert and w13 shard to catch reciprocal, ordering, and chunking bugs.
@@ -1644,9 +1835,9 @@ def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics() -> None:
     w3_global_scale = torch.tensor([40.0, 72.0], device=device)
     w2_global_scale = torch.tensor([128.0, 56.0], device=device)
 
-    w1_packed, w1_scale, w1_reference = serialize_experts(w1, w1_global_scale)
-    w3_packed, w3_scale, w3_reference = serialize_experts(w3, w3_global_scale)
-    w2_packed, w2_scale, w2_reference = serialize_experts(w2, w2_global_scale)
+    w1_packed, w1_scale, w1_reference = _serialize_nvfp4_experts(w1, w1_global_scale)
+    w3_packed, w3_scale, w3_reference = _serialize_nvfp4_experts(w3, w3_global_scale)
+    w2_packed, w2_scale, w2_reference = _serialize_nvfp4_experts(w2, w2_global_scale)
 
     w13_dequantized, w2_dequantized = dequantize_nvfp4_moe_weights(
         torch.cat((w1_packed, w3_packed), dim=1),
@@ -1667,16 +1858,15 @@ def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics() -> None:
     w13_requantized = w13_fp8.float() * w13_fp8_scale[:, None, None]
     w2_requantized = w2_fp8.float() * w2_fp8_scale[:, None, None]
 
-    inputs = torch.randn(
-        num_experts, 8, hidden_size, device=device, dtype=torch.bfloat16
-    ) * 0.4
+    inputs = (
+        torch.randn(num_experts, 8, hidden_size, device=device, dtype=torch.bfloat16)
+        * 0.4
+    )
 
     def expert_output(
         w13_weight: torch.Tensor, w2_weight: torch.Tensor
     ) -> torch.Tensor:
-        gate_up = torch.einsum(
-            "eth,eih->eti", inputs.float(), w13_weight.float()
-        )
+        gate_up = torch.einsum("eth,eih->eti", inputs.float(), w13_weight.float())
         gate, up = gate_up.chunk(2, dim=-1)
         hidden = torch.nn.functional.silu(gate) * up
         return torch.einsum("eti,ehi->eth", hidden, w2_weight.float())
