@@ -905,11 +905,7 @@ class ROCMAiterMLASparseImpl(
                     self.sinks.reshape(1, self.num_heads, 1),
                     q.shape[1],
                 ).reshape(-1)
-            # The packed MXFP4 row is a byte pitch, not head_dim elements, so
-            # flattening to q.shape[-1] both regroups bytes across row
-            # boundaries and hides the layout from the op, which then fails to
-            # recognise the cache and falls through to the fp8 branch --
-            # "Both operands must be same dtype. Got bf16 and uint8".
+            # A packed MXFP4 row is a byte pitch, not head_dim elements.
             from vllm.v1.attention.ops.mxfp4_mla import (
                 row_bytes as mxfp4_row_bytes,
             )

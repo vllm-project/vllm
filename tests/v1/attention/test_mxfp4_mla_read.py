@@ -60,7 +60,7 @@ def test_gather_matches_reference(seed: int):
 
     _, gather = _ops()
     slots = torch.arange(num).cuda().to(torch.int64)
-    got = gather(cache, slots, LATENT, GROUP, BLOCK_K).cpu()
+    got = gather(cache, slots, LATENT, BLOCK_K).cpu()
 
     want = mx.quantize_dequantize(x.to(torch.bfloat16), GROUP)
     assert torch.equal(got.to(torch.float32), want.to(torch.float32))
@@ -78,9 +78,7 @@ def test_nibble_order_is_not_transposed():
     cache = _store_all(x)
 
     _, gather = _ops()
-    got = gather(
-        cache, torch.zeros(BLOCK_K).cuda().to(torch.int64), LATENT, GROUP, BLOCK_K
-    )
+    got = gather(cache, torch.zeros(BLOCK_K).cuda().to(torch.int64), LATENT, BLOCK_K)
     want = mx.quantize_dequantize(x.to(torch.bfloat16), GROUP)
 
     row = got[0].to(torch.float32).cpu()
@@ -97,7 +95,7 @@ def test_scattered_slots_gather_the_right_rows():
 
     _, gather = _ops()
     perm = torch.randperm(num)[: BLOCK_K * 2]
-    got = gather(cache, perm.cuda().to(torch.int64), LATENT, GROUP, BLOCK_K).cpu()
+    got = gather(cache, perm.cuda().to(torch.int64), LATENT, BLOCK_K).cpu()
 
     want = mx.quantize_dequantize(x.to(torch.bfloat16), GROUP)[perm]
     assert torch.equal(got.to(torch.float32), want.to(torch.float32))
@@ -113,7 +111,7 @@ def test_invalid_slots_read_as_zero():
     slots = torch.arange(BLOCK_K).to(torch.int64)
     slots[3] = -1
     slots[7] = 9999
-    got = gather(cache, slots.cuda(), LATENT, GROUP, BLOCK_K).cpu()
+    got = gather(cache, slots.cuda(), LATENT, BLOCK_K).cpu()
 
     assert (got[3] == 0).all(), "PAD_SLOT_ID row should be zero"
     assert (got[7] == 0).all(), "out-of-range row should be zero"
@@ -129,7 +127,7 @@ def test_repeated_slots_are_consistent():
 
     _, gather = _ops()
     slots = torch.full((BLOCK_K,), 3, dtype=torch.int64)
-    got = gather(cache, slots.cuda(), LATENT, GROUP, BLOCK_K).cpu()
+    got = gather(cache, slots.cuda(), LATENT, BLOCK_K).cpu()
     for i in range(1, BLOCK_K):
         assert torch.equal(got[0], got[i])
 
@@ -147,9 +145,7 @@ def test_all_codes_survive_the_round_trip():
 
     cache = _store_all(x)
     _, gather = _ops()
-    got = gather(
-        cache, torch.zeros(BLOCK_K).cuda().to(torch.int64), LATENT, GROUP, BLOCK_K
-    )
+    got = gather(cache, torch.zeros(BLOCK_K).cuda().to(torch.int64), LATENT, BLOCK_K)
 
     want = mx.quantize_dequantize(x.to(torch.bfloat16), GROUP)
     assert torch.equal(got[0].to(torch.float32).cpu(), want[0].to(torch.float32))
@@ -168,7 +164,7 @@ def test_dot_against_unpacked_tile_matches_bf16_reference():
 
     _, gather = _ops()
     slots = torch.arange(num).cuda().to(torch.int64)
-    tile = gather(cache, slots, LATENT, GROUP, BLOCK_K)
+    tile = gather(cache, slots, LATENT, BLOCK_K)
 
     g = torch.Generator().manual_seed(11)
     q = torch.randn(16, LATENT, generator=g, dtype=torch.bfloat16).cuda()

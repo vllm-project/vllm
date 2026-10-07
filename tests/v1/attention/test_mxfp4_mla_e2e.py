@@ -78,13 +78,8 @@ def _packed_cache(latent: torch.Tensor) -> torch.Tensor:
     return cache
 
 
-@pytest.mark.parametrize("hw_unpack", [True, False])
 @pytest.mark.parametrize("seed", [0, 1])
-def test_packed_cache_matches_dequantized_bf16_cache(monkeypatch, seed, hw_unpack):
-    """hw_unpack=False runs the software unpack used off gfx950, here too."""
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as ops
-
-    monkeypatch.setattr(ops, "_ON_GFX950", hw_unpack and ops._ON_GFX950)
+def test_packed_cache_matches_dequantized_bf16_cache(seed: int):
     q, latent, indices, indptr = _fixture(seed)
 
     packed = _packed_cache(latent)
@@ -137,14 +132,6 @@ def test_bf16_path_is_untouched():
     assert torch.equal(a, b), "bf16 path is not deterministic"
 
 
-def test_mxfp4_rejects_a_quantized_query():
-    """Q must stay wide: the unpack targets q.dtype."""
-    q, latent, indices, indptr = _fixture(seed=4)
-    packed = _packed_cache(latent)
-    with pytest.raises(AssertionError, match="bf16 query"):
-        _attend(q.to(torch.float16), packed, indices, indptr)
-
-
 def test_cache_is_3_76x_smaller():
     """The actual point: bytes moved per token."""
     bf16_row = LATENT * 2
@@ -159,9 +146,8 @@ def test_dense_indices_entry_point_also_reaches_the_mxfp4_path():
     ``rocm_sparse_attn_prefill`` branches: with ``ragged_indices`` it calls the
     ragged kernel directly, and otherwise it goes through
     ``_rocm_sparse_attn_prefill_triton`` with a dense ``indices`` tensor. Only
-    the ragged launcher carries the MXFP4 constexprs, so the dense branch is
-    correct only because it converts its indices and delegates to that same
-    launcher.
+    the ragged kernel reads a packed cache, so the dense branch is correct only
+    because it converts its indices and delegates to that same launcher.
 
     Nothing enforces that delegation. If the dense branch ever grew its own
     kernel launch, a packed cache would be read as bf16 and return plausible

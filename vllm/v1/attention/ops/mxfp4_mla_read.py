@@ -19,7 +19,17 @@ The attention kernels keep their fp32 accumulators: bf16 operands feed
 
 from __future__ import annotations
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import _ON_GFX950
+else:
+    _ON_GFX950 = False
+
+# v_cvt_scalef32_pk_bf16_fp4 exists only on gfx950.
+_HW_UNPACK = tl.constexpr(_ON_GFX950)
+_GROUP = tl.constexpr(32)
 
 # E2M1 magnitudes reconstructed arithmetically rather than from a lookup table,
 # so the kernel needs no constant memory. Code index ``c = e << 1 | f``, where
@@ -187,34 +197,35 @@ def unpack_mxfp4_tile(
 
 @triton.jit
 def load_mxfp4_rows(
-    cache_ptr,  # uint8, flat; row pitch ROW_BYTES
-    slots,  # [BLOCK_K] int64 global slot indices
-    valid,  # [BLOCK_K] bool
-    BLOCK_K: tl.constexpr,
-    LATENT: tl.constexpr,
-    GROUP: tl.constexpr,
-    ROW_BYTES: tl.constexpr,
-    SCALE_OFFSET: tl.constexpr,
+    cache_ptr, slots, valid, row_pitch, BLOCK_K: tl.constexpr, LATENT: tl.constexpr
 ):
-    """Gather ``BLOCK_K`` packed rows and return them as a bf16 tile.
+    """Gather BLOCK_K packed rows as a bf16 [BLOCK_K, LATENT] tile.
 
-    Two loads from the same 272-byte row: the data region and the scale region.
-    Both are natural orientation -- slot-major, unit stride along the row -- so
-    neither needs a transpose. Invalid slots return zeros, which contribute
-    nothing to either dot.
+    ``cache_ptr`` is the uint8 cache, ``row_pitch`` its row size in bytes.
+    Invalid slots come back as zeros.
     """
-    row = cache_ptr + slots[:, None] * ROW_BYTES
-    byte_offsets = tl.arange(0, LATENT // 2)[None, :]
-    group_offsets = tl.arange(0, LATENT // GROUP)[None, :]
-
-    packed = tl.load(row + byte_offsets, mask=valid[:, None], other=0)
-    # other=127 encodes 2**0 so a masked row dequantizes to exact zeros rather
-    # than denormals; the values are zero anyway, this just keeps it tidy.
+    base = slots[:, None].to(tl.int64) * row_pitch
     encoded_scales = tl.load(
-        row + SCALE_OFFSET + group_offsets, mask=valid[:, None], other=127
+        cache_ptr + base + LATENT // 2 + tl.arange(0, LATENT // _GROUP)[None, :],
+        mask=valid[:, None],
+        other=127,
     )
-
-    tile = unpack_mxfp4_tile(packed, encoded_scales, BLOCK_K, LATENT, GROUP)
+    if _HW_UNPACK:
+        words = tl.load(
+            cache_ptr.to(tl.pointer_type(tl.int32))
+            + base // 4
+            + tl.arange(0, LATENT // 8)[None, :],
+            mask=valid[:, None],
+            other=0,
+        )
+        tile = unpack_mxfp4_tile_hw(words, encoded_scales, BLOCK_K, LATENT, _GROUP)
+    else:
+        packed = tl.load(
+            cache_ptr + base + tl.arange(0, LATENT // 2)[None, :],
+            mask=valid[:, None],
+            other=0,
+        )
+        tile = unpack_mxfp4_tile(packed, encoded_scales, BLOCK_K, LATENT, _GROUP)
     return tl.where(valid[:, None], tile, 0.0)
 
 
@@ -224,32 +235,16 @@ def _gather_mxfp4_kernel(
     slots_ptr,
     out_ptr,
     num_slots,
+    row_pitch,
     BLOCK_K: tl.constexpr,
     LATENT: tl.constexpr,
-    GROUP: tl.constexpr,
-    ROW_BYTES: tl.constexpr,
-    SCALE_OFFSET: tl.constexpr,
 ):
-    """Standalone driver for :func:`load_mxfp4_rows`, used by the tests.
-
-    Mirrors what the attention kernels do per iteration: take a tile of
-    scattered slot indices, guard them, and produce a bf16 tile.
-    """
-    tile = tl.program_id(0)
-    offsets = tile * BLOCK_K + tl.arange(0, BLOCK_K)
+    """Standalone driver for :func:`load_mxfp4_rows`, used by the tests."""
+    offsets = tl.program_id(0) * BLOCK_K + tl.arange(0, BLOCK_K)
     slots = tl.load(slots_ptr + offsets).to(tl.int64)
     valid = (slots >= 0) & (slots < num_slots)
-    safe = tl.where(valid, slots, 0)
-
     values = load_mxfp4_rows(
-        cache_ptr,
-        safe,
-        valid,
-        BLOCK_K=BLOCK_K,
-        LATENT=LATENT,
-        GROUP=GROUP,
-        ROW_BYTES=ROW_BYTES,
-        SCALE_OFFSET=SCALE_OFFSET,
+        cache_ptr, tl.where(valid, slots, 0), valid, row_pitch, BLOCK_K, LATENT
     )
     tl.store(
         out_ptr + offsets[:, None] * LATENT + tl.arange(0, LATENT)[None, :],
@@ -257,33 +252,28 @@ def _gather_mxfp4_kernel(
     )
 
 
-def gather_mxfp4_rows(cache, slots, latent: int, group: int = 32, block_k: int = 16):
+def gather_mxfp4_rows(cache, slots, latent: int, block_k: int = 16):
     """Host-side driver for the gather kernel. Test and reference harness."""
     import torch
 
-    from vllm.v1.attention.ops.mxfp4_mla import row_bytes, scale_region_offset
+    from vllm.v1.attention.ops.mxfp4_mla import row_bytes
 
     if cache.dtype != torch.uint8:
         raise ValueError(f"expected a uint8 cache, got {cache.dtype}")
-    pitch = row_bytes(latent, group)
+    pitch = row_bytes(latent)
     flat = cache.reshape(-1)
-    num_slots = flat.numel() // pitch
-
     n = slots.numel()
     if n % block_k:
         raise ValueError(f"{n} slots is not a multiple of block_k={block_k}")
     out = torch.empty(n, latent, dtype=torch.bfloat16, device=cache.device)
-
     _gather_mxfp4_kernel[(n // block_k,)](
         flat,
         slots,
         out,
-        num_slots,
+        flat.numel() // pitch,
+        pitch,
         BLOCK_K=block_k,
         LATENT=latent,
-        GROUP=group,
-        ROW_BYTES=pitch,
-        SCALE_OFFSET=scale_region_offset(latent),
         num_warps=4,
     )
     return out
