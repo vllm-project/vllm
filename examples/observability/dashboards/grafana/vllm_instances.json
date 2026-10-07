@@ -45,122 +45,82 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "count by (model_name, instance) (vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "A"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (model_name, instance) (vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "B"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (model_name, instance) (vllm:num_requests_waiting{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "C"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "max by (model_name, instance) (vllm:kv_cache_usage_perc{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "D"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (model_name, instance) (rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m]))",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "E"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (model_name, instance) (rate(vllm:generation_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m]))",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "F"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "histogram_quantile(0.95, sum by (le, model_name, instance) (rate(vllm:time_to_first_token_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m])))",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "G"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "histogram_quantile(0.95, sum by (le, model_name, instance) (rate(vllm:inter_token_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m])))",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "H"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (model_name, instance) (rate(vllm:num_preemptions_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m]))",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "I"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "max by (model_name, instance) ((time() - process_start_time_seconds{job=~\"$job\", instance=~\"$instance\"}) * on (job, instance) group_left (model_name) group by (job, instance, model_name) (vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}))",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "J"
         }
@@ -196,12 +156,12 @@
               "Value #A": "Engines",
               "Value #B": "Running",
               "Value #C": "Waiting",
-              "Value #D": "KV cache usage",
-              "Value #E": "Requests / s",
-              "Value #F": "Output tokens / s",
+              "Value #D": "KV cache",
+              "Value #E": "Req/s",
+              "Value #F": "Output tok/s",
               "Value #G": "TTFT p95",
               "Value #H": "ITL p95",
-              "Value #I": "Preemptions / s",
+              "Value #I": "Preempt/s",
               "Value #J": "Uptime"
             }
           }
@@ -213,7 +173,8 @@
             "align": "auto",
             "cellOptions": {
               "type": "auto"
-            }
+            },
+            "minWidth": 80
           },
           "mappings": [
             {
@@ -229,6 +190,30 @@
           ]
         },
         "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Model"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Instance"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 160
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",
@@ -268,7 +253,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "KV cache usage"
+              "options": "KV cache"
             },
             "properties": [
               {
@@ -280,7 +265,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Requests / s"
+              "options": "Req/s"
             },
             "properties": [
               {
@@ -292,7 +277,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Output tokens / s"
+              "options": "Output tok/s"
             },
             "properties": [
               {
@@ -328,7 +313,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Preemptions / s"
+              "options": "Preempt/s"
             },
             "properties": [
               {
@@ -369,7 +354,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "KV cache usage"
+              "options": "KV cache"
             },
             "properties": [
               {
@@ -409,7 +394,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Preemptions / s"
+              "options": "Preempt/s"
             },
             "properties": [
               {
@@ -492,15 +477,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -514,8 +492,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "short"
+          "unit": "short",
+          "min": 0
         },
         "overrides": []
       },
@@ -536,7 +514,7 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 0,
         "y": 9
@@ -553,15 +531,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (vllm:num_requests_waiting{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -575,8 +546,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "short"
+          "unit": "short",
+          "min": 0
         },
         "overrides": []
       },
@@ -597,7 +568,7 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 8,
         "y": 9
@@ -614,15 +585,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "max by (instance, engine) (vllm:kv_cache_usage_perc{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -636,8 +600,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
           "unit": "percentunit",
+          "min": 0,
           "max": 1
         },
         "overrides": []
@@ -659,7 +623,7 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 16,
         "y": 9
@@ -676,15 +640,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance) (rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -698,8 +655,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "reqps"
+          "unit": "reqps",
+          "min": 0
         },
         "overrides": []
       },
@@ -720,10 +677,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 0,
-        "y": 17
+        "y": 19
       },
       "id": 6
     },
@@ -737,15 +694,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (rate(vllm:prompt_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -759,8 +709,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "count:tok/s"
+          "unit": "count:tok/s",
+          "min": 0
         },
         "overrides": []
       },
@@ -781,10 +731,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 8,
-        "y": 17
+        "y": 19
       },
       "id": 7
     },
@@ -798,15 +748,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (rate(vllm:generation_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -820,8 +763,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "count:tok/s"
+          "unit": "count:tok/s",
+          "min": 0
         },
         "overrides": []
       },
@@ -842,10 +785,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 16,
-        "y": 17
+        "y": 19
       },
       "id": 8
     },
@@ -857,7 +800,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 29
       },
       "id": 9,
       "panels": []
@@ -872,15 +815,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "histogram_quantile(0.95, sum by (le, instance) (rate(vllm:time_to_first_token_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -894,8 +830,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "s"
+          "unit": "s",
+          "min": 0
         },
         "overrides": []
       },
@@ -916,10 +852,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 30
       },
       "id": 10
     },
@@ -933,15 +869,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "histogram_quantile(0.95, sum by (le, instance) (rate(vllm:inter_token_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -955,8 +884,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "s"
+          "unit": "s",
+          "min": 0
         },
         "overrides": []
       },
@@ -977,10 +906,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 30
       },
       "id": 11
     },
@@ -994,15 +923,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "histogram_quantile(0.95, sum by (le, instance) (rate(vllm:e2e_request_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1016,8 +938,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "s"
+          "unit": "s",
+          "min": 0
         },
         "overrides": []
       },
@@ -1038,10 +960,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 40
       },
       "id": 12
     },
@@ -1055,15 +977,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance) (rate(vllm:request_queue_time_seconds_sum{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (instance) (rate(vllm:request_queue_time_seconds_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1077,8 +992,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "s"
+          "unit": "s",
+          "min": 0
         },
         "overrides": []
       },
@@ -1099,10 +1014,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 12,
-        "y": 34
+        "y": 40
       },
       "id": 13
     },
@@ -1114,7 +1029,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 42
+        "y": 50
       },
       "id": 14,
       "panels": []
@@ -1129,15 +1044,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (rate(vllm:iteration_tokens_total_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1151,8 +1059,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "short"
+          "unit": "short",
+          "min": 0
         },
         "overrides": []
       },
@@ -1173,10 +1081,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 0,
-        "y": 43
+        "y": 51
       },
       "id": 15
     },
@@ -1190,15 +1098,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (rate(vllm:iteration_tokens_total_sum{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (instance, engine) (rate(vllm:iteration_tokens_total_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1212,8 +1113,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "count:tok"
+          "unit": "count:tok",
+          "min": 0
         },
         "overrides": []
       },
@@ -1234,10 +1135,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 8,
-        "y": 43
+        "y": 51
       },
       "id": 16
     },
@@ -1251,15 +1152,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (rate(vllm:num_preemptions_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1273,8 +1167,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "short"
+          "unit": "short",
+          "min": 0
         },
         "overrides": []
       },
@@ -1295,10 +1189,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 16,
-        "y": 43
+        "y": 51
       },
       "id": 17
     },
@@ -1312,15 +1206,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine, reason) (vllm:num_requests_waiting_by_reason{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}} · {{reason}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1334,8 +1221,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "short"
+          "unit": "short",
+          "min": 0
         },
         "overrides": []
       },
@@ -1356,10 +1243,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 0,
-        "y": 51
+        "y": 61
       },
       "id": 18
     },
@@ -1373,15 +1260,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (rate(vllm:prefix_cache_hits_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (instance, engine) (rate(vllm:prefix_cache_queries_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1395,8 +1275,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
           "unit": "percentunit",
+          "min": 0,
           "max": 1
         },
         "overrides": []
@@ -1418,10 +1298,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 12,
-        "y": 51
+        "y": 61
       },
       "id": 19
     },
@@ -1433,7 +1313,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 71
       },
       "id": 20,
       "panels": []
@@ -1448,15 +1328,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance) (rate(process_cpu_seconds_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1470,8 +1343,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "short"
+          "unit": "short",
+          "min": 0
         },
         "overrides": []
       },
@@ -1492,10 +1365,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 0,
-        "y": 60
+        "y": 72
       },
       "id": 21
     },
@@ -1509,15 +1382,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance) (process_resident_memory_bytes{job=~\"$job\", instance=~\"$instance\"})",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1531,8 +1397,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "bytes"
+          "unit": "bytes",
+          "min": 0
         },
         "overrides": []
       },
@@ -1553,10 +1419,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 8,
-        "y": 60
+        "y": 72
       },
       "id": 22
     },
@@ -1570,15 +1436,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance) (process_open_fds{job=~\"$job\", instance=~\"$instance\"}) / sum by (instance) (process_max_fds{job=~\"$job\", instance=~\"$instance\"})",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -1592,8 +1451,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
           "unit": "percentunit",
+          "min": 0,
           "max": 1
         },
         "overrides": []
@@ -1615,10 +1474,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 16,
-        "y": 60
+        "y": 72
       },
       "id": 23
     },
@@ -1630,7 +1489,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 68
+        "y": 82
       },
       "id": 24,
       "panels": []
@@ -1645,14 +1504,10 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "vllm:cache_config_info{job=~\"$job\", instance=~\"$instance\", engine=~\"$engine\"}",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "A"
         }
@@ -1732,7 +1587,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 83
       },
       "id": 25
     },
@@ -1746,14 +1601,10 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "topk by (job, instance) (1, vllm:lora_requests_info{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
           "format": "table",
           "instant": true,
-          "legendFormat": "__auto",
           "range": false,
           "refId": "A"
         }
@@ -1812,7 +1663,7 @@
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 75
+        "y": 89
       },
       "id": 26
     },
@@ -1824,7 +1675,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 94
       },
       "id": 27,
       "panels": [
@@ -1838,22 +1689,16 @@
           },
           "targets": [
             {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
               "expr": "(1 - max by (instance, engine) (vllm:engine_sleep_state{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\", sleep_state=\"awake\"})) * (1 + max by (instance, engine) (vllm:engine_sleep_state{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\", sleep_state=\"discard_all\"}))",
-              "format": "time_series",
-              "instant": false,
               "legendFormat": "{{instance}} · engine {{engine}}",
-              "range": true,
               "refId": "A"
             }
           ],
           "fieldConfig": {
             "defaults": {
               "color": {
-                "mode": "thresholds"
+                "fixedColor": "text",
+                "mode": "fixed"
               },
               "mappings": [
                 {
@@ -1876,16 +1721,7 @@
                     }
                   }
                 }
-              ],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              }
+              ]
             },
             "overrides": []
           },
@@ -1908,52 +1744,40 @@
             "h": 6,
             "w": 24,
             "x": 0,
-            "y": 81
+            "y": 95
           },
           "id": 28
         },
         {
           "type": "table",
-          "title": "Sleep mode and weight update operations (selected time range)",
-          "description": "Sleep, wake and KV cache release calls of the sleep mode API, and weight transfer steps of RL weight updates, with their duration. Rows appear once an operation has run.\n\nMetrics: `vllm:sleep_mode_operation_duration_seconds`, `vllm:rl_weight_update_operation_duration_seconds`",
+          "title": "Sleep mode and weight update operations (since process start)",
+          "description": "Sleep, wake and KV cache release calls of the sleep mode API, and the weight transfer steps of RL weight updates, counted since each server started. Rows appear once an operation has run.\n\nMetrics: `vllm:sleep_mode_operation_duration_seconds`, `vllm:rl_weight_update_operation_duration_seconds`",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
           "targets": [
             {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "round(sum by (operation) (increase(vllm:sleep_mode_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range]))) or round(sum by (operation) (increase(vllm:rl_weight_update_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])))",
+              "expr": "sum by (operation) (last_over_time(vllm:sleep_mode_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])) or sum by (operation) (last_over_time(vllm:rl_weight_update_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range]))",
+              "legendFormat": "__auto",
               "format": "table",
               "instant": true,
-              "legendFormat": "__auto",
               "range": false,
               "refId": "A"
             },
             {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "sum by (operation) (rate(vllm:sleep_mode_operation_duration_seconds_sum{job=~\"$job\", instance=~\"$instance\"}[$__range])) / (sum by (operation) (rate(vllm:sleep_mode_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])) > 0) or sum by (operation) (rate(vllm:rl_weight_update_operation_duration_seconds_sum{job=~\"$job\", instance=~\"$instance\"}[$__range])) / (sum by (operation) (rate(vllm:rl_weight_update_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])) > 0)",
+              "expr": "sum by (operation) (last_over_time(vllm:sleep_mode_operation_duration_seconds_sum{job=~\"$job\", instance=~\"$instance\"}[$__range])) / (sum by (operation) (last_over_time(vllm:sleep_mode_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])) > 0) or sum by (operation) (last_over_time(vllm:rl_weight_update_operation_duration_seconds_sum{job=~\"$job\", instance=~\"$instance\"}[$__range])) / (sum by (operation) (last_over_time(vllm:rl_weight_update_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])) > 0)",
+              "legendFormat": "__auto",
               "format": "table",
               "instant": true,
-              "legendFormat": "__auto",
               "range": false,
               "refId": "B"
             },
             {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "histogram_quantile(0.99, sum by (le, operation) (rate(vllm:sleep_mode_operation_duration_seconds_bucket{job=~\"$job\", instance=~\"$instance\"}[$__range]))) or histogram_quantile(0.99, sum by (le, operation) (rate(vllm:rl_weight_update_operation_duration_seconds_bucket{job=~\"$job\", instance=~\"$instance\"}[$__range])))",
+              "expr": "histogram_quantile(0.99, sum by (le, operation) (last_over_time(vllm:sleep_mode_operation_duration_seconds_bucket{job=~\"$job\", instance=~\"$instance\"}[$__range]))) or histogram_quantile(0.99, sum by (le, operation) (last_over_time(vllm:rl_weight_update_operation_duration_seconds_bucket{job=~\"$job\", instance=~\"$instance\"}[$__range])))",
+              "legendFormat": "__auto",
               "format": "table",
               "instant": true,
-              "legendFormat": "__auto",
               "range": false,
               "refId": "C"
             }
@@ -1990,7 +1814,8 @@
                 "align": "auto",
                 "cellOptions": {
                   "type": "auto"
-                }
+                },
+                "minWidth": 80
               },
               "mappings": [
                 {
@@ -2006,6 +1831,18 @@
               ]
             },
             "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Operation"
+                },
+                "properties": [
+                  {
+                    "id": "custom.minWidth",
+                    "value": 260
+                  }
+                ]
+              },
               {
                 "matcher": {
                   "id": "byName",
@@ -2061,7 +1898,7 @@
             "h": 5,
             "w": 24,
             "x": 0,
-            "y": 87
+            "y": 101
           },
           "id": 29
         }
@@ -2075,7 +1912,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 95
       },
       "id": 30,
       "panels": [
@@ -2089,15 +1926,8 @@
           },
           "targets": [
             {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
               "expr": "sum by (instance, engine) (rate(vllm:estimated_flops_per_gpu_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-              "format": "time_series",
-              "instant": false,
               "legendFormat": "{{instance}} · engine {{engine}}",
-              "range": true,
               "refId": "A"
             }
           ],
@@ -2111,8 +1941,8 @@
                 "lineWidth": 1,
                 "showPoints": "never"
               },
-              "min": 0,
-              "unit": "flops"
+              "unit": "flops",
+              "min": 0
             },
             "overrides": []
           },
@@ -2133,10 +1963,10 @@
             }
           },
           "gridPos": {
-            "h": 8,
+            "h": 10,
             "w": 12,
             "x": 0,
-            "y": 82
+            "y": 96
           },
           "id": 31
         },
@@ -2150,15 +1980,8 @@
           },
           "targets": [
             {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
               "expr": "sum by (instance, engine) (rate(vllm:estimated_read_bytes_per_gpu_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) + sum by (instance, engine) (rate(vllm:estimated_write_bytes_per_gpu_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-              "format": "time_series",
-              "instant": false,
               "legendFormat": "{{instance}} · engine {{engine}}",
-              "range": true,
               "refId": "A"
             }
           ],
@@ -2172,8 +1995,8 @@
                 "lineWidth": 1,
                 "showPoints": "never"
               },
-              "min": 0,
-              "unit": "Bps"
+              "unit": "Bps",
+              "min": 0
             },
             "overrides": []
           },
@@ -2194,10 +2017,10 @@
             }
           },
           "gridPos": {
-            "h": 8,
+            "h": 10,
             "w": 12,
             "x": 12,
-            "y": 82
+            "y": 96
           },
           "id": 32
         }
