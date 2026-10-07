@@ -1323,7 +1323,7 @@ class VllmConfig:
     ) -> bool:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
-            if config is not None and config.watermarking is not False:
+            if config is not None and config.watermarking is True:
                 logger.warning_once(
                     "Watermarking is enabled for this request, but the engine has no "
                     "watermark configuration. This and subsequent requests will run "
