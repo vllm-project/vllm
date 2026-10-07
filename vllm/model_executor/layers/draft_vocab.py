@@ -305,6 +305,73 @@ def gather_rows_gemv(
     return out
 
 
+@triton.jit
+def _scatter_draft_logits_kernel(
+    out_ptr,
+    listed_ptr,
+    token_ids_ptr,
+    picked_ptr,
+    picks_ptr,
+    candidate_ids_ptr,
+    vocab_size,
+    num_listed,
+    num_picked,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    is_listed = cols < num_listed
+    is_picked = (cols >= num_listed) & (cols < num_listed + num_picked)
+    pcols = tl.where(is_picked, cols - num_listed, 0)
+    listed_id = tl.load(token_ids_ptr + cols, mask=is_listed, other=0)
+    listed = tl.load(listed_ptr + token * num_listed + cols, mask=is_listed, other=0.0)
+    pick = tl.load(picks_ptr + token * num_picked + pcols, mask=is_picked, other=0)
+    picked_id = tl.load(candidate_ids_ptr + pick, mask=is_picked, other=0)
+    picked = tl.load(picked_ptr + token * num_picked + pcols, mask=is_picked, other=0.0)
+    ids = tl.where(is_listed, listed_id, picked_id).to(tl.int64)
+    tl.store(
+        out_ptr + token * vocab_size + ids,
+        tl.where(is_listed, listed, picked),
+        mask=is_listed | is_picked,
+    )
+
+
+def scatter_draft_logits(
+    vocab_size: int,
+    listed: torch.Tensor,
+    token_ids: torch.Tensor,
+    picked: torch.Tensor,
+    picks: torch.Tensor,
+    candidate_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Target-vocabulary logits, `-inf` outside the listed and picked rows.
+
+    `out[n, token_ids] = listed[n]` and `out[n, candidate_ids[picks[n]]] =
+    picked[n]`, in one kernel on CUDA.
+    """
+    out = listed.new_full((listed.shape[0], vocab_size), float("-inf"))
+    if not listed.is_cuda:
+        out[:, token_ids] = listed
+        out.scatter_(1, candidate_ids[picks], picked)
+        return out
+    num_listed, num_picked = listed.shape[1], picked.shape[1]
+    block = 1024
+    grid = (listed.shape[0], triton.cdiv(num_listed + num_picked, block))
+    _scatter_draft_logits_kernel[grid](
+        out,
+        listed.contiguous(),
+        token_ids,
+        picked.contiguous(),
+        picks.contiguous(),
+        candidate_ids,
+        vocab_size,
+        num_listed,
+        num_picked,
+        BLOCK=block,
+    )
+    return out
+
+
 class DraftVocab:
     """Draft logits over a subset of the target vocabulary.
 
@@ -344,12 +411,13 @@ class DraftVocab:
     ) -> torch.Tensor:
         """Target-vocabulary logits, `-inf` outside the draft vocabulary."""
         if self.token_ids is not None:
-            logits, dynamic_ids = self._token_map_logits(hidden_states)
-            out = logits.new_full((logits.shape[0], self.vocab_size), float("-inf"))
-            num_static = self.token_ids.numel()
-            out[:, self.token_ids] = logits[:, :num_static]
-            if dynamic_ids is not None:
-                out.scatter_(1, dynamic_ids, logits[:, num_static:])
+            listed, picked = self._token_map_logits(hidden_states)
+            if picked is not None:
+                return scatter_draft_logits(
+                    self.vocab_size, listed, self.token_ids, *picked, self.candidate_ids
+                )
+            out = listed.new_full((listed.shape[0], self.vocab_size), float("-inf"))
+            out[:, self.token_ids] = listed
             return out
 
         logits = self.logits_processor(lm_head, hidden_states)
@@ -366,16 +434,16 @@ class DraftVocab:
     ) -> torch.Tensor:
         """Greedy target token ids without materializing full logits."""
         if self.token_ids is not None:
-            logits, dynamic_ids = self._token_map_logits(hidden_states)
-            cols = logits.argmax(dim=-1)
-            num_static = self.token_ids.numel()
-            top = self.token_ids[cols.clamp(max=num_static - 1)]
-            if dynamic_ids is None:
+            listed, picked = self._token_map_logits(hidden_states)
+            listed_max, listed_col = listed.max(dim=-1)
+            top = self.token_ids[listed_col]
+            if picked is None:
                 return top
-            picked = (cols - num_static).clamp(min=0).unsqueeze(1)
-            return torch.where(
-                cols < num_static, top, dynamic_ids.gather(1, picked).squeeze(1)
-            )
+            logits, picks = picked
+            picked_max, picked_col = logits.max(dim=-1)
+            pick = picks.gather(1, picked_col.unsqueeze(1)).squeeze(1)
+            # Ties go to the listed row, as an argmax over [listed, picked] would.
+            return torch.where(listed_max >= picked_max, top, self.candidate_ids[pick])
 
         top = self.logits_processor.get_top_tokens(lm_head, hidden_states)
         return self.map_draft_to_target(top)
@@ -533,8 +601,9 @@ class DraftVocab:
 
     def _token_map_logits(
         self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Logits of the listed rows, then of the dynamic rows with their ids."""
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+        """Logits of the listed rows, and of the picked rows with the picks as
+        positions in `candidate_ids`."""
         assert self.rows is not None
         logits = self.rows(hidden_states)
         if self.tp_size > 1:
@@ -544,11 +613,10 @@ class DraftVocab:
         if self.num_dynamic_rows == 0:
             return logits, None
         scores = self.scorer(hidden_states @ self.basis)
-        top = scores.topk(self.num_dynamic_rows, dim=-1, sorted=False).indices
-        dynamic_ids = self.candidate_ids[top]
-        gather_ids = dynamic_ids if len(self.gather_rows) == 1 else top
-        dynamic = gather_rows_gemv(hidden_states, self.gather_rows, gather_ids)
-        return torch.cat([logits, dynamic], dim=-1), dynamic_ids
+        picks = scores.topk(self.num_dynamic_rows, dim=-1, sorted=False).indices
+        gather_ids = self.candidate_ids[picks] if len(self.gather_rows) == 1 else picks
+        picked = gather_rows_gemv(hidden_states, self.gather_rows, gather_ids)
+        return logits, (picked, picks)
 
 
 def load_draft_token_map(model: nn.Module, vllm_config: "VllmConfig") -> None:
