@@ -105,11 +105,14 @@ class NextTokenStrategy(ReadStrategy):
         tokenizer = context.online_renderer.renderer.get_tokenizer()
         probe = tokenizer.apply_chat_template(
             [{"role": "user", "content": "x"}],
-            chat_template=context.chat_template,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=False,
-            **{**context.default_chat_template_kwargs, "enable_thinking": False},
+            **{
+                **context.default_chat_template_kwargs,
+                "chat_template": context.chat_template,
+                "add_generation_prompt": True,
+                "tokenize": True,
+                "return_dict": False,
+                "enable_thinking": False,
+            },
         )
         if isinstance(probe, str):
             probe = tokenizer.encode(probe, add_special_tokens=False)
