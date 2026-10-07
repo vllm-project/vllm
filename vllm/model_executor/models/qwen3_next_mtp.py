@@ -227,15 +227,18 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        shared_weight_names = ["embed_tokens", "lm_head"]
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return not name.startswith("mtp.") and not any(
+            key in name for key in ["embed_tokens", "lm_head"]
+        )
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names(weights):
             for name, weight in weights:
+                if self.is_unused_checkpoint_weight(name):
+                    continue
                 if name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
-                elif not any(key in name for key in shared_weight_names):
-                    continue
                 yield name, weight
 
         loader = AutoWeightsLoader(self)

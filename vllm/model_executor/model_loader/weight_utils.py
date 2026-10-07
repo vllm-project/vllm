@@ -785,6 +785,42 @@ def filter_mm_encoder_only_safetensors_files(
     return kept
 
 
+def filter_safetensors_files_by_weight_name(
+    hf_weights_files: list[str],
+    is_unused_weight: Callable[[str], bool],
+) -> list[str]:
+    """Drop safetensors shards in which `is_unused_weight` accepts every tensor.
+
+    Loaders that read whole files (InstantTensor, fastsafetensors, multi-thread,
+    eager, prefetch) cannot skip single tensors, so dropping shards is their
+    only way to avoid reading weights the model does not load.
+
+    Args:
+        hf_weights_files: Safetensors shard paths.
+        is_unused_weight: Returns True for checkpoint weight names the model does
+            not load.
+
+    Returns:
+        The shards holding at least one wanted tensor, or `hf_weights_files`
+        unchanged when no shard does.
+
+    """
+    kept: list[str] = []
+    for st_file in hf_weights_files:
+        with safe_open(st_file, framework="pt") as f:
+            if not all(is_unused_weight(name) for name in f.keys()):  # noqa: SIM118
+                kept.append(st_file)
+    if not kept:
+        return hf_weights_files
+    if len(kept) < len(hf_weights_files):
+        logger.info_once(
+            "Skipped %d/%d safetensors shard(s) holding no weights the model loads",
+            len(hf_weights_files) - len(kept),
+            len(hf_weights_files),
+        )
+    return kept
+
+
 # explicitly use pure text format, with a newline at the end
 # this makes it impossible to see the animation in the progress bar
 # but will avoid messing up with ray or multiprocessing, which wraps
