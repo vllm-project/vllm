@@ -111,38 +111,6 @@ steps:
 #                                                                                                                                       #
 #########################################################################################################################################
 
-- label: ":computer: (CPU) Rust Frontend Cargo Style + Clippy" # TBD
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  no_gpu: true
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - rust/
-  - rust-toolchain.toml
-  - .buildkite/test_areas/rust_frontend_cargo.yaml
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-  commands:
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
-
-- label: ":computer: (CPU) Rust Frontend Cargo" # TBD
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  no_gpu: true
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - rust/
-  - rust-toolchain.toml
-  - .buildkite/test_areas/rust_frontend_cargo.yaml
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-  commands:
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
-
 - label: ":computer: (CPU) Docker Build Metadata" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -1076,12 +1044,12 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
-  - tests/entrypoints/weight_transfer
+  - tests/entrypoints/rl/weight_transfer
   - tests/entrypoints/launchers
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/unit_tests
-  - pytest -v -s entrypoints/weight_transfer
+  - pytest -v -s entrypoints/rl/weight_transfer
   - pytest -v -s entrypoints/launchers
 
 - label: ":amd: (MI300) Entrypoints Integration (Responses API)" # TBD
@@ -2398,6 +2366,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
   - tests/quantization
   - tests/rocm/test_moe_weight_replay.py
+  - tests/rocm/test_moe_padding.py
   optional: true
   commands:
   # temporary install here since we need nightly, will move to requirements/test.in
@@ -2411,6 +2380,7 @@ steps:
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py; fi
 
 - label: ":amd: (MI300) Quantized Fusions" # TBD
   timeout_in_minutes: 45
@@ -3776,11 +3746,13 @@ steps:
   - vllm/
   - tests/entrypoints/serve
   - tests/entrypoints/scale_out
+  - tests/entrypoints/rl
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)" # TBD
   timeout_in_minutes: 65
@@ -5886,6 +5858,7 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/models/test_deepseek_v4_vl_rocm.py
+  - tests/models/test_deepseek_v4_aiter_mega_moe.py
   - vllm/models/deepseek_v4/amd/
   - vllm/models/deepseek_v4/common/
   - vllm/model_executor/layers/fused_moe/
@@ -5899,6 +5872,7 @@ steps:
   - vllm/envs.py
   commands:
   - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
+  - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
   dind: false
   working_dir: /vllm-workspace/tests
   agent_pool: mi355_1
