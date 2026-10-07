@@ -1837,9 +1837,7 @@ def test_flashinfer_kda_prefill_preserves_backend_state_contract(
     assert captured["lower_bound"] == lower_bound
     normalize_in_kernel = backend == "auto" or not default_fla_norm
     assert captured["use_qk_l2norm_in_kernel"] == normalize_in_kernel
-    assert captured["qk_l2norm_additive_epsilon"] == (
-        1e-6 if backend == "cudnn" and normalize_in_kernel else None
-    )
+    assert "qk_l2norm_additive_epsilon" not in captured
     assert captured["A_log"].shape == (2,)
     assert captured["dt_bias"].shape == ((256,) if backend == "auto" else (2, 128))
     assert captured["initial_state"].dtype == state_dtype
@@ -1859,18 +1857,32 @@ def test_cudnn_kda_prefill_rejects_batch_invariant(monkeypatch):
         flashinfer_kda_prefill(**vars(inputs), backend="cudnn")
 
 
-@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(
+    ("backend", "flashinfer_backend", "state_dtype"),
+    [
+        ("flashkda", "auto", torch.bfloat16),
+        ("flashinfer", "auto", torch.bfloat16),
+        ("flashinfer", "cudnn", torch.bfloat16),
+        ("flashinfer", "cudnn", torch.float32),
+    ],
+)
+@pytest.mark.parametrize("qk_scale", [(0.0, 0.0), (1e-4, 1e-6), (1.0, 1.0)])
+@pytest.mark.parametrize("num_heads", [6, 16])
 @torch.inference_mode()
-def test_cudnn_kda_prefill_small_qk_norm(state_dtype):
+def test_kda_prefill_qk_norm(
+    backend, flashinfer_backend, state_dtype, qk_scale, num_heads
+):
     _require_kda_prefill_backend(
-        "flashinfer", state_dtype, -5.0, flashinfer_backend="cudnn"
+        backend, state_dtype, -5.0, flashinfer_backend=flashinfer_backend
     )
-    inputs = _make_kda_prefill_inputs(state_dtype, lower_bound=-5.0)
-    inputs.q.mul_(1e-4)
-    inputs.k.mul_(1e-6)
+    inputs = _make_kda_prefill_inputs(
+        state_dtype, lower_bound=-5.0, num_tokens=65, num_heads=num_heads
+    )
+    inputs.q.mul_(qk_scale[0])
+    inputs.k.mul_(qk_scale[1])
     expected_out, expected_state = _kda_prefill_reference(inputs)
     actual_out, actual_state = _run_kda_prefill_backend(
-        "flashinfer", flashinfer_backend="cudnn", **vars(inputs)
+        backend, flashinfer_backend=flashinfer_backend, **vars(inputs)
     )
 
     assert_close("o", expected_out, actual_out, 0.03)

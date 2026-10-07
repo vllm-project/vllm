@@ -485,10 +485,10 @@ with `-5 <= lower_bound < 0`. GDN computes its final state in FP32 before vLLM
 stores it in the configured cache dtype.
 
 These paths require newer FlashInfer APIs, including `max_seqlen` for GDN.
-Fused KDA normalization additionally requires [FlashInfer #6078](https://github.com/flashinfer-ai/flashinfer/pull/6078)
-and [cuDNN frontend #1418](https://github.com/NVIDIA/cudnn-frontend/pull/1418).
-The validated revisions are FlashInfer `5146335b10ee45d8c0c3760a4cf7bbffb9084eeb`
-and frontend `734e22b8e7fdaae650cf68651919beab9263dcbb`.
+Fused additive KDA normalization requires [cuDNN frontend #1454](https://github.com/NVIDIA/cudnn-frontend/pull/1454)
+(merged at `db85ff42d6d8ce8ab05b1d94414620cfc451a0fa`).
+The adapter uses FlashInfer's standard normalization flag; it does not require
+the epsilon argument proposed in FlashInfer #6078.
 Build frontend's Python package and native extension from the same revision.
 Install these dependencies in the serving environment after vLLM; the standard
 FlashInfer 0.7.0.post1 and frontend 1.30.0 packages do not provide this KDA path.
@@ -513,7 +513,7 @@ The inner option does not override vLLM's provider selection: KDA provider `auto
 still chooses FlashKDA or Triton. Kimi Linear's
 unbounded softplus gate produces nonfinite results with cuDNN frontend 1.30.0.
 It remains outside this adapter's bounded-gate contract for both inner backends.
-KDA requests fused additive Q/K normalization with epsilon `1e-6` from cuDNN.
+cuDNN applies additive Q/K normalization with epsilon `1e-6` internally.
 Fusion retains FP32 normalized values through gate scaling, so it can differ
 from external BF16 normalization. The explicit FLA override remains available.
 Unsupported hardware produces an error when explicitly selected. Missing APIs

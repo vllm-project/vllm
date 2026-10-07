@@ -117,9 +117,6 @@ def flashinfer_kda_prefill(
         initial_state=final_state,
         output_final_state=backend == "cudnn",
         use_qk_l2norm_in_kernel=normalize_in_kernel,
-        qk_l2norm_additive_epsilon=1e-6
-        if backend == "cudnn" and normalize_in_kernel
-        else None,
         use_gate_in_kernel=True,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens.contiguous(),
