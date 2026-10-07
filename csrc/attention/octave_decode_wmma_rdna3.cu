@@ -622,17 +622,19 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
   const int nrt = std::min(num_q, QG) * hpk > 16 ? 2 : 1;
   const int spb = 2 * kSqWmmaNsb / nrt;
   dim3 grid((num_q + QG - 1) / QG, num_kv_heads, (ns + spb - 1) / spb);
-  #define SQW_SP(B, KC, T, SP)                                                 \
-    decode_wmma<B, KC, kSqWmmaNsb, T, SP><<<grid, 64 * kSqWmmaNsb, 0, stream>>>(\
-        (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),          \
-        block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),                 \
-        q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),                    \
-        k_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,          \
-        num_kv_heads, cache.size(2), block_table.size(1), block_table.size(0), \
-        cache.size(0), ns, kSqWmmaMinTps, nrt, query.stride(0),                \
-        query.stride(1), cache.stride(0), cache.stride(1), cache.stride(2),    \
-        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2), idx, sidx, topk,    \
-        qpos, wtags, wmask, stags, smask)
+  #define SQW_SP(B, KC, T, SP)                                              \
+    decode_wmma<B, KC, kSqWmmaNsb, T, SP>                                   \
+        <<<grid, 64 * kSqWmmaNsb, 0, stream>>>(                             \
+            (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),   \
+            block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),          \
+            q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),             \
+            k_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,   \
+            num_kv_heads, cache.size(2), block_table.size(1),               \
+            block_table.size(0), cache.size(0), ns, kSqWmmaMinTps, nrt,     \
+            query.stride(0), query.stride(1), cache.stride(0),              \
+            cache.stride(1), cache.stride(2), mid_o.stride(0),              \
+            mid_o.stride(1), mid_o.stride(2), idx, sidx, topk, qpos, wtags, \
+            wmask, stags, smask)
   #define SQW(B, KC, T)          \
     do {                         \
       if (sp)                    \

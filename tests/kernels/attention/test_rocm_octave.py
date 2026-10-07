@@ -249,3 +249,109 @@ def test_prefill_matches_reference(cache_dtype, query_lens):
         ref[int(qsl[i]) : int(qsl[i + 1])] = torch.einsum("hqt,thd->qhd", p, v_all)
     # Only the kernel's int8 query and fp16 P/V rounding differ.
     assert _rel(out, ref) < 2e-2
+
+
+def _window_tables(entries, hkv, dev):
+    return (
+        torch.zeros(entries, hkv, 2 * HEAD, dtype=torch.float16, device=dev),
+        torch.full((entries,), -1, dtype=torch.int32, device=dev),
+        torch.zeros(entries, dtype=torch.int32, device=dev),
+    )
+
+
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+@pytest.mark.parametrize("hkv,group", [(1, 6), (2, 6)])
+@pytest.mark.parametrize("window", ["off", "on", "evicted"])
+def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window):
+    """Sparse (top-k) decode as qwen4_exp QSA runs it: each query reads the
+    logical positions in its index row, -1 entries are holes. With the window
+    on, the first 4 and the last 64 positions come from the fp16 tables;
+    an entry whose tag was overwritten falls back to the packed cache."""
+    torch.manual_seed(4)
+    dev, fmt = "cuda", _format(cache_dtype)
+    signs = sq.sign_bits(HEAD).to(dev)
+    lens, max_blocks, nblk = [1500, 2600, 777], 192, 1024
+    cache = torch.zeros(nblk, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
+    block_table = (
+        torch.randperm(nblk, device=dev)[: len(lens) * max_blocks]
+        .view(len(lens), max_blocks)
+        .int()
+    )
+    wtab, wtags, wlocks = _window_tables(4096, hkv, dev)
+    stab, stags, slocks = _window_tables(256, hkv, dev)
+    ks, vs = [], []
+    for r, n in enumerate(lens):
+        k = torch.randn(n, hkv, HEAD, device=dev).half()
+        v = torch.randn_like(k)
+        pos = torch.arange(n, device=dev)
+        slots = block_table[r, pos // BLOCK].long() * BLOCK + pos % BLOCK
+        torch.ops._C.octave_cache_store(
+            k, v, cache, slots, signs, signs, fmt.kernel_code
+        )
+        torch.ops._C.octave_window_store(
+            k, v, slots, pos.int(), wtab, wtags, wlocks, stab, stags, slocks
+        )
+        ks.append(k)
+        vs.append(v)
+    if window == "evicted":
+        wtags[::2] = -7
+        stags[::2] = -7
+
+    q_to_req = torch.tensor([0, 1, 1, 2, 0, 1, 2], dtype=torch.int32, device=dev)
+    num_q, topk = q_to_req.numel(), 512
+    qpos = torch.tensor(
+        [lens[r] - 1 - 37 * i for i, r in enumerate(q_to_req.tolist())],
+        dtype=torch.int32,
+        device=dev,
+    )
+    indices = torch.full((num_q, topk), -1, dtype=torch.int32, device=dev)
+    for i in range(num_q):
+        n = int(qpos[i]) + 1
+        cand = torch.cat(
+            [
+                torch.arange(max(0, n - 80), n, device=dev),
+                torch.arange(4, device=dev),
+                torch.randperm(n, device=dev)[:300],
+            ]
+        ).unique()
+        indices[i, : cand.numel()] = cand.int()
+        indices[i] = indices[i][torch.randperm(topk, device=dev)]
+
+    q = torch.randn(num_q, hkv * group, HEAD, device=dev).half()
+    out = torch.empty_like(q)
+    mid = torch.empty(num_q, hkv * group, 64, HEAD + 2, dtype=torch.float32, device=dev)
+    scale = HEAD**-0.5
+    window_args = () if window == "off" else (qpos, wtab, wtags, stab, stags)
+    torch.ops._C.octave_decode_sparse(
+        out,
+        q,
+        cache,
+        block_table,
+        q_to_req,
+        indices,
+        mid,
+        signs,
+        signs,
+        scale,
+        64,
+        fmt.kernel_code,
+        *window_args,
+    )
+
+    ref = torch.zeros(num_q, hkv * group, HEAD, device=dev)
+    for i in range(num_q):
+        r, p = int(q_to_req[i]), int(qpos[i])
+        sel = indices[i][indices[i] >= 0].long()
+        blocks = block_table[r, sel // BLOCK].long()
+        k, v = sq.reference_dequantize(cache[blocks, :, sel % BLOCK], fmt)
+        if window != "off":
+            slot = blocks * BLOCK + sel % BLOCK
+            exact = ((p - sel) < 64) & (wtags[slot % 4096].long() == slot)
+            exact |= (sel < 4) & (stags[slot % 256].long() == slot)
+            k[exact] = ks[r][sel[exact]].float()
+            v[exact] = vs[r][sel[exact]].float()
+        k = k.repeat_interleave(group, 1)
+        v = v.repeat_interleave(group, 1)
+        p_attn = torch.softmax(torch.einsum("hd,thd->ht", q[i].float(), k) * scale, -1)
+        ref[i] = torch.einsum("ht,thd->hd", p_attn, v)
+    assert _rel(out, ref) < 2e-2

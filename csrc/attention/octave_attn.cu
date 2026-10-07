@@ -683,7 +683,6 @@ __global__ void __launch_bounds__(32)
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // Exact window (sparse decode). Direct-mapped fp16 shadow tables keyed by the
 // cache slot: entry slot & mask holds that token's exact K and V ([hkv, 2D])
@@ -741,20 +740,16 @@ __global__ void __launch_bounds__(32)
 // exact window, written as one more split of mid_o (in the rotated V space,
 // like the packed-cache splits). grid (num_q, hkv), block 256.
 template <typename T>
-__global__ void __launch_bounds__(256)
-    window_attn_kernel(const T* __restrict__ query,
-                       const int* __restrict__ positions,
-                       const int* __restrict__ q_to_req,
-                       const int* __restrict__ block_table,
-                       const int* __restrict__ indices,
-                       const T* __restrict__ wtab, const int* __restrict__ wtags,
-                       int wmask, const T* __restrict__ stab,
-                       const int* __restrict__ stags, int smask,
-                       float* __restrict__ mid_o, const int* __restrict__ v_signs,
-                       float sm_scale, int split, int topk, int64_t sidx,
-                       int block_size, int max_blocks, int num_reqs,
-                       int num_phys_blocks, int hq, int hkv, int64_t sq0,
-                       int64_t sq1, int64_t smo, int64_t smh, int64_t sms) {
+__global__ void __launch_bounds__(256) window_attn_kernel(
+    const T* __restrict__ query, const int* __restrict__ positions,
+    const int* __restrict__ q_to_req, const int* __restrict__ block_table,
+    const int* __restrict__ indices, const T* __restrict__ wtab,
+    const int* __restrict__ wtags, int wmask, const T* __restrict__ stab,
+    const int* __restrict__ stags, int smask, float* __restrict__ mid_o,
+    const int* __restrict__ v_signs, float sm_scale, int split, int topk,
+    int64_t sidx, int block_size, int max_blocks, int num_reqs,
+    int num_phys_blocks, int hq, int hkv, int64_t sq0, int64_t sq1, int64_t smo,
+    int64_t smh, int64_t sms) {
   __shared__ int s_entry[kMaxWindowHits];
   __shared__ float s_score[8][kMaxWindowHits];
   __shared__ int s_count;
@@ -1025,16 +1020,17 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
 
 // Sparse decode: query row i attends to the logical positions indices[i, :]
 // of request q_to_req[i] (negative entries are skipped). WMMA tier only.
-void octave_decode_sparse(
-    torch::Tensor out, torch::Tensor query, torch::Tensor cache,
-    torch::Tensor block_table, torch::Tensor q_to_req, torch::Tensor indices,
-    torch::Tensor mid_o, torch::Tensor k_signs, torch::Tensor v_signs,
-    double sm_scale, int64_t num_kv_splits, int64_t fmt,
-    const std::optional<torch::Tensor>& positions,
-    const std::optional<torch::Tensor>& wtab,
-    const std::optional<torch::Tensor>& wtags,
-    const std::optional<torch::Tensor>& stab,
-    const std::optional<torch::Tensor>& stags) {
+void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
+                          torch::Tensor cache, torch::Tensor block_table,
+                          torch::Tensor q_to_req, torch::Tensor indices,
+                          torch::Tensor mid_o, torch::Tensor k_signs,
+                          torch::Tensor v_signs, double sm_scale,
+                          int64_t num_kv_splits, int64_t fmt,
+                          const std::optional<torch::Tensor>& positions,
+                          const std::optional<torch::Tensor>& wtab,
+                          const std::optional<torch::Tensor>& wtags,
+                          const std::optional<torch::Tensor>& stab,
+                          const std::optional<torch::Tensor>& stags) {
   const int num_q = query.size(0);
   if (num_q == 0) return;
   check_cache(cache, fmt);
@@ -1052,8 +1048,9 @@ void octave_decode_sparse(
   TORCH_CHECK(!win || (wtab && wtags && stab && stags && num_kv_splits >= 2));
   const int wmask = win ? (int)wtags->size(0) - 1 : 0;
   const int smask = win ? (int)stags->size(0) - 1 : 0;
-  TORCH_CHECK(!win || (((wmask + 1) & wmask) == 0 && ((smask + 1) & smask) == 0),
-              "octave_decode_sparse: shadow tables must be powers of two");
+  TORCH_CHECK(
+      !win || (((wmask + 1) & wmask) == 0 && ((smask + 1) & smask) == 0),
+      "octave_decode_sparse: shadow tables must be powers of two");
   const int ns = octave_decode_wmma(
       query, cache, block_table, q_to_req, q_to_req, mid_o, k_signs, sm_scale,
       win ? num_kv_splits - 1 : num_kv_splits, fmt, indices,
@@ -1070,16 +1067,16 @@ void octave_decode_sparse(
   const int hq = query.size(1), hkv = cache.size(1);
   TORCH_CHECK(hq / hkv <= 8 && wtab->size(1) == hkv && wtab->size(2) == 2 * D);
   dim3 grid(num_q, hkv);
-  #define SQ_WIN(T)                                                          \
-    window_attn_kernel<T><<<grid, 256, 0, stream>>>(                         \
-        (const T*)query.data_ptr(), positions->data_ptr<int>(),              \
-        q_to_req.data_ptr<int>(), block_table.data_ptr<int>(),               \
-        indices.data_ptr<int>(), (const T*)wtab->data_ptr(),                 \
-        wtags->data_ptr<int>(), wmask, (const T*)stab->data_ptr(),           \
-        stags->data_ptr<int>(), smask, mid_o.data_ptr<float>(),              \
-        v_signs.data_ptr<int>(), (float)sm_scale, ns, (int)indices.size(1),  \
-        indices.stride(0), cache.size(2), block_table.size(1),               \
-        block_table.size(0), cache.size(0), hq, hkv, query.stride(0),        \
+  #define SQ_WIN(T)                                                         \
+    window_attn_kernel<T><<<grid, 256, 0, stream>>>(                        \
+        (const T*)query.data_ptr(), positions->data_ptr<int>(),             \
+        q_to_req.data_ptr<int>(), block_table.data_ptr<int>(),              \
+        indices.data_ptr<int>(), (const T*)wtab->data_ptr(),                \
+        wtags->data_ptr<int>(), wmask, (const T*)stab->data_ptr(),          \
+        stags->data_ptr<int>(), smask, mid_o.data_ptr<float>(),             \
+        v_signs.data_ptr<int>(), (float)sm_scale, ns, (int)indices.size(1), \
+        indices.stride(0), cache.size(2), block_table.size(1),              \
+        block_table.size(0), cache.size(0), hq, hkv, query.stride(0),       \
         query.stride(1), mid_o.stride(0), mid_o.stride(1), mid_o.stride(2))
   if (query.dtype() == at::kBFloat16)
     SQ_WIN(__hip_bfloat16);
@@ -1096,19 +1093,20 @@ void octave_window_store(torch::Tensor key, torch::Tensor value,
                          torch::Tensor stags, torch::Tensor slocks) {
   const int n = slot_mapping.size(0);
   if (n == 0) return;
-  TORCH_CHECK(slot_mapping.dtype() == at::kLong && positions.dtype() == at::kInt);
+  TORCH_CHECK(slot_mapping.dtype() == at::kLong &&
+              positions.dtype() == at::kInt);
   TORCH_CHECK(wtab.dtype() == key.dtype() && stab.dtype() == key.dtype());
   const int hkv = wtab.size(1);
   const int wmask = (int)wtags.size(0) - 1, smask = (int)stags.size(0) - 1;
   const at::cuda::OptionalCUDAGuard guard(device_of(key));
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  #define SQ_WSTORE(T)                                                        \
-    window_store_kernel<T><<<n, 32, 0, stream>>>(                             \
-        (const T*)key.data_ptr(), (const T*)value.data_ptr(),                 \
-        slot_mapping.data_ptr<int64_t>(), positions.data_ptr<int>(),          \
-        (T*)wtab.data_ptr(), wtags.data_ptr<int>(), wlocks.data_ptr<int>(),   \
-        wmask, (T*)stab.data_ptr(), stags.data_ptr<int>(),                    \
-        slocks.data_ptr<int>(), smask, hkv, key.stride(0), key.stride(1),     \
+  #define SQ_WSTORE(T)                                                      \
+    window_store_kernel<T><<<n, 32, 0, stream>>>(                           \
+        (const T*)key.data_ptr(), (const T*)value.data_ptr(),               \
+        slot_mapping.data_ptr<int64_t>(), positions.data_ptr<int>(),        \
+        (T*)wtab.data_ptr(), wtags.data_ptr<int>(), wlocks.data_ptr<int>(), \
+        wmask, (T*)stab.data_ptr(), stags.data_ptr<int>(),                  \
+        slocks.data_ptr<int>(), smask, hkv, key.stride(0), key.stride(1),   \
         value.stride(0), value.stride(1))
   if (key.dtype() == at::kBFloat16)
     SQ_WSTORE(__hip_bfloat16);
@@ -1148,8 +1146,7 @@ void octave_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
 void octave_decode_sparse(torch::Tensor, torch::Tensor, torch::Tensor,
                           torch::Tensor, torch::Tensor, torch::Tensor,
                           torch::Tensor, torch::Tensor, torch::Tensor, double,
-                          int64_t, int64_t,
-                          const std::optional<torch::Tensor>&,
+                          int64_t, int64_t, const std::optional<torch::Tensor>&,
                           const std::optional<torch::Tensor>&,
                           const std::optional<torch::Tensor>&,
                           const std::optional<torch::Tensor>&,
