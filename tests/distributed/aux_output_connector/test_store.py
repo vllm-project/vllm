@@ -96,6 +96,10 @@ class _SchedulerRequest:
         default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0)
     )
 
+    @property
+    def num_prompt_tokens(self) -> int:
+        return self.num_tokens - self.num_output_tokens
+
     def is_finished(self) -> bool:
         return self.finished
 
@@ -1438,6 +1442,18 @@ def test_scheduler_starts_worker_output_at_requested_prompt_token():
     )
 
     assert metadata.requests == {request.request_id: 2}
+
+    # A P/D prefiller cuts its prompt short of the last token, which can pass
+    # the requested start; the rows then start at the end of the cut prompt.
+    connector = _make_connector()
+    request = _scheduler_request(
+        "cut", [b"a" * 32], num_tokens=3, num_output_tokens=0, prompt_start=4
+    )
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [3]),
+        {request.request_id: request},
+    )
+    assert metadata.requests == {request.request_id: 3}
 
 
 def test_scheduler_connector_preserves_request_finish_order():
