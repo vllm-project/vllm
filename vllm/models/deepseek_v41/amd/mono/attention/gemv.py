@@ -137,7 +137,7 @@ def _step_mfma(c, nsteps, xl, xsl, st, ops, acc, live, rows):
 def gemv_mfmas(c, k, xl, xsl, red, ops, split=None, tiled=False, rows=16, nsteps=None):
     """``gemv_loads``' operands against ``rows`` tokens' MXFP8 rows of the
     window in LDS (``xl`` words, ``xsl`` codes, rows ``lds_row`` of the window)
-    -> red[wave][lane] (a 16 x 16 C: row 4 (lane // 16) + i, token lane % 16)."""
+    -> ``red[wave][lane]`` (a 16 x 16 C: row 4 (lane // 16) + i, token lane % 16)."""
     lane, wave = c["lane"], c["wave"]
     nsteps = k // 128 if nsteps is None else nsteps
     acc = fx.Vector.filled(4, 0.0, fx.Float32)

@@ -81,7 +81,7 @@ def scratch_layout(tokens: int) -> dict[str, tuple[int, int]]:
 
 
 def attn_peer_bytes(tokens: int, tp: int) -> int:
-    """ATTN: [source rank][token][hidden / 2] bf16 pairs."""
+    """ATTN: ``[source rank][token][hidden / 2]`` bf16 pairs."""
     return tp * tokens * HIDDEN // 2 * 8
 
 
@@ -104,7 +104,7 @@ def lane_f32(v, src):
 
 def pend_value(c, t, col, cc):
     """The owed post's sublayer output at (token t, column col): read from
-    ``pend``, or where a caller staged it (``pend_lds``, [token][32] of this
+    ``pend``, or where a caller staged it (``pend_lds``, ``[token][32]`` of this
     task's columns: a reduction it did first)."""
     if const_expr(c.get("pend_lds") is None):
         return ld_bf(c["args"]["pend"], t * HIDDEN + col)
@@ -242,7 +242,8 @@ def slice_mix(c, task, t0, n):
 
 # ---------------------------------------------------------------- gate
 def _row(v, lane, q):
-    """Comb lanes 8..23 hold comb[r][c] at lane 8 + 4 r + c: element q of the row."""
+    """Comb lanes 8..23 hold ``comb[r][c]`` at lane 8 + 4 r + c: element q of
+    the row."""
     return lane_f32(v, (lane - 8) // 4 * 4 + 8 + q)
 
 

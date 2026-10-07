@@ -223,7 +223,7 @@ def gemv_fp8_loads(c, w, ws, k, rg, split=None, tiled=False, row_major=False):
 def gemv_fp8_mfmas(c, k, xl, xsl, red, ops, split=None, tiled=False, rows=None):
     """``gemv_fp8_loads``' operands against the rows in LDS (``rows``: a token
     tile's, every token's by default) ->
-    red[wave][lane]; the scaled 16x16x128 MFMA, chunk kc in dwords 0-3 and kc +
+    ``red[wave][lane]``; the scaled 16x16x128 MFMA, chunk kc in dwords 0-3 and kc +
     1 in 4-7. ``k`` a multiple of 32: a last half step has its upper chunk zeroed
     on both sides at unit scale (a NaN byte past the row must not reach the
     MFMA), its loads clamped into the row: the last row group's would read past

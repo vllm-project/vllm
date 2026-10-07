@@ -206,7 +206,7 @@ def scratch_layout(key: MoeBuild) -> dict[str, tuple[int, int]]:
 
 
 def peer_bytes(tokens: int, tp: int) -> int:
-    """FFN: [source rank][token][hidden / 2] bf16 pairs."""
+    """FFN: ``[source rank][token][hidden / 2]`` bf16 pairs."""
     return tp * tokens * HIDDEN // 2 * 8
 
 
@@ -1300,7 +1300,7 @@ def _down_ug_flag(c, ucs, f, per_slot):
 def down_shared(c, tasks):
     """Each of ``tasks``' rows of the shared expert's down projection
     (its MXFP8 intermediate, ``load_smid_tile``) for every
-    token, bf16 -> LDS ``sdl`` [task][token][16 rows] (``down_combine``):
+    token, bf16 -> LDS ``sdl[task][token][16 rows]`` (``down_combine``):
     every task's weights in flight first."""
     s, tid, red, d = c["S"], c["tid"], c["red"], c["d"]
     a = c["args"]
@@ -1385,7 +1385,7 @@ def down_mfma(c, j, task, sl, mid, first, count, av, live):
 
 
 def contrib_store(c, j, i, v):
-    """Task j's routed contribution word i ([pick (t, k)][16 rows] f32 bits)."""
+    """Task j's routed contribution word i (``[pick (t, k)][16 rows]`` f32 bits)."""
     fx.ptr_store(v.bitcast(fx.Int32), c["contrib"] + (j * c["rs"].picks * 16 + i))
 
 

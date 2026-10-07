@@ -182,7 +182,7 @@ def stage_xq(c, unit, w, live):
 
 @traced
 def stage_kt(c, t):
-    """Token t's keys for K2: KT[t][k] = slot | 1 << 31 for its top-k compressed
+    """Token t's keys for K2: ``KT[t][k] = slot | 1 << 31`` for its top-k compressed
     rows (k < ntopk), the window slot for k in [ntopk, kv_len), -1 for an
     invalid or absent key; KLEN[t] = kv_len (0 for a pad row), KLEN[S + t] =
     ntopk."""

@@ -79,7 +79,7 @@ def router_x_loads(x, part, s, lane, wave, x_cm=0, t0=0):
 
 
 def router_tile_mfma(wvs, xvs, lane, wave, red):
-    """``router_tile``'s MFMAs, K steps in order -> red[wave][lane]."""
+    """``router_tile``'s MFMAs, K steps in order -> ``red[wave][lane]``."""
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
     for i in range_constexpr(len(wvs)):
         acc = mfma_bf16(wvs[i].bitcast(fx.BFloat16), xvs[i].bitcast(fx.BFloat16), acc)
