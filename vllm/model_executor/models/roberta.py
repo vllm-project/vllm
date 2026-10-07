@@ -292,6 +292,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding, Support
 
     is_pooling_model = True
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
+    lora_classifier_modules = ("classifier.dense", "classifier.out_proj")
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "emb_ln": "embeddings.LayerNorm",

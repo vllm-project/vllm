@@ -38,7 +38,6 @@ from vllm.lora.utils import (
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models import (
     SupportsLoRA,
     SupportsMultiModal,
@@ -481,24 +480,17 @@ class LoRAModelManager:
 
         wrapped_by_id: dict[int, BaseLayerWithLoRA] = {}
 
-        # A classification head is a single linear (`score`) or a module of
-        # linears (RoBERTa's `classifier.dense` and `classifier.out_proj`).
-        # Only its last linear produces the labels.
-        head_linears = [
-            name
-            for name, module in self.model.named_modules()
-            if isinstance(module, ReplicatedLinear)
-            and (
-                name in self.supported_modules_to_save
-                or _parent_module(name) in self.supported_modules_to_save
-            )
-        ]
+        multi_layer_head = (
+            self.model.lora_classifier_modules if self.supported_modules_to_save else ()
+        )
 
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
                 continue
 
-            is_classifier_head = module_name in head_linears
+            is_classifier_head = module_name in multi_layer_head or (
+                not multi_layer_head and module_name in self.supported_modules_to_save
+            )
 
             if self.lora_config.target_modules is None:
                 if not is_supported_lora_module(
@@ -566,7 +558,7 @@ class LoRAModelManager:
                     self.lora_slots,
                     self.lora_config,
                     self.model.config,
-                    variable_num_labels=module_name == head_linears[-1],
+                    variable_num_labels=module_name not in multi_layer_head[:-1],
                 )
             else:
                 new_module = from_layer(
