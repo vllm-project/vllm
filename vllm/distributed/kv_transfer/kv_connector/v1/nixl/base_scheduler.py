@@ -35,6 +35,7 @@ from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiddenStateRecordSpec,
     MambaSpec,
     SlidingWindowSpec,
 )
@@ -104,6 +105,12 @@ class NixlBaseConnectorScheduler:
         self._bounded_replay = any(
             g.kv_cache_spec.prefix_replay_tokens > 0
             for g in kv_cache_config.kv_cache_groups
+        )
+        # P/D hidden-state handoff: the prefiller computes the whole prompt and
+        # transfers the last position's hidden state as its own cache group.
+        self._hidden_state_handoff = any(
+            isinstance(g.kv_cache_spec, HiddenStateRecordSpec)
+            for g in kv_cache_config.transfer_groups
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -387,7 +394,13 @@ class NixlBaseConnectorScheduler:
         would otherwise embed the unverified drafts in the MTP layer's KV cache. The
         decoder would never rebuild them, because the update is sized by the rejection
         count, which is zero for the first decode.
+
+        With the hidden-state handoff the decoder recomputes nothing: the
+        prefiller computes every prompt token and transfers the last one's
+        hidden state.
         """
+        if self._hidden_state_handoff:
+            return 0
         return max(
             1 if self._has_mamba or self._bounded_replay else 0,
             self.vllm_config.num_prefill_lookahead_tokens - 1,

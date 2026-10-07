@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiddenStateRecordSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheGroupRole,
@@ -2668,6 +2669,12 @@ def register_all_kvcache_specs(vllm_config):
         SlidingWindowMLASpec,
         SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+    # P/D hidden-state handoff: one block per request, like a ring buffer.
+    KVCacheSpecRegistry.register(
+        HiddenStateRecordSpec,
+        CircularBufferManager,
+        uniform_type_base_spec=HiddenStateRecordSpec,
     )
 
     KVCacheSpecRegistry.register(

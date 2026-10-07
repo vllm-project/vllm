@@ -199,6 +199,12 @@ def compute_nixl_compatibility_hash(
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
         # push (WRITE) and pull (READ) connectors are protocol-incompatible
         "transfer_mode": transfer_mode,
+        # The hidden-state record is an extra transferred cache group, and it
+        # changes where both sides stop the prefill.
+        "hidden_state_handoff": (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.kv_transfer_config.hidden_state_handoff
+        ),
     }
 
     compat_hash = hash_factors(factors)
