@@ -10,7 +10,7 @@ import torch
 import vllm.envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, check_json_nesting
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
@@ -49,6 +49,10 @@ class XgrammarBackend(StructuredOutputBackend):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
+        model_config = self.vllm_config.model_config
+        is_plamo3 = (
+            model_config is not None and model_config.hf_config.model_type == "plamo3"
+        )
 
         full_vocab_tokenizer_info = None
         if is_mistral_tokenizer(self.tokenizer):
@@ -69,6 +73,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
             )
+        elif is_plamo3 and callable(
+            init_xgrammar := getattr(self.tokenizer, "init_xgrammar", None)
+        ):
+            tokenizer_info, _ = init_xgrammar()
         else:
             # tokenizer for structural tags
             # accepts some of the special tokens
@@ -454,6 +462,12 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # "maybe", "", 42, {}, [], {"a": 1}, etc.
         # which is NOT what is expected.
         # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/937
+        allof = obj.get("allOf")
+        if isinstance(allof, list) and len(allof) >= 2:
+            return True
+
+        # Xgrammar lacks support of multi-branch allOf; accepting it would
+        # silently weaken the schema.
         allof = obj.get("allOf")
         if isinstance(allof, list) and len(allof) >= 2:
             return True
