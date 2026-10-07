@@ -190,5 +190,5 @@ def test_sm90_nope_fp8_ds_mla_resolves_to_flashmla():
     ],
 )
 def test_sm100_quantized_sparse_priority(kv_cache_dtype, expected, num_heads):
-    """FlashInfer serves nvfp4_ds_mla through fp8 staging, so it is opt-in."""
+    """Keep NVFP4 on FlashMLA by default pending backend comparisons."""
     assert _sparse_order(kv_cache_dtype, 576, num_heads=num_heads) == expected

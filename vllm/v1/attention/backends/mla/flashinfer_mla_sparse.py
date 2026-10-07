@@ -100,7 +100,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
-        # Staged to FP8 rows for the FP8 kernel (nvfp4_ds_mla_fp8_gather.py).
+        # Native NVFP4 decode where supported; FP8 staging for prefill/fallback.
         "nvfp4_ds_mla",
     ]
 
@@ -304,7 +304,6 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
     """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    hisparse_supports_multi_token_decode: ClassVar[bool] = True
     use_nvfp4_gather: bool = False
 
     @classmethod
@@ -363,22 +362,6 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
             self._nvfp4_workspace_rows = nvfp4_fp8_prefill_workspace_rows(
                 vllm_config.model_config.max_model_len
             )
-
-    @classmethod
-    def get_cudagraph_support(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: KVCacheSpec,
-    ) -> AttentionCGSupport:
-        # Some callers pass no config: the base class ignores its arguments.
-        if (
-            vllm_config is not None
-            and vllm_config.cache_config.cache_dtype == "nvfp4_ds_mla"
-        ):
-            # The prefill context gather is planned on the host per batch, so
-            # only uniform decode batches can be captured.
-            return AttentionCGSupport.UNIFORM_BATCH
-        return cls._cudagraph_support
 
     def build(
         self,
@@ -795,7 +778,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashInferMLASparseMetadata,
     ) -> torch.Tensor:
-        """Attend over an nvfp4_ds_mla cache through FP8 staging rows.
+        """Attend over an nvfp4_ds_mla cache with native decode when supported.
 
         Decode tokens are at the front of ``q``; any tokens after them are
         prefill tokens (present unless the layer routed them to dense MHA).
@@ -863,6 +846,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 bmm1_scale=float(self.bmm1_scale) * self._nvfp4_inv_k_scale,
                 bmm2_scale=float(self.bmm2_scale) * self._nvfp4_inv_k_scale,
                 out=out,
+                backend="cuda",
             )
             return
         topk = physical_topk.shape[1]

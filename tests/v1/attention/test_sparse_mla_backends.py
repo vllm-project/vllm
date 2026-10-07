@@ -820,7 +820,7 @@ def test_sparse_backend_decode_correctness(
 
     # FP8 quantization introduces some error, but should be within reasonable bounds
     # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
-    # FlashInfer reads nvfp4_ds_mla with an fp8 query (and staged fp8 rows).
+    # FlashInfer reads nvfp4_ds_mla with an fp8 query; prefill is staged to fp8.
     fp8_error = kv_cache_dtype.startswith("fp8") or (
         kv_cache_dtype == "nvfp4_ds_mla"
         and backend_cls == FlashInferMLASparseTRTLLMBackend
