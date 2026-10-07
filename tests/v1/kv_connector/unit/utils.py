@@ -548,6 +548,7 @@ def make_nixl_scheduler(
 
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
+    sched.hisparse = None
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -563,7 +564,7 @@ def make_nixl_scheduler(
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
-        sched._hisparse_host_blocks_to_recv = {}
+        sched._reqs_alias_block_ids = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
@@ -602,6 +603,7 @@ def make_nixl_push_scheduler(
 
     # Base scheduler fields (shared with pull / heartbeat path).
     sched._reqs_need_recv = {}
+    sched._reqs_alias_block_ids = {}
     sched._reqs_need_send = {}
     sched._reqs_in_batch = set()
     sched._reqs_not_processed = set()

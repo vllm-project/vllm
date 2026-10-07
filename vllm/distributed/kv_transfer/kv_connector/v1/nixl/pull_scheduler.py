@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import HiSparseResidentSpec, KVCacheGroupRole
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -62,6 +63,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
+                self._prepare_hisparse_gpu_import(request)
                 return count, True
 
         if (
@@ -100,10 +102,15 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         self.kv_recompute_threshold,
                     )
                     return 0, False
+                self._prepare_hisparse_gpu_import(request)
                 return count, True
 
         # No remote prefill for this request.
         return 0, False
+
+    def _prepare_hisparse_gpu_import(self, request: "Request") -> None:
+        if self.hisparse is not None:
+            self.hisparse.prepare_gpu_import(request.request_id)
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -164,6 +171,14 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         )
                         for group in blocks.blocks
                     )
+                    if (
+                        self.hisparse is not None
+                        and unhashed_local_block_ids
+                        and not self.hisparse.imports_to_host(request.request_id)
+                    ):
+                        local_num_computed_blocks = self._land_on_hisparse_resident(
+                            request.request_id, blocks, local_num_computed_blocks
+                        )
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
@@ -187,6 +202,48 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
             params["_remote_blocks_processed"] = True
+
+    def _land_on_hisparse_resident(
+        self,
+        request_id: str,
+        blocks: "KVCacheBlocks",
+        num_computed_blocks: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        """Pull host source pages into resident GPU pages past the local prefix.
+
+        Resident pages are never hashed. The indexer's hashed pages give the
+        local hit length; host source pages can outlast it.
+        """
+        groups = self.kv_cache_config.kv_cache_groups
+        (indexer_group_id,) = (
+            group_id
+            for group_id, group in enumerate(groups)
+            if group.role is KVCacheGroupRole.HISPARSE_INDEXER
+        )
+        (source_group_id,) = (
+            group_id
+            for group_id, group in enumerate(groups)
+            if group.role is KVCacheGroupRole.HISPARSE_SOURCE
+        )
+        num_prefix_pages = num_computed_blocks[indexer_group_id]
+        alias_block_ids = {
+            group_id: [
+                block.block_id
+                for block in blocks.blocks[group_id][num_prefix_pages:]
+                if not block.is_null
+            ]
+            for group_id, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        }
+        self._reqs_alias_block_ids[request_id] = alias_block_ids
+        assert self.hisparse is not None
+        self.hisparse.record_gpu_import(
+            request_id,
+            num_prefix_pages + max(map(len, alias_block_ids.values()), default=0),
+        )
+        computed = list(num_computed_blocks)
+        computed[source_group_id] = num_prefix_pages
+        return tuple(computed)
 
     def request_finished(
         self,

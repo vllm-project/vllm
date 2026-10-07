@@ -186,7 +186,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
             ]
-        elif local_region_groups != remote_region_groups:
+        elif (
+            meta.alias_block_ids is not None
+            or local_region_groups != remote_region_groups
+        ):
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -206,6 +209,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             local_by_region = self._block_ids_by_region(
                 local_block_ids, local_region_groups
             )
+            if meta.alias_block_ids is not None:
+                if dcp_active or len(plan.all_source_ranks) != 1:
+                    raise NotImplementedError(
+                        "Alias-region pulls require one source rank without DCP"
+                    )
+                local_by_region = list(local_by_region)
+                for region, alias in self._region_aliases.items():
+                    local_by_region[region] = self._logical_to_kernel_block_ids(
+                        [meta.alias_block_ids[alias.group_id]],
+                        self._physical_blocks_per_logical_kv_block,
+                    )[0]
             num_computed_blocks = None
             num_remote_blocks = None
             if (
@@ -245,6 +259,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         remote_dcp_size=remote_info.remote_dcp_size,
                     ),
                     block_ids_by_region=True,
+                    use_alias_regions=meta.alias_block_ids is not None,
                 )
                 for rank in plan.all_source_ranks
             ]
@@ -525,6 +540,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             ),
         )
 
+        if read_spec.use_alias_regions:
+            local_block_descs_ids = self._alias_local_desc_ids(
+                local_block_ids, local_block_descs_ids
+            )
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
