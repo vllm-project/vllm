@@ -3,10 +3,34 @@
 import importlib.util
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import vllm.utils.flashinfer as fi
+
+
+@pytest.mark.parametrize("has_sizer", [False, True])
+@pytest.mark.parametrize("accepts_workspace", [False, True])
+def test_cutlass_workspace_requires_both_apis(
+    monkeypatch: pytest.MonkeyPatch, has_sizer: bool, accepts_workspace: bool
+):
+    """Older FlashInfer versions must never receive an unsupported keyword."""
+    module = SimpleNamespace(
+        cutlass_fused_moe=(
+            (lambda *, workspace_buffer=None: None)
+            if accepts_workspace
+            else (lambda: None)
+        )
+    )
+    if has_sizer:
+        module.cutlass_fused_moe_workspace_size = lambda: 256
+    monkeypatch.setattr(fi, "has_flashinfer_cutlass_fused_moe", lambda: True)
+    monkeypatch.setattr(fi, "_get_submodule", lambda name: module)
+    # Bypass the process-wide capability cache without changing it for other tests.
+    assert fi.has_flashinfer_cutlass_fused_moe_workspace.__wrapped__() == (
+        has_sizer and accepts_workspace
+    )
 
 
 def _make_exe(path: Path) -> None:
