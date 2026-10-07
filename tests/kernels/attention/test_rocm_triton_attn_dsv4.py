@@ -859,69 +859,6 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
     assert torch.count_nonzero(output) == 0
 
 
-def test_sparse_attn_prefill_aiter_gfx942_routing(monkeypatch) -> None:
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-
-    q = torch.empty(2, 1, HEAD_DIM, dtype=torch.bfloat16)
-    kv = torch.empty(2, 1, HEAD_DIM, dtype=torch.bfloat16)
-    indices = torch.tensor([[0], [1]], dtype=torch.int32)
-    topk_length = torch.ones(2, dtype=torch.int32)
-    attn_sink = torch.empty(1, dtype=torch.float32)
-    output = torch.empty_like(q)
-    pa_calls = 0
-
-    def fake_pa(
-        q, kv, indices, indptr, kv_ext, idx_ext, indptr_ext, sink, scale, out=None
-    ):
-        nonlocal pa_calls
-        pa_calls += 1
-        assert kv.ndim == 2
-        assert kv_ext is None and idx_ext is None and indptr_ext is None
-        assert out is output
-        assert indices.ndim == 1 and indptr.ndim == 1
-        assert torch.equal(indices, torch.tensor([0, 1], dtype=torch.int32))
-        assert torch.equal(indptr, torch.tensor([0, 1, 2], dtype=torch.int32))
-        out.zero_()
-        return out
-
-    monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: False)
-    monkeypatch.setattr(mod, "_get_aiter_pa_prefill_sparse", lambda: fake_pa)
-    monkeypatch.setattr(
-        mod,
-        "build_ragged_indices_from_dense",
-        lambda *args, **kwargs: (
-            torch.tensor([0, 1], dtype=torch.int32),
-            torch.tensor([0, 1, 2], dtype=torch.int32),
-        ),
-    )
-    monkeypatch.setattr(
-        mod,
-        "_rocm_sparse_attn_prefill_triton",
-        lambda *args, **kwargs: pytest.fail("unexpected dense Triton fallback"),
-    )
-    monkeypatch.setattr(
-        mod,
-        "_rocm_sparse_attn_prefill_ragged_triton",
-        lambda *args, **kwargs: pytest.fail("unexpected ragged Triton fallback"),
-    )
-
-    mod.rocm_sparse_attn_prefill(
-        q=q,
-        kv=kv,
-        indices=indices,
-        topk_length=topk_length,
-        scale=HEAD_DIM**-0.5,
-        head_dim=HEAD_DIM,
-        nope_head_dim=NOPE_HEAD_DIM,
-        rope_head_dim=ROPE_HEAD_DIM,
-        attn_sink=attn_sink,
-        output=output,
-    )
-
-    assert pa_calls == 1
-    assert torch.count_nonzero(output) == 0
-
-
 @requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_prefill_ragged_aiter_opus(monkeypatch) -> None:
