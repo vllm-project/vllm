@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import ClassVar
 
 import torch
@@ -413,10 +413,47 @@ class AiterFlashAttentionMetadata:
     kv_sharing_metadata: AiterKVSharingMetadata | None = None
 
 
+@dataclass
+class AsmKvScaleTables:
+    """Dense per-slot scale tables the asm decode kernel reads for an fp8 cache.
+
+    One table per distinct (device, shape, scale), shared by every layer and
+    every metadata builder in the process, so the target and draft models with
+    equal scales reuse a single allocation. Tables are constants: never write
+    to one in place; a per-token or dynamic scale needs its own buffer.
+    """
+
+    tables: dict[tuple[str, int, int, int, float], torch.Tensor] = field(
+        default_factory=dict
+    )
+
+    def get(
+        self,
+        device: torch.device,
+        num_blocks: int,
+        num_kv_heads: int,
+        block_size: int,
+        scale: float,
+    ) -> torch.Tensor:
+        key = (str(device), num_blocks, num_kv_heads, block_size, scale)
+        table = self.tables.get(key)
+        if table is None:
+            table = torch.full(
+                (num_blocks, num_kv_heads, block_size),
+                scale,
+                dtype=torch.float32,
+                device=device,
+            )
+            self.tables[key] = table
+        return table
+
+
 class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+    asm_kv_scale_tables: ClassVar[AsmKvScaleTables] = AsmKvScaleTables()
 
     def __init__(
         self,
@@ -494,8 +531,8 @@ class AiterFlashAttentionMetadataBuilder(
 
     def _build_asm_kv_scale_tables(self) -> None:
         # Only for fp8 shuffle kv cache: the asm decode kernel reads a dense
-        # [num_blocks, num_kv_heads, block_size] scale table per layer, so build
-        # one per distinct per-tensor scale once the KV cache is bound (no-op after).
+        # [num_blocks, num_kv_heads, block_size] scale table per layer. Map each
+        # layer to the shared table for its scale once the KV cache is bound.
         if (
             self.k_scale is not None
             or not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
@@ -503,30 +540,24 @@ class AiterFlashAttentionMetadataBuilder(
         ):
             return
         attn_layers = self.vllm_config.compilation_config.static_forward_context
-        tables_by_scale: dict[tuple[int, float], torch.Tensor] = {}
-
-        def shared_scale_table(num_blocks: int, scale: float) -> torch.Tensor:
-            # Layers with the same scale share one table.
-            key = (num_blocks, scale)
-            if key not in tables_by_scale:
-                tables_by_scale[key] = torch.full(
-                    (num_blocks, self.num_heads_kv, self.block_size),
-                    scale,
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-            return tables_by_scale[key]
-
         k_scale_tables: dict[str, torch.Tensor] = {}
         v_scale_tables: dict[str, torch.Tensor] = {}
         for layer_name in self.layer_names:
             layer = attn_layers[layer_name]
             num_blocks = layer.kv_cache.shape[0]
-            k_scale_tables[layer_name] = shared_scale_table(
-                num_blocks, layer._k_scale_float
+            k_scale_tables[layer_name] = self.asm_kv_scale_tables.get(
+                self.device,
+                num_blocks,
+                self.num_heads_kv,
+                self.block_size,
+                layer._k_scale_float,
             )
-            v_scale_tables[layer_name] = shared_scale_table(
-                num_blocks, layer._v_scale_float
+            v_scale_tables[layer_name] = self.asm_kv_scale_tables.get(
+                self.device,
+                num_blocks,
+                self.num_heads_kv,
+                self.block_size,
+                layer._v_scale_float,
             )
         self.k_scale, self.v_scale = k_scale_tables, v_scale_tables
 
