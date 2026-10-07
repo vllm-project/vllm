@@ -306,8 +306,10 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
 class EmbeddingGemma2ModelConfig(Gemma4Config):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        Gemma4Config.verify_and_update_config(vllm_config)
+    def verify_and_update_config(
+        vllm_config: "VllmConfig", allow_flashinfer: bool = False
+    ) -> None:
+        Gemma4Config.verify_and_update_config(vllm_config, allow_flashinfer)
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         attn_config = vllm_config.attention_config
