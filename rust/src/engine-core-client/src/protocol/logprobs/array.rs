@@ -32,17 +32,7 @@ pub(super) fn decode_array2_u32(
         ));
     }
 
-    let data = match scalar {
-        TensorDtype::I32 => decode_i32_vec(&bytes, endianness, field)?
-            .into_iter()
-            .map(|value| convert_to_u32(value, field))
-            .try_collect()?,
-        TensorDtype::I64 => decode_i64_vec(&bytes, endianness, field)?
-            .into_iter()
-            .map(|value| convert_to_u32(value, field))
-            .try_collect()?,
-        _ => unreachable!("scalar validation should accept only i32 and i64"),
-    };
+    let data = decode_u32_values(&bytes, scalar, endianness, field)?;
     Ok(DecodedArray2 {
         rows: shape[0],
         cols: shape[1],
@@ -64,18 +54,56 @@ pub(crate) fn decode_array1_u32(
         ));
     }
 
-    let data = match scalar {
-        TensorDtype::I32 => decode_i32_vec(&bytes, endianness, field)?
+    decode_u32_values(&bytes, scalar, endianness, field)
+}
+
+/// Token ranks, either for the sampled/selected token only or for every entry.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum DecodedRanks {
+    /// Shape `[num_positions]`.
+    Sampled(Vec<u32>),
+    /// Shape `[num_positions, max_num_logprobs + 1]`.
+    PerToken(DecodedArray2<u32>),
+}
+
+pub(super) fn decode_ranks_u32(
+    value: WireNdArray,
+    field: &str,
+    frames: &[Bytes],
+) -> Result<DecodedRanks> {
+    let (shape, bytes, scalar, endianness) =
+        decode_array_metadata(value, field, frames, &[TensorDtype::I32, TensorDtype::I64])?;
+    if !matches!(shape.len(), 1 | 2) {
+        return Err(decode_error(
+            field,
+            &format!("expected rank-1 or rank-2 array, got rank {}", shape.len()),
+        ));
+    }
+
+    let data = decode_u32_values(&bytes, scalar, endianness, field)?;
+    Ok(match shape.as_slice() {
+        &[rows, cols] => DecodedRanks::PerToken(DecodedArray2 { rows, cols, data }),
+        _ => DecodedRanks::Sampled(data),
+    })
+}
+
+fn decode_u32_values(
+    bytes: &[u8],
+    scalar: TensorDtype,
+    endianness: Endianness,
+    field: &str,
+) -> Result<Vec<u32>> {
+    match scalar {
+        TensorDtype::I32 => decode_i32_vec(bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
-            .try_collect()?,
-        TensorDtype::I64 => decode_i64_vec(&bytes, endianness, field)?
+            .try_collect(),
+        TensorDtype::I64 => decode_i64_vec(bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
-            .try_collect()?,
+            .try_collect(),
         _ => unreachable!("scalar validation should accept only i32 and i64"),
-    };
-    Ok(data)
+    }
 }
 
 pub(super) fn decode_array2_f32(
