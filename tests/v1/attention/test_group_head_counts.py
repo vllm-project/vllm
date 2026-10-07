@@ -41,7 +41,9 @@ def _layers(layer_num_heads: list[int]):
 
 
 def _build(
-    layer_num_heads: list[int], block_size: int = 16
+    layer_num_heads: list[int],
+    block_size: int = 16,
+    num_kv_heads: int = NUM_KV_HEADS,
 ) -> CPUAttentionMetadataBuilder:
     layers = _layers(layer_num_heads)
     vllm_config = MagicMock()
@@ -49,7 +51,7 @@ def _build(
     vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
     vllm_config.cache_config.cache_dtype = "auto"
     kv_cache_spec = SimpleNamespace(
-        num_kv_heads=NUM_KV_HEADS, head_size=64, block_size=block_size
+        num_kv_heads=num_kv_heads, head_size=64, block_size=block_size
     )
 
     with (
@@ -86,11 +88,15 @@ def test_mixed_head_counts_in_one_group_are_rejected():
 
 
 def _request_group(
-    query_len: int, seq_len: int, is_cross_attention: bool = False
+    query_len: int,
+    seq_len: int,
+    is_cross_attention: bool = False,
+    num_heads: int = 32,
+    num_kv_heads: int = NUM_KV_HEADS,
 ) -> int:
     """Return the AMX scheduler's head-group size for one request."""
     with patch("torch.cpu._is_amx_tile_supported", return_value=True):
-        builder = _build([32], block_size=32)
+        builder = _build([num_heads], block_size=32, num_kv_heads=num_kv_heads)
     builder.is_cross_attention = is_cross_attention
     common = SimpleNamespace(
         num_reqs=1,
@@ -117,19 +123,40 @@ def _request_group(
 
 
 @requires_cpu
-@set_default_torch_num_threads(16)
+@set_default_torch_num_threads(32)
 @pytest.mark.parametrize(
-    ("query_len", "seq_len", "is_cross_attention", "expected_group"),
+    (
+        "query_len",
+        "seq_len",
+        "is_cross_attention",
+        "expected_group",
+        "num_heads",
+        "num_kv_heads",
+    ),
     [
-        pytest.param(4, 8192, False, 4, id="q4-self"),
-        pytest.param(4, 8192, True, 1, id="q4-cross"),
-        pytest.param(1, 128, False, 4, id="q1-decode"),
+        pytest.param(4, 8192, False, 4, 32, 8, id="q4-self"),
+        pytest.param(4, 8192, True, 1, 32, 8, id="q4-cross"),
+        pytest.param(1, 128, False, 4, 32, 8, id="q1-decode"),
+        pytest.param(8, 8192, False, 2, 16, 1, id="q8-full-thread-group"),
+        pytest.param(14, 8192, False, 2, 16, 1, id="q14-underfilled-span-balance"),
+        pytest.param(16, 8192, False, 16, 16, 1, id="q16-single-kv"),
+        pytest.param(16, 8192, False, 16, 32, 2, id="q16-two-kv"),
+        pytest.param(16, 128, False, 1, 16, 1, id="q16-short-span"),
     ],
 )
 def test_cpu_builder_selects_amx_group_for_single_request(
-    query_len, seq_len, is_cross_attention, expected_group
+    query_len, seq_len, is_cross_attention, expected_group, num_heads, num_kv_heads
 ):
-    assert _request_group(query_len, seq_len, is_cross_attention) == expected_group
+    assert (
+        _request_group(
+            query_len,
+            seq_len,
+            is_cross_attention,
+            num_heads,
+            num_kv_heads,
+        )
+        == expected_group
+    )
 
 
 def test_flash_attention_geometry_comes_from_the_group():

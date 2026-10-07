@@ -721,23 +721,29 @@ class AttentionScheduler {
       }
       return count;
     };
-    Partitions partitions;
-    bool selected = false;
+    Partitions partitions = partition(1);
     if (has_multi_token_request) {
+      int64_t best_spans =
+          std::min<int64_t>(thread_num, span_count(partitions));
+      int32_t best_group = 1;
       for (int32_t group = original_q_head_per_kv; group >= 2; --group) {
         if (original_q_head_per_kv % group != 0) {
           continue;
         }
         auto candidate = partition(group);
-        if (span_count(candidate) >= thread_num) {
+        const int64_t candidate_spans = span_count(candidate);
+        const int64_t usable_spans =
+            std::min<int64_t>(thread_num, candidate_spans);
+        if (usable_spans > best_spans ||
+            (usable_spans == best_spans && group > best_group)) {
           partitions = std::move(candidate);
-          selected = true;
+          best_spans = usable_spans;
+          best_group = group;
+        }
+        if (candidate_spans >= thread_num) {
           break;
         }
       }
-    }
-    if (!selected) {
-      partitions = partition(1);
     }
     struct MaterializedPlan {
       std::vector<AttentionWorkItemGroup> workitems;
