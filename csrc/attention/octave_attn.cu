@@ -683,6 +683,153 @@ __global__ void __launch_bounds__(32)
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Exact window (sparse decode). Direct-mapped fp16 shadow tables keyed by the
+// cache slot: entry slot & mask holds that token's exact K and V ([hkv, 2D])
+// and is valid while tags[entry] == slot. The recent table takes every stored
+// token, the sink table the first kSinks positions of a sequence. A lost
+// entry only means the token is read from the packed cache instead.
+// ---------------------------------------------------------------------------
+constexpr int kWindow = 64;
+constexpr int kSinks = 4;
+constexpr int kMaxWindowHits = 128;
+
+// One wave per token. The per-entry lock keeps two tokens that share an
+// entry in the same launch from leaving a mixed row behind.
+template <typename T>
+__global__ void __launch_bounds__(32)
+    window_store_kernel(const T* __restrict__ key, const T* __restrict__ value,
+                        const int64_t* __restrict__ slot_mapping,
+                        const int* __restrict__ positions, T* __restrict__ wtab,
+                        int* __restrict__ wtags, int* __restrict__ wlocks,
+                        int wmask, T* __restrict__ stab,
+                        int* __restrict__ stags, int* __restrict__ slocks,
+                        int smask, int hkv, int64_t sk0, int64_t sk1,
+                        int64_t sv0, int64_t sv1) {
+  const int i = blockIdx.x, lane = threadIdx.x;
+  const int64_t slot = slot_mapping[i];
+  if (slot < 0) return;
+  const int pos = positions[i];
+  auto put = [&](T* tab, int* tags, int* locks, int e) {
+    if (lane == 0) {
+      while (atomicCAS(&locks[e], 0, 1) != 0) {
+      }
+      atomicExch(&tags[e], -1);
+    }
+    __threadfence();
+    for (int h = 0; h < hkv; ++h) {
+      T* row = tab + ((int64_t)e * hkv + h) * (2 * D);
+  #pragma unroll
+      for (int d = 0; d < DPL; ++d) {
+        row[lane * DPL + d] = key[i * sk0 + h * sk1 + lane * DPL + d];
+        row[D + lane * DPL + d] = value[i * sv0 + h * sv1 + lane * DPL + d];
+      }
+    }
+    __threadfence();
+    if (lane == 0) {
+      atomicExch(&tags[e], (int)slot);
+      __threadfence();
+      atomicExch(&locks[e], 0);
+    }
+  };
+  put(wtab, wtags, wlocks, (int)(slot & wmask));
+  if (pos >= 0 && pos < kSinks) put(stab, stags, slocks, (int)(slot & smask));
+}
+
+// Attention of one query row over its selected positions that sit in the
+// exact window, written as one more split of mid_o (in the rotated V space,
+// like the packed-cache splits). grid (num_q, hkv), block 256.
+template <typename T>
+__global__ void __launch_bounds__(256)
+    window_attn_kernel(const T* __restrict__ query,
+                       const int* __restrict__ positions,
+                       const int* __restrict__ q_to_req,
+                       const int* __restrict__ block_table,
+                       const int* __restrict__ indices,
+                       const T* __restrict__ wtab, const int* __restrict__ wtags,
+                       int wmask, const T* __restrict__ stab,
+                       const int* __restrict__ stags, int smask,
+                       float* __restrict__ mid_o, const int* __restrict__ v_signs,
+                       float sm_scale, int split, int topk, int64_t sidx,
+                       int block_size, int max_blocks, int num_reqs,
+                       int num_phys_blocks, int hq, int hkv, int64_t sq0,
+                       int64_t sq1, int64_t smo, int64_t smh, int64_t sms) {
+  __shared__ int s_entry[kMaxWindowHits];
+  __shared__ float s_score[8][kMaxWindowHits];
+  __shared__ int s_count;
+  const int qi = blockIdx.x, kvh = blockIdx.y;
+  const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
+  const int hpk = hq / hkv;
+  if (tid == 0) s_count = 0;
+  __syncthreads();
+  const int req = q_to_req[qi];
+  const int p = positions[qi];
+  if (req >= 0 && req < num_reqs) {
+    for (int j = tid; j < topk; j += 256) {
+      const int t = indices[qi * sidx + j];
+      const int d = p - t;
+      if (t < 0 || d < 0 || (d >= kWindow && t >= kSinks)) continue;
+      const int lb = t / block_size;
+      if (lb >= max_blocks) continue;
+      const int pb = block_table[req * max_blocks + lb];
+      if (pb < 0 || pb >= num_phys_blocks) continue;
+      const int slot = pb * block_size + (t - lb * block_size);
+      int e = -1;
+      if (d < kWindow && wtags[slot & wmask] == slot)
+        e = slot & wmask;
+      else if (t < kSinks && stags[slot & smask] == slot)
+        e = (slot & smask) | (1 << 30);
+      if (e < 0) continue;
+      const int k = atomicAdd(&s_count, 1);
+      if (k < kMaxWindowHits) s_entry[k] = e;
+    }
+  }
+  __syncthreads();
+  const int n = min(s_count, kMaxWindowHits);
+  const float sl2 = sm_scale * 1.4426950408889634f;
+  for (int g = w; g < hpk; g += 8) {
+    const int head = kvh * hpk + g;
+    float q[DPL];
+  #pragma unroll
+    for (int d = 0; d < DPL; ++d)
+      q[d] = to_f<T>(query[qi * sq0 + head * sq1 + lane * DPL + d]);
+    auto row_of = [&](int e) {
+      const T* tab = (e >> 30) ? stab : wtab;
+      return tab + ((int64_t)(e & ((1 << 30) - 1)) * hkv + kvh) * (2 * D);
+    };
+    float m = -INFINITY;
+    for (int i = 0; i < n; ++i) {
+      const T* r = row_of(s_entry[i]);
+      float acc = 0.f;
+  #pragma unroll
+      for (int d = 0; d < DPL; ++d) acc += q[d] * to_f<T>(r[lane * DPL + d]);
+      acc = xor_sum<16>(acc) * sl2;
+      if (lane == 0) s_score[w][i] = acc;
+      m = fmaxf(m, acc);
+    }
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+    __builtin_amdgcn_wave_barrier();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+    float l = 0.f, o[DPL] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (int i = 0; i < n; ++i) {
+      const float pr = exp2f(s_score[w][i] - m);
+      l += pr;
+      const T* r = row_of(s_entry[i]) + D;
+  #pragma unroll
+      for (int d = 0; d < DPL; ++d) o[d] += pr * to_f<T>(r[lane * DPL + d]);
+    }
+    rotate_full(o, lane, v_signs);
+    float* op = mid_o + qi * smo + head * smh + (int64_t)split * sms;
+  #pragma unroll
+    for (int d = 0; d < DPL; ++d) op[lane * DPL + d] = o[d];
+    if (lane == 0) {
+      op[D] = n > 0 ? m : -INFINITY;
+      op[D + 1] = l;
+    }
+  }
+}
+
 }  // namespace octave
 
 // ---------------------------------------------------------------------------
@@ -803,7 +950,26 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        torch::Tensor block_table, torch::Tensor q_to_req,
                        torch::Tensor q_to_klen, torch::Tensor mid_o,
                        torch::Tensor k_signs, double sm_scale,
-                       int64_t num_kv_splits, int64_t fmt);
+                       int64_t num_kv_splits, int64_t fmt,
+                       const std::optional<torch::Tensor>& indices,
+                       const int* qpos, const int* wtags, int wmask,
+                       const int* stags, int smask);
+
+static void launch_reduce(torch::Tensor out, torch::Tensor mid_o,
+                          torch::Tensor v_signs, int num_splits,
+                          cudaStream_t stream) {
+  dim3 grid(out.size(0), out.size(1));
+  if (out.dtype() == at::kBFloat16)
+    reduce_kernel<__hip_bfloat16><<<grid, 256, 0, stream>>>(
+        mid_o.data_ptr<float>(), (__hip_bfloat16*)out.data_ptr(),
+        v_signs.data_ptr<int>(), num_splits, mid_o.stride(0), mid_o.stride(1),
+        mid_o.stride(2), out.stride(0), out.stride(1));
+  else
+    reduce_kernel<half><<<grid, 256, 0, stream>>>(
+        mid_o.data_ptr<float>(), (half*)out.data_ptr(), v_signs.data_ptr<int>(),
+        num_splits, mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
+        out.stride(0), out.stride(1));
+}
 
 void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
                    torch::Tensor block_table, torch::Tensor q_to_req,
@@ -831,7 +997,8 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
   const int wmma_splits =
       use_wmma
           ? octave_decode_wmma(query, cache, block_table, q_to_req, q_to_klen,
-                               mid_o, k_signs, sm_scale, num_kv_splits, fmt)
+                               mid_o, k_signs, sm_scale, num_kv_splits, fmt,
+                               std::nullopt, nullptr, nullptr, 0, nullptr, 0)
           : 0;
   if (wmma_splits > 0) {
     ns = wmma_splits;
@@ -853,17 +1020,101 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
     }
   #undef SQ_DISPATCH
   }
-  dim3 grid2(num_q, hq);
-  if (bf)
-    reduce_kernel<__hip_bfloat16><<<grid2, 256, 0, stream>>>(
-        mid_o.data_ptr<float>(), (__hip_bfloat16*)out.data_ptr(),
-        v_signs.data_ptr<int>(), ns, mid_o.stride(0), mid_o.stride(1),
-        mid_o.stride(2), out.stride(0), out.stride(1));
+  launch_reduce(out, mid_o, v_signs, ns, stream);
+}
+
+// Sparse decode: query row i attends to the logical positions indices[i, :]
+// of request q_to_req[i] (negative entries are skipped). WMMA tier only.
+void octave_decode_sparse(
+    torch::Tensor out, torch::Tensor query, torch::Tensor cache,
+    torch::Tensor block_table, torch::Tensor q_to_req, torch::Tensor indices,
+    torch::Tensor mid_o, torch::Tensor k_signs, torch::Tensor v_signs,
+    double sm_scale, int64_t num_kv_splits, int64_t fmt,
+    const std::optional<torch::Tensor>& positions,
+    const std::optional<torch::Tensor>& wtab,
+    const std::optional<torch::Tensor>& wtags,
+    const std::optional<torch::Tensor>& stab,
+    const std::optional<torch::Tensor>& stags) {
+  const int num_q = query.size(0);
+  if (num_q == 0) return;
+  check_cache(cache, fmt);
+  TORCH_CHECK(query.size(2) == D && query.stride(2) == 1);
+  TORCH_CHECK(out.dtype() == query.dtype());
+  TORCH_CHECK(indices.dim() == 2 && indices.size(0) >= num_q &&
+              indices.stride(1) == 1 && indices.dtype() == at::kInt);
+  TORCH_CHECK(mid_o.size(2) >= num_kv_splits && mid_o.size(3) >= D + 2);
+  TORCH_CHECK(num_kv_splits <= 1024 && mid_o.stride(3) == 1);
+  const at::cuda::OptionalCUDAGuard guard(device_of(query));
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  // With the exact window, the packed-cache splits leave the last split of
+  // mid_o to octave_window_attn.
+  const bool win = positions.has_value();
+  TORCH_CHECK(!win || (wtab && wtags && stab && stags && num_kv_splits >= 2));
+  const int wmask = win ? (int)wtags->size(0) - 1 : 0;
+  const int smask = win ? (int)stags->size(0) - 1 : 0;
+  TORCH_CHECK(!win || (((wmask + 1) & wmask) == 0 && ((smask + 1) & smask) == 0),
+              "octave_decode_sparse: shadow tables must be powers of two");
+  const int ns = octave_decode_wmma(
+      query, cache, block_table, q_to_req, q_to_req, mid_o, k_signs, sm_scale,
+      win ? num_kv_splits - 1 : num_kv_splits, fmt, indices,
+      win ? positions->data_ptr<int>() : nullptr,
+      win ? wtags->data_ptr<int>() : nullptr, wmask,
+      win ? stags->data_ptr<int>() : nullptr, smask);
+  TORCH_CHECK(ns > 0,
+              "octave_decode_sparse: needs the WMMA tier (gfx11, head size "
+              "256, GQA group <= 8)");
+  if (!win) {
+    launch_reduce(out, mid_o, v_signs, ns, stream);
+    return;
+  }
+  const int hq = query.size(1), hkv = cache.size(1);
+  TORCH_CHECK(hq / hkv <= 8 && wtab->size(1) == hkv && wtab->size(2) == 2 * D);
+  dim3 grid(num_q, hkv);
+  #define SQ_WIN(T)                                                          \
+    window_attn_kernel<T><<<grid, 256, 0, stream>>>(                         \
+        (const T*)query.data_ptr(), positions->data_ptr<int>(),              \
+        q_to_req.data_ptr<int>(), block_table.data_ptr<int>(),               \
+        indices.data_ptr<int>(), (const T*)wtab->data_ptr(),                 \
+        wtags->data_ptr<int>(), wmask, (const T*)stab->data_ptr(),           \
+        stags->data_ptr<int>(), smask, mid_o.data_ptr<float>(),              \
+        v_signs.data_ptr<int>(), (float)sm_scale, ns, (int)indices.size(1),  \
+        indices.stride(0), cache.size(2), block_table.size(1),               \
+        block_table.size(0), cache.size(0), hq, hkv, query.stride(0),        \
+        query.stride(1), mid_o.stride(0), mid_o.stride(1), mid_o.stride(2))
+  if (query.dtype() == at::kBFloat16)
+    SQ_WIN(__hip_bfloat16);
   else
-    reduce_kernel<half><<<grid2, 256, 0, stream>>>(
-        mid_o.data_ptr<float>(), (half*)out.data_ptr(), v_signs.data_ptr<int>(),
-        ns, mid_o.stride(0), mid_o.stride(1), mid_o.stride(2), out.stride(0),
-        out.stride(1));
+    SQ_WIN(half);
+  #undef SQ_WIN
+  launch_reduce(out, mid_o, v_signs, ns + 1, stream);
+}
+
+void octave_window_store(torch::Tensor key, torch::Tensor value,
+                         torch::Tensor slot_mapping, torch::Tensor positions,
+                         torch::Tensor wtab, torch::Tensor wtags,
+                         torch::Tensor wlocks, torch::Tensor stab,
+                         torch::Tensor stags, torch::Tensor slocks) {
+  const int n = slot_mapping.size(0);
+  if (n == 0) return;
+  TORCH_CHECK(slot_mapping.dtype() == at::kLong && positions.dtype() == at::kInt);
+  TORCH_CHECK(wtab.dtype() == key.dtype() && stab.dtype() == key.dtype());
+  const int hkv = wtab.size(1);
+  const int wmask = (int)wtags.size(0) - 1, smask = (int)stags.size(0) - 1;
+  const at::cuda::OptionalCUDAGuard guard(device_of(key));
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  #define SQ_WSTORE(T)                                                        \
+    window_store_kernel<T><<<n, 32, 0, stream>>>(                             \
+        (const T*)key.data_ptr(), (const T*)value.data_ptr(),                 \
+        slot_mapping.data_ptr<int64_t>(), positions.data_ptr<int>(),          \
+        (T*)wtab.data_ptr(), wtags.data_ptr<int>(), wlocks.data_ptr<int>(),   \
+        wmask, (T*)stab.data_ptr(), stags.data_ptr<int>(),                    \
+        slocks.data_ptr<int>(), smask, hkv, key.stride(0), key.stride(1),     \
+        value.stride(0), value.stride(1))
+  if (key.dtype() == at::kBFloat16)
+    SQ_WSTORE(__hip_bfloat16);
+  else
+    SQ_WSTORE(half);
+  #undef SQ_WSTORE
 }
 
 void octave_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
@@ -892,6 +1143,23 @@ void octave_cache_store(torch::Tensor, torch::Tensor, torch::Tensor,
 void octave_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                    torch::Tensor, double, int64_t, int64_t, int64_t, bool) {
+  TORCH_CHECK(false, "octave requires ROCm");
+}
+void octave_decode_sparse(torch::Tensor, torch::Tensor, torch::Tensor,
+                          torch::Tensor, torch::Tensor, torch::Tensor,
+                          torch::Tensor, torch::Tensor, torch::Tensor, double,
+                          int64_t, int64_t,
+                          const std::optional<torch::Tensor>&,
+                          const std::optional<torch::Tensor>&,
+                          const std::optional<torch::Tensor>&,
+                          const std::optional<torch::Tensor>&,
+                          const std::optional<torch::Tensor>&) {
+  TORCH_CHECK(false, "octave requires ROCm");
+}
+void octave_window_store(torch::Tensor, torch::Tensor, torch::Tensor,
+                         torch::Tensor, torch::Tensor, torch::Tensor,
+                         torch::Tensor, torch::Tensor, torch::Tensor,
+                         torch::Tensor) {
   TORCH_CHECK(false, "octave requires ROCm");
 }
 void octave_rotate(torch::Tensor, torch::Tensor, bool, bool) {

@@ -89,6 +89,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int num_kv_splits, int fmt, int query_group, bool use_wmma) -> ()");
   ops.impl("octave_decode", torch::kCUDA, &octave_decode);
   ops.def(
+      "octave_decode_sparse(Tensor! out, Tensor query, Tensor cache, "
+      "Tensor block_table, Tensor q_to_req, Tensor indices, Tensor! mid_o, "
+      "Tensor k_signs, Tensor v_signs, float sm_scale, int num_kv_splits, "
+      "int fmt, Tensor? positions=None, Tensor? wtab=None, "
+      "Tensor? wtags=None, Tensor? stab=None, Tensor? stags=None) -> ()");
+  ops.impl("octave_decode_sparse", torch::kCUDA, &octave_decode_sparse);
+  ops.def(
+      "octave_window_store(Tensor key, Tensor value, Tensor slot_mapping, "
+      "Tensor positions, Tensor! wtab, Tensor! wtags, Tensor! wlocks, "
+      "Tensor! stab, Tensor! stags, Tensor! slocks) -> ()");
+  ops.impl("octave_window_store", torch::kCUDA, &octave_window_store);
+  ops.def(
       "octave_rotate(Tensor! x, Tensor signs, bool k_layout, bool inverse) "
       "-> ()");
   ops.impl("octave_rotate", torch::kCUDA, &octave_rotate);
