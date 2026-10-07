@@ -3,6 +3,7 @@
 
 import weakref
 from collections import deque
+from itertools import count
 from types import SimpleNamespace
 from typing import Any
 
@@ -31,7 +32,7 @@ class _PayloadLifetimeCheckingQueue:
         if self.dequeue_count == 1:
             payload = _RpcPayload()
             self.payload_ref = weakref.ref(payload)
-            return "consume", (payload,), {}, None
+            return 0, "consume", (payload,), {}, None
 
         assert self.payload_ref is not None
         assert self.payload_ref() is None
@@ -44,7 +45,7 @@ def test_worker_rpc_payload_released_before_next_dequeue():
     worker_proc.rpc_broadcast_mq = queue
     worker_proc.rank = 0
     worker_proc.worker = SimpleNamespace(consume=lambda payload: payload)
-    worker_proc.handle_output = lambda output: None
+    worker_proc.handle_output = lambda seq, output: None
 
     with pytest.raises(_ExitWorkerLoop):
         worker_proc.worker_busy_loop()
@@ -59,14 +60,16 @@ def test_execute_worker_rpc_returns_worker_exception():
     worker_proc: Any = WorkerProc.__new__(WorkerProc)
     worker_proc.rank = 0
     worker_proc.worker = SimpleNamespace(fail=fail)
-    outputs: list[Any] = []
-    worker_proc.handle_output = outputs.append
+    outputs: list[tuple[int, Any]] = []
+    worker_proc.handle_output = lambda seq, output: outputs.append((seq, output))
 
-    worker_proc._execute_worker_rpc(("fail", (), {}, None))
+    worker_proc._execute_worker_rpc((3, "fail", (), {}, None))
 
     assert len(outputs) == 1
-    assert isinstance(outputs[0], RuntimeError)
-    assert str(outputs[0]) == "test error"
+    seq, output = outputs[0]
+    assert seq == 3
+    assert isinstance(output, RuntimeError)
+    assert str(output) == "test error"
 
 
 @pytest.mark.parametrize("stalled", [False, True])
@@ -79,12 +82,13 @@ def test_take_draft_token_ids_uses_execute_model_timeout(monkeypatch, stalled):
         assert timeout is not None and 0 < timeout <= 7
         if stalled:
             raise TimeoutError
-        return WorkerProc.ResponseStatus.SUCCESS, draft
+        return 0, WorkerProc.ResponseStatus.SUCCESS, draft
 
     executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
     executor.is_failed = False
     executor.output_rank = 1
     executor.futures_queue = deque()
+    executor.rpc_seq = count()
     executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)
     executor.response_mqs = [None, SimpleNamespace(dequeue=dequeue)]
 
@@ -93,3 +97,43 @@ def test_take_draft_token_ids_uses_execute_model_timeout(monkeypatch, stalled):
             executor.take_draft_token_ids()
     else:
         assert executor.take_draft_token_ids() is draft
+
+
+class _FakeResponseMQ:
+    def __init__(self) -> None:
+        self.replies: deque[tuple[int, Any, Any]] = deque()
+
+    def dequeue(self, *, timeout=None):
+        if not self.replies:
+            raise TimeoutError
+        return self.replies.popleft()
+
+
+def test_collective_rpc_discards_stale_reply_after_timeout():
+    """A reply that arrives after its call timed out must not be returned to
+    the next call. Replies carry no other correlation, so before seq ids the
+    next call read the stale reply as its own."""
+    mq = _FakeResponseMQ()
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.futures_queue = deque()
+    executor.rpc_seq = count()
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)
+    executor.response_mqs = [mq]
+
+    with pytest.raises(TimeoutError, match="check_health timed out"):
+        executor.collective_rpc("check_health", timeout=1, unique_reply_rank=0)
+
+    # The stalled worker catches up: the abandoned reply lands before the
+    # reply to the next call.
+    mq.replies.extend(
+        [
+            (0, WorkerProc.ResponseStatus.SUCCESS, None),
+            (1, WorkerProc.ResponseStatus.SUCCESS, "model output"),
+        ]
+    )
+    assert (
+        executor.collective_rpc("execute_model", timeout=1, unique_reply_rank=0)
+        == "model output"
+    )
+    assert not mq.replies

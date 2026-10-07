@@ -6,6 +6,7 @@ import threading
 import weakref
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from itertools import count
 from typing import Any
 
 from torch.distributed import TCPStore
@@ -479,6 +480,7 @@ class RayExecutorV2(MultiprocExecutor):
             response_mq.wait_until_ready()
 
         self.futures_queue = deque[FutureWrapper]()
+        self.rpc_seq = count()
         self._post_init_executor()
 
         self.start_worker_monitor()
