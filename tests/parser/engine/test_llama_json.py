@@ -3,8 +3,9 @@
 """Tests for the engine-based Llama 3.x/4 JSON parser (llama3_json /
 llama4_json).
 
-Staged commit 3/7: adds truncation repair on top of full format-shape
-coverage. Later commits grow both llama_json.py and this file together.
+Staged commit 4/7: adds truncation repair and the schema-type groundwork
+for coercion safety (not wired in yet). Later commits grow both
+llama_json.py and this file together.
 """
 
 import json
@@ -274,3 +275,37 @@ class TestTruncationRepair:
         results = _stream(_parser(), _request(), text, chunk_size=1)
         _, calls = _accumulate(results)
         assert json.loads(calls[0]["args"]) == {"city": "San Francisco", "unit": "C"}
+
+
+class TestDeclaredTypes:
+    """Groundwork for schema-coercion safety: which JSON types a schema
+    actually permits, not the shared engine's string fallback."""
+
+    def test_empty_schema_permits_every_type(self):
+        from vllm.parser.llama_json import _declared_types
+
+        assert _declared_types({}) == {
+            "null",
+            "boolean",
+            "integer",
+            "number",
+            "string",
+            "array",
+            "object",
+        }
+
+    def test_typed_schema_restricts_to_declared_type(self):
+        from vllm.parser.llama_json import _declared_types
+
+        assert _declared_types({"type": "string"}) == {"string"}
+
+    def test_number_type_also_permits_integer(self):
+        from vllm.parser.llama_json import _declared_types
+
+        assert _declared_types({"type": "number"}) == {"number", "integer"}
+
+    def test_is_valid_for_schema_type_true_for_already_matching_value(self):
+        from vllm.parser.llama_json import _is_valid_for_schema_type
+
+        assert _is_valid_for_schema_type(7, {"type": "integer"}) is True
+        assert _is_valid_for_schema_type("7", {"type": "integer"}) is False

@@ -12,9 +12,12 @@ not a call; its text is restored as content in place.
 
 This commit adds truncation repair: a value cut off mid-stream is cut back
 to the last completable point and closed by appending ``"``/``}``/``]``, so
-every streamed delta -- not just the final one -- is valid JSON. Before this,
-an unfinished string or number streamed verbatim and unterminated.
-Schema-coercion safety and resumable scanning are not implemented yet.
+every streamed delta -- not just the final one -- is valid JSON. It also
+adds the groundwork for schema-coercion safety: ``_declared_types`` answers
+which JSON types a schema actually permits (not the shared engine's string
+fallback, which rewrites an already-valid integer under ``{}`` as a string).
+Nothing calls it yet -- the next commit wires it into argument splicing.
+Resumable scanning is not implemented yet.
 """
 
 from __future__ import annotations
@@ -434,6 +437,88 @@ def _constrains_object(schema: dict) -> bool:
         elif value is not None:
             return True
     return False
+
+
+_ALL_JSON_TYPES = frozenset(
+    {"null", "boolean", "integer", "number", "string", "array", "object"}
+)
+
+
+def _json_type_name(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "object"
+
+
+def _declared_types(schema: object) -> set[str]:
+    """JSON types permitted by *schema*.
+
+    Sibling constraints and ``allOf`` intersect; ``anyOf``/``oneOf`` union.
+    No type constraint permits every type, unlike
+    ``extract_types_from_schema``'s string fallback -- why an integer
+    under ``{}``, a ``const`` or a ``$ref`` used to be rewritten as a string.
+    """
+    all_types = set(_ALL_JSON_TYPES)
+    if not isinstance(schema, dict):
+        return all_types
+
+    def widen(types: set[str]) -> set[str]:
+        # Every integer is a valid number, so a "number" schema accepts one.
+        if "number" in types:
+            types.add("integer")
+        return types
+
+    constraints: list[set[str]] = []
+    declared: set[str] = set()
+    type_value = schema.get("type")
+    if isinstance(type_value, str):
+        declared.add(type_value)
+    elif isinstance(type_value, list):
+        declared.update(t for t in type_value if isinstance(t, str))
+    if declared:
+        constraints.append(widen(declared))
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        constraints.append(widen({_json_type_name(v) for v in enum}))
+
+    if "const" in schema:
+        constraints.append(widen({_json_type_name(schema["const"])}))
+
+    for field in ("anyOf", "oneOf"):
+        choices = schema.get(field)
+        if isinstance(choices, list) and choices:
+            union: set[str] = set()
+            for choice in choices:
+                union |= _declared_types(choice)
+            constraints.append(union)
+
+    choices = schema.get("allOf")
+    if isinstance(choices, list) and choices:
+        conjunction = set(all_types)
+        for choice in choices:
+            conjunction &= _declared_types(choice)
+        constraints.append(conjunction)
+
+    allowed = all_types
+    for constraint in constraints:
+        allowed &= constraint
+    return allowed
+
+
+def _is_valid_for_schema_type(value: object, schema: dict) -> bool:
+    """Whether *value* already has a JSON type *schema* permits."""
+    return _json_type_name(value) in _declared_types(schema)
 
 
 @functools.cache
