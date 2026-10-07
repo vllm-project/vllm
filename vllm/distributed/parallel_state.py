@@ -1861,9 +1861,14 @@ def init_distributed_environment(
             ):
                 # Group rank 0 lets the world-group TCPStore bind port 0
                 # and publishes the kernel-assigned port via the
-                # coordination store.
-                coord_store = get_cached_tcp_store_client(
-                    ip, parallel_config._coord_store_port
+                # coordination store. A one-shot client of our own: the
+                # cached one is inherited across fork and shared with
+                # sibling workers.
+                coord_store = create_tcp_store(
+                    ip,
+                    parallel_config._coord_store_port,
+                    is_master=False,
+                    wait_for_workers=False,
                 )
                 if rank == 0:
                     # Workers can only connect once the port is published.
