@@ -21,10 +21,41 @@ from vllm.transformers_utils.config import (
     get_safetensors_params_metadata,
     mrope_num_dims,
     patch_legacy_rope_type,
+    patch_rope_parameters,
     try_get_generation_config,
     uses_mrope,
 )
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
+
+
+@pytest.mark.parametrize("factor", [None, 2.0])
+@pytest.mark.parametrize("rope_type", [None, "default", "dynamic", "linear"])
+def test_nomic_legacy_rope_scaling(factor, rope_type):
+    config = PreTrainedConfig()
+    config.model_type = "nomic_bert"
+    config.rotary_emb_base = 1000.0
+    config.rotary_emb_fraction = 1.0
+    config.rotary_scaling_factor = factor
+    config.max_position_embeddings = 8192
+    if rope_type is not None:
+        config.rope_parameters = {"rope_type": rope_type}
+        if rope_type != "default":
+            config.rope_parameters["factor"] = 4.0
+
+    patch_rope_parameters(config)
+    expected_type = rope_type or ("dynamic" if factor else "default")
+    expected = {
+        "rope_type": expected_type,
+        "rope_theta": 1000.0,
+        "partial_rotary_factor": 1.0,
+    }
+    if expected_type != "default":
+        expected["factor"] = 4.0 if rope_type else factor
+    assert config.rope_parameters == expected
+
+    # get_config also patches get_text_config(), which can be the same object.
+    patch_rope_parameters(config)
+    assert config.rope_parameters == expected
 
 
 @pytest.mark.parametrize("layout", ["mixed", "flat"])
