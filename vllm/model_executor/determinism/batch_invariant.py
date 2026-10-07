@@ -743,6 +743,19 @@ def mm_batch_invariant(a, b, bias=None):
 
 
 def mm_dtype_batch_invariant(a, b, out_dtype, *, out=None):
+    # Same dtype checks as ATen's CUDA mm.dtype / mm.dtype_out.
+    if a.dtype != b.dtype:
+        raise RuntimeError("input dtypes must be the same")
+    if out_dtype != a.dtype and not (
+        out_dtype == torch.float32 and a.dtype in (torch.float16, torch.bfloat16)
+    ):
+        raise RuntimeError(
+            "out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs"
+        )
+    if out is not None and out.dtype != out_dtype:
+        raise RuntimeError(
+            "out_dtype must be the same as the dtype of the provided out tensor"
+        )
     result = matmul_persistent(a, b, out_dtype=out_dtype)
     return result if out is None else out.copy_(result)
 
