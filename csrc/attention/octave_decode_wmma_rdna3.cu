@@ -47,6 +47,8 @@ using octave::Format;
 using octave::LUT_ONE;
 using octave::R;
 constexpr int QG = 4;        // query tokens per block
+constexpr int kWindow = 64;  // exact recent positions (sparse window mode)
+constexpr int kSinks = 4;    // exact leading positions (sparse window mode)
 constexpr int QROW = D + 8;  // padded LDS row (bank spread)
 constexpr float PSCALE = 256.0f;
 constexpr float BIAS = 1152.0f;  // int8 byte x fed as x + 1152
@@ -123,7 +125,9 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     int num_phys_blocks, int num_splits, int min_tps, int num_row_tiles,
     int64_t sq0, int64_t sq1, int64_t scb, int64_t sch, int64_t sct,
     int64_t smo, int64_t smh, int64_t sms, const int* __restrict__ idx,
-    int64_t sidx, int topk) {
+    int64_t sidx, int topk, const int* __restrict__ qpos,
+    const int* __restrict__ wtags, int wmask, const int* __restrict__ stags,
+    int smask) {
   #ifndef OCTAVE_WMMA_STUB
   using F = Format<VB, KC>;
   constexpr int NG = KC ? 1 : 4;  // QK tiles (one per K scale)
@@ -294,6 +298,16 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
                            : -1;
         return (pb >= 0 && pb < num_phys_blocks) ? pb : -1;
       };
+      // Exact-window tokens (attended by octave_window_attn instead): the
+      // last kWindow positions before the query, and the first kSinks.
+      const int rpos = SP && wtags ? qpos[grp * QG + seg0] : 0;
+      auto in_window = [&](int pos, int pb, int off) {
+        const int t = irow[min(pos, topk - 1)];
+        const int d = rpos - t;
+        const int slot = pb * block_size + off;
+        return (d >= 0 && d < kWindow && wtags[slot & wmask] == slot) ||
+               (t >= 0 && t < kSinks && stags[slot & smask] == slot);
+      };
       auto sel_ptr = [&](int pos) {
         int off;
         const int pb = sel_block(pos, off);
@@ -445,7 +459,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
           bool ok = t < end && t < qlen;
           if constexpr (SP) {
             int off;
-            ok = ok && sel_block(t, off) >= 0;
+            const int pb = sel_block(t, off);
+            ok = ok && pb >= 0 && !(wtags && in_window(t, pb, off));
           }
           const uint32_t a = pickw(sa_c, 2 * e);
           float v;
@@ -579,7 +594,9 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        torch::Tensor q_to_klen, torch::Tensor mid_o,
                        torch::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t fmt,
-                       const std::optional<torch::Tensor>& indices) {
+                       const std::optional<torch::Tensor>& indices,
+                       const int* qpos, const int* wtags, int wmask,
+                       const int* stags, int smask) {
   using namespace octave_wmma;
   static const bool arch_ok = [] {
     const auto* prop = at::cuda::getCurrentDeviceProperties();
@@ -614,7 +631,8 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
         num_kv_heads, cache.size(2), block_table.size(1), block_table.size(0), \
         cache.size(0), ns, kSqWmmaMinTps, nrt, query.stride(0),                \
         query.stride(1), cache.stride(0), cache.stride(1), cache.stride(2),    \
-        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2), idx, sidx, topk)
+        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2), idx, sidx, topk,    \
+        qpos, wtags, wmask, stags, smask)
   #define SQW(B, KC, T)          \
     do {                         \
       if (sp)                    \

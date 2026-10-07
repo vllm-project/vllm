@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import ClassVar, cast
 
 import torch
@@ -68,8 +69,15 @@ def _octave_mid_o_capacity(vllm_config: VllmConfig) -> int:
     capture = vllm_config.compilation_config.max_cudagraph_capture_size or 4
     return max(
         capture * vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph,
-        vllm_config.scheduler_config.max_num_batched_tokens,
+        2 * vllm_config.scheduler_config.max_num_batched_tokens,
     )
+
+
+# Exact window of the Octave QSA cache: fp16 shadow tables (entries, powers of
+# two) of every stored token and of each sequence's leading positions; the
+# kernels keep the last 64 and the first 4 selected positions exact.
+_OCTAVE_WINDOW_ENTRIES = 16384
+_OCTAVE_SINK_ENTRIES = 2048
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -181,6 +189,22 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
             )
             self._octave_capacity = _octave_mid_o_capacity(vllm_config)
+            self._octave_positions: torch.Tensor | None = None
+            self._octave_window = os.environ.get("VLLM_QSA_OCTAVE_WINDOW", "1") == "1"
+            if self._octave_window:
+                device = torch.device("cuda", torch.cuda.current_device())
+                dtype = vllm_config.model_config.dtype
+                row = (self.num_kv_heads, 2 * self.head_size)
+
+                def table(entries: int) -> tuple[torch.Tensor, ...]:
+                    return (
+                        torch.zeros((entries, *row), dtype=dtype, device=device),
+                        torch.full((entries,), -1, dtype=torch.int32, device=device),
+                        torch.zeros(entries, dtype=torch.int32, device=device),
+                    )
+
+                self._wtab, self._wtags, self._wlocks = table(_OCTAVE_WINDOW_ENTRIES)
+                self._stab, self._stags, self._slocks = table(_OCTAVE_SINK_ENTRIES)
 
     def _octave_buffers(
         self, num_q: int, device: torch.device
@@ -192,6 +216,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             self._octave_signs = rocm_octave.sign_bits(self.head_size).to(device)
         capacity = self._octave_capacity
         splits = max(1, min(self._octave_splits, capacity // max(num_q, 1)))
+        if self._octave_window:
+            splits = max(2, splits)
         row = self.head_size + 2
         numel = capacity * self.num_heads * row
         if is_workspace_manager_initialized():
@@ -235,6 +261,20 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             signs,
             self.octave_fmt.kernel_code,
         )
+        if self._octave_window:
+            assert self._octave_positions is not None
+            torch.ops._C.octave_window_store(
+                key[:n],
+                value[:n],
+                slot_mapping,
+                self._octave_positions[:n],
+                self._wtab,
+                self._wtags,
+                self._wlocks,
+                self._stab,
+                self._stags,
+                self._slocks,
+            )
 
     def forward_qsa(
         self,
@@ -282,6 +322,17 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 self.scale,
                 splits,
                 self.octave_fmt.kernel_code,
+                *(
+                    (
+                        self._octave_positions[:num_tokens],
+                        self._wtab,
+                        self._wtags,
+                        self._stab,
+                        self._stags,
+                    )
+                    if self._octave_window
+                    else ()
+                ),
             )
             return output
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
@@ -506,6 +557,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         ):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
+        if impl.octave_fmt is not None:
+            flat = positions[0] if positions.dim() == 2 else positions
+            impl._octave_positions = flat.to(torch.int32)
         impl.do_kv_cache_update(
             self,
             key,

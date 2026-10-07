@@ -71,7 +71,18 @@ void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
                           torch::Tensor q_to_req, torch::Tensor indices,
                           torch::Tensor mid_o, torch::Tensor k_signs,
                           torch::Tensor v_signs, double sm_scale,
-                          int64_t num_kv_splits, int64_t fmt);
+                          int64_t num_kv_splits, int64_t fmt,
+                          const std::optional<torch::Tensor>& positions,
+                          const std::optional<torch::Tensor>& wtab,
+                          const std::optional<torch::Tensor>& wtags,
+                          const std::optional<torch::Tensor>& stab,
+                          const std::optional<torch::Tensor>& stags);
+
+void octave_window_store(torch::Tensor key, torch::Tensor value,
+                         torch::Tensor slot_mapping, torch::Tensor positions,
+                         torch::Tensor wtab, torch::Tensor wtags,
+                         torch::Tensor wlocks, torch::Tensor stab,
+                         torch::Tensor stags, torch::Tensor slocks);
 
 void octave_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
                    bool inverse);
