@@ -41,19 +41,21 @@ class SpecDecodingStats:
         )
 
     def observe_draft_stats_per_req(
-        self, num_draft_tokens: int, num_accepted_tokens: int
+        self,
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+        num_verified_draft_tokens: int | None = None,
     ):
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
+        if num_verified_draft_tokens is not None:
+            self.num_verified_draft_tokens += num_verified_draft_tokens
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
         for i in range(num_draft_tokens):
             self.num_draft_tokens_per_pos[i] += 1
-
-    def observe_draft_stats_per_batch(self, num_verified_draft_tokens: int):
-        self.num_verified_draft_tokens += num_verified_draft_tokens
 
 
 class SpecDecodingLogging:
