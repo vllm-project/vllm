@@ -78,26 +78,43 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         return q_layernorm(q_c), kv_layernorm(kv_c)
 
-    @torch.no_grad()
-    def _build_w_fold(self) -> None:
-        """W_fold = [W_UK @ W_qb_nope ; W_qb_pe]: one GEMM gives [ql_nope | q_pe]."""
-        assert self.q_b_proj is not None
-        N, P, R, L = (
-            self.num_heads,
-            self.qk_nope_head_dim,
-            self.qk_rope_head_dim,
-            self.kv_lora_rank,
-        )
-        w_qb = self.q_b_proj.weight  # [N * (P + R), q_lora_rank]
-        W_UK, _ = split_kv_b_proj(
-            self.mla_attn.kv_b_proj, w_qb.dtype, L, N, P, self.v_head_dim
-        )  # [L, N, P]
+    @staticmethod
+    def _compute_w_fold(
+        w_qb: torch.Tensor,
+        w_uk: torch.Tensor,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+    ) -> torch.Tensor:
+        """W_fold = [W_UK @ W_qb_nope ; W_qb_pe]: one GEMM gives [ql_nope | q_pe].
+
+        ``w_qb`` is the q_b_proj weight [N * (P + R), Lq], ``w_uk`` is [L, N, P].
+        Rows hold all heads' nope rows, then all pe rows, so the two output
+        halves of ``x @ W_fold.T`` are contiguous: [B, N * L] and [B, N * R]."""
+        N, P, R = num_heads, qk_nope_head_dim, qk_rope_head_dim
+        L = w_uk.shape[0]
         w = w_qb.view(N, P + R, -1).float()
-        nope = torch.einsum("lnp,npk->nlk", W_UK.float(), w[:, :P])  # [N, L, Lq]
-        self._w_fold = (
+        nope = torch.einsum("lnp,npk->nlk", w_uk.float(), w[:, :P])  # [N, L, Lq]
+        return (
             torch.cat([nope.reshape(N * L, -1), w[:, P:].reshape(N * R, -1)])
             .to(w_qb.dtype)
             .contiguous()
+        )
+
+    @torch.no_grad()
+    def _build_w_fold(self) -> None:
+        assert self.q_b_proj is not None
+        w_qb = self.q_b_proj.weight  # [N * (P + R), q_lora_rank]
+        W_UK, _ = split_kv_b_proj(
+            self.mla_attn.kv_b_proj,
+            w_qb.dtype,
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim,
+            self.v_head_dim,
+        )  # [L, N, P]
+        self._w_fold = self._compute_w_fold(
+            w_qb, W_UK, self.num_heads, self.qk_nope_head_dim, self.qk_rope_head_dim
         )
 
     def _absorb_q_nope(self, q_nope: torch.Tensor, layer) -> torch.Tensor:
