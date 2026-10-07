@@ -162,6 +162,7 @@ def test_native_decode_matches_staged_decode(num_tokens, k_scale):
         bmm1_scale=bmm1_scale * inv_k_scale,
         bmm2_scale=bmm2_scale * inv_k_scale,
         out=native,
+        backend="cuda",
     )
     torch.accelerator.synchronize()
 
