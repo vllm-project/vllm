@@ -444,3 +444,25 @@ def test_sampler_bad_words(
                 assert logits_for_req[token_id] == -float("inf")
             else:
                 assert logits_for_req[token_id] != -float("inf")
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_sampler_logprob_token_ids_ranks(device: str):
+    """Every requested column gets its own vocab rank (ties count as >=)."""
+    logprobs = torch.tensor(
+        [[-1.0, -0.5, -3.0, -2.0, -4.0], [-2.0, -1.0, -1.0, -0.1, -5.0]],
+        device=device,
+    )
+    sampled = torch.tensor([1, 3], device=device)
+    # Other tests in this module change the default device; the sampler
+    # builds its pinned staging buffers on it.
+    with torch.device("cpu"):
+        output = Sampler().gather_specific_token_logprobs(
+            logprobs, {0: [4, 0, 2], 1: [2]}, sampled
+        )
+    assert output is not None
+    assert output.logprob_token_ids.tolist() == [[1, 4, 0, 2], [3, 2, 0, 0]]
+    ranks = output.selected_token_ranks.tolist()
+    assert ranks[0] == [1, 5, 2, 4]
+    # Token 2 ties token 1 at -1.0, so both count toward its rank.
+    assert ranks[1][:2] == [1, 3]

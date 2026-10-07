@@ -627,6 +627,65 @@ def test_all_logprobs(example_prompts):
                 assert len(prompt_logprob) == vocab_size
 
 
+@pytest.mark.parametrize(
+    "use_v2_model_runner",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.xfail(
+                reason="Known bug #60357 on Model Runner V2 (fixed by PR #36746)",
+                strict=False,
+            ),
+        ),
+    ],
+)
+def test_logprob_token_ids_ranks(
+    monkeypatch: pytest.MonkeyPatch, example_prompts, use_v2_model_runner: bool
+):
+    """`logprob_token_ids` entries report vocab ranks, not request positions."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_model_runner else "0")
+    with VllmRunner(
+        "facebook/opt-125m",
+        max_logprobs=-1,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        max_model_len=256,
+    ) as runner:
+        full = runner.llm.generate(
+            example_prompts,
+            SamplingParams(temperature=0.0, max_tokens=3, logprobs=-1),
+        )
+        # Request ids worst-first with the greedy token in the middle, so list
+        # positions disagree with vocab ranks.
+        params = []
+        for output in full:
+            first = output.outputs[0].logprobs[0]
+            by_rank = sorted(first, key=lambda t: first[t].logprob, reverse=True)
+            ids = [by_rank[i] for i in (99, 9, 0, 29)]
+            params.append(
+                SamplingParams(temperature=0.0, max_tokens=3, logprob_token_ids=ids)
+            )
+        selected = runner.llm.generate(example_prompts, params)
+
+    for full_output, selected_output in zip(full, selected):
+        full_completion = full_output.outputs[0]
+        completion = selected_output.outputs[0]
+        assert completion.token_ids == full_completion.token_ids
+        for full_pos, pos in zip(full_completion.logprobs, completion.logprobs):
+            vocab_logprobs = np.array([lp.logprob for lp in full_pos.values()])
+            for token_id, logprob in pos.items():
+                ref = full_pos[token_id].logprob
+                # Ranks count tokens whose logit is >= the token's own, so a
+                # tie may land anywhere in its run of equal logprobs.
+                best = 1 + int((vocab_logprobs > ref).sum())
+                worst = int((vocab_logprobs >= ref).sum())
+                assert best <= logprob.rank <= worst, (
+                    f"token {token_id}: rank {logprob.rank}, "
+                    f"expected within [{best}, {worst}]"
+                )
+
+
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 def test_logprobs_mode(logprobs_mode: LogprobsMode):
     """Test with LLM engine with different logprobs_mode.
