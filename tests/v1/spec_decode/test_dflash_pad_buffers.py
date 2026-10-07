@@ -26,10 +26,13 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     _pad_dflash_buffers_kernel,
 )
 
+
 # Mirror the production sizing rule rather than a fixed width, so the
 # test exercises the block size the speculator would actually launch.
 def _pad_block_size(pad_span):
     return min(1024, triton.next_power_of_2(max(1, pad_span)))
+
+
 SENTINEL = -12345
 
 
@@ -83,8 +86,9 @@ def _launch(bufs, num_reqs, num_query_per_req, num_spec, max_num_reqs, max_num_t
     )
 
 
-def _expected(num_reqs, num_query_per_req, num_spec, max_num_reqs, max_num_tokens,
-              device):
+def _expected(
+    num_reqs, num_query_per_req, num_spec, max_num_reqs, max_num_tokens, device
+):
     """The serial padding this kernel replaced, written directly."""
     last_query_end = num_reqs * num_query_per_req
     e = _buffers(max_num_reqs, max_num_tokens, num_spec, device)
@@ -112,11 +116,13 @@ def test_padding_matches_serial_version(num_reqs, num_spec, max_num_tokens):
     dev = "cuda"
     got = _buffers(max_num_reqs, max_num_tokens, num_spec, dev)
     _launch(got, num_reqs, num_query_per_req, num_spec, max_num_reqs, max_num_tokens)
-    want = _expected(num_reqs, num_query_per_req, num_spec, max_num_reqs,
-                     max_num_tokens, dev)
+    want = _expected(
+        num_reqs, num_query_per_req, num_spec, max_num_reqs, max_num_tokens, dev
+    )
     for name in got:
-        torch.testing.assert_close(got[name], want[name], atol=0, rtol=0,
-                                   msg=lambda m, n=name: f"{n}: {m}")
+        torch.testing.assert_close(
+            got[name], want[name], atol=0, rtol=0, msg=lambda m, n=name: f"{n}: {m}"
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
