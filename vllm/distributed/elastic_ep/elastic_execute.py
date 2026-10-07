@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.distributed import P2POp
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import ParallelConfig, set_current_vllm_config
@@ -74,6 +75,53 @@ def can_reuse_fused_moe_kernel(parallel_config: ParallelConfig) -> bool:
     disconnected, masked, or unmasked.
     """
     return parallel_config.all2all_backend == "nixl_ep"
+
+
+def nixl_ep_v2_max_ep_size(parallel_config: ParallelConfig) -> int:
+    """The largest EP size the job can reach.
+
+    The EP group spans the TP x PCP GPUs of every DP rank; elastic_ep_max_dp_size
+    is the DP size when elastic EP is off.
+
+    Args:
+        parallel_config: The job's parallel config.
+
+    Returns:
+        TP x PCP x the maximum DP size.
+
+    """
+    return (
+        parallel_config.tensor_parallel_size
+        * parallel_config.prefill_context_parallel_size
+        * parallel_config.elastic_ep_max_dp_size
+    )
+
+
+def nixl_ep_v2_domain_size(parallel_config: ParallelConfig) -> int:
+    """GPUs per NVLink domain for nixl_ep_v2.
+
+    Args:
+        parallel_config: The job's parallel config.
+
+    Returns:
+        VLLM_NIXL_EP_V2_DOMAIN_SIZE if set, capped at the maximum EP size (a
+        larger domain holds the whole job). Otherwise 0 for a fixed EP size,
+        which lets nixl_ep_v2 infer the domains, and the maximum EP size under
+        elastic EP, which puts the whole maximum world in one domain.
+
+    Raises:
+        ValueError: If VLLM_NIXL_EP_V2_DOMAIN_SIZE is negative.
+
+    """
+    domain_size = envs.VLLM_NIXL_EP_V2_DOMAIN_SIZE
+    if domain_size < 0:
+        raise ValueError(
+            f"VLLM_NIXL_EP_V2_DOMAIN_SIZE must be 0 or positive, got {domain_size}"
+        )
+    max_ep_size = nixl_ep_v2_max_ep_size(parallel_config)
+    if domain_size:
+        return min(domain_size, max_ep_size)
+    return max_ep_size if parallel_config.enable_elastic_ep else 0
 
 
 def batch_transfer_weights(

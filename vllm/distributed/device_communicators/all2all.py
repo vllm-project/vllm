@@ -26,6 +26,7 @@ from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
     has_mori,
+    has_nixl_ep_v2,
 )
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -656,6 +657,214 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         state.buffer.clean_mask_buffer()
         torch.accelerator.synchronize()
         NixlEPAll2AllManager._last_mask = None
+
+
+@dataclass
+class _NixlEPV2State:
+    buffer: Any
+    kwargs: dict[str, Any]  # built for these get_handle() args; later calls must match
+    max_num_ep_ranks: int
+    num_sms: int  # active SMs per dispatch
+
+
+def _nixl_ep_v2_num_sms(num_launch_sms: int) -> int:
+    """The active SMs per dispatch and combine.
+
+    Args:
+        num_launch_sms: The buffer's fixed launch grid.
+
+    Returns:
+        VLLM_NIXL_EP_V2_NUM_SMS, or the launch grid when it is 0.
+
+    Raises:
+        ValueError: If VLLM_NIXL_EP_V2_NUM_SMS is not an even number from 2
+            to the launch grid, which nixl_ep_v2 would silently clamp.
+
+    """
+    num_sms = envs.VLLM_NIXL_EP_V2_NUM_SMS
+    if not num_sms:
+        return num_launch_sms
+    if num_sms % 2 or not 2 <= num_sms <= num_launch_sms:
+        raise ValueError(
+            f"nixl_ep_v2: VLLM_NIXL_EP_V2_NUM_SMS={num_sms} must be an even "
+            f"number from 2 to the launch grid of {num_launch_sms} SMs, or 0"
+        )
+    return num_sms
+
+
+def _nixl_ep_v2_world_args(
+    rank: int, ep_size: int, max_ep_size: int, domain_size: int
+) -> dict[str, int]:
+    """ElasticBuffer arguments that place EP rank `rank` in the maximum world.
+
+    With domain size 0, nixl_ep_v2 infers the domains from the starting ranks
+    and sizes the buffer for them. Otherwise the maximum world is
+    max_ep_size // domain_size NVLink domains of domain_size GPUs, and EP rank
+    `rank` sits in domain rank // domain_size at position rank % domain_size,
+    which is nixl_ep_v2's dense rank order.
+
+    Args:
+        rank: This GPU's EP rank.
+        ep_size: The starting EP size (the ranks that build the buffer).
+        max_ep_size: The largest EP size the job can reach.
+        domain_size: GPUs per NVLink domain; 0 to let nixl_ep_v2 infer it.
+
+    Returns:
+        {} for domain size 0. Otherwise max_num_scaleout_ranks,
+        max_num_scaleup_ranks, scaleout_rank_idx, scaleup_rank_idx and
+        num_group_scaleup_ranks for the ElasticBuffer constructor.
+
+    Raises:
+        ValueError: If max_ep_size is not whole domains, or ep_size is larger
+            than one domain but not whole domains.
+
+    """
+    if not domain_size:
+        return {}
+    if max_ep_size % domain_size:
+        raise ValueError(
+            f"nixl_ep_v2: the max EP size {max_ep_size} is not a whole number "
+            f"of NVLink domains of {domain_size} GPUs; set "
+            "VLLM_NIXL_EP_V2_DOMAIN_SIZE to the GPUs per domain"
+        )
+    # nixl_ep_v2 builds the buffer only in whole domains, or in part of the
+    # first one.
+    if ep_size > domain_size and ep_size % domain_size:
+        raise ValueError(
+            f"nixl_ep_v2: the starting EP size {ep_size} must fit in one NVLink "
+            f"domain of {domain_size} GPUs or fill whole domains"
+        )
+    return dict(
+        max_num_scaleout_ranks=max_ep_size // domain_size,
+        max_num_scaleup_ranks=domain_size,
+        scaleout_rank_idx=rank // domain_size,
+        scaleup_rank_idx=rank % domain_size,
+        num_group_scaleup_ranks=min(domain_size, ep_size),
+    )
+
+
+class NixlEPV2All2AllManager(All2AllManagerBase):
+    """All2All communication based on NIXL EP v2 (nixl.runtime.ep): the
+    topology-adaptive EP kernels on NIXL.
+
+    One ElasticBuffer per process, sized for the maximum EP size, serves every
+    MoE layer and is kept when elastic EP re-creates the manager.
+
+    Args:
+        cpu_group: The EP group's CPU process group.
+        tcp_store_group: The Store group for the NIXL bootstrap; elastic EP
+            passes its own. None builds one over the cpu_group's Store.
+
+    """
+
+    _state: _NixlEPV2State | None = None
+    _lock = threading.RLock()
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        assert has_nixl_ep_v2(), (
+            "nixl_ep_v2 needs nixl.runtime.ep: install a NIXL build with "
+            "NIXL EP v2 for this PyTorch version (see the warning above if it "
+            "was found but failed to import)."
+        )
+        # A joining rank would wait for a cohort that never builds the buffer.
+        assert not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH, (
+            "nixl_ep_v2 does not support elastic EP scale-up yet"
+        )
+        if tcp_store_group is None:
+            tcp_store_group = StatelessProcessGroup(
+                rank=cpu_group.rank(),
+                world_size=cpu_group.size(),
+                store=dist.PrefixStore("nixl_ep_v2", cpu_group.get_group_store()),
+            )
+        super().__init__(cpu_group, tcp_store_group)
+
+    @property
+    def max_num_ep_ranks(self) -> int:
+        """The largest EP size the buffer is sized for; set by the first
+        get_handle() call."""
+        assert NixlEPV2All2AllManager._state is not None
+        return NixlEPV2All2AllManager._state.max_num_ep_ranks
+
+    def get_handle(self, kwargs: dict[str, Any]) -> Any:
+        """The process's ElasticBuffer, built on the first call.
+
+        Args:
+            kwargs: num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch
+                and num_local_experts; every call must pass equal kwargs.
+
+        Returns:
+            The nixl_ep_v2 ElasticBuffer shared by every MoE layer.
+
+        Raises:
+            AssertionError: If kwargs differ from the first call's.
+
+        """
+        with NixlEPV2All2AllManager._lock:
+            if NixlEPV2All2AllManager._state is None:
+                NixlEPV2All2AllManager._state = self._make_state(kwargs)
+            state = NixlEPV2All2AllManager._state
+            # One buffer serves every MoE layer, so every layer must ask for
+            # the same sizes.
+            assert kwargs == state.kwargs, (
+                f"nixl_ep_v2 buffer was built for {state.kwargs}, got {kwargs}"
+            )
+            return state.buffer
+
+    def _make_state(self, kwargs: dict[str, Any]) -> _NixlEPV2State:
+        from nixl.runtime.ep import ElasticBuffer  # type: ignore[import-not-found]
+
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            nixl_ep_v2_domain_size,
+            nixl_ep_v2_max_ep_size,
+        )
+
+        parallel_config = get_current_vllm_config().parallel_config
+        max_num_ep_ranks = nixl_ep_v2_max_ep_size(parallel_config)
+        world = _nixl_ep_v2_world_args(
+            self.rank,
+            self.world_size,
+            max_num_ep_ranks,
+            nixl_ep_v2_domain_size(parallel_config),
+        )
+        buffer = ElasticBuffer(
+            rank_idx=self.rank,
+            num_ranks=self.world_size,
+            store=self.tcp_store_group.store,
+            bootstrap_id="nixl_ep_v2",
+            num_max_tokens_per_rank=kwargs["num_max_tokens_per_rank"],
+            hidden=kwargs["hidden"],
+            num_topk=kwargs["num_topk"],
+            use_fp8_dispatch=kwargs["use_fp8_dispatch"],
+            num_experts_per_rank=kwargs["num_local_experts"],
+            prefer_overlap_with_compute=envs.VLLM_NIXL_EP_V2_PREFER_OVERLAP,
+            allow_multiple_reduction=envs.VLLM_NIXL_EP_V2_ALLOW_MULTIPLE_REDUCTION,
+            explicitly_destroy=True,
+            **world,
+        )
+        return _NixlEPV2State(
+            buffer,
+            dict(kwargs),
+            max_num_ep_ranks,
+            _nixl_ep_v2_num_sms(buffer.num_launch_sms),
+        )
+
+    @property
+    def num_sms(self) -> int:
+        """The active SMs per dispatch and combine; set by the first
+        get_handle() call."""
+        assert NixlEPV2All2AllManager._state is not None
+        return NixlEPV2All2AllManager._state.num_sms
+
+    def max_sms_used(self) -> int | None:
+        """SMs the dispatch and combine kernels work on.
+
+        Returns:
+            The active SMs per dispatch, or None before the first
+            get_handle() call.
+
+        """
+        state = NixlEPV2All2AllManager._state
+        return None if state is None else state.num_sms
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):

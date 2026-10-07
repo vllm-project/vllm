@@ -248,14 +248,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     self.cpu_group, tcp_store_group
                 )
             elif self.all2all_backend == "nixl_ep_v2":
-                # TODO: remove this raise and the type: ignore below when
-                # NixlEPV2All2AllManager lands.
-                raise NotImplementedError(
-                    "nixl_ep_v2 all2all manager is not implemented yet"
-                )
-                from .all2all import (  # type: ignore[attr-defined]
-                    NixlEPV2All2AllManager,
-                )
+                from .all2all import NixlEPV2All2AllManager
 
                 self.all2all_manager = NixlEPV2All2AllManager(
                     self.cpu_group, tcp_store_group
