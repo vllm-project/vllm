@@ -423,37 +423,40 @@ def _rdna_model_config(is_hybrid=False, num_heads=32, num_kv_heads=8):
 
 
 @pytest.mark.parametrize(
-    "rdna, selector_kwargs, vllm_config, expected_backend",
+    "arch, selector_kwargs, vllm_config, expected_backend",
     [
         # HIP paged-attention decode kernel usable: ROCM_ATTN stays default.
-        (True, {}, None, AttentionBackendEnum.ROCM_ATTN),
-        (True, {}, _rdna_model_config(), AttentionBackendEnum.ROCM_ATTN),
+        ("rdna4", {}, None, AttentionBackendEnum.ROCM_ATTN),
+        ("rdna4", {}, _rdna_model_config(), AttentionBackendEnum.ROCM_ATTN),
         # Not usable on RDNA: TRITON_ATTN is preferred.
-        (True, {"head_size": 256}, None, AttentionBackendEnum.TRITON_ATTN),
-        (True, {"block_size": 32}, None, AttentionBackendEnum.TRITON_ATTN),
-        (True, {"has_sink": True}, None, AttentionBackendEnum.TRITON_ATTN),
-        (True, {"has_sliding_window": True}, None, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"head_size": 256}, None, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"block_size": 32}, None, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"has_sink": True}, None, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"has_sliding_window": True}, None, AttentionBackendEnum.TRITON_ATTN),
         # ROCM_ATTN's Triton fallback measured faster: fp8 KV, head_size <= 64.
-        (True, {"kv_cache_dtype": "fp8"}, None, AttentionBackendEnum.ROCM_ATTN),
-        (True, {"head_size": 64}, None, AttentionBackendEnum.ROCM_ATTN),
+        ("rdna4", {"kv_cache_dtype": "fp8"}, None, AttentionBackendEnum.ROCM_ATTN),
+        ("rdna4", {"head_size": 64}, None, AttentionBackendEnum.ROCM_ATTN),
         (
-            True,
+            "rdna4",
             {},
             _rdna_model_config(is_hybrid=True),
             AttentionBackendEnum.TRITON_ATTN,
         ),
         (
-            True,
+            "rdna4",
             {},
             _rdna_model_config(num_heads=32, num_kv_heads=32),
             AttentionBackendEnum.TRITON_ATTN,
         ),
-        # Not RDNA: unchanged.
-        (False, {"head_size": 256}, None, AttentionBackendEnum.ROCM_ATTN),
+        # gfx1100 behaves like RDNA4.
+        ("gfx1100", {"head_size": 256}, None, AttentionBackendEnum.TRITON_ATTN),
+        ("gfx1100", {}, None, AttentionBackendEnum.ROCM_ATTN),
+        # Other archs (e.g. gfx1151, CDNA): unchanged.
+        ("other", {"head_size": 256}, None, AttentionBackendEnum.ROCM_ATTN),
     ],
 )
 def test_rdna_prefers_triton_attn_without_custom_paged_attention(
-    rdna,
+    arch,
     selector_kwargs,
     vllm_config,
     expected_backend,
@@ -463,7 +466,8 @@ def test_rdna_prefers_triton_attn_without_custom_paged_attention(
 ):
     import vllm.platforms.rocm as rocm
 
-    monkeypatch.setattr(rocm, "on_rdna", lambda: rdna)
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: arch == "rdna4")
+    monkeypatch.setattr(rocm, "on_gfx1100", lambda: arch == "gfx1100")
     kwargs = dict(
         head_size=128,
         dtype=torch.bfloat16,

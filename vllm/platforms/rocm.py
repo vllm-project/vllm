@@ -441,7 +441,7 @@ def _rdna_prefer_triton_attn(
     attn_selector_config: "AttentionSelectorConfig",
     vllm_config: "VllmConfig | None",
 ) -> bool:
-    """Whether TRITON_ATTN should be preferred over ROCM_ATTN on RDNA.
+    """Whether TRITON_ATTN should be preferred over ROCM_ATTN on RDNA4/gfx1100.
 
     ROCM_ATTN is fast on RDNA only when its HIP paged-attention decode kernel
     applies (the static conditions of use_rocm_custom_paged_attention());
@@ -740,10 +740,11 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
-        # On RDNA, prefer TRITON_ATTN over ROCM_ATTN when ROCM_ATTN cannot use
-        # its HIP paged-attention decode kernel.
+        # On RDNA4 and gfx1100, prefer TRITON_ATTN over ROCM_ATTN when ROCM_ATTN
+        # cannot use its HIP paged-attention decode kernel. Other RDNA parts
+        # (e.g. gfx1151) are not switched until TRITON_ATTN is tuned for them.
         if (
-            on_rdna()
+            (on_rdna4() or on_gfx1100())
             and AttentionBackendEnum.ROCM_ATTN in backend_priorities
             and AttentionBackendEnum.TRITON_ATTN in backend_priorities
             and _rdna_prefer_triton_attn(attn_selector_config, vllm_config)
