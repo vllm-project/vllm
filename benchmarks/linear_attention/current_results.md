@@ -11,19 +11,27 @@ TP: QwenNext 2, Qwen3.5 1, GLM 4; full Kimi 16/four nodes on GB200 and 8/two nod
 | Model / GPU | Job | State | Audited launches |
 | --- | --- | --- | ---: |
 | Kimi-K3 / GB200 | 3257663 | passed | 6/6 |
-| Kimi-K3 / GB300 | 3257664 | PENDING | 0/6 |
+| Kimi-K3 / GB300 | 3257664 | partial | 0/6 |
 | GLM-5.3-Flash / GB200 | 3257665 | model_validation_failed | 0/6 |
-| GLM-5.3-Flash / GB300 | 3257666 | PENDING | 0/6 |
+| GLM-5.3-Flash / GB300 | 3257666 | partial | 1/6 |
 | Qwen3-Next-80B-A3B-Instruct / GB200 | 3257667 | passed | 6/6 |
-| Qwen3-Next-80B-A3B-Instruct / GB300 | 3257668 | PENDING | 0/6 |
+| Qwen3-Next-80B-A3B-Instruct / GB300 | 3257668 | partial | 2/6 |
 | Qwen3.5-35B-A3B / GB200 | 3257669 | model_validation_failed | 3/6 |
-| Qwen3.5-35B-A3B / GB300 | 3257670 | PENDING | 0/6 |
+| Qwen3.5-35B-A3B / GB300 | 3257670 | partial | 2/6 |
 | GLM-5.3-Flash / GB200 | 3258192 | model_validation_failed | 0/6 |
 | Qwen3.5-35B-A3B / GB200 | 3258435 | passed | 6/6 |
+| GLM-5.3-Flash / GB200 | 3263484 | run_failed | 0/4 |
+| GLM-5.3-Flash / GB200 | 3263929 | RUNNING | 0/2 |
 
 Original GLM GB200 job3257665 stopped at FlashKDA GSM64 54/64 (floor55) before any timing. Qwen3.5 job3257669 stopped at reverse FI cuDNN 55/64 (floor56); its three forward launches are incomplete controls. Both failures remain excluded from balanced comparisons. Fixed-count diagnostics found GLM scores54–58/64 and Qwen3.5 scores55–58/64 on unchanged code; causes remain unknown. Each has one fresh comparison with unchanged gates (GLM3258192, Qwen3.5 3258435). No old partial timings are combined with these runs, and another gate failure stops the comparison.
 
 The bounded GLM GB200 retry (job 3258192) also stopped at its first FlashKDA GSM64 gate: 54/64, below the unchanged 55/64 floor, with zero invalid answers and normal finite generation. Exact runtime, checkpoint and server arguments match the original failed run apart from launcher paths. Neither FI arm, full GSM1319 nor timing ran. All 29 files / 391,949 bytes are retained. The cause remains unresolved. The gate remains unchanged, and no further retry is scheduled.
+
+**GLM GB200 FI-auto runtime failure:** independent job3263484 passed generation, GSM64 55/64 and full GSM1319 1205/1319 with zero invalid. Nine C1/C8/C32 bursts completed. The first measured C128 burst, after warmup, hit a `sample_tokens` worker RPC timeout. No explicit CUDA error or faulting kernel was recorded. Its 128 responses contained only 7,854/131,072 required output tokens; the harness rejected the result despite the stock client reporting 128 successful requests. Neither cuDNN launch started. All 82 files / 31,844,386 bytes are archived and verified. Partial bursts remain separate; no FI-auto performance retry or cross-allocation comparison.
+
+User-requested GLM GB200 comparison 3263484 runs FlashInfer auto and cuDNN independently of the failed FlashKDA baseline: four ABBA launches, unchanged generation/GSM64 gates for each FI arm, then full GSM1319 and the same 8192/1024 protocol. This protocol can provide two-backend results only after completion; no failed or historical FlashKDA timing is substituted.
+
+Standalone GLM GB200 cuDNN job 3263929 measures the arm that never started before FI-auto failed. Two fresh launches keep all model gates, full GSM1319 and the same timing protocol. No baseline or FI-auto retry; no matched cross-allocation comparison.
 
 ### Kimi-K3 / GB200 — job 3257663
 
@@ -168,7 +176,7 @@ Every burst is retained below and in current_results.json. Equal score floors do
 
 ## Completed current-stack prefill measurements
 
-Measured vLLM `2bc6cd95d3f02dac347c64e1c86ecc932a47dd4d`; FlashInfer `5146335b10ee45d8c0c3760a4cf7bbffb9084eeb` (#6078), frontend `734e22b8e7fdaae650cf68651919beab9263dcbb` (#1418), matching rebuilt native frontend 1.31.0, cuDNN 9.20, Torch 2.13.0+cu132. The cleaned PR preserves the measured runtime Python files byte for byte. The original-caller control uses vLLM `b163158` on these same current libraries; it is not an October 2 run.
+Measured vLLM `2bc6cd95d3f02dac347c64e1c86ecc932a47dd4d`; FlashInfer `5146335b10ee45d8c0c3760a4cf7bbffb9084eeb` (#6078), frontend `734e22b8e7fdaae650cf68651919beab9263dcbb` (#1418), matching rebuilt native frontend 1.31.0, cuDNN 9.20, Torch 2.13.0+cu132. Measured NVIDIA source files are unchanged; the AMD model file was restored separately at the user’s request. The original-caller control uses vLLM `b163158` on these same current libraries; it is not an October 2 run.
 
 Eight ABCD-DCBA launches on fixed nodes; 3 repeats per concurrency per launch; warmup before every repeat. Unprofiled 8192-input/1-output C1/C8/C32. Generation and GSM64 gates precede every timing client: Kimi 64/64, GLM at least 55/64, zero invalid. The GLM floor is a safety gate, not accuracy equivalence. No profiler or OS CPU observer. This workload has **no TPOT or decode-throughput measurement**.
 
