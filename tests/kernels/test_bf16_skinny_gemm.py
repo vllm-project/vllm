@@ -457,7 +457,9 @@ def test_glm52_projection_plans_are_separate() -> None:
         if backend == "dsv3_fused_a"
     } == {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
     assert {
-        num_tokens for num_tokens, (backend, _) in gate_up_plan.items() if backend == "cute"
+        num_tokens
+        for num_tokens, (backend, _) in gate_up_plan.items()
+        if backend == "cute"
     } == {1}
     assert all(backend == "cute" for backend, _ in gate_up_plan.values())
 
@@ -884,8 +886,9 @@ def _require_sm10x_and_cute() -> None:
     targets the whole SM10x family (including B200 / SM100), so the gate is
     ``is_device_capability_family(100)`` rather than an exact (10, 3) match.
     """
-    if not torch.cuda.is_available() or not current_platform.is_device_capability_family(
-        100
+    if (
+        not torch.cuda.is_available()
+        or not current_platform.is_device_capability_family(100)
     ):
         pytest.skip("GLM-5.2 low-latency GEMM requires SM10x")
     if not glm52_gemm.shape_dynamic_skinny_gemm.is_available():
@@ -893,8 +896,9 @@ def _require_sm10x_and_cute() -> None:
 
 
 def _require_sm10x_and_dsv3() -> None:
-    if not torch.cuda.is_available() or not current_platform.is_device_capability_family(
-        100
+    if (
+        not torch.cuda.is_available()
+        or not current_platform.is_device_capability_family(100)
     ):
         pytest.skip("GLM-5.2 low-latency GEMM requires SM10x")
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
@@ -1131,9 +1135,7 @@ DSV3_CASES = sorted(
 
 GLM_DSV3_CASES = [
     (num_tokens, spec)
-    for spec in (
-        glm52_gemm.GLM52_QKV_A_PROJECTION,
-    )
+    for spec in (glm52_gemm.GLM52_QKV_A_PROJECTION,)
     for num_tokens in sorted(_dsv3_probe_tokens(spec.dsv3_tokens))
 ]
 

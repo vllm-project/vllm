@@ -241,7 +241,10 @@ def enable_glm52_low_latency_gemm(
             weight.dtype,
             type(child.quant_method).__name__,
         )
-        if isinstance(child, RowParallelLinear) and getattr(child, "bias", None) is not None:
+        if (
+            isinstance(child, RowParallelLinear)
+            and getattr(child, "bias", None) is not None
+        ):
             logger.warning(
                 "GLM-5.2 low-latency GEMM: %s is a RowParallelLinear with a "
                 "bias; the plan bypasses biased layers silently.",
@@ -257,5 +260,7 @@ def enable_glm52_low_latency_gemm(
             "(0 switched)"
         )
     else:
-        logger.info("%s is ENABLED (%d projection(s) switched)", FEATURE_NAME, installed)
+        logger.info(
+            "%s is ENABLED (%d projection(s) switched)", FEATURE_NAME, installed
+        )
     _request_warmup(dtype, warmup_configs)

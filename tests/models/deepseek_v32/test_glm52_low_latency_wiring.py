@@ -109,8 +109,7 @@ def test_env_var_disables_and_logs(
         glm52_gemm.enable_glm52_low_latency_gemm(root, torch.bfloat16)
 
     assert any(
-        "GLM-5.2 low-latency GEMM plan is DISABLED (env override)"
-        in record.message
+        "GLM-5.2 low-latency GEMM plan is DISABLED (env override)" in record.message
         for record in caplog.records
     ), caplog.text
     # Nothing is touched: the stock methods survive.
@@ -119,8 +118,7 @@ def test_env_var_disables_and_logs(
         is glm52_gemm.UnquantizedLinearMethod
     )
     assert (
-        type(root.mlp.gate_up_proj.quant_method)
-        is glm52_gemm.UnquantizedLinearMethod
+        type(root.mlp.gate_up_proj.quant_method) is glm52_gemm.UnquantizedLinearMethod
     )
 
 
@@ -182,8 +180,7 @@ def test_enabler_leaves_non_bf16_model_untouched(
         is glm52_gemm.UnquantizedLinearMethod
     )
     assert (
-        type(root.mlp.gate_up_proj.quant_method)
-        is glm52_gemm.UnquantizedLinearMethod
+        type(root.mlp.gate_up_proj.quant_method) is glm52_gemm.UnquantizedLinearMethod
     )
 
 
