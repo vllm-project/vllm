@@ -54,8 +54,8 @@ class NonUvaBuffer:
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         if n is None:
-            return self._uva.copy_(self.cpu)
-        return self._uva[:n].copy_(self.cpu[:n])
+            return self._uva.copy_(self.cpu, non_blocking=True)
+        return self._uva[:n].copy_(self.cpu[:n], non_blocking=True)
 
 
 class UvaBufferPool:
