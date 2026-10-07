@@ -7,10 +7,11 @@ from __future__ import annotations
 import math
 import mmap
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
 
+import numpy as np
 import psutil
 import torch
 
@@ -21,8 +22,9 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
-from vllm.utils.torch_utils import current_stream
+from vllm.utils.torch_utils import async_tensor_h2d, current_stream
 from vllm.v1.attention.backend import max_decode_query_len
+from vllm.v1.hisparse.types import SparseKVResidencyUpdate
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
@@ -1104,11 +1106,58 @@ class HiSparseRuntime:
         return physical_topk_indices
 
 
+class HiSparseResidencyTable:
+    """GPU block of each resident page by request state row, and the per-step
+    gather by batch row that attention reads. Block 0 means not resident."""
+
+    def __init__(self, max_num_reqs: int, max_num_pages: int, device: torch.device):
+        self.state_rows = torch.zeros(
+            (max_num_reqs, max_num_pages), dtype=torch.int32, device=device
+        )
+        self.batch_rows = torch.zeros_like(self.state_rows)
+
+
+def update_hisparse_residency(
+    tables: Sequence[HiSparseResidencyTable],
+    updates: Mapping[str, SparseKVResidencyUpdate],
+    request_ids: Sequence[str],
+    request_state_indices: torch.Tensor,
+) -> None:
+    """Apply scheduled requests' residency changes, then gather this batch."""
+    if updates:
+        batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
+        rows: list[int] = []
+        pages: list[int] = []
+        block_ids: list[list[int]] = [[] for _ in tables]
+        for request_id, update in updates.items():
+            num_pages = len(update.block_ids[0])
+            rows.extend([batch_rows[request_id]] * num_pages)
+            pages.extend(range(update.start_page, update.start_page + num_pages))
+            for table_ids, group_ids in zip(block_ids, update.block_ids, strict=True):
+                table_ids.extend(group_ids)
+        values = async_tensor_h2d(
+            np.array([rows, pages, *block_ids], dtype=np.int32),
+            device=request_state_indices.device,
+        )
+        state_rows = request_state_indices[values[0]]
+        for table, table_ids in zip(tables, values[2:], strict=True):
+            table.state_rows[state_rows, values[1]] = table_ids
+    num_reqs = request_state_indices.numel()
+    for table in tables:
+        torch.index_select(
+            table.state_rows,
+            0,
+            request_state_indices,
+            out=table.batch_rows[:num_reqs],
+        )
+
+
 class HiSparseCacheHandle:
     """Attention-facing handle for resident KV and sparse offload state."""
 
     def __init__(self, runtime: HiSparseRuntime) -> None:
         self.view: PagedCacheView | None = None
+        self.residency: HiSparseResidencyTable | None = None
         self.block_table: torch.Tensor | None = None
         self.source_block_table: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None

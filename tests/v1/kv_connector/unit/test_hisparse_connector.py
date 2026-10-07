@@ -141,7 +141,7 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
     connector = object.__new__(HiSparseConnector)
     connector.connector_worker = worker
     connector._get_connector_metadata = MagicMock(
-        return_value=HiSparseConnectorMetadata(None, (), (), {}, True)
+        return_value=HiSparseConnectorMetadata(None, (), (), {}, True, {})
     )
     req_id_per_token = torch.tensor([0, 1], dtype=torch.int32)
     attn_metadata = SimpleNamespace(
@@ -279,6 +279,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
                 )
             },
             True,
+            {},
         )
     )
     # A verification step: four query tokens of one request fill the page.
@@ -312,7 +313,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     # The next step's start mirrors the drafter's rows, then hands the page over.
     compute_stream.wait_event.reset_mock()
     connector._get_connector_metadata.return_value = HiSparseConnectorMetadata(
-        None, (), (), {}, True
+        None, (), (), {}, True, {}
     )
     connector.start_load_kv(
         SimpleNamespace(),
@@ -355,7 +356,8 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
 
 
 def test_scheduled_prefix_hit_publishes_adopted_copies():
-    """Copies adopted after scheduling must reach the worker's block table."""
+    """Copies adopted after scheduling reach the worker as a residency update,
+    leaving the block-table row the scheduler output carries untouched."""
     from tests.v1.core.test_prefix_caching import (
         HISPARSE_BLOCK_SIZE,
         _allocate_scheduled,
@@ -401,7 +403,12 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
         num_scheduled_tokens={resumed.request_id: num_new_tokens},
     )
 
-    scheduler.build_connector_meta(scheduler_output)
+    core_row = list(scheduler_output.scheduled_new_reqs[0].block_ids[2])
 
-    resident_ids = scheduler_output.block_table_updates[resumed.request_id][2]
-    assert resident_ids[:3] == copy_ids[:3]
+    metadata = scheduler.build_connector_meta(scheduler_output)
+
+    update = metadata.residency_updates[resumed.request_id]
+    assert update.start_page == 0
+    assert update.block_ids[0][:3] == copy_ids[:3]
+    assert manager.get_block_ids(resumed.request_id)[2] == core_row
+    assert core_row[:3] == [0, 0, 0]

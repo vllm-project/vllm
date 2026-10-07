@@ -17,6 +17,7 @@ from vllm.v1.hisparse.layout import (
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseHostPool,
+    HiSparseResidencyTable,
     initialize_hisparse_runtime_buffers,
     release_pinned_state,
 )
@@ -224,6 +225,11 @@ def bind_hisparse_kv_caches(
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         if not isinstance(group.kv_cache_spec, HiSparseResidentSpec):
             continue
+        core_table = block_tables.input_block_tables[group_id]
+        max_num_reqs, max_num_pages = core_table.shape
+        residency = HiSparseResidencyTable(
+            max_num_reqs, max_num_pages, core_table.device
+        )
         for cache_name in group.layer_names:
             assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
@@ -236,9 +242,10 @@ def bind_hisparse_kv_caches(
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
-                block_table=block_tables.input_block_tables[group_id],
+                block_table=residency.batch_rows,
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
+            cache_handle.residency = residency
             assert cache_handle.view is not None
             kv_caches[cache_name] = cache_handle.view.cache
             cache_handle.runtime.resident_source_index = resident_source_index
