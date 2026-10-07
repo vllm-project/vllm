@@ -139,6 +139,13 @@ def _installed_version(distribution: str) -> str | None:
         return None
 
 
+def has_flashinfer_jit_cache_wheels() -> bool:
+    """Return whether FlashInfer publishes flashinfer-jit-cache for the installed
+    PyTorch's CUDA version, which it does from CUDA 12.9."""
+    cuda_version = torch.version.cuda
+    return cuda_version is not None and Version(cuda_version) >= Version("12.9")
+
+
 def warn_if_flashinfer_kernels_missing() -> None:
     """Warn on Hopper and newer GPUs when FlashInfer's precompiled kernels are
     missing or were installed for another FlashInfer version."""
@@ -149,9 +156,11 @@ def warn_if_flashinfer_kernels_missing() -> None:
     ):
         return
     flashinfer_version = _installed_version("flashinfer-python")
-    packages = ["flashinfer-jit-cache"]
+    packages = []
     if not envs.VLLM_HAS_FLASHINFER_CUBIN:
-        packages.insert(0, "flashinfer-cubin")
+        packages.append("flashinfer-cubin")
+    if has_flashinfer_jit_cache_wheels():
+        packages.append("flashinfer-jit-cache")
     installed = {name: _installed_version(name) for name in packages}
     if flashinfer_version is None or all(
         version == flashinfer_version for version in installed.values()
@@ -1386,5 +1395,6 @@ __all__ = [
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
     "is_flashinfer_cudnn_fp8_prefill_attn_supported",
+    "has_flashinfer_jit_cache_wheels",
     "warn_if_flashinfer_kernels_missing",
 ]

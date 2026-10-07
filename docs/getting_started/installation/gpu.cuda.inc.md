@@ -40,6 +40,8 @@ Hopper and newer GPUs, **especially Blackwell**, and logs a warning. Run it in t
 same Python environment after every vLLM install or upgrade, and in custom
 container images. The kernels are tied to the FlashInfer version, and FlashInfer
 refuses to import when they do not match, so an upgrade needs them refreshed.
+With a PyTorch built for CUDA older than 12.9, only `flashinfer-cubin` is
+installed, because FlashInfer does not publish `flashinfer-jit-cache` for it.
 For CUDA overrides and nightly kernels, use the
 [FlashInfer CLI](https://docs.flashinfer.ai/cli.html#download-kernels) directly.
 

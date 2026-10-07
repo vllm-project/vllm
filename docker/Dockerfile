@@ -917,9 +917,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # `vllm download-kernels` wraps this command but vLLM is only installed in later
 # stages, and running it there would rebuild this large layer for every wheel.
 RUN --mount=type=cache,target=/opt/pip/cache \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
-        PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels; \
-    fi
+    PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES

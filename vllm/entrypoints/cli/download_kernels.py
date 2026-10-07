@@ -30,7 +30,17 @@ def _download_flashinfer_kernels(dry_run: bool) -> int:
     if find_spec("flashinfer") is None:
         logger.info("FlashInfer is not installed; skipping its kernels.")
         return 0
-    cmd = [sys.executable, "-m", "flashinfer", "download-kernels"]
+    from vllm.utils.flashinfer import has_flashinfer_jit_cache_wheels
+
+    cmd = [sys.executable, "-m", "flashinfer"]
+    if has_flashinfer_jit_cache_wheels():
+        cmd.append("download-kernels")
+    else:
+        logger.info(
+            "FlashInfer does not publish flashinfer-jit-cache for this CUDA "
+            "version; installing flashinfer-cubin only."
+        )
+        cmd.append("install-cubin-wheel")
     if dry_run:
         cmd.append("--dry-run")
     # FlashInfer refuses to import while kernels from another FlashInfer version
@@ -43,6 +53,15 @@ class DownloadKernelsSubcommand(CLISubcommand):
     """The `download-kernels` subcommand for the vLLM CLI."""
 
     name = "download-kernels"
+
+    @staticmethod
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Print the install commands without running them.",
+        )
+        return parser
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -61,12 +80,7 @@ class DownloadKernelsSubcommand(CLISubcommand):
             ),
             usage="vllm download-kernels [--dry-run]",
         )
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Print the install commands without running them.",
-        )
-        return parser
+        return DownloadKernelsSubcommand.add_cli_args(parser)
 
 
 def cmd_init() -> list[CLISubcommand]:

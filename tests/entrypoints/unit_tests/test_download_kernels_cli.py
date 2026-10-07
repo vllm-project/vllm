@@ -68,6 +68,43 @@ def test_download_kernels_resolves_kernel_warning(
     assert not warns()
 
 
+def test_cuda_without_jit_cache_wheels_needs_only_cubin(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog_vllm: pytest.LogCaptureFixture,
+    disable_log_dedup,
+):
+    """FlashInfer publishes no flashinfer-jit-cache below CUDA 12.9, so the
+    command must not fail on it and the warning must not ask for it."""
+    commands = []
+    installed = {"flashinfer-python": "1.0", "flashinfer-cubin": "1.0"}
+
+    def version(name: str) -> str:
+        if name not in installed:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return installed[name]
+
+    def run(cmd: list[str], **kwargs) -> SimpleNamespace:
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.delenv("VLLM_HAS_FLASHINFER_CUBIN", raising=False)
+    monkeypatch.setattr(fi.torch.version, "cuda", "12.8")
+    monkeypatch.setattr(download_kernels, "find_spec", lambda name: object())
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    monkeypatch.setattr(fi, "has_flashinfer", lambda: True)
+    monkeypatch.setattr(
+        fi,
+        "current_platform",
+        SimpleNamespace(is_cuda=lambda: True, has_device_capability=lambda _: True),
+    )
+
+    assert download_kernels._download_flashinfer_kernels(dry_run=False) == 0
+    assert commands[0][-1] == "install-cubin-wheel"
+    fi.warn_if_flashinfer_kernels_missing()
+    assert "vllm download-kernels" not in caplog_vllm.text
+
+
 def test_download_kernels_skips_without_flashinfer(monkeypatch: pytest.MonkeyPatch):
     """Builds without FlashInfer (CPU, ROCm, XPU) have nothing to download."""
     monkeypatch.setattr(download_kernels, "find_spec", lambda name: None)

@@ -201,6 +201,8 @@ vllm download-kernels
 vllm download-kernels --dry-run
 ```
 
+See [vllm download-kernels](./download-kernels.md) for the full reference of all available arguments.
+
 ## run-batch
 
 Run batch prompts and write results to file.
