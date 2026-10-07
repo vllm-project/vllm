@@ -4,6 +4,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -116,6 +117,12 @@ _QUARK_MXFP4_CONFIG = {
 }
 
 
+class _StubGlm5NextAttention(torch.nn.Module):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self.o_proj = SimpleNamespace(reduce_results=True)
+
+
 @pytest.fixture(autouse=True)
 def reset_aiter_shared_expert_topk_metadata(monkeypatch: pytest.MonkeyPatch):
     """Isolate AITER's process-global shared-expert routing buffer."""
@@ -171,6 +178,19 @@ def _write_minimal_moe_config(model_path: Path, architecture: str) -> None:
             linear_num_key_heads=4,
             linear_num_value_heads=4,
             shared_expert_intermediate_size=256,
+        )
+    elif architecture == "Glm5NextForCausalLM":
+        config.update(
+            model_type="glm5_next",
+            layer_types=["linear_attention"],
+            mlp_layer_types=["sparse"],
+            qk_rope_head_dim=0,
+            index_topk=1,
+            index_kpool=1,
+            pad_token_id=None,
+            scoring_func="sigmoid",
+            topk_method="noaux_tc",
+            mhc=False,
         )
     else:
         config["model_type"] = "deepseek_v3" if "V3" in architecture else "deepseek_v2"
@@ -355,6 +375,7 @@ def test_online_shared_expert_reload_compatibility(
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
         "Glm4MoeForCausalLM",
+        "Glm5NextForCausalLM",
         "GlmMoeDsaForCausalLM",
         "Qwen3NextForCausalLM",
     ],
@@ -370,6 +391,14 @@ def test_online_quantization(
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
     rocm_aiter_ops.refresh_env_variables()
+    if architecture == "Glm5NextForCausalLM":
+        from vllm.models.glm5next.common import model as glm5_next_model
+
+        for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
+            monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
+        monkeypatch.setattr(
+            glm5_next_model, "_fused_shared_experts_tuned", lambda _: True
+        )
     _write_minimal_moe_config(tmp_path, architecture)
     expected_shared_expert_name = (
         "shared_expert" if architecture == "Qwen3NextForCausalLM" else "shared_experts"
