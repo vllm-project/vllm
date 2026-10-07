@@ -51,8 +51,9 @@ pub(crate) fn answer_format(params: &StructuredOutputsParams) -> Option<Format> 
 
 /// Apply one parser-built output grammar to the prepared text request.
 ///
-/// A parser-owned grammar replaces any structured output constraint the user
-/// supplied, matching the Python frontend. `None` leaves the request untouched.
+/// The parser has already composed the user's answer constraint into the
+/// grammar where its protocol allows, so the grammar replaces the request's
+/// structured outputs. `None` leaves the request untouched.
 pub(crate) fn apply_output_grammar(
     request: &mut TextRequest,
     built: Option<BuiltOutputGrammar>,

@@ -290,7 +290,9 @@ mod tests {
     use std::sync::Arc;
 
     use thiserror_ext::AsReport as _;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
     use vllm_tokenizer::test_utils::TestTokenizer;
+    use xgrammar_structural_tag::format::Format;
 
     use super::DefaultChatOutputProcessor;
     use crate::output::ChatOutputProcessor;
@@ -344,6 +346,44 @@ mod tests {
         assert_eq!(parameters, strict);
         assert_ne!(envelope, parameters);
         assert!(build(ToolStrictLevel::Parameter, None, ChatToolChoice::None).is_none());
+    }
+
+    #[test]
+    fn answer_constraint_keeps_optional_tool_calls() {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let mut request = ChatRequest {
+            tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)
+                .unwrap(),
+            ..ChatRequest::for_test()
+        };
+        let mut processor = DefaultChatOutputProcessor::new(
+            &mut request,
+            "other-model",
+            tokenizer(),
+            &ParserSelection::Explicit("qwen3_coder".to_string()),
+            &ParserSelection::None,
+            ToolStrictLevel::Auto,
+        )
+        .unwrap();
+        processor.initialize(&[]).unwrap();
+        let schema = serde_json::json!({"type": "object"});
+        let structured_outputs = StructuredOutputsParams::json(schema.clone());
+
+        // Non-strict `auto` alone needs no grammar; with an answer constraint
+        // the grammar holds the answer or a call.
+        assert!(processor.build_output_grammar(None).unwrap().is_none());
+        let built = processor.build_output_grammar(Some(&structured_outputs)).unwrap();
+        let built = built.unwrap();
+        let Format::Or(branches) = built.format else {
+            panic!("expected the calls or the answer, got {:?}", built.format);
+        };
+        assert_eq!(branches.elements.last(), Some(&Format::json_schema(schema)));
     }
 
     #[test]

@@ -4,9 +4,13 @@
 //! Adapter that combines reasoning and tool parsers.
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::format::Format;
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
-use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
+use crate::output_grammar::{
+    self, AnswerTools, BuiltOutputGrammar, OutputGrammarContext, answer_tools,
+    warn_answer_ignored_once,
+};
 use crate::reasoning::ReasoningParser;
 use crate::tool::{Tool, ToolParser, ToolParserOutput};
 
@@ -60,6 +64,61 @@ impl CombinedParser {
     }
 }
 
+/// The language of everything after reasoning, and whether it holds tool
+/// calls built by the tool parser.
+struct VisibleFormat {
+    format: Format,
+    has_calls: bool,
+}
+
+impl CombinedParser {
+    /// Build the visible language: the tool parser's calls, the user's answer
+    /// constraint, or both, as the tool choice allows.
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<VisibleFormat>> {
+        let calls = |ctx: &OutputGrammarContext<'_>| -> output_grammar::Result<Option<Format>> {
+            match self.tool.as_ref() {
+                Some(tool) => tool.build_visible_format(ctx),
+                None => Ok(None),
+            }
+        };
+        let with_calls = |format| VisibleFormat {
+            format,
+            has_calls: true,
+        };
+        let Some(answer) = ctx.answer else {
+            return Ok(calls(ctx)?.map(with_calls));
+        };
+        let answer_only = || {
+            Some(VisibleFormat {
+                format: answer.clone(),
+                has_calls: false,
+            })
+        };
+        Ok(match answer_tools(ctx) {
+            AnswerTools::None => answer_only(),
+            AnswerTools::Optional(required) => {
+                let required = OutputGrammarContext {
+                    tool_choice: &required,
+                    ..*ctx
+                };
+                match calls(&required)? {
+                    Some(calls) => Some(with_calls(Format::or(vec![calls, answer.clone()]))),
+                    // Without a tool grammar the calls cannot be held next to
+                    // the answer, so the answer applies alone, as in Python.
+                    None => answer_only(),
+                }
+            }
+            AnswerTools::Required => {
+                warn_answer_ignored_once();
+                calls(ctx)?.map(with_calls)
+            }
+        })
+    }
+}
+
 impl UnifiedParser for CombinedParser {
     fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
     where
@@ -87,10 +146,7 @@ impl UnifiedParser for CombinedParser {
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
-        let Some(tool) = self.tool.as_ref() else {
-            return Ok(None);
-        };
-        let Some(visible) = tool.build_visible_format(ctx)? else {
+        let Some(visible) = self.build_visible_format(ctx)? else {
             return Ok(None);
         };
         // The reasoning parser may wrap that language with the reasoning phase
@@ -99,13 +155,16 @@ impl UnifiedParser for CombinedParser {
         // engine can skip its own reasoning gate; if it declines, the grammar
         // covers only the final output and the engine gate stays in charge.
         let wrapped = match self.reasoning.as_ref() {
-            Some(reasoning) => reasoning.wrap_visible_format(ctx, &visible)?,
+            Some(reasoning) => reasoning.wrap_visible_format(ctx, &visible.format)?,
             None => None,
         };
-        Ok(Some(match wrapped {
-            Some(full) => BuiltOutputGrammar::from_token_zero(full),
-            None => BuiltOutputGrammar::final_output_only(visible),
-        }))
+        Ok(match wrapped {
+            Some(full) => Some(BuiltOutputGrammar::from_token_zero(full)),
+            // Without the reasoning phase, an answer alone is just the user's
+            // constraint, which the engine already applies after reasoning.
+            None if !visible.has_calls => None,
+            None => Some(BuiltOutputGrammar::final_output_only(visible.format)),
+        })
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
@@ -654,5 +713,92 @@ mod tests {
                 "{prompt:?}"
             );
         }
+    }
+
+    fn grammar_ctx<'a>(
+        tools: &'a [Tool],
+        tool_choice: &'a ToolChoice,
+        answer: Option<&'a Format>,
+    ) -> OutputGrammarContext<'a> {
+        OutputGrammarContext {
+            tools,
+            tool_choice,
+            tool_strict_level: Default::default(),
+            parallel_tool_calls: true,
+            answer,
+        }
+    }
+
+    fn qwen3_parser(tools: &[Tool], with_tool: bool) -> CombinedParser {
+        let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
+        let tool = with_tool.then(|| Qwen3XmlToolParser::create(tools).unwrap());
+        let mut parser = CombinedParser::new(Some(reasoning), tool);
+        parser.initialize(&[]).unwrap();
+        parser
+    }
+
+    #[test]
+    fn answer_constraint_composes_with_the_tool_choice() {
+        let tools = test_tools();
+        let answer = Format::json_schema(serde_json::json!({ "type": "object" }));
+        let reasoning = |visible| {
+            Format::sequence(vec![
+                Format::optional(Format::sequence(vec![
+                    Format::tag("<think>", Format::any_text(), "</think>"),
+                    Format::const_string("\n\n"),
+                ])),
+                visible,
+            ])
+        };
+        let required = ToolChoice::required();
+        let required_calls = Qwen3XmlToolParser::create(&tools)
+            .unwrap()
+            .build_visible_format(&grammar_ctx(&tools, &required, None))
+            .unwrap()
+            .unwrap();
+
+        // No callable tool: the answer alone, after the reasoning phase.
+        for (tool_choice, with_tool) in [(ToolChoice::none(), true), (ToolChoice::auto(), false)] {
+            let parser = qwen3_parser(&tools, with_tool);
+            let ctx = grammar_ctx(&tools, &tool_choice, Some(&answer));
+            let actual = parser.build_output_grammar(&ctx).unwrap().unwrap();
+            assert_eq!(actual.coverage, GrammarCoverage::FromTokenZero);
+            assert_eq!(actual.format, reasoning(answer.clone()), "{tool_choice:?}");
+        }
+
+        // `auto`, strict or not, keeps tool calls next to the answer.
+        let parser = qwen3_parser(&tools, true);
+        let auto = ToolChoice::auto();
+        let actual = parser.build_output_grammar(&grammar_ctx(&tools, &auto, Some(&answer)));
+        let expected = Format::or(vec![required_calls, answer.clone()]);
+        assert_eq!(actual.unwrap().unwrap().format, reasoning(expected));
+
+        // A required call ignores the answer constraint.
+        for tool_choice in [ToolChoice::required(), ToolChoice::function("get_weather")] {
+            let with_answer = grammar_ctx(&tools, &tool_choice, Some(&answer));
+            let without = grammar_ctx(&tools, &tool_choice, None);
+            assert_eq!(
+                parser.build_output_grammar(&with_answer).unwrap(),
+                parser.build_output_grammar(&without).unwrap(),
+                "{tool_choice:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn answer_alone_without_a_reasoning_phase_stays_on_its_wire_field() {
+        let tools = test_tools();
+        let answer = Format::regex("[a-z]+");
+        let parser = CombinedParser::new(None, Some(Qwen3XmlToolParser::create(&tools).unwrap()));
+
+        let none = ToolChoice::none();
+        let ctx = grammar_ctx(&tools, &none, Some(&answer));
+        assert!(parser.build_output_grammar(&ctx).unwrap().is_none());
+
+        let auto = ToolChoice::auto();
+        let ctx = grammar_ctx(&tools, &auto, Some(&answer));
+        let composed = parser.build_output_grammar(&ctx).unwrap().unwrap();
+        assert_eq!(composed.coverage, GrammarCoverage::FinalOutputOnly);
+        assert!(matches!(composed.format, Format::Or(_)));
     }
 }
