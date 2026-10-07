@@ -1170,7 +1170,7 @@ tokenizers==0.23.2
     #   -r requirements/test/../common.txt
     #   cohere
     #   transformers
-torch==2.14.1+cpu
+torch==2.14.0+cpu
     # via
     #   -r requirements/test/cuda.in
     #   accelerate

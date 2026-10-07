@@ -6,8 +6,11 @@ setuptools==78.1.1 # this version can reuse CMake build dir; >=78.1.1 for GHSA-5
 numba == 0.65.0 # Required for N-gram speculative decoding
 
 # Dependencies for CPUs
-torch==2.14.1+cpu; platform_machine == "x86_64" or platform_machine == "s390x" or platform_machine == "aarch64"
-torch==2.14.1; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "riscv64"
+# Held at 2.14.0 while CUDA is on 2.14.1: zentorch (setup.py "zen" extra) is
+# only published for 2.14.0, and tests/test_zentorch_version_pin.py requires
+# the two pins to match.
+torch==2.14.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x" or platform_machine == "aarch64"
+torch==2.14.0; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "riscv64"
 
 # required for the image processor of minicpm-o-2_6, this must be updated alongside torch
 torchaudio; platform_machine != "s390x" and platform_machine != "riscv64"
