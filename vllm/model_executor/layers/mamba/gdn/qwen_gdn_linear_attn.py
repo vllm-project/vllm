@@ -511,11 +511,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
-        self.gdn_xpu_backend: Literal["sycl", "triton"] | None = None
+        self.gdn_xpu_backend: str | None = None
         self.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
         if current_platform.is_xpu():
-            requested, self.gdn_xpu_backend = _resolve_gdn_prefill_backend(vllm_config)
-            _log_gdn_backend_decision(vllm_config, requested, self.gdn_xpu_backend)
+            requested, gdn_xpu_backend = _resolve_gdn_prefill_backend(vllm_config)
+            _log_gdn_backend_decision(vllm_config, requested, gdn_xpu_backend)
+            self.gdn_xpu_backend = gdn_xpu_backend
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.mamba.ops.cpu.gdn_attention import (
