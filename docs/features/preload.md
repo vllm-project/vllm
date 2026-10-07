@@ -1,10 +1,9 @@
 # Preload
 
-vLLM's preload feature keeps model artifacts resident across engine restarts,
-so a restarting engine reuses them instead of rebuilding them from scratch. The
-design is extensible to different kinds of artifacts; it currently supports
-**model weights**, which the weight cache daemon holds in GPU memory, and the
-**FlashInfer autotune table**, which it holds in host memory.
+vLLM's preload feature keeps model artifacts resident in GPU memory across
+engine restarts, so a restarting engine reuses them instead of rebuilding them
+from scratch. The design is extensible to different kinds of artifacts; it
+currently supports **model weights** via the weight cache daemon.
 
 With weight preloading, a daemon process per GPU holds its rank's
 post-quantized, TP-sharded weights and serves CUDA IPC handles to vLLM engines
@@ -51,58 +50,33 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 The daemon itself must load from disk; passing `--load-format ipc_cache` to
 `vllm preload` is an error.
 
-## Preloading the FlashInfer autotune table
+## Preloading the FlashInfer autotune cache
 
 FlashInfer has several implementations of each operation and chooses between
-them by benchmarking. That pass runs during kernel warmup on every engine
-start, and on a large MoE model it dominates what is left of the startup time
-once the weights come from the daemon.
+them by benchmarking. vLLM runs that pass during kernel warmup and persists the
+result per rank in the on-disk FlashInfer autotune cache (under
+`VLLM_CACHE_ROOT`, or `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR`), so a later engine
+with the same configuration loads the tuned configs instead of profiling again.
+Normally the first serving engine pays for the pass, and on a large MoE model it
+dominates what is left of the startup time once the weights come from the
+daemon.
 
-The daemons therefore also cache the tuned table. An engine that finds one
-loads it and skips the autotune pass outright; an engine that has to tune hands
-its table back, so only the first engine on a given GPU pays for it:
-
-```bash
-vllm serve /path/to/model --tensor-parallel-size 4 --load-format ipc_cache
-# INFO ... Handed the FlashInfer autotune table (22841 bytes) to the weight
-#          cache daemon; engine restarts will skip the autotune pass.
-```
-
-```bash
-# after a restart
-vllm serve /path/to/model --tensor-parallel-size 4 --load-format ipc_cache
-# INFO ... Adopted the preloaded FlashInfer autotune table from the weight
-#          cache daemon (22841 bytes); skipping the autotune pass.
-```
-
-To pay that cost at preload time instead, so even the first engine starts warm,
-pass `--preload-autotune`. Once every daemon is serving, `vllm preload` runs one
-throwaway engine against them that autotunes and JIT-compiles, then exits,
-leaving the table on the daemons:
+To pay it at preload time instead, pass `--preload-autotune`. Once every daemon
+is serving, `vllm preload` runs one throwaway engine against them that
+autotunes and JIT-compiles, writes the cache, then exits:
 
 ```bash
 vllm preload --model /path/to/model --tensor-parallel-size 4 --preload-autotune
 ```
 
 That engine is an ordinary engine, so it needs the GPU memory budget a real one
-does and takes as long as a cold start. Give `vllm preload` the same engine
-flags you give `vllm serve`: the table is keyed to the computation graph it was
-measured on, and an engine whose flags differ recomputes it. A failed warmup is
+does and takes as long as a cold start minus loading the weights. Give
+`vllm preload` the same engine flags you give `vllm serve`, and run both with
+the same cache directory: the cache is keyed by the configuration hash, so an
+engine whose flags differ tunes again. `--load-format` and
+`--gpu-memory-utilization` are not part of the hash, which is why the warmup
+engine and `vllm serve --load-format ipc_cache` share it. A failed warmup is
 reported but not fatal, since the daemons keep serving the weights they hold.
-
-The key covers the engine's configuration hash, the FlashInfer build that
-measured the tactics, the set of ops the pass skipped, and the rank, so an
-engine never adopts a table that was not tuned for exactly what it runs.
-FlashInfer keys MoE tactics by rank, so each rank keeps its own table on its
-own daemon, and the pass is skipped only when every rank of a tuning group
-has one; otherwise the whole group tunes. `--load-format` and
-`--gpu-memory-utilization` are not part of it, which is why the daemon and the
-engine match despite differing there.
-
-!!! note
-    Skipping the pass also skips the JIT loading it did incidentally, so the
-    ops it exercised are loaded from the on-disk FlashInfer JIT cache on their
-    first real use instead. The chosen tactics are unaffected.
 
 ## How it works
 
@@ -222,9 +196,7 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   launching the daemon with pipeline parallelism is rejected.
 - **Autotune preloading**: `--preload-autotune` runs one local engine, so it
   supports neither `--nnodes > 1` nor `--data-parallel-size > 1`; those
-  deployments let their first engine tune and publish instead. The table lives
-  only in the daemons' memory, so restarting them drops it — the engine's own
-  on-disk autotune cache still saves the profiling work in that case.
+  deployments let their first engine tune and fill the cache instead.
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise

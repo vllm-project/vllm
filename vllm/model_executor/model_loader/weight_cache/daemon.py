@@ -99,10 +99,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.model_executor.model_loader.weight_cache.artifact_cache import ArtifactStore
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    MAX_ARTIFACT_SIZE,
-    ArtifactCacheKey,
     TensorEntry,
     WeightCacheKey,
     WeightCacheUnavailableError,
@@ -226,10 +223,6 @@ class WeightCacheDaemon:
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
-        # Host-side artifacts an engine computed once and handed back, e.g.
-        # the FlashInfer autotune table. They outlive every engine restart
-        # like the weights do, but cost only host memory.
-        self.artifacts = ArtifactStore()
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
@@ -393,10 +386,6 @@ class WeightCacheDaemon:
                     "memory_bytes": torch.accelerator.memory_allocated(),
                 },
             )
-        elif cmd == "get_artifact":
-            self._handle_get_artifact(conn, request)
-        elif cmd == "put_artifact":
-            self._handle_put_artifact(conn, request)
         elif cmd == "release":
             self._handle_release(conn)
         else:
@@ -433,53 +422,6 @@ class WeightCacheDaemon:
             self.global_rank,
             len(entries),
             len(aliases),
-        )
-
-    def _handle_get_artifact(self, conn: socket.socket, request: dict) -> None:
-        key = request.get("key")
-        if not isinstance(key, ArtifactCacheKey):
-            send_msg(conn, {"status": "error", "message": "Missing artifact key"})
-            return
-        data = self.artifacts.get(key)
-        if data is None:
-            send_msg(conn, {"status": "miss"})
-            return
-        send_msg(conn, {"status": "ok", "data": data})
-        logger.info_once(
-            "Weight cache %s daemon rank %d served %r artifact (%d bytes)",
-            self.role,
-            self.global_rank,
-            key.kind,
-            len(data),
-        )
-
-    def _handle_put_artifact(self, conn: socket.socket, request: dict) -> None:
-        key = request.get("key")
-        data = request.get("data")
-        if not isinstance(key, ArtifactCacheKey) or not isinstance(data, bytes):
-            send_msg(
-                conn,
-                {"status": "error", "message": "Missing artifact key or data"},
-            )
-            return
-        if len(data) > MAX_ARTIFACT_SIZE:
-            send_msg(
-                conn,
-                {
-                    "status": "error",
-                    "message": f"Artifact of {len(data)} bytes exceeds the "
-                    f"{MAX_ARTIFACT_SIZE} byte limit",
-                },
-            )
-            return
-        self.artifacts.put(key, data)
-        send_msg(conn, {"status": "ok"})
-        logger.info(
-            "Weight cache %s daemon rank %d cached %r artifact (%d bytes)",
-            self.role,
-            self.global_rank,
-            key.kind,
-            len(data),
         )
 
     def _handle_release(self, conn: socket.socket) -> None:

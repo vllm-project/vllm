@@ -104,9 +104,9 @@ def _run_warmup_engine(args: argparse.Namespace, socket_dir: str | None) -> None
 
     The engine's own startup path is what runs the FlashInfer autotune pass
     and the JIT/CUDA graph compilation, so booting one here pays those costs
-    at preload time and leaves the tuned table on the daemons for every
-    engine that follows. Runs in its own process so the engine's CUDA and
-    distributed state dies with it.
+    at preload time and leaves the tuned configs in the on-disk FlashInfer
+    autotune cache for every engine that follows. Runs in its own process so
+    the engine's CUDA and distributed state dies with it.
     """
     from vllm.engine.arg_utils import EngineArgs
     from vllm.usage.usage_lib import UsageContext
@@ -125,7 +125,7 @@ def _run_warmup_engine(args: argparse.Namespace, socket_dir: str | None) -> None
         "fallback": False,
     }
     # Resolve batch defaults as `vllm serve` does: they feed the config hash
-    # the tuned table is keyed by.
+    # the autotune cache is keyed by.
     LLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER
     )
@@ -167,10 +167,11 @@ class PreloadSubcommand(CLISubcommand):
             action="store_true",
             help="After the daemons are ready, run one throwaway engine "
             "against them so the FlashInfer autotune pass and the JIT/CUDA "
-            "graph compilation happen once, at preload time. The tuned table "
-            "is left on the daemons, so engines started later skip the pass. "
+            "graph compilation happen once, at preload time. The tuned configs "
+            "land in the on-disk FlashInfer autotune cache, so engines started "
+            "later with the same cache dir load them instead of profiling. "
             "Pass the same engine flags you pass `vllm serve`, otherwise the "
-            "table is keyed to a different configuration and ignored. "
+            "cache is keyed to a different configuration and ignored. "
             "Single-node, single-DP only.",
         )
         parser.add_argument(
@@ -425,8 +426,8 @@ def _warm_up_kernels(
     warmup_procs.remove(proc)
     if proc.exitcode == 0:
         logger.info_once(
-            "Kernel warmup finished; the daemons now hold the FlashInfer "
-            "autotune table."
+            "Kernel warmup finished; the FlashInfer autotune cache is on disk "
+            "for the engines that follow."
         )
     else:
         logger.error(

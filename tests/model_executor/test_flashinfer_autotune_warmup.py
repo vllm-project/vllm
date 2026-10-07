@@ -44,7 +44,6 @@ def _make_runner(modules, *, max_tokens: int = 8192, linear_backend: str = "auto
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
-            load_config=SimpleNamespace(load_format="auto"),
             kernel_config=SimpleNamespace(linear_backend=linear_backend),
             attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(data_parallel_rank=0),
@@ -152,7 +151,7 @@ class _AutotuneGroup:
         # Ranks run sequentially: snapshot every rank's file before any saves.
         self.record(("all_gather",))
         if isinstance(obj, bool):
-            out[:] = [self.run.loads(rank) for rank in self.ranks]
+            out[:] = [rank not in self.run.rejected_load_ranks for rank in self.ranks]
             assert out[self.rank_in_group] == obj
             return
         out[:] = self.run.gathered.setdefault(
@@ -220,10 +219,6 @@ class _AutotuneRun:
 
     def cache_path(self, rank):
         return self.cache_dir / f"autotune_configs_dp0_rank{rank}.json"
-
-    def loads(self, rank):
-        """Whether ``rank``'s tuner will accept the configs it is offered."""
-        return rank not in self.rejected_load_ranks
 
     def world(self):
         return _AutotuneGroup(self, range(self.pp * self.tp))
@@ -367,123 +362,3 @@ def test_rejected_cache_retunes_every_rank_in_its_tuning_group(autotune_run, pp,
     rerun.assert_collectives_match()
     assert set(rerun.profile_groups) == set(range(tp))
     assert {rank for rank, _, _ in rerun.saves} == set(range(tp))
-
-
-def _serve_from_daemon(run, monkeypatch, daemon):
-    """Back flashinfer_autotune's daemon cache with ``daemon``, keyed by rank."""
-    held = set(daemon)
-
-    def put(key, table):
-        daemon[key] = table
-        return True
-
-    def load(table):
-        run.tuners[run.rank].cache.update(json.loads(table))
-        return True
-
-    monkeypatch.setattr(
-        warmup.DaemonArtifactCache,
-        "from_vllm_config",
-        lambda config: SimpleNamespace(get=daemon.get, put=put),
-    )
-    monkeypatch.setattr(
-        warmup,
-        "flashinfer_autotune_artifact_key",
-        lambda runner, skip_ops, rank_id: rank_id,
-    )
-    monkeypatch.setattr(warmup, "try_load_flashinfer_autotune_configs", load)
-    monkeypatch.setattr(
-        warmup,
-        "dump_flashinfer_autotune_configs",
-        lambda: json.dumps(run.tuners[run.rank].cache).encode(),
-    )
-    # Ranks run one after another, so the gather predicts every rank's load
-    # from the tables the daemons held before any rank published.
-    monkeypatch.setattr(run, "loads", lambda rank: f"dp0_rank{rank}" in held)
-
-
-def test_pp_stages_adopt_daemon_tables_independently(autotune_run, monkeypatch):
-    """A stage adopting its tables from the weight cache daemons while another
-    stage tunes must still meet it at the world barrier, and each rank must
-    only ever see the table tuned for it."""
-    run = autotune_run()
-    daemon = {
-        f"dp0_rank{rank}": json.dumps({"shared_gemm": 1, "rank": rank}).encode()
-        for rank in range(4, 8)
-    }
-    _serve_from_daemon(run, monkeypatch, daemon)
-
-    run.execute()
-    run.assert_collectives_match()
-    assert set(run.profile_groups) == {0, 1, 2, 3}
-    for rank in range(4, 8):
-        assert run.tuners[rank].cache == {"shared_gemm": 1, "rank": rank}
-    assert json.loads(daemon["dp0_rank0"]) == {"shared_gemm": 0, "pp0_extra_gemm": 0}
-
-
-def test_daemon_tables_are_adopted_only_if_every_rank_has_one(
-    autotune_run, monkeypatch
-):
-    """FlashInfer keys MoE entries by rank, so each rank adopts its own table,
-    and a rank that skipped the pass would leave a tuning one blocked in the
-    per-tactic reduce: one missing table retunes the whole group."""
-    run = autotune_run(pp=1)
-    daemon = {
-        f"dp0_rank{rank}": json.dumps({"shared_gemm": 9}).encode() for rank in range(3)
-    }
-    _serve_from_daemon(run, monkeypatch, daemon)
-
-    run.execute()
-    run.assert_collectives_match()
-    assert set(run.profile_groups) == {0, 1, 2, 3}
-    for rank in range(4):
-        assert json.loads(daemon[f"dp0_rank{rank}"]) == {"shared_gemm": 0}
-
-
-def test_daemon_hit_still_enables_kimi_k3_projection_overlap(autotune_run, monkeypatch):
-    """Kimi K3's QKVG warmup also raises a limit on the model that the tuned
-    table does not carry, so adopting the table must not skip it."""
-    run = autotune_run(pp=1)
-    daemon = {
-        f"dp0_rank{rank}": json.dumps({"shared_gemm": 0}).encode() for rank in range(4)
-    }
-    _serve_from_daemon(run, monkeypatch, daemon)
-    warmed = []
-    monkeypatch.setattr(
-        warmup, "_autotune_kimi_k3_kda_qkvg", lambda model: warmed.append(run.rank)
-    )
-
-    run.execute()
-    assert not run.profile_groups
-    assert warmed == [0, 1, 2, 3]
-
-
-def _autotune_key(skip_ops=None, *, config_hash="cfg", workspace="ws", rank_id=""):
-    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-        flashinfer_autotune_artifact_key,
-    )
-
-    runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(compute_hash=lambda include_version: config_hash)
-    )
-    with patch(
-        "vllm.model_executor.warmup.flashinfer_autotune_cache._flashinfer_workspace_id",
-        return_value=workspace,
-    ):
-        return flashinfer_autotune_artifact_key(runner, skip_ops, rank_id)
-
-
-def test_flashinfer_autotune_key_distinguishes_skipped_ops():
-    """A hit lets an engine skip the autotune pass outright, so a table tuned
-    with ops skipped must not be adopted by an engine that tunes them -- those
-    ops would silently stay on their heuristics."""
-    assert _autotune_key() != _autotune_key({"fp4_gemm"})
-    assert _autotune_key({"fp4_gemm"}) == _autotune_key(["fp4_gemm"])
-
-
-def test_flashinfer_autotune_key_tracks_config_build_and_rank():
-    """Tactics are only valid for the graph they were measured on, the build
-    that measured them, and (for MoE entries) the rank they were tuned on."""
-    assert _autotune_key() != _autotune_key(config_hash="other")
-    assert _autotune_key() != _autotune_key(workspace="other")
-    assert _autotune_key(rank_id="dp0_rank0") != _autotune_key(rank_id="dp0_rank1")
