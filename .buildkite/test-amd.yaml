@@ -1044,12 +1044,12 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
-  - tests/entrypoints/weight_transfer
+  - tests/entrypoints/rl/weight_transfer
   - tests/entrypoints/launchers
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/unit_tests
-  - pytest -v -s entrypoints/weight_transfer
+  - pytest -v -s entrypoints/rl/weight_transfer
   - pytest -v -s entrypoints/launchers
 
 - label: ":amd: (MI300) Entrypoints Integration (Responses API)" # TBD
@@ -3746,11 +3746,13 @@ steps:
   - vllm/
   - tests/entrypoints/serve
   - tests/entrypoints/scale_out
+  - tests/entrypoints/rl
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)" # TBD
   timeout_in_minutes: 65
@@ -5856,6 +5858,7 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/models/test_deepseek_v4_vl_rocm.py
+  - tests/models/test_deepseek_v4_aiter_mega_moe.py
   - vllm/models/deepseek_v4/amd/
   - vllm/models/deepseek_v4/common/
   - vllm/model_executor/layers/fused_moe/
@@ -5869,6 +5872,7 @@ steps:
   - vllm/envs.py
   commands:
   - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
+  - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
   dind: false
   working_dir: /vllm-workspace/tests
   agent_pool: mi355_1
