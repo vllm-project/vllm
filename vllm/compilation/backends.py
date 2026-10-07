@@ -8,6 +8,7 @@ import json
 import operator
 import os
 import pprint
+import tempfile
 import time
 from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
@@ -220,8 +221,20 @@ class CompilerManager:
             return
         printer = pprint.PrettyPrinter(indent=4)
         data = printer.pformat(self.cache)
-        with open(self.cache_file_path, "w") as f:
-            f.write(data)
+        temp_file_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self.cache_dir,
+                prefix=".vllm_compile_cache.",
+                delete=False,
+            ) as f:
+                temp_file_path = f.name
+                f.write(data)
+            os.replace(temp_file_path, self.cache_file_path)
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
 
     def load(
         self,
