@@ -74,6 +74,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         use_fused_qsa_prepare=True,
         kv_cache=torch.empty(0, 1, 1, 2),
         kv_cache_dtype="auto",
+        fp8_kv_view_dtype=None,
         q_norm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
         k_norm=SimpleNamespace(weight=torch.ones(1)),
         _k_scale_float=1.0,
@@ -1031,12 +1032,13 @@ def test_qsa_block_expansion_correctness() -> None:
         pytest.param(128, 24, 2, 1568, True, 7, E4M3, id="tp1_r128_fp8"),
         pytest.param(2048, 24, 2, 1600, True, 63, E4M3, id="tp1_r2048_prefill_fp8"),
         pytest.param(2048, 24, 2, 1600, False, 63, E4M3, id="tp1_r2048_uniform_fp8"),
-        # fp8_e5m2 K/V caches (the fp8 format usable on SM80/SM86).
+        # fp8_e5m2 K/V caches (the fp8 format usable on SM80/SM86). The
+        # largest batch is r1024 so the cases fit on 24 GB SM86 cards.
         pytest.param(1, 24, 2, 1600, True, 2, E5M2, id="tp1_r1_e5m2"),
         pytest.param(16, 12, 1, 1600, True, 3, E5M2, id="tp2_r16_e5m2"),
         pytest.param(128, 24, 2, 1568, True, 7, E5M2, id="tp1_r128_e5m2"),
-        pytest.param(2048, 24, 2, 1600, True, 63, E5M2, id="tp1_r2048_prefill_e5m2"),
-        pytest.param(2048, 24, 2, 1600, False, 63, E5M2, id="tp1_r2048_uniform_e5m2"),
+        pytest.param(1024, 24, 2, 1600, True, 33, E5M2, id="tp1_r1024_prefill_e5m2"),
+        pytest.param(1024, 24, 2, 1600, False, 33, E5M2, id="tp1_r1024_uniform_e5m2"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
