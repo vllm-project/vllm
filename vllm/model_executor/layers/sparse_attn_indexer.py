@@ -54,6 +54,40 @@ logger = init_logger(__name__)
 MXFP4_BLOCK_SIZE = 32
 
 
+def _top_k_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    top_k: int,
+) -> None:
+    if envs.VLLM_BATCH_INVARIANT:
+        torch.ops._C.deterministic_top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            indices,
+            num_rows,
+            stride0,
+            stride1,
+            top_k,
+        )
+        return
+    ops.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        stride0,
+        stride1,
+        top_k,
+    )
+
+
 def _assert_cutedsl_dcp_merge_supported(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -353,6 +387,12 @@ def sparse_attn_indexer(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
+    if envs.VLLM_BATCH_INVARIANT and (dcp_world_size > 1 or use_pcp):
+        raise NotImplementedError(
+            "Batch-invariant sparse top-k does not support DCP/PCP: "
+            "the local selector and distributed merge use different tie-breaks."
+        )
+
     if candidate_blocks is not None:
         # Candidate blocks are request-local; the DCP-sharded logits layout
         # would need per-rank translation that is not implemented.
@@ -616,7 +656,7 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
-                ops.top_k_per_row_prefill(
+                _top_k_per_row_prefill(
                     logits,
                     cu_seqlen_ks,
                     cu_seqlen_ke,
@@ -768,16 +808,40 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
+        if envs.VLLM_BATCH_INVARIANT:
+            # Match prefill's selector as well as its DeepGEMM score kernel.
+            # At C128 position 2051 there are 513 candidates for top-512, so
+            # score/selection differences that were hidden on shorter rows
+            # become observable in the chosen KV set.
+            assert decode_metadata.row_starts is not None
+            row_starts = decode_metadata.row_starts[:num_rows]
+            if seq_lens.numel() != num_rows:
+                raise NotImplementedError(
+                    "Batch-invariant sparse top-k requires one sequence length "
+                    "per query row."
+                )
+            row_ends = seq_lens.reshape(-1)[:num_rows].contiguous()
+            _top_k_per_row_prefill(
+                logits,
+                row_starts,
+                row_ends,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+        else:
+            # The backend comes from the layer (config is only readable at model
+            # construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
+                logits,
+                seq_lens,
+                next_n,
+                topk_indices,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
 
         if decode_metadata.global_seq_lens is not None:
             _merge_dcp_topk_global(
