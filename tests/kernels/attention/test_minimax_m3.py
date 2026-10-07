@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for MiniMax M3 sparse prefill attention kernels."""
 
+from functools import partial
+
 import pytest
 import torch
 
@@ -1444,19 +1446,21 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
     reason="CuteDSL index decode score requires Blackwell.",
 )
 @pytest.mark.parametrize(
-    ("dtype", "decode_query_len", "max_decode_query_len"),
+    ("dtype", "decode_query_len", "max_decode_query_len", "concurrent_writes"),
     [
-        (torch.bfloat16, 1, 1),
-        (torch.bfloat16, 3, 8),
-        (torch.float8_e4m3fn, 1, 1),
-        (torch.float8_e4m3fn, 3, 8),
-        (torch.float8_e4m3fn, 8, 8),
+        (torch.bfloat16, 1, 1, False),
+        (torch.bfloat16, 3, 8, False),
+        (torch.float8_e4m3fn, 1, 1, False),
+        (torch.float8_e4m3fn, 3, 8, False),
+        (torch.float8_e4m3fn, 8, 8, False),
+        pytest.param(torch.float8_e4m3fn, 1, 1, True, id="concurrent-writes"),
     ],
 )
 def test_decode_index_score_cutedsl_correctness(
     dtype: torch.dtype,
     decode_query_len: int,
     max_decode_query_len: int,
+    concurrent_writes: bool,
 ):
     pytest.importorskip("cutlass")
     from vllm.models.minimax_m3.nvidia.ops import (
@@ -1466,7 +1470,8 @@ def test_decode_index_score_cutedsl_correctness(
     torch.manual_seed(0)
     init_blocks, local_blocks = 0, 0
     num_idx_heads, head_dim = 4, 128
-    active_seq_lens = torch.tensor((1025, 4097), device="cuda", dtype=torch.int32)
+    lengths = (131326, 131289, 131252, 131215) if concurrent_writes else (1025, 4097)
+    active_seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
     batch = active_seq_lens.numel()
     total_q = batch * decode_query_len
     max_seq_len = int(active_seq_lens.max())
@@ -1488,7 +1493,8 @@ def test_decode_index_score_cutedsl_correctness(
     )
     score = unified_score.transpose(0, 1)
 
-    minimax_m3_index_decode_score_cutedsl(
+    launch = partial(
+        minimax_m3_index_decode_score_cutedsl,
         idx_q,
         index_kv_cache,
         block_table,
@@ -1501,6 +1507,7 @@ def test_decode_index_score_cutedsl_correctness(
         max_decode_query_len=max_decode_query_len,
         score_out=score,
     )
+    launch()
     expected = _reference_decode_index_score(
         idx_q,
         index_kv_cache,
@@ -1510,6 +1517,23 @@ def test_decode_index_score_cutedsl_correctness(
         score_block_stride,
     )
     torch.testing.assert_close(score, expected)
+
+    if concurrent_writes:
+        # Concurrent stores expose shared-memory reuse before ldmatrix reads finish.
+        quiet = score.clone()
+        noise = torch.zeros(1 << 26, device="cuda")
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        try:
+            for _ in range(20):
+                with torch.cuda.stream(side):
+                    for _ in range(40):
+                        noise.mul_(1.0)
+                launch()
+                torch.testing.assert_close(score, quiet, atol=0, rtol=0)
+                side.synchronize()
+        finally:
+            side.synchronize()
 
 
 # Sparse attention kernels.
