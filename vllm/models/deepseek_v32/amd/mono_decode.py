@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5 decode with each sparse MoE layer fused into one AITER kernel.
+"""GLM-5 decode with each decoder layer fused into one AITER kernel.
 
 The kernel all-reduces inside the launch, so whether a step takes this path must
 be decided identically on every TP rank. It depends only on the step's token
@@ -19,7 +19,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -28,10 +27,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel impo
 )
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
-    fit_kpool_indices_to_aiter,
-    triton_convert_req_index_to_global_index,
-)
 
 if TYPE_CHECKING:
     from aiter.ops.flydsl.glm5_mono import Glm5MonoKernel, LayerWeights
@@ -93,9 +88,9 @@ class GlmMonoDecode:
     """Routes eligible decode steps of a ``DeepseekV32Model`` to the fused kernel.
 
     A step is eligible when it is a pure decode of 1, 2, 4 or 8 tokens; prefill,
-    mixed and other steps take the regular layers. The leading dense layers
-    always run unfused. Weights are bound on the first eligible step, which runs
-    eagerly before CUDA graph capture.
+    mixed and other steps take the regular layers. The leading dense layers run in
+    the kernel too, their MLP stored as expert-shaped slices. Weights are bound on
+    the first eligible step, which runs eagerly before CUDA graph capture.
     """
 
     def __init__(self, model: DeepseekV32Model, vllm_config: VllmConfig) -> None:
@@ -155,19 +150,12 @@ class GlmMonoDecode:
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         model = self._model
         n = input_ids.numel()
-        hidden = model.embed_input_ids(input_ids)
-        residual = None
-        for layer in model.layers[: self._num_dense]:
-            hidden, residual = layer(positions, hidden, residual)
-        state = tensor_model_parallel_all_reduce(hidden) + residual
+        state = model.embed_input_ids(input_ids)
 
         ctx = get_forward_context()
         md = ctx.attn_metadata[self._layer_name]
         slots = ctx.slot_mapping[self._layer_name][:n]
         indptr = md.paged_kv_indptr[: n + 1]
-        # CUDA-graph pad rows carry unwritten attention output out of the dense
-        # layers; the fused kernel needs finite values on every row.
-        state = state.masked_fill(slots[:, None] < 0, 0)
         kernel_positions = positions
         if n == 1:
             state = torch.cat([state, torch.zeros_like(state)])
@@ -180,14 +168,7 @@ class GlmMonoDecode:
         req_ids = md.req_id_per_token[:n]
         if n == 1:
             req_ids = torch.cat([req_ids, req_ids])
-        first = model.layers[self._num_dense]
-        if not _computes_indices(first):
-            # The dense layers convert their top-k into the indexer layers'
-            # metadata; the shared-index layers read another buffer.
-            self._convert_indices(first.self_attn, md)
-        for layer, op, index in zip(
-            model.layers[self._num_dense :], ops, self._launch_index
-        ):
+        for layer, op, index in zip(model.layers, ops, self._launch_index):
             attn = layer.self_attn
             cache = attn.kv_cache.view(fp8).view(-1, attn.kv_cache.shape[-1])
             if op.with_indexer:
@@ -228,21 +209,6 @@ class GlmMonoDecode:
             runtime.advance_step()
         return model.norm(state[:n])
 
-    @staticmethod
-    def _convert_indices(attn, md) -> None:
-        tokens = md.num_actual_tokens
-        triton_convert_req_index_to_global_index(
-            md.req_id_per_token,
-            md.block_table,
-            fit_kpool_indices_to_aiter(
-                attn.topk_indices_buffer[:tokens], md.topk_tokens
-            ),
-            md.paged_kv_indptr,
-            md.paged_kv_indices,
-            BLOCK_SIZE=md.block_size,
-            NUM_TOPK_TOKENS=md.topk_tokens,
-        )
-
     def _bind(self) -> None:
         from aiter.ops.flydsl.glm5_mono import (
             AttentionWeight,
@@ -256,22 +222,23 @@ class GlmMonoDecode:
         cfg = glm5_tp_config(tp)
         rank = get_tensor_model_parallel_rank()
         group = get_tp_group().cpu_group
-        sparse = list(self._model.layers[self._num_dense :])
-        fused = [_computes_indices(layer) for layer in sparse]
+        layers = list(self._model.layers)
+        fused = [_computes_indices(layer) for layer in layers]
+        dense = [i < self._num_dense for i in range(len(layers))]
         weights = [
-            _layer_weights(layer, cfg, rank, tp, with_indexer=f)
-            for layer, f in zip(sparse, fused)
+            _layer_weights(layer, cfg, rank, tp, with_indexer=f, dense=d)
+            for layer, f, d in zip(layers, fused, dense)
         ]
         prepared = [
             prepare_glm5_weights(w, AttentionWeight.FP8_BLOCK128) for w in weights
         ]
-        index_options = self._index_options(sparse, fused)
+        index_options = self._index_options(layers, fused)
         launches = {f: fused.count(f) for f in (False, True)}
         self._launch_index = [fused[:i].count(f) for i, f in enumerate(fused)]
         for chunk in sorted({max(n, 2) for n in _STEP_TOKENS}):
             runtimes: dict[bool, Glm5MonoKernel | None] = {False: None, True: None}
             ops = []
-            for w, p, f in zip(weights, prepared, fused):
+            for w, p, f, d in zip(weights, prepared, fused, dense):
                 op = Glm5MonoKernel(
                     w,
                     chunk,
@@ -287,6 +254,7 @@ class GlmMonoDecode:
                     prepared_weights=p,
                     runtime=runtimes[f],
                     native_fp4_mfma=True,
+                    dense_experts=w.physical_experts if d else 0,
                     **(index_options if f else {}),
                 )
                 runtimes[f] = runtimes[f] or op
@@ -298,26 +266,27 @@ class GlmMonoDecode:
             for name in ("w_qkv_a", "w_q_b", "w_uk", "w_uv", "w_o"):
                 w.t[name] = p[name]
 
-        attn = sparse[0].self_attn
+        attn = layers[0].self_attn
         cos_sin = attn.rotary_emb.cos_sin_cache
         half = cos_sin.shape[-1] // 2
         self._cos = cos_sin[:, :half].to(torch.bfloat16).contiguous()
         self._sin = cos_sin[:, half:].to(torch.bfloat16).contiguous()
         self._cur_pos = torch.zeros(1, dtype=torch.int32, device=cos_sin.device)
         logger.info_once(
-            "GLM fused decode enabled for %d MoE layers (%d with the fused "
-            "indexer), decode steps of %s tokens.",
-            len(sparse),
+            "GLM fused decode enabled for %d layers (%d dense, %d with the "
+            "fused indexer), decode steps of %s tokens.",
+            len(layers),
+            self._num_dense,
             sum(fused),
             "/".join(map(str, _STEP_TOKENS)),
         )
 
     def _index_options(
-        self, sparse: list[DeepseekV32DecoderLayer], fused: list[bool]
+        self, layers: list[DeepseekV32DecoderLayer], fused: list[bool]
     ) -> dict:
         if not any(fused):
             return {}
-        attn = next(layer.self_attn for layer, f in zip(sparse, fused) if f)
+        attn = next(layer.self_attn for layer, f in zip(layers, fused) if f)
         if not torch.equal(
             attn.rotary_emb.cos_sin_cache, attn.indexer_rope_emb.cos_sin_cache
         ):
@@ -451,8 +420,66 @@ def _fp4_storage(tensor: torch.Tensor) -> torch.Tensor:
     return view
 
 
+def _moe_weights(moe: DeepseekV2MoE, cfg) -> tuple[dict[str, torch.Tensor], int]:
+    experts = moe.experts.routed_experts
+    physical = cfg.n_experts + cfg.num_shared_experts
+    if experts.w13_weight.shape[0] != physical:
+        raise ValueError(
+            f"VLLM_ROCM_GLM_MONO_DECODE expects {physical} physical experts, "
+            f"got {experts.w13_weight.shape[0]}."
+        )
+    tensors = {
+        "w_r": moe.gate.weight.to(torch.bfloat16).contiguous(),
+        "bias": moe.gate.e_score_correction_bias.float().contiguous(),
+        "w_ug": _fp4_storage(experts.w13_weight),
+        "s_ug": experts.w13_weight_scale.view(torch.uint8),
+        "w_dn": _fp4_storage(experts.w2_weight),
+        "s_dn": experts.w2_weight_scale.view(torch.uint8),
+    }
+    return tensors, physical
+
+
+def _mxfp4_rows(linear: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
+    weight = linear.weight.view(torch.uint8)
+    rows, half_k = weight.shape
+    scale = linear.weight_scale.view(torch.uint8)
+    if scale.shape != (half_k * 2 // 32, rows):
+        raise ValueError(
+            "VLLM_ROCM_GLM_MONO_DECODE requires the dense MLP in the row-major "
+            "MXFP4 layout of the AITER Triton GEMM, but "
+            f"{getattr(linear, 'prefix', linear)} has weight_scale "
+            f"{tuple(scale.shape)}."
+        )
+    return weight, scale.T.contiguous()
+
+
+def _dense_mlp_weights(
+    mlp: torch.nn.Module, cfg
+) -> tuple[dict[str, torch.Tensor], int]:
+    from aiter.ops.flydsl.glm5_mono import pack_dense_mlp
+
+    gate_up = _mxfp4_rows(mlp.gate_up_proj)
+    slices = gate_up[0].shape[0] // (2 * cfg.inter)
+    if gate_up[0].shape[0] != 2 * cfg.inter * slices or not 0 < slices <= cfg.moe_slots:
+        raise ValueError(
+            "VLLM_ROCM_GLM_MONO_DECODE requires the dense MLP width to be a "
+            f"multiple of the expert width {cfg.inter}, at most {cfg.moe_slots} "
+            f"times, got {gate_up[0].shape[0] // 2}."
+        )
+    tensors = pack_dense_mlp(*gate_up, *_mxfp4_rows(mlp.down_proj), slices)
+    device = gate_up[0].device
+    tensors["w_r"] = torch.zeros(16, cfg.hidden, dtype=torch.bfloat16, device=device)
+    tensors["bias"] = torch.zeros(cfg.n_experts, dtype=torch.float32, device=device)
+    return tensors, slices
+
+
 def _layer_weights(
-    layer: DeepseekV32DecoderLayer, cfg, rank: int, tp: int, with_indexer: bool = False
+    layer: DeepseekV32DecoderLayer,
+    cfg,
+    rank: int,
+    tp: int,
+    with_indexer: bool = False,
+    dense: bool = False,
 ) -> LayerWeights:
     from aiter.ops.flydsl.glm5_mono import (
         LayerWeights,
@@ -461,21 +488,16 @@ def _layer_weights(
     )
 
     attn = layer.self_attn
-    moe = layer.mlp
-    experts = moe.experts.routed_experts
-    physical = cfg.n_experts + cfg.num_shared_experts
-    if experts.w13_weight.shape[0] != physical:
-        raise ValueError(
-            f"VLLM_ROCM_GLM_MONO_DECODE expects {physical} physical experts, "
-            f"got {experts.w13_weight.shape[0]}."
-        )
+    if dense:
+        mlp, physical = _dense_mlp_weights(layer.mlp, cfg)
+    else:
+        mlp, physical = _moe_weights(layer.mlp, cfg)
     w_qkv_a, s_qkv_a = _block_fp8(attn.fused_qkv_a_proj)
     w_q_b, s_q_b = _block_fp8(attn.q_b_proj)
     w_o, s_o = _block_fp8(attn.o_proj)
     w_uk, s_uk, w_uv, s_uv = split_kv_b(
         *_block_fp8(attn.kv_b_proj), cfg.local_heads, cfg.nope_dim, cfg.v_dim
     )
-    gate = moe.gate
     tensors = {
         "g_in": layer.input_layernorm.weight,
         "g_q": attn.q_a_layernorm.weight,
@@ -491,12 +513,7 @@ def _layer_weights(
         "s_uv": s_uv,
         "w_o": w_o,
         "s_o": s_o,
-        "w_r": gate.weight.to(torch.bfloat16).contiguous(),
-        "bias": gate.e_score_correction_bias.float().contiguous(),
-        "w_ug": _fp4_storage(experts.w13_weight),
-        "s_ug": experts.w13_weight_scale.view(torch.uint8),
-        "w_dn": _fp4_storage(experts.w2_weight),
-        "s_dn": experts.w2_weight_scale.view(torch.uint8),
+        **mlp,
     }
     if with_indexer:
         tensors.update(_indexer_weights(layer))
