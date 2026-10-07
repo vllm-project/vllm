@@ -408,9 +408,12 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     def compute_candidates(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.candidate_logits_processor.get_top_k_tokens(
+        ids, values = self.candidate_logits_processor.get_top_k_tokens(
             self.lm_head, hidden_states, self.model.candidate_selector.top_k
         )
+        if self.draft_id_to_target_id is not None:
+            ids = ids + self.draft_id_to_target_id[ids]
+        return ids, values
 
 
 EntryClass = DFlash2Qwen3ForCausalLM
