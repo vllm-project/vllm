@@ -114,6 +114,7 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
             profiler="torch",
             torch_profiler_dir=str(tmp_path),
             torch_profiler_dump_cuda_time_total=False,
+            torch_profiler_with_stack=False,
         ),
         worker_name="worker",
         local_rank=1,
