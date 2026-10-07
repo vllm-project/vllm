@@ -432,6 +432,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 temperature,
                 seeds,
                 self.block_tables.input_block_tables[gid],
+                self.block_tables.block_sizes[gid],
                 self.block_tables.kernel_block_sizes[gid],
                 self.block_tables.cp_rank,
                 self.dcp_size,
@@ -551,6 +552,7 @@ def _prepare_dflash_inputs_kernel(
     # Scalars
     parallel_drafting_token_id,
     block_size,
+    kernel_block_size,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
@@ -592,26 +594,24 @@ def _prepare_dflash_inputs_kernel(
     is_query = (j >= num_valid_ctx) & (j < num_valid_ctx + num_query_per_req)
     query_off = j - num_valid_ctx
 
+    block_table_row_ptr = block_table_ptr + req_idx * block_table_stride
+
     # --- Context positions / slots ---
     ctx_pos_idx = ctx_start + tl.where(is_ctx, j, 0)
     ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
-    ctx_block_num = ctx_pos // (block_size * CP_SIZE)
-    ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
-    ctx_block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + ctx_block_num,
-        mask=is_valid_ctx,
-        other=0,
-    ).to(tl.int64)
     # Block 0 is the null block. Old sliding-window context positions can map
     # to it after eviction; rejected suffix rows are invalid context as well.
     # Neither kind of row may write draft KV into physical block 0.
-    ctx_resident = is_valid_ctx & (ctx_block_id != 0)
-    local_ctx_slot = cp_local_slot(
-        ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
-    )
-    ctx_slot = tl.where(
-        ctx_resident,
-        local_ctx_slot,
+    ctx_slot = cp_local_slot(
+        ctx_pos,
+        block_table_row_ptr,
+        block_table_stride,
+        is_valid_ctx,
+        block_size,
+        kernel_block_size,
+        cp_rank,
+        CP_SIZE,
+        CP_INTERLEAVE,
         PAD_SLOT_ID,
     )
     # Stored over the full [0, num_ctx) span while the loads above are masked to
@@ -628,28 +628,18 @@ def _prepare_dflash_inputs_kernel(
     is_bonus = is_query & (query_off == 0)
     input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
 
-    q_block_num = query_pos // (block_size * CP_SIZE)
-    q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
-    q_block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + q_block_num,
-        mask=is_query,
-        other=0,
-    ).to(tl.int64)
     # A null block is never a writable cache slot. This can occur when a
     # sliding-window block table contains evicted/global padding entries.
-    q_resident = is_query & (q_block_id != 0)
-    local_q_slot = cp_local_slot(
+    q_slot = cp_local_slot(
         query_pos,
-        q_block_id,
+        block_table_row_ptr,
+        block_table_stride,
+        is_query,
         block_size,
+        kernel_block_size,
         cp_rank,
         CP_SIZE,
         CP_INTERLEAVE,
-        PAD_SLOT_ID,
-    )
-    q_slot = tl.where(
-        q_resident,
-        local_q_slot,
         PAD_SLOT_ID,
     )
 
@@ -745,6 +735,7 @@ def prepare_dflash_inputs(
     # [max_num_reqs, max_num_blocks]
     block_table: torch.Tensor,
     block_size: int,
+    kernel_block_size: int,
     cp_rank: int,
     cp_size: int,
     cp_interleave: int,
@@ -790,6 +781,7 @@ def prepare_dflash_inputs(
         block_table.stride(0),
         parallel_drafting_token_id,
         block_size,
+        kernel_block_size,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,

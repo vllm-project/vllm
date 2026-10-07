@@ -66,19 +66,42 @@ def _dcp_local_seq_lens_kernel(
 @triton.jit
 def cp_local_slot(
     positions,
-    block_numbers,
+    block_table_row_ptr,
+    block_table_stride,
+    is_valid,
     block_size,
+    kernel_block_size,
     cp_rank,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
     PAD_ID: tl.constexpr,
 ):
     """Return rank-local KV slots, or PAD_ID for positions not owned by this rank."""
-    block_offsets = positions % (block_size * CP_SIZE)
     if CP_SIZE == 1:
-        return block_numbers * block_size + block_offsets
-    is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
-    rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
-    remainder = block_offsets % CP_INTERLEAVE
-    local_offsets = rounds * CP_INTERLEAVE + remainder
-    return tl.where(is_local, block_numbers * block_size + local_offsets, PAD_ID)
+        local_positions = positions
+        is_local = is_valid
+    else:
+        virtual_block_size = block_size * CP_SIZE
+        virtual_block_indices = positions // virtual_block_size
+        virtual_block_offsets = positions % virtual_block_size
+        is_local = is_valid & (
+            virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+        )
+        rounds = virtual_block_offsets // (CP_INTERLEAVE * CP_SIZE)
+        remainder = virtual_block_offsets % CP_INTERLEAVE
+        local_offsets = rounds * CP_INTERLEAVE + remainder
+        local_positions = virtual_block_indices * block_size + local_offsets
+
+    block_num = tl.minimum(local_positions // kernel_block_size, block_table_stride - 1)
+    block_id = tl.load(
+        block_table_row_ptr + block_num,
+        mask=is_local,
+        other=0,
+    ).to(tl.int64)
+    resident = is_local & (block_id != 0)
+    block_offset = local_positions % kernel_block_size
+    return tl.where(
+        resident,
+        block_id * kernel_block_size + block_offset,
+        PAD_ID,
+    )
