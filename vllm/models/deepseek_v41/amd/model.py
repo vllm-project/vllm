@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -258,6 +259,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
+        if self.mono is not None and self.mono.ffn_only:
+            # A decode step hands wo_b's TP partial to the FFN launch; forward
+            # reduces it on the others.
+            self.attn.wo_b.reduce_results = False
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -378,6 +383,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.attn(positions, x, None)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
+        elif self.mono is not None and self.mono.ffn_only:
+            out = self.mono.ffn(self, x, residual, post_mix, res_mix, attn_pre)
+            if out is not None:
+                return out
+            x = tensor_model_parallel_all_reduce(x)
 
         residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
             residual,

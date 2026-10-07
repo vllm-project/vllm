@@ -15,6 +15,8 @@ handing off through the tagged mailbox:
     reduce  (160): the FFN seam's attention output, the TP ranks' partials
             (pushed to every rank's ATTN region) summed in the all-reduce's
             order -> ``pend_lds``, where its slice reads it
+    push    (160): a rank's partial given in memory (an attention vLLM ran)
+            to every rank's ATTN region, ahead of the slice's reduce
 
 Every elementwise step follows aiter's ``mhc_fused_post_pre_delayed_rmsnorm``
 rounding; the mix projection and the sums of squares, split-K reductions,
@@ -382,3 +384,22 @@ def reduce_attn_pair(c, task, idx):
         lds = c["pend_lds"] + (t * COLS + col - c0)
         fx.ptr_store(bf16_round(acc0), lds)
         fx.ptr_store(bf16_round(acc1), lds + 1)
+
+
+@traced
+def stage_push(c, task, part):
+    """This rank's attention partial (``part``: bf16 [S, HIDDEN], wo_b's
+    unreduced output) at this slice's 32 columns, every token, to every rank's
+    ATTN region: the pairs ``stage_reduce`` polls, as the bits vLLM wrote."""
+    s, tid, tp = c["S"], c["tid"], c["d"].tp
+    for pas in range_constexpr(0, s * COLS // 2, THREADS):
+        idx = plus(pas, tid)
+        if idx < s * COLS // 2:
+            t = idx // (COLS // 2)
+            col = task * COLS + 2 * (idx % (COLS // 2))
+            w = bo.buffer_load(
+                rsrc(part), (t * HIDDEN + col) // 2, vec_width=1, dtype=T.i32
+            )
+            pair = attn_region_pair(c["rank"], t, s, col)
+            for p in range_constexpr(tp):
+                c["put_words"](preg(c["peer_addr"](p), 0, "attn"), pair, [w])

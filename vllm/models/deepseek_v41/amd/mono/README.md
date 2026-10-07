@@ -2,7 +2,9 @@
 
 One fused decoder layer for vLLM's decode steps on MI355X: the attention seam,
 the attention, the attention all-reduce, the FFN seam, the MoE and the MoE
-all-reduce, in two persistent launches a layer. ATOM's V4.1 mono decode
+all-reduce, in two persistent launches a layer. The other backbone layers keep
+vLLM's attention and run the rest -- the attention all-reduce, the FFN seam,
+the MoE and its all-reduce -- as one launch (the FFN launch). ATOM's V4.1 mono decode
 (ROCm/ATOM `atom/models/deepseek_v41/mono`) is the reference design: the seam
 and MoE stages (`stages/`) and the framework under them (`common/`) are adapted
 from it, each file naming its origin; the attention stages (`attention/`) are
@@ -10,12 +12,13 @@ new, reading vLLM's KV records and weights as loaded.
 
 ## Scope
 
-- Layers: every backbone layer with the standard seam and no compressor /
-  indexer: 3-7, 9-13, 15-19 (compress ratio 2) and 21-23, 25-27, 29-31, 33-35,
-  37-39 (ratio 1), 30 of 40. Layer 0 (embedding-broadcast seam), layer 1
-  (Engram at the seam) and the compressor / indexer layers 2, 8, 14, 20, 24,
-  28, 32, 36 keep vLLM's path; the two paths interleave freely (same tensors at
-  the layer boundary).
+- Layers: the whole layer on every backbone layer with the standard seam and no
+  compressor / indexer: 3-7, 9-13, 15-19 (compress ratio 2) and 21-23, 25-27,
+  29-31, 33-35, 37-39 (ratio 1), 30 of 40. The FFN launch on the other 10:
+  layer 0 (embedding-broadcast seam), layer 1 (Engram at the seam) and the
+  compressor / indexer layers 2, 8, 14 (also Engram), 20, 24, 28, 32, 36,
+  whose wo_b leaves its TP reduce to it. The DSpark draft layers keep vLLM's
+  path. The paths interleave freely (same tensors at the layer boundary).
 - Steps: decode only (FULL graph or eager), M <= 48 rows (8 requests x 6
   DSpark tokens), TP2 / TP4, `fp8_ds_mla` KV records (ROCm), text tokens (the
   routing bias is `e_score_correction_bias`).
@@ -43,6 +46,9 @@ new, reading vLLM's KV records and weights as loaded.
         GEMVs, clamped SiLU), ug (MXFP4 x MXFP8 per expert of the step's
         union), down (+ routing weight, top-k order; + shared) -> push, rank-order
         sum -> out
+    FFN K2 without the attention back: push (160 x 32 columns) of vLLM's
+        unreduced wo_b output, as its bits, to every rank's attention region,
+        then K2's FFN seam and MoE (the same code, `layer.run_ffn`)
 
 ## Execution model and hand-offs
 
@@ -53,8 +59,8 @@ new, reading vLLM's KV records and weights as loaded.
   activations.
 - In a launch: tagged pairs (value + tag in one 8 B store) or plain data +
   flags, at device scope. The tag is the launch pair's epoch (K1 `2e + 1`,
-  K2 `2e + 2`), a device word K2's CTA 0 moves on once every CTA has marked
-  the launch done: no clearing between steps, no host step hook, every argument
+  K2 or the FFN launch `2e + 2`), a device word their CTA 0 moves on once every
+  CTA has marked the launch done: no clearing between steps, no host step hook, every argument
   a fixed device pointer (graph-safe).
 - Across ranks: one symmetric uncached buffer a rank (aiter `UncachedIpcHeap`),
   every rank holding every peer's address; pushes are system-scope stores of

@@ -1085,7 +1085,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     def _wo_b_after_wo_a(self, zf: torch.Tensor) -> torch.Tensor:
         if self._wo_b_scale is not None and zf.dim() == 2:
-            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
+            return self._bpre_attn_gemm(
+                self.wo_b.weight, self._wo_b_scale, zf, self.wo_b.reduce_results
+            )
         return self.wo_b(zf)
 
     def forward_mqa(

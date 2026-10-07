@@ -6,10 +6,11 @@ One ``DSV41MonoLayer`` a TP rank runs every mono layer of a decode step (M <= 48
 rows): two persistent launches a layer (``layer``) from the layer's
 inputs at the attention seam to its outputs at the next one -- the MoE's
 reduced output, the residual after the FFN seam and that seam's mixes -- with
-both TP all-reduces inside the kernels (symmetric peer memory). Every argument
-is a device pointer: the launches can be captured in a HIP graph. The kernels
-move their mailbox epoch on themselves; every rank runs the same launches, so
-the ranks' epochs agree.
+both TP all-reduces inside the kernels (symmetric peer memory). A layer whose
+attention vLLM runs (``ffn``) takes one launch from its unreduced attention
+output on. Every argument is a device pointer: the launches can be captured in a
+HIP graph. The kernels move their mailbox epoch on themselves; every rank runs
+the same launches, so the ranks' epochs agree.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Dims
 from .layer import (
     MAX_TOKENS,
     MonoBuild,
+    build_mono_ffn,
     build_mono_k1,
     build_mono_k2,
     peer_half_bytes,
@@ -89,9 +91,10 @@ class AttnWeights:
 
 @dataclass
 class MonoLayerWeights:
-    """One layer's tensors on this rank, in vLLM's loaded layout."""
+    """One layer's tensors on this rank, in vLLM's loaded layout (``attn``:
+    None for a layer whose attention vLLM runs)."""
 
-    attn: AttnWeights
+    attn: AttnWeights | None
     hc_attn_fn: torch.Tensor  # [24, 4 * 5120] f32
     hc_attn_scale: torch.Tensor  # [3] f32
     hc_attn_base: torch.Tensor  # [24] f32
@@ -162,6 +165,23 @@ class DSV41MonoLayer:
             self._kernels[key] = (build_mono_k1(b), build_mono_k2(b))
         return self._kernels[key]
 
+    def ffn_kernel(self, tokens: int):
+        key = (tokens, "ffn")
+        if key not in self._kernels:
+            self._kernels[key] = build_mono_ffn(MonoBuild(tokens, self.tp, 0))
+        return self._kernels[key]
+
+    @staticmethod
+    def _outs(M: int, residual: torch.Tensor) -> tuple:
+        dev = residual.device
+        return (
+            torch.empty(M, HIDDEN, dtype=torch.bfloat16, device=dev),
+            torch.empty_like(residual),
+            torch.empty(M, HC, 1, dtype=torch.float32, device=dev),
+            torch.empty(M, HC, HC, dtype=torch.float32, device=dev),
+            torch.empty(M, HC, dtype=torch.float32, device=dev),
+        )
+
     def forward(
         self,
         w: MonoLayerWeights,
@@ -186,17 +206,12 @@ class DSV41MonoLayer:
         M = x.shape[0]
         assert self.supports(M), M
         a = w.attn
+        assert a is not None
         ratio = a.ratio
         k1, k2 = self.kernels(M, ratio)
         st = torch.cuda.current_stream()
         if outs is None:
-            outs = (
-                torch.empty(M, HIDDEN, dtype=torch.bfloat16, device=x.device),
-                torch.empty_like(residual),
-                torch.empty(M, HC, 1, dtype=torch.float32, device=x.device),
-                torch.empty(M, HC, HC, dtype=torch.float32, device=x.device),
-                torch.empty(M, HC, dtype=torch.float32, device=x.device),
-            )
+            outs = self._outs(M, residual)
         out, res_out, post_out, comb_out, pre_out = outs
         for t_ in (x, residual, post_mix, res_mix, pre_mix, positions, slot_mapping):
             assert t_.is_contiguous()
@@ -314,5 +329,60 @@ class DSV41MonoLayer:
             self.epoch.data_ptr(),
             0,
             stream=st,
+        )
+        return outs
+
+    def ffn(
+        self,
+        w: MonoLayerWeights,
+        part: torch.Tensor,  # [M, 5120] bf16: this rank's unreduced wo_b output
+        residual: torch.Tensor,  # [M, 4, 5120] bf16, after the attention seam
+        post_mix: torch.Tensor,  # [M, 4, 1] f32, the attention seam's
+        res_mix: torch.Tensor,  # [M, 4, 4] f32
+        pre_mix: torch.Tensor,  # [M, 4] f32
+        outs: tuple | None = None,
+    ):
+        """-> (out, residual, post_mix, res_mix, pre_mix) of a layer whose
+        attention vLLM ran: the attention's TP reduce, the FFN seam, the MoE and
+        its all-reduce in one launch."""
+        M = part.shape[0]
+        assert self.supports(M), M
+        for t_ in (part, residual, post_mix, res_mix, pre_mix):
+            assert t_.is_contiguous()
+        assert part.dtype == residual.dtype == torch.bfloat16
+        if outs is None:
+            outs = self._outs(M, residual)
+        out, res_out, post_out, comb_out, pre_out = outs
+        self.ffn_kernel(M)(
+            part.data_ptr(),
+            residual.data_ptr(),
+            post_mix.data_ptr(),
+            res_mix.data_ptr(),
+            pre_mix.data_ptr(),
+            w.hc_ffn_fn.data_ptr(),
+            w.hc_ffn_scale.data_ptr(),
+            w.hc_ffn_base.data_ptr(),
+            w.ffn_norm.data_ptr(),
+            res_out.data_ptr(),
+            post_out.data_ptr(),
+            comb_out.data_ptr(),
+            pre_out.data_ptr(),
+            w.gate_w.data_ptr(),
+            w.bias.data_ptr(),
+            w.w13.data_ptr(),
+            w.w13_s.data_ptr(),
+            w.w2.data_ptr(),
+            w.w2_s.data_ptr(),
+            w.sgu.data_ptr(),
+            w.sgu_s.data_ptr(),
+            w.sw2.data_ptr(),
+            w.sw2_s.data_ptr(),
+            out.data_ptr(),
+            self.scratch.data_ptr(),
+            self.peer.local,
+            self.peer.addresses.data_ptr(),
+            self.rank,
+            self.epoch.data_ptr(),
+            stream=torch.cuda.current_stream(),
         )
         return outs

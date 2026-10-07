@@ -3,9 +3,11 @@
 """The DeepSeek-V4.1 mono decode layer runs only where its kernels are exact:
 decode-only steps of at most MAX_ROWS rows with causal SWA windows, eager or in
 a FULL graph. A PIECEWISE capture is replayed for mixed batches, so it must
-never record the mono launches."""
+never record the mono launches. Layers outside the whole-layer kernels run the
+FFN launch on the same steps, from wo_b's unreduced output."""
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -24,12 +26,16 @@ class _Runner:
         self.calls.append((args, kwargs))
         return ("mono outputs",)
 
+    def ffn(self, *args):
+        self.calls.append((args, {}))
+        return ("ffn outputs",)
 
-def _layer():
+
+def _layer(comp="comp"):
     cache = lambda: torch.zeros(4, 128 * md.RECORD, dtype=torch.uint8)  # noqa: E731
     attn = SimpleNamespace(
         swa_cache_layer=SimpleNamespace(prefix="swa", kv_cache=cache()),
-        compressed_cache_prefix="comp",
+        compressed_cache_prefix=comp,
         topk_indices_buffer=torch.zeros(64, 512, dtype=torch.int32),
         compress_ratio=1,
         _compressed_kv_cache=cache,
@@ -69,7 +75,9 @@ def run(monkeypatch):
     """Call the mono path for one layer under a forward context built from
     ``mode`` and ``metadata``; returns (result, runner calls)."""
 
-    def _run(mode=CUDAGraphMode.FULL, metadata=None, **inputs):
+    def _run(
+        mode=CUDAGraphMode.FULL, metadata=None, ffn_only=False, entry=None, **inputs
+    ):
         if metadata is None:
             metadata = {
                 "swa": _swa(),
@@ -82,7 +90,13 @@ def run(monkeypatch):
         monkeypatch.setattr(md, "_mono_runner", lambda device: runner)
         monkeypatch.setattr(md.MonoDecodeLayer, "weights", lambda self, layer: None)
         args = {**_inputs(), **inputs}
-        return md.MonoDecodeLayer()(_layer(), **args), runner.calls
+        mono = md.MonoDecodeLayer(ffn_only)
+        if (entry or ("ffn" if ffn_only else "layer")) == "ffn":
+            # x stands for wo_b's unreduced output; the first layer's attention
+            # has no compressed cache
+            part, _ = args.pop("x"), args.pop("positions")
+            return mono.ffn(_layer(comp=None), part, **args), runner.calls
+        return mono(_layer(), **args), runner.calls
 
     return _run
 
@@ -139,4 +153,96 @@ def test_decode_step_runs_mono(run, mode):
 )
 def test_other_steps_take_the_original_path(run, case):
     out, calls = run(**case)
+    assert out is None and not calls
+
+
+def _decoder_layer(engram=None, **attn):
+    attn = (
+        dict(
+            layer_id=21,
+            compressor=None,
+            indexer=None,
+            compress_ratio=1,
+            kv_mxfp8=False,
+            kv_cache_dtype="fp8_ds_mla",
+        )
+        | attn
+    )
+    ffn = SimpleNamespace(
+        shared_experts=object(),
+        gate=SimpleNamespace(tid2eid=None),
+        n_routed_experts=384,
+        n_activated_experts=6,
+        routed_scaling_factor=1.5,
+        swiglu_limit=10.0,
+        scoring_func="sqrtsoftplus",
+        renormalize=True,
+    )
+    return SimpleNamespace(
+        attn=SimpleNamespace(**attn),
+        ffn=ffn,
+        engram=engram,
+        use_sequence_parallel=False,
+        fuse_seam_norm=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "layer, path",
+    [
+        (_decoder_layer(), "whole"),
+        (_decoder_layer(compress_ratio=0), "ffn"),
+        (_decoder_layer(engram=object()), "ffn"),
+        (_decoder_layer(compressor=object(), indexer=object()), "ffn"),
+        (_decoder_layer(indexer=object()), "ffn"),
+        (_decoder_layer(kv_cache_dtype="auto"), "ffn"),
+        (_decoder_layer(layer_id=40), None),
+    ],
+    ids=["standard", "first", "engram", "kv-source", "index-source", "kv", "draft"],
+)
+def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
+    """The whole-layer kernels serve the standard layers; every other backbone
+    layer keeps vLLM's attention and runs its FFN half as one launch."""
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setenv("VLLM_ROCM_DSV41_MONO_DECODE", "1")
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
+    monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
+    runner = "vllm.models.deepseek_v41.amd.mono.runner"
+    monkeypatch.setitem(sys.modules, runner, ModuleType(runner))
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40))
+    )
+    mono = md.MonoDecodeLayer.create(layer, config)
+    got = None if mono is None else "ffn" if mono.ffn_only else "whole"
+    assert got == path
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_decode_step_runs_ffn_launch(run, mode):
+    out, calls = run(mode, ffn_only=True, metadata={"swa": _swa()})
+    assert out == ("ffn outputs",) and len(calls) == 1
+    assert calls[0][0][1].shape == (M, 5120)  # wo_b's unreduced output
+
+
+def test_ffn_layer_never_runs_whole(run):
+    out, calls = run(ffn_only=True, entry="layer")
+    assert out is None and not calls
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        dict(mode=CUDAGraphMode.PIECEWISE),
+        dict(metadata={"swa": _swa(num_prefills=1)}),
+        dict(metadata={"swa": _swa(num_decode_tokens=M + 1)}),
+        dict(metadata={}),
+        dict(**_inputs(md.MAX_ROWS + 6)),
+    ],
+    ids=["piecewise", "prefill", "padding", "no-metadata", "rows"],
+)
+def test_other_steps_reduce_wo_b_themselves(run, case):
+    """None: the layer all-reduces wo_b's partial and runs the FFN as before."""
+    case.setdefault("metadata", {"swa": _swa()})
+    out, calls = run(ffn_only=True, **case)
     assert out is None and not calls

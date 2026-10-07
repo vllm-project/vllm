@@ -5,12 +5,16 @@
 A decode step's backbone layer -- the attention seam, the attention, its TP
 all-reduce, the FFN seam, the MoE and its all-reduce -- runs as two persistent
 FlyDSL launches (``mono``, this directory) on the layer's loaded
-weights, the TP reductions inside the kernels. A layer takes it when it has the
-standard seam and no compressor or indexer of its own (compress ratio 1 or 2);
-a step when it is decode only, at most ``MAX_ROWS`` rows with causal SWA
-windows (eager or a FULL CUDA graph: the model is not torch.compiled). Anything
-else runs the layer as before; the two paths share every tensor at the layer
-boundary, so they interleave freely.
+weights, the TP reductions inside the kernels. A layer runs whole when it has
+the standard seam and no compressor or indexer of its own (compress ratio 1 or
+2) over ``fp8_ds_mla`` records. Any other backbone layer (the first, the Engram
+layers, the compressor / indexer layers) keeps vLLM's attention seam and
+attention and runs the rest as one launch, the FFN launch, from wo_b's
+unreduced output. A step takes the kernels when it is decode only, at most
+``MAX_ROWS`` rows (eager or a FULL CUDA graph: the model is not torch.compiled);
+a whole layer also needs causal SWA windows. Anything else runs the layer as
+before; the paths share every tensor at the layer boundary, so they interleave
+freely.
 
 Every TP rank must take the same path at every layer (the kernels wait on each
 other's pushes): the conditions read only metadata every rank holds alike.
@@ -84,10 +88,12 @@ def _scale_bytes(scale: torch.Tensor) -> torch.Tensor:
 
 class MonoDecodeLayer:
     """One decoder layer's mono path (``create``: None when the layer is not
-    eligible). Its weights are taken from the layer at the first call, after
-    loading."""
+    eligible): the whole layer (``__call__``) or, with ``ffn_only``, the FFN
+    launch after vLLM's attention (``ffn``). Its weights are taken from the
+    layer at the first call, after loading."""
 
-    def __init__(self) -> None:
+    def __init__(self, ffn_only: bool = False) -> None:
+        self.ffn_only = ffn_only
         self._weights: MonoLayerWeights | None = None
 
     @staticmethod
@@ -111,21 +117,15 @@ class MonoDecodeLayer:
                 why = f"needs FlyDSL and AITER's FlyDSL helpers ({err})"
         if why is not None:
             raise ValueError(f"VLLM_ROCM_DSV41_MONO_DECODE {why}.")
-        # the layer: the kernels serve the standard backbone layers only
+        # the layer: the kernels serve the backbone's seams and MoE
         config = vllm_config.model_config.hf_config
         attn, ffn = layer.attn, layer.ffn
-        if layer.engram is not None or layer.use_sequence_parallel:
-            why = "Engram or sequence-parallel layer"
+        if layer.use_sequence_parallel:
+            why = "sequence-parallel layer"
         elif not layer.fuse_seam_norm:
             why = "needs aiter's fused mHC seam"
         elif attn.layer_id >= config.num_hidden_layers:
             why = "draft layer"
-        elif attn.compressor is not None or attn.indexer is not None:
-            why = "layer has its own compressor / indexer"
-        elif attn.compress_ratio not in (1, 2):
-            why = f"compress ratio {attn.compress_ratio}"
-        elif attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
-            why = f"{attn.kv_cache_dtype} KV cache (needs fp8_ds_mla records)"
         elif (
             ffn.shared_experts is None
             or ffn.gate.tid2eid is not None
@@ -140,41 +140,33 @@ class MonoDecodeLayer:
         if why is not None:
             logger.info_once("DSv4.1 mono decode off for some layers: %s", why)
             return None
-        logger.info_once("DSv4.1 mono decode on for the standard backbone layers")
+        # the whole layer: the kernels' attention takes the standard layers only
+        if layer.engram is not None:
+            why = "Engram"
+        elif attn.compressor is not None or attn.indexer is not None:
+            why = "a compressor / indexer"
+        elif attn.compress_ratio not in (1, 2):
+            why = f"compress ratio {attn.compress_ratio}"
+        elif attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
+            why = f"a {attn.kv_cache_dtype} KV cache"
+        if why is not None:
+            logger.info_once(
+                "DSv4.1 mono decode: the FFN launch for layers with %s", why
+            )
+            return MonoDecodeLayer(ffn_only=True)
+        logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
         return MonoDecodeLayer()
 
     def weights(self, layer: "DeepseekV4DecoderLayer"):
         if self._weights is not None:
             return self._weights
-        from vllm.models.deepseek_v41.amd.mono.runner import (
-            AttnWeights,
-            MonoLayerWeights,
-        )
+        from vllm.models.deepseek_v41.amd.mono.runner import MonoLayerWeights
 
         a, f = layer.attn, layer.ffn
         e, sh = f.experts.routed_experts, f.shared_experts
         assert sh is not None  # ``create`` took only layers with one
-        attn = AttnWeights(
-            layer_id=a.layer_id,
-            wqkv=a.fused_wqa_wkv.weight,
-            wqkv_scale=_scale_bytes(a.fused_wqa_wkv.weight_scale),
-            q_norm=a.q_norm.weight,
-            kv_norm=a.kv_norm.weight,
-            wq_b=a.wq_b.weight,
-            wq_b_scale=_scale_bytes(a.wq_b.weight_scale),
-            wo_a=a.wo_a.weight,
-            wo_a_scale=_scale_bytes(a.wo_a.weight_scale),
-            wo_b=a.wo_b.weight,
-            wo_b_scale=_scale_bytes(a.wo_b.weight_scale),
-            attn_sink=a.attn_sink,
-            cos_sin=a.rotary_emb.cos_sin_cache,
-            ratio=a.compress_ratio,
-        )
-        from vllm.models.deepseek_v41.amd.mono.attention.plan import Dims
-
-        attn.check(Dims(get_tensor_model_parallel_world_size()))
         self._weights = MonoLayerWeights(
-            attn=attn,
+            attn=None if self.ffn_only else self._attn_weights(a),
             hc_attn_fn=layer.hc_attn_fn,
             hc_attn_scale=layer.hc_attn_scale,
             hc_attn_base=layer.hc_attn_base,
@@ -197,9 +189,69 @@ class MonoDecodeLayer:
         return self._weights
 
     @staticmethod
+    def _attn_weights(a):
+        from vllm.models.deepseek_v41.amd.mono.attention.plan import Dims
+        from vllm.models.deepseek_v41.amd.mono.runner import AttnWeights
+
+        attn = AttnWeights(
+            layer_id=a.layer_id,
+            wqkv=a.fused_wqa_wkv.weight,
+            wqkv_scale=_scale_bytes(a.fused_wqa_wkv.weight_scale),
+            q_norm=a.q_norm.weight,
+            kv_norm=a.kv_norm.weight,
+            wq_b=a.wq_b.weight,
+            wq_b_scale=_scale_bytes(a.wq_b.weight_scale),
+            wo_a=a.wo_a.weight,
+            wo_a_scale=_scale_bytes(a.wo_a.weight_scale),
+            wo_b=a.wo_b.weight,
+            wo_b_scale=_scale_bytes(a.wo_b.weight_scale),
+            attn_sink=a.attn_sink,
+            cos_sin=a.rotary_emb.cos_sin_cache,
+            ratio=a.compress_ratio,
+        )
+        attn.check(Dims(get_tensor_model_parallel_world_size()))
+        return attn
+
+    @staticmethod
     def _skip(why: str) -> None:
         logger.debug_once("DSv4.1 mono decode skipped a step: %s", why)
         return None
+
+    @staticmethod
+    def _decode_step(layer: "DeepseekV4DecoderLayer", rows: int):
+        """(why this step takes the original path -- None for a decode-only step
+        the kernels take -- the layer's SWA metadata, its compressed cache's)."""
+        if not 1 <= rows <= MAX_ROWS:
+            return f"{rows} rows", None, None
+        if not is_forward_context_available():
+            return "no forward context", None, None
+        fc = get_forward_context()
+        md = fc.attn_metadata
+        attn = layer.attn
+        swa, comp = None, None
+        if isinstance(md, dict):
+            swa = cast(
+                "DeepseekV4ROCMAiterSparseSWAMetadata | None",
+                md.get(attn.swa_cache_layer.prefix),
+            )
+            if attn.compressed_cache_prefix is not None:
+                comp = cast(
+                    "DeepseekV4FlashMLAMetadata | None",
+                    md.get(attn.compressed_cache_prefix),
+                )
+        why = None
+        if fc.cudagraph_runtime_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
+            # a PIECEWISE (breakable) capture is replayed for mixed batches too
+            why = f"{fc.cudagraph_runtime_mode} step"
+        elif not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
+            why = "no attention metadata"
+        elif swa is None:
+            why = "layer metadata missing"
+        elif swa.num_prefills != 0 or swa.num_decodes == 0:
+            why = "not a decode-only step"
+        elif swa.num_decode_tokens > rows:
+            why = "more decode tokens than rows"
+        return why, swa, comp
 
     def __call__(
         self,
@@ -212,52 +264,29 @@ class MonoDecodeLayer:
         pre_mix: torch.Tensor | None,
     ) -> tuple[torch.Tensor, ...] | None:
         """The layer's outputs (x, residual, post_mix, res_mix, pre_mix) by the
-        mono kernels, or None when this step takes the original path."""
-        M = x.shape[0]
-        why = None
+        mono kernels, or None when this step takes the original path (always for
+        an ``ffn_only`` layer)."""
+        if self.ffn_only:
+            return None
         if residual is None or x.dim() != 2:
-            why = "first layer"
-        elif not 1 <= M <= MAX_ROWS:
-            why = f"{M} rows"
-        elif not is_forward_context_available():
-            why = "no forward context"
-        if why is not None:
-            return self._skip(why)
-        fc = get_forward_context()
-        md = fc.attn_metadata
+            return self._skip("first layer")
+        why, swa, comp = self._decode_step(layer, x.shape[0])
         attn = layer.attn
-        swa, comp = None, None
-        if isinstance(md, dict) and attn.compressed_cache_prefix is not None:
-            swa = cast(
-                "DeepseekV4ROCMAiterSparseSWAMetadata | None",
-                md.get(attn.swa_cache_layer.prefix),
-            )
-            comp = cast(
-                "DeepseekV4FlashMLAMetadata | None",
-                md.get(attn.compressed_cache_prefix),
-            )
         tensors = (x, residual, post_mix, res_mix, pre_mix)
-        if fc.cudagraph_runtime_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
-            # a PIECEWISE (breakable) capture is replayed for mixed batches too
-            why = f"{fc.cudagraph_runtime_mode} step"
-        elif not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
-            why = "no attention metadata"
-        elif swa is None or comp is None:
-            why = "layer metadata missing"
-        elif swa.num_prefills != 0 or swa.num_decodes == 0:
-            why = "not a decode-only step"
-        elif swa.num_decode_tokens > M:
-            why = "more decode tokens than rows"
-        elif swa.decode_swa_width != SWA_WIDTH:
-            why = f"SWA width {swa.decode_swa_width}"
-        elif (
-            swa.decode_swa_indices is None
-            or swa.decode_swa_lens is None
-            or swa.token_to_req_indices is None
-        ):
-            why = "SWA decode metadata missing"
-        elif not all(t is not None and t.is_contiguous() for t in tensors):
-            why = "non-contiguous layer inputs"
+        if why is None:
+            # the kernels' attention: causal SWA windows, the compressed cache
+            if comp is None:
+                why = "layer metadata missing"
+            elif swa.decode_swa_width != SWA_WIDTH:
+                why = f"SWA width {swa.decode_swa_width}"
+            elif (
+                swa.decode_swa_indices is None
+                or swa.decode_swa_lens is None
+                or swa.token_to_req_indices is None
+            ):
+                why = "SWA decode metadata missing"
+            elif not all(t is not None and t.is_contiguous() for t in tensors):
+                why = "non-contiguous layer inputs"
         if why is not None:
             return self._skip(why)
         assert swa is not None and comp is not None
@@ -285,3 +314,28 @@ class MonoDecodeLayer:
             comp_block_table=comp.block_table,
         )
         return out
+
+    def ffn(
+        self,
+        layer: "DeepseekV4DecoderLayer",
+        part: torch.Tensor,
+        residual: torch.Tensor,
+        post_mix: torch.Tensor,
+        res_mix: torch.Tensor,
+        pre_mix: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...] | None:
+        """The layer's outputs by the FFN launch from ``part``, wo_b's unreduced
+        output, and the attention seam's outputs; None when this step takes the
+        original path (the caller then reduces ``part`` itself)."""
+        why, _, _ = self._decode_step(layer, part.shape[0])
+        tensors = (part, residual, post_mix, res_mix, pre_mix)
+        if why is None and not all(t.is_contiguous() for t in tensors):
+            why = "non-contiguous layer inputs"
+        if why is not None:
+            return self._skip(why)
+        runner = _mono_runner(part.device)
+        logger.info_once(
+            "DSv4.1 mono decode FFN launch active (decode steps of <= %d rows)",
+            MAX_ROWS,
+        )
+        return runner.ffn(self.weights(layer), *tensors)
