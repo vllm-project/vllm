@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    amax_for_moe_activation_quant,
 )
 
 logger = init_logger(__name__)
@@ -358,7 +359,16 @@ def convert_to_nvfp4_moe_kernel_format(
             view["w1_global_scale"],
         )
         w2, w2_scale, w2_scale_2 = view["w2"], view["w2_scale"], view["w2_global_scale"]
-        # cuTile W4A4 quantizes activations dynamically in-kernel.
+        # W4A4 quantizes activations in-kernel. The SM12x backend takes one
+        # activation global scale per GEMM; without it the E4M3 block scales of
+        # small activations underflow, so pass the calibrated one as the
+        # FlashInfer CUTLASS path does (shared by all experts).
+        if a13_scale is not None and a2_scale is not None:
+            enable_eplb = layer.moe_config.moe_parallel_config.enable_eplb
+            layer.cutile_input_global_scales = tuple(
+                (1.0 / amax_for_moe_activation_quant(s, enable_eplb)).reshape(1)
+                for s in (a13_scale, a2_scale)
+            )
         a13_scale = None
         a2_scale = None
     elif nvfp4_backend == NvFp4MoeBackend.B12X:

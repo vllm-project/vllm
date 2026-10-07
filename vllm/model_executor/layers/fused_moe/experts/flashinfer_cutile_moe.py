@@ -310,16 +310,18 @@ class FlashInferCuTileNvfp4Experts(mk.FusedMoEExpertsModular):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # The oracle already stored the prepared view on the layer.
-        self.dispatch.set_weights(
-            {
-                "w1": layer.w13_weight,
-                "w1_scale": layer.w13_weight_scale,
-                "w1_global_scale": layer.w13_weight_scale_2,
-                "w2": layer.w2_weight,
-                "w2_scale": layer.w2_weight_scale,
-                "w2_global_scale": layer.w2_weight_scale_2,
-            }
-        )
+        view = {
+            "w1": layer.w13_weight,
+            "w1_scale": layer.w13_weight_scale,
+            "w1_global_scale": layer.w13_weight_scale_2,
+            "w2": layer.w2_weight,
+            "w2_scale": layer.w2_weight_scale,
+            "w2_global_scale": layer.w2_weight_scale_2,
+        }
+        input_scales = getattr(layer, "cutile_input_global_scales", None)
+        if input_scales is not None:
+            view["w1_input_global_scale"], view["w2_input_global_scale"] = input_scales
+        self.dispatch.set_weights(view)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
