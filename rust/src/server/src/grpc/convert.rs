@@ -161,8 +161,7 @@ fn build_sampling_params(
         ..SamplingParams::default()
     };
 
-    // Preserve explicit disabled values; omitted fields inherit model defaults
-    // during lowering. For top_p, zero still means unset.
+    // Preserve explicit values; omitted fields inherit model defaults during lowering.
     if let Some(s) = sampling {
         // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
         // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
@@ -173,7 +172,7 @@ fn build_sampling_params(
             ));
         }
         params.top_k = s.top_k;
-        params.top_p = s.top_p.filter(|&p| p != 0.0);
+        params.top_p = s.top_p;
         params.min_p = s.min_p;
         params.seed = s.seed;
     }
@@ -746,7 +745,7 @@ mod tests {
     fn grpc_sampling_preserves_explicit_values_and_model_defaults_through_lowering() {
         for ((top_k, top_p, min_p), expected) in [
             ((None, None, None), (8, 0.9, 0.2)),
-            ((Some(0), Some(0.0), Some(0.0)), (0, 0.9, 0.0)),
+            ((Some(0), Some(1.0), Some(0.0)), (0, 1.0, 0.0)),
             ((Some(50), Some(0.8), Some(0.1)), (50, 0.8, 0.1)),
         ] {
             let request = pb::GenerateRequest {

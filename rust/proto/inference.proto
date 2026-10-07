@@ -76,7 +76,7 @@ message KVHintAction {
 message RandomSampling {
   uint32 num_sequences = 1;  // "n", default (0) means 1
   optional uint32 top_k = 2;  // Omitted means default; 0 disables top-k.
-  optional float top_p = 3;  // Omitted or 0 means default.
+  optional float top_p = 3;  // Omitted means default; must be in (0, 1].
   optional float min_p = 4;  // Omitted means default; 0 disables min-p.
   optional int64 seed = 5;
 }
