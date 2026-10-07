@@ -131,9 +131,10 @@ def run_config_tuning(
 
 
 def _tables() -> list[TunableConfigTable]:
+    from vllm.model_executor.warmup.lora_autotune import LoRAConfigTable
     from vllm.model_executor.warmup.mamba_ssu_autotune import MambaSSUConfigTable
 
-    return [MambaSSUConfigTable()]
+    return [MambaSSUConfigTable(), LoRAConfigTable()]
 
 
 def triton_autotune(worker: Worker) -> None:
