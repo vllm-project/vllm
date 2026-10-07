@@ -293,6 +293,13 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: check-grafana-dashboards
+    name: Check Grafana dashboards are generated and query defined metrics
+    entry: python tools/generate_grafana_dashboards.py --check
+    language: python
+    files: ^(vllm/.*\.py|tools/generate_grafana_dashboards\.py|examples/observability/dashboards/grafana/.*\.json)$
+    pass_filenames: false
+    additional_dependencies: [regex]
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
     entry: python tools/pre_commit/check_boolean_context_manager.py

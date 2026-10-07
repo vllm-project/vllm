@@ -45,15 +45,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum(rate(vllm:spec_decode_num_draft_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "__auto",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -111,7 +104,7 @@
     },
     {
       "type": "stat",
-      "title": "Mean acceptance length",
+      "title": "Acceptance length",
       "description": "Tokens produced per verification step, including the bonus token: 1 + accepted tokens / drafts. The upper bound is `num_speculative_tokens` + 1.\n\nMetrics: `vllm:spec_decode_num_accepted_tokens_total`, `vllm:spec_decode_num_drafts_total`",
       "datasource": {
         "type": "prometheus",
@@ -119,15 +112,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "1 + sum(rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum(rate(vllm:spec_decode_num_drafts_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "__auto",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -194,15 +180,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "__auto",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -268,15 +247,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:spec_decode_num_draft_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "__auto",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -342,15 +314,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:spec_decode_num_drafts_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "__auto",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -408,7 +373,7 @@
     },
     {
       "type": "stat",
-      "title": "Output from accepted drafts",
+      "title": "Output from drafts",
       "description": "Share of generated tokens that were accepted draft tokens.\n\nMetrics: `vllm:spec_decode_num_accepted_tokens_total`, `vllm:generation_tokens_total`",
       "datasource": {
         "type": "prometheus",
@@ -416,15 +381,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum(rate(vllm:generation_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "__auto",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -503,15 +461,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (model_name) (rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (model_name) (rate(vllm:spec_decode_num_draft_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{model_name}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -525,8 +476,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
           "unit": "percentunit",
+          "min": 0,
           "max": 1
         },
         "overrides": []
@@ -561,15 +512,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "1 + sum by (model_name) (rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (model_name) (rate(vllm:spec_decode_num_drafts_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{model_name}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -583,8 +527,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
           "unit": "short",
+          "min": 0,
           "decimals": 2
         },
         "overrides": []
@@ -619,15 +563,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (position) (rate(vllm:spec_decode_num_accepted_tokens_per_pos_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / on () group_left () (sum(rate(vllm:spec_decode_num_drafts_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "position {{position}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -641,8 +578,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
           "unit": "percentunit",
+          "min": 0,
           "max": 1
         },
         "overrides": []
@@ -660,7 +597,7 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 0,
         "y": 13
@@ -677,15 +614,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum by (instance, engine) (rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (instance, engine) (rate(vllm:spec_decode_num_draft_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "{{instance}} · engine {{engine}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -699,8 +629,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
           "unit": "percentunit",
+          "min": 0,
           "max": 1
         },
         "overrides": []
@@ -722,7 +652,7 @@
         }
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 12,
         "y": 13
@@ -737,7 +667,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 23
       },
       "id": 12,
       "panels": []
@@ -752,39 +682,18 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:spec_decode_num_draft_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "proposed",
-          "range": true,
           "refId": "A"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "accepted",
-          "range": true,
           "refId": "B"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:spec_decode_num_draft_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) - sum(rate(vllm:spec_decode_num_accepted_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "rejected",
-          "range": true,
           "refId": "C"
         }
       ],
@@ -798,8 +707,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "count:tok/s"
+          "unit": "count:tok/s",
+          "min": 0
         },
         "overrides": [
           {
@@ -865,7 +774,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 24
       },
       "id": 13
     },
@@ -879,51 +788,23 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "histogram_quantile(0.5, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "p50",
-          "range": true,
           "refId": "A"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "p95",
-          "range": true,
           "refId": "B"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "p99",
-          "range": true,
           "refId": "C"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "sum(rate(vllm:inter_token_latency_seconds_sum{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum(rate(vllm:inter_token_latency_seconds_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
-          "format": "time_series",
-          "instant": false,
           "legendFormat": "mean",
-          "range": true,
           "refId": "D"
         }
       ],
@@ -937,8 +818,8 @@
             "lineWidth": 1,
             "showPoints": "never"
           },
-          "min": 0,
-          "unit": "s"
+          "unit": "s",
+          "min": 0
         },
         "overrides": [
           {
@@ -1019,7 +900,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 24
       },
       "id": 14
     }
