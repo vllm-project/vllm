@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 from types import SimpleNamespace
 
 import pytest
@@ -75,7 +76,8 @@ def test_refresh_follows_target_update(
     default_vllm_config, dist_init, monkeypatch, quantization
 ):
     """After the target's weights change, the copy is re-derived in place: it
-    equals a fresh quantization of the new target and keeps its storage."""
+    equals a fresh quantization of the new target, keeps its storage, and
+    frees the temporary copy without waiting for the cycle collector."""
     head = _target_head(monkeypatch)
     drafter = torch.nn.Module()
     drafter.lm_head = quantized_lm_head_copy(head, quantization)
@@ -83,7 +85,13 @@ def test_refresh_follows_target_update(
 
     new_weight = _target_head(monkeypatch, seed=1).weight.detach()
     head.weight.data.copy_(new_weight)
-    refresh_quantized_lm_heads(drafter)
+    gc.disable()
+    try:
+        allocated = torch.accelerator.memory_allocated()
+        refresh_quantized_lm_heads(drafter)
+        assert torch.accelerator.memory_allocated() == allocated
+    finally:
+        gc.enable()
 
     expected = _tensors(quantized_lm_head_copy(head, quantization))
     for name, tensor in _tensors(drafter.lm_head).items():

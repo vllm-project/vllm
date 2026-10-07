@@ -137,6 +137,11 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
         )
     replace_parameter(head, "weight", lm_head.weight.data)
     head.quant_method.process_weights_after_loading(head)
+    # The copy is never loaded. The online loader wrapper captures the layer,
+    # so keeping it would leave each copy to the cycle collector.
+    for param in head.parameters(recurse=False):
+        if hasattr(param, "weight_loader"):
+            del param.weight_loader
     return head
 
 
