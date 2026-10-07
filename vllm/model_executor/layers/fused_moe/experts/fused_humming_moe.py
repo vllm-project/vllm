@@ -267,6 +267,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         max_expanded_rows = (
             self.moe_config.max_num_tokens
             * self.moe_config.dp_size
+            * self.moe_config.pcp_size
             * self.moe_config.experts_per_token
         )
         return get_moe_permute_scratch(

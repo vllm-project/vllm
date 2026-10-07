@@ -1454,6 +1454,7 @@ def test_humming_permute_scratch_is_shared_by_config(
     monkeypatch.setattr(permute, "MoEPermuteScratch", scratch_type)
     moe_config = make_dummy_moe_config(max_num_tokens=512, experts_per_token=6)
     moe_config.moe_parallel_config.dp_size = 2
+    moe_config.moe_parallel_config.pcp_size = 4
     experts = SimpleNamespace(moe_config=moe_config)
     other_layer = SimpleNamespace(moe_config=moe_config)
 
@@ -1466,9 +1467,9 @@ def test_humming_permute_scratch_is_shared_by_config(
 
     assert scratch_type.call_count == 2
     first_call, second_call = scratch_type.call_args_list
-    assert first_call.kwargs["max_num_tokens"] == 1024
+    assert first_call.kwargs["max_num_tokens"] == 4096
     assert first_call.kwargs["topk"] == 6
-    assert second_call.kwargs["max_num_tokens"] == 6144
+    assert second_call.kwargs["max_num_tokens"] == 24576
     assert second_call.kwargs["topk"] == 1
 
     manager.lock()
