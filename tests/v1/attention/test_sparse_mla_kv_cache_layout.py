@@ -12,6 +12,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseBackend,
 )
@@ -55,7 +56,7 @@ pytestmark = pytest.mark.skip_global_cleanup
         (FlashInferMLASparseTRTLLMBackend, "fp8", True, 32 * 576),
         (FlashAttnMLASparseBackend, "auto", True, 1152),
         (FlashMLASparseBackend, "auto", True, 1152),
-        (FlashMLASparseBackend, "fp8_ds_mla", False, None),
+        (FlashMLASparseBackend, "fp8_ds_mla", False, MultipleOf(64)),
         (FlashMLASparseBackend, "fp8_ds_mla", True, 656),
         (FlashMLASparseBackend, "nvfp4_ds_mla", True, 352),
     ],
@@ -106,10 +107,8 @@ def test_allocation_and_warmup_follow_addressing_mode(
     MLAAttention.bind_kv_cache(layer, views["mla"])
     DeepseekV32IndexerCache.bind_kv_cache(indexer, views["indexer"])
     assert indexer.kv_cache.stride(0) == views["indexer"].stride(0)
-    if stride_alignment is not None:
-        assert (
-            views["mla"].stride(0) * views["mla"].element_size() % stride_alignment == 0
-        )
+    alignment = spec.get_block_stride_alignment()
+    assert views["mla"].stride(0) * views["mla"].element_size() % alignment == 0
     if not layer._uses_flat_kv_cache():
         register.assert_not_called()
     else:
@@ -117,7 +116,7 @@ def test_allocation_and_warmup_follow_addressing_mode(
         register.assert_called_once_with(config, block_stride_rows=stride)
         layer.kv_cache[1, 0].fill_(3)
         torch.testing.assert_close(rows[stride], layer.kv_cache[1, 0])
-    if stride_alignment is None:
+    if alignment == 1:
         assert cache.kv_cache_tensors[0].size == cache.num_blocks * sum(
             item.page_size_bytes for item in specs.values()
         )

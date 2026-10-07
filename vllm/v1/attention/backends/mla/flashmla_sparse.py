@@ -132,6 +132,17 @@ QUANTIZED_DS_MLA_CACHE_FORMATS: frozenset[str] = frozenset(
 FP8_DS_MLA_ROPE_DIM = 64
 
 
+def _fp8_kv_pages(
+    kv_cache: torch.Tensor, block_size: int
+) -> tuple[torch.Tensor, int | None]:
+    """The cache as the fp8 kernel's 64-token pages, and the block stride in
+    rows when a block spans several pages."""
+    if block_size == 64:
+        return kv_cache, None
+    rows, block_stride_rows = flat_kv_row_view(kv_cache, block_size)
+    return rows.view(-1, 64, rows.shape[-1]), block_stride_rows
+
+
 class FlashMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -146,10 +157,11 @@ class FlashMLASparseBackend(AttentionBackend):
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if (
             isinstance(kv_cache_spec, AttentionSpec)
-            and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
+            and current_platform.is_device_capability_family(100)
         ):
-            return [MultipleOf(64)]
-        return [64]
+            return [64]
+        return [MultipleOf(64)]
 
     @staticmethod
     def get_name() -> str:
@@ -1003,13 +1015,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # and the prefill rows per chunk, against the gathered workspace.
         lse: torch.Tensor | None = None
         topk_length: torch.Tensor | None = None
+        kv_pages, block_stride_rows = _fp8_kv_pages(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         if self.pcp_dcp_kv_gather:
             pass
         elif num_prefill_tokens == 0 and not uses_host_cache:
             topk_indices, topk_length = self._convert_logical_to_physical_topk(
                 topk_indices,
                 attn_metadata,
-                block_stride_rows=None,
+                block_stride_rows=block_stride_rows,
                 return_valid_counts=True,
             )
         elif num_prefill_tokens > 0:
@@ -1018,6 +1033,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 attn_metadata.block_table,
                 topk_indices,
                 BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 HAS_PREFILL_WORKSPACE=has_prefill_workspace,
                 prefill_workspace_request_ids=prefill_request_ids,
@@ -1061,7 +1077,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             topk_indices = topk_indices.view(num_decodes, seq_len, -1)
             attn_out, _ = self._fp8_flash_mla_kernel(
                 q=q,
-                kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
+                kv_c_and_k_pe_cache=kv_pages,
                 topk_indices=topk_indices,
                 kernel_metadata=fp8_metadata.decode.kernel_metadata,
             )
@@ -1178,6 +1194,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # req_id_per_token covers the whole batch; slice it to the MQA tokens
         # (q may exclude prefill tokens routed to dense MHA).
         req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
+        kv_pages, block_stride_rows = _fp8_kv_pages(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         if self.dcp_world_size > 1:
             # The indexer emits global token ids; keep this rank's shard and
             # convert to local slots. compact_valid_to_front=False keeps the
@@ -1192,6 +1211,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 dcp_rank=self.dcp_rank,
                 cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
                 BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 compact_valid_to_front=False,
             )
@@ -1207,7 +1227,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 topk_indices = self._convert_logical_to_physical_topk(
                     topk_indices,
                     attn_metadata,
-                    block_stride_rows=None,
+                    block_stride_rows=block_stride_rows,
                     return_valid_counts=False,
                 )
             else:
@@ -1216,12 +1236,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     block_table,
                     topk_indices,
                     BLOCK_SIZE=attn_metadata.block_size,
+                    BLOCK_STRIDE_ROWS=block_stride_rows,
                     NUM_TOPK_TOKENS=topk_indices.shape[1],
                 )
 
         _attn_out, _lse = self._fp8_flash_mla_kernel(
             q=q.unsqueeze(0),  # unsqueeze to add batch_dim: (T, H, D) -> (1, T, H, D)
-            kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
+            kv_c_and_k_pe_cache=kv_pages,
             topk_indices=topk_indices.unsqueeze(0),  # (T, topk) -> (1, T, topk)
             kernel_metadata=fp8_metadata,
         )

@@ -819,9 +819,11 @@ def test_sparse_backend_decode_correctness(
             out_buffer,
         )
 
-    if block_stride_rows is not None:
+    if block_stride_rows is not None and kv_cache_dtype == "auto":
         expected_row = torch.cat((kv_c_vllm[-1], k_pe_vllm[-1, 0]))
         torch.testing.assert_close(query_row, expected_row, rtol=0, atol=0)
+    elif block_stride_rows is not None:
+        assert query_row.any()
 
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
@@ -837,22 +839,53 @@ def test_sparse_backend_decode_correctness(
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
 
 
-def test_flashinfer_sparse_mla_packed_stride(
-    default_vllm_config, dist_init, workspace_init, monkeypatch
+@pytest.mark.parametrize(
+    ("backend_cls", "kv_cache_dtype", "block_size", "block_stride_rows", "head_dims"),
+    [
+        pytest.param(
+            FlashInferMLASparseTRTLLMBackend,
+            "auto",
+            256,
+            320,
+            (128, 128, 64, 128),
+            id="FlashInferTRTLLM",
+        ),
+        # GLM-5.3 on SM90: the fp8 kernel's 64-token pages in larger blocks.
+        pytest.param(
+            FlashMLASparseBackend,
+            "fp8_ds_mla",
+            128,
+            192,
+            (64, 256, 0, 256),
+            id="FlashMLA-fp8_ds_mla",
+        ),
+    ],
+)
+def test_sparse_mla_packed_stride(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    monkeypatch,
+    backend_cls,
+    kv_cache_dtype,
+    block_size,
+    block_stride_rows,
+    head_dims,
 ):
     test_sparse_backend_decode_correctness(
         default_vllm_config,
         dist_init,
-        FlashInferMLASparseTRTLLMBackend,
+        backend_cls,
         "mixed_small",
-        "auto",
+        kv_cache_dtype,
         1,
-        256,
+        block_size,
         workspace_init,
         1.0,
         1.0,
+        *head_dims,
         monkeypatch,
-        block_stride_rows=320,
+        block_stride_rows=block_stride_rows,
     )
 
 

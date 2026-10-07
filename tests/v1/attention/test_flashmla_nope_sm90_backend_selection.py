@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
+    _fp8_kv_pages,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -145,7 +146,15 @@ def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
     assert caches["layer.0"].shape == (num_blocks, 1, 1152, 512)
 
 
-def test_flashmla_quantized_cache_keeps_fixed_kernel_pages():
+@pytest.mark.parametrize("sm100", [False, True])
+def test_flashmla_quantized_cache_kernel_pages(monkeypatch, sm100):
+    """Quantized blocks are read as 64-token pages; SM100 only row-aligns them
+    (TMA) and keeps 64-token blocks."""
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family, device_id=0: sm100 and family == 100,
+    )
     spec = MLAAttentionSpec(
         block_size=1152,
         num_kv_heads=1,
@@ -156,8 +165,29 @@ def test_flashmla_quantized_cache_keeps_fixed_kernel_pages():
         state_content_bytes=656,
     )
 
-    assert FlashMLASparseBackend.get_supported_kernel_block_sizes(spec) == [64]
-    assert select_common_block_size(1152, [FlashMLASparseBackend], [spec]) == 64
+    kernel_block_size = 64 if sm100 else 1152
+    assert (
+        select_common_block_size(1152, [FlashMLASparseBackend], [spec])
+        == kernel_block_size
+    )
+
+
+def test_fp8_kv_pages_address_packed_blocks():
+    """Token t of block b is row b * block_stride_rows + t of the 64-row pages;
+    64-token blocks are passed through."""
+    row, block_size, stride_rows = 656, 128, 192
+    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
+    cache = backing.view(3, stride_rows, row)[:, :block_size]
+
+    pages, block_stride_rows = _fp8_kv_pages(cache, block_size)
+    assert block_stride_rows == stride_rows
+    assert pages.shape[1:] == (64, row)
+    slot = 2 * block_stride_rows + 100
+    assert torch.equal(pages[slot // 64, slot % 64], cache[2, 100])
+
+    pages, block_stride_rows = _fp8_kv_pages(cache[:, :64], 64)
+    assert block_stride_rows is None
+    assert torch.equal(pages, cache[:, :64])
 
 
 def test_quantized_ds_mla_formats_are_the_envelope_set():

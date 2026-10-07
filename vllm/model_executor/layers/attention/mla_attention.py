@@ -282,6 +282,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MLAAttentionImpl,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.prefill import (
@@ -1390,6 +1391,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             spec = replace(
                 spec, block_stride_alignment=page_rows * spec.state_content_size_bytes
             )
+        elif backend == "FLASHMLA_SPARSE":
+            # FlashMLA's quantized cache is read in 64-token pages.
+            spec = replace(spec, block_stride_alignment=MultipleOf(64))
         return spec
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
