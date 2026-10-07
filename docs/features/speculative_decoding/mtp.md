@@ -98,10 +98,6 @@ vllm serve <mtp-model> \
   ranks token ids by frequency over a corpus and reports held-out coverage.
   Measure the real acceptance length (see
   [acceptance metrics](acceptance_metrics.md)) with and without the list.
-- `vllm/model_executor/layers/draft_vocab_lists/` ships ready-made lists,
-  installed with the package; pass the file's path. `qwen38_flash_next_32k.json`
-  holds 32,768 ids for `local-inference-lab/Qwen3.8-Flash-Next-NVFP4`, built
-  from that checkpoint's own generations.
 
 A static list loses acceptance on traffic it was not built from (for example
 other languages). `draft_token_map_dynamic_rows` adds that many tokens per
