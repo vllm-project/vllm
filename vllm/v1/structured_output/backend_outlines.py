@@ -344,9 +344,16 @@ def _check_unsupported(parsed) -> None:
             for branch in tval[1]:
                 _check_unsupported(branch)
 
-        # tval is (min, max, subpattern)
-        elif ttype == sre_parse.MAX_REPEAT:
-            _check_unsupported(tval[2])
+        else:
+            # Any other node that nests a pattern holds it in tval, either as
+            # the value itself (atomic group) or as one of its members: repeats
+            # hold (min, max, subpattern) and groups hold
+            # (group, add_flags, del_flags, subpattern). Recursing on the
+            # nested patterns themselves means a feature cannot escape the
+            # check by being wrapped in a group or a quantifier.
+            for sub in tval if isinstance(tval, tuple) else (tval,):
+                if isinstance(sub, sre_parse.SubPattern):
+                    _check_unsupported(sub)
 
 
 def validate_regex_is_buildable(pattern: str) -> None:
