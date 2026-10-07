@@ -1,6 +1,8 @@
-# Current GDN/KDA measurements
+# GDN/KDA measurements
 
-## Current full-serving measurements
+**FE1454 results:** [New GB200 TTFT and KDA CPU/kernel comparison](native_additive_results.md), with [all repeats and audits](native_additive_results.json). GLM is complete; Kimi is queued. The sections below retain the earlier FE1418/FI6078 measurements and do not describe the FE1454 implementation.
+
+## Earlier FE1418/FI6078 full-serving measurements
 
 All three choices use vLLM `c871d07d6e955303a2033b15b90aeeb955f4c73a`, FlashInfer `5146335b10ee45d8c0c3760a4cf7bbffb9084eeb`, frontend `734e22b8e7fdaae650cf68651919beab9263dcbb`, matching native frontend 1.31.0 and cuDNN 9.20. These are current-adapter results; October 2 timings are excluded.
 

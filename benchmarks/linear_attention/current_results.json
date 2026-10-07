@@ -6720,5 +6720,23 @@
       "3258435",
       "3263929"
     ]
+  },
+  "native_additive_8192_1": {
+    "report": "native_additive_results.md",
+    "data": "native_additive_results.json",
+    "completed_jobs": [
+      "3264918"
+    ],
+    "pending_jobs": [
+      "3264917"
+    ],
+    "pins": {
+      "frontend_version": "1.31.0",
+      "candidate": {
+        "frontend": "db85ff42d6d8ce8ab05b1d94414620cfc451a0fa",
+        "flashinfer": "13e9271f03b2d0e27881697c2d32c17d9705d10f",
+        "vllm": "29ad8bdac62250209d0e7c694eb0246f1882efab"
+      }
+    }
   }
 }
