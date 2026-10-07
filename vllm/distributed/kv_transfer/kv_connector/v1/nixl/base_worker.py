@@ -46,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.digest import (
     serialize_digest,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_DIGESTS_MSG,
     GET_META_MSG,
     NixlAgentMetadata,
     NixlConnectorMetadata,
@@ -108,6 +109,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _SHARED_REGION_GROUP_ID = -1
+
+# KV digest fetch (push mode): recv timeout for the D -> P-scheduler
+# side-channel fetch. Must exceed the server-side wait budget
+# (_DIGEST_SERVE_WAIT_S in base_scheduler.py) plus network slack, or a
+# client timeout would masquerade as "producer has no digests".
+_DIGEST_FETCH_TIMEOUT_MS = 10_000
 
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
@@ -961,6 +968,9 @@ class NixlBaseConnectorWorker:
         # P side: digests computed this step, drained by
         # build_connector_worker_meta.
         self._pending_digests: dict[ReqId, list[list[str]]] = {}
+        # D side, push mode: requests whose push completed and whose digests
+        # must be fetched from the producer's side channel before verifying.
+        self._digest_fetch_pending: set[ReqId] = set()
 
     def _validate_remote_parallel_config(
         self, agent_metadata: NixlAgentMetadata
@@ -2972,6 +2982,59 @@ class NixlBaseConnectorWorker:
         self._pending_digests = {}
         return meta
 
+    def _fetch_remote_digests(
+        self, host: str, port: int, remote_req_id: str
+    ) -> list[list[str]] | None:
+        """Fetch this rank's per-group block digests for a request from the
+        producer scheduler's side channel.
+
+        Runs on the engine main thread at transfer-completion time
+        (post-forward), off the forward critical path, so a bounded blocking
+        REQ round trip is acceptable for the prototype. The producer waits
+        server-side for digests still in flight from its workers, so a reply
+        of None means exactly "the producer has no digests for this request"
+        (feature off, non-producer request, or expired entry).
+
+        Returns the digests, or None per the contract above. A transport
+        failure (e.g. dead producer) also returns None; the verify path
+        treats both as "producer shipped no digests" (fail-closed aware).
+        """
+        path = make_zmq_path("tcp", host, port)
+        msg = msgspec.msgpack.encode((GET_DIGESTS_MSG, remote_req_id, self.tp_rank))
+        try:
+            with zmq_ctx(zmq.REQ, path) as sock:
+                sock.setsockopt(zmq.RCVTIMEO, _DIGEST_FETCH_TIMEOUT_MS)
+                sock.setsockopt(zmq.LINGER, 0)
+                sock.send(msg)
+                reply = sock.recv_multipart()
+            return msgspec.msgpack.decode(reply[0])
+        except zmq.ZMQError as e:
+            logger.warning("KV digest fetch from %s failed: %s", path, e)
+            return None
+
+    def _fetch_remote_digests_into(self, meta: ReqMeta) -> None:
+        """Fill ``meta.remote.block_digests`` from the producer's side
+        channel (push mode has no kv_transfer_params leg to carry them).
+
+        On fetch failure leaves block_digests None, which the verify path
+        treats as "producer shipped no digests" (fail-closed aware).
+        """
+        assert self.transfer_topo is not None and meta.remote is not None
+        remote = meta.remote
+        rank_digests = self._fetch_remote_digests(
+            remote.host, remote.port, remote.request_id
+        )
+        if rank_digests is None:
+            return
+        remote_tp_size = self.transfer_topo.get_engine_info(
+            remote.engine_id
+        ).remote_tp_size
+        # Only this rank's entry is populated; verification reads just that.
+        remote.block_digests = [
+            rank_digests if rank == self.tp_rank else []
+            for rank in range(remote_tp_size)
+        ]
+
     def _verify_recved_digests(self, req_id: str, meta: ReqMeta) -> bool:
         """Recompute digests over received blocks and compare with the
         producer's digests shipped in kv_transfer_params.
@@ -3019,10 +3082,6 @@ class NixlBaseConnectorWorker:
         if not supported:
             return _skip("unsupported transfer layout")
 
-        # Under homogeneous TP this rank READ exactly the producer shard of
-        # the same rank, so verify against that rank's digests. A missing or
-        # empty entry means the producer rank shipped none; skip rather than
-        # misfire.
         # Under homogeneous TP this rank READ exactly the producer shard of
         # the same rank, so verify against that rank's digests.
         expected_rank = expected[self.tp_rank] if self.tp_rank < len(expected) else []
@@ -3191,6 +3250,7 @@ class NixlBaseConnectorWorker:
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
                 self._pending_recv_notifs.pop(req_id, None)
+                self._digest_fetch_pending.discard(req_id)
                 # TODO (NickLucche) handle failed transfer for HMA.
                 if not self._is_hma_required:
                     self._invalid_block_ids.put(set(meta.local_block_ids[0]))
@@ -3204,6 +3264,12 @@ class NixlBaseConnectorWorker:
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
+
+            if req_id in self._digest_fetch_pending:
+                # Push mode: digests ride the producer's side channel; fetch
+                # them now that the WRITE has completed.
+                self._digest_fetch_pending.discard(req_id)
+                self._fetch_remote_digests_into(meta)
 
             if not self._verify_recved_digests(req_id, meta):
                 # Digest mismatch with failure routing enabled: report the

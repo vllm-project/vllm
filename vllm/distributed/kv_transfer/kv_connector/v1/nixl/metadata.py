@@ -21,6 +21,15 @@ ReqId = str
 
 GET_META_MSG = b"get_meta_msg"
 
+# KV digest fetch (push mode): D worker -> P scheduler side channel,
+# encoded as msgpack((GET_DIGESTS_MSG, remote_req_id, tp_rank)). The
+# scheduler waits server-side (bounded, see _DIGEST_SERVE_WAIT_S) for
+# digests still in flight from its workers, then replies with
+# msgpack(list[list[str]] | None): that rank's per-group block digests, or
+# None meaning exactly "the producer has no digests for this request"
+# (feature off, non-producer request, or expired entry).
+GET_DIGESTS_MSG = b"get_digests_msg"
+
 # Push-mode (WRITE-based) registration notification.
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).

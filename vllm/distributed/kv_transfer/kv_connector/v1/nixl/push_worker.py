@@ -205,6 +205,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # --- P-side: newly finished blocks awaiting a D registration match ---
         if metadata.push_finished_blocks:
             for req_id, block_ids in metadata.push_finished_blocks.items():
+                if self._enable_kv_digest:
+                    # KV content is final once prefill finishes. Digest now
+                    # so the scheduler can serve digests over its side
+                    # channel; push has no kv_transfer_params leg back to D.
+                    self._pending_digests[req_id] = self._compute_block_digests(
+                        block_ids
+                    )
                 self._finished_blocks_inbox.put((req_id, block_ids))
             self._push_writer_wake.set()
 
@@ -783,6 +790,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     # materialise an empty ``_recving_transfers`` entry for
                     # ``_pop_done_transfers`` to report done.
                     self._recving_transfers.setdefault(req_id, [])
+                    if self._enable_kv_digest:
+                        # Digests are served from P's side channel; fetched
+                        # at completion-verify time in get_transfer_results,
+                        # not on this path.
+                        self._digest_fetch_pending.add(req_id)
                 else:
                     # Not tracked on either side (lease may have expired
                     # before the notif arrived). Log and skip.

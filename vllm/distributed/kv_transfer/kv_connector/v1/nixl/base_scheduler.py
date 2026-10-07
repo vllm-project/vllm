@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_DIGESTS_MSG,
     GET_META_MSG,
     HeartbeatInfo,
     NixlConnectorMetadata,
@@ -52,6 +53,14 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Server-side wait budget for GET_DIGESTS_MSG: how long the listener waits
+# for digests still in flight from the workers before answering None
+# (meaning: the producer has no digests for this request). Entries expire
+# with the block lease, so the wait never outlives them either. The D-side
+# recv timeout (_DIGEST_FETCH_TIMEOUT_MS in base_worker.py) must exceed this
+# plus network slack, or a client timeout would masquerade as "no digests".
+_DIGEST_SERVE_WAIT_S = 5.0
 
 
 class _ReqDigestState(NamedTuple):
@@ -214,6 +223,14 @@ class NixlBaseConnectorScheduler:
         # Worker-computed digests awaiting pickup by request_finished, keyed
         # by request id then producer TP rank.
         self._pending_digests: dict[ReqId, dict[int, list[list[str]]]] = {}
+        # Push mode: digests served over the side channel (D fetches after
+        # the WRITE completes, so they outlive the request on P). Values are
+        # (per-rank digests, perf_counter deadline); served entries are
+        # deleted per rank and unserved ones reaped at the deadline. The
+        # condition lets the listener wait for digests still in flight from
+        # the workers; update_worker_meta notifies after storing.
+        self._digests_by_req: dict[ReqId, tuple[dict[int, list[list[str]]], float]] = {}
+        self._digests_cond = threading.Condition()
 
     def shutdown(self):
         self._stop_event.set()
@@ -351,6 +368,8 @@ class NixlBaseConnectorScheduler:
                     self._stop_event,
                     self.side_channel_host,
                     self.side_channel_port,
+                    self._digests_by_req,
+                    self._digests_cond,
                 ),
                 daemon=True,
                 name="nixl_handshake_listener",
@@ -365,6 +384,8 @@ class NixlBaseConnectorScheduler:
         stop_event: threading.Event,
         host: str,
         port: int,
+        digests_by_req: dict[ReqId, tuple[dict[int, list[list[str]]], float]],
+        digests_cond: threading.Condition,
     ):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
@@ -383,15 +404,43 @@ class NixlBaseConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode (GET_META_MSG, pp_rank, tp_rank).
-                msg, target_pp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
+                # Decode (GET_META_MSG, pp_rank, tp_rank) or
+                # (GET_DIGESTS_MSG, req_id, tp_rank).
+                parts = msgspec.msgpack.decode(msg)
+                if parts[0] == GET_DIGESTS_MSG:
+                    _, req_id, tp_rank = parts
+                    with digests_cond:
+                        # Wait for digests still in flight from the workers
+                        # (worker meta lags the WRITE). A timeout means the
+                        # producer has no digests for this request (feature
+                        # off, non-producer request, or expired entry).
+                        end = time.perf_counter() + _DIGEST_SERVE_WAIT_S
+                        while (entry := digests_by_req.get(req_id)) is None:
+                            if not digests_cond.wait(end - time.perf_counter()):
+                                break
+                        rank_digests = None
+                        if entry is not None:
+                            # Serve-and-delete per rank: each D rank fetches
+                            # only its own entry. A rank missing from an
+                            # existing entry will not appear later (all
+                            # producer ranks land in one worker-meta batch).
+                            rank_digests = entry[0].pop(tp_rank, None)
+                            if not entry[0]:
+                                del digests_by_req[req_id]
+                    sock.send_multipart(
+                        (identity, b"", msgspec.msgpack.encode(rank_digests))
+                    )
+                    continue
+                msg_type, target_pp_rank, target_tp_rank = parts
                 logger.debug(
                     "Received message for pp rank %s, tp rank %s",
                     target_pp_rank,
                     target_tp_rank,
                 )
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
+                if msg_type != GET_META_MSG:
+                    logger.warning(
+                        "Connection listener got unexpected message %s", msg_type
+                    )
                 # Echo our perf_counter so P can estimate the clock offset.
                 # perf_counter is only comparable within a process, so this
                 # listener must run in the same process that stamps the block
@@ -526,6 +575,8 @@ class NixlBaseConnectorScheduler:
 
         if self._enable_kv_digest and self._TRANSFER_MODE == "pull":
             self._update_blocks_to_checksum(meta, scheduler_output)
+        if self._digests_by_req:
+            self._reap_expired_digests()
 
         # Package heartbeats, throttled by heartbeat_interval.
         if self._heartbeat_by_engine:
@@ -548,9 +599,35 @@ class NixlBaseConnectorScheduler:
             self._stop_heartbeat(req_id)
 
     def update_worker_meta(self, worker_meta: KVConnectorWorkerMetadata) -> None:
-        """Stash worker-computed block digests for request_finished."""
-        if isinstance(worker_meta, NixlDigestMetadata):
-            self._pending_digests.update(worker_meta.digests)
+        """Stash worker-computed block digests: for request_finished in pull
+        mode, or for side-channel serving in push mode."""
+        if not isinstance(worker_meta, NixlDigestMetadata):
+            return
+        if self._TRANSFER_MODE == "push":
+            # Digests outlive the request on P: D fetches them after the
+            # WRITE completes. TTL them like the block lease.
+            deadline = time.perf_counter() + self._kv_lease_duration
+            with self._digests_cond:
+                for req_id, rank_digests in worker_meta.digests.items():
+                    self._digests_by_req[req_id] = (rank_digests, deadline)
+                # Wake listeners waiting on a GET_DIGESTS_MSG for these.
+                self._digests_cond.notify_all()
+            return
+        self._pending_digests.update(worker_meta.digests)
+
+    def _reap_expired_digests(self) -> None:
+        """Drop unserved push-mode digest entries past their deadline."""
+        now = time.perf_counter()
+        with self._digests_cond:
+            expired = [
+                req_id
+                for req_id, (_, deadline) in self._digests_by_req.items()
+                if now >= deadline
+            ]
+            for req_id in expired:
+                del self._digests_by_req[req_id]
+        for req_id in expired:
+            logger.warning("KV digests for request %s expired unserved", req_id)
 
     def _update_blocks_to_checksum(
         self,
