@@ -22,7 +22,9 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.attention import HiSparseConfig
 from vllm.config.compilation import CompilationMode, PassConfig
+from vllm.config.vllm import enable_rope_kvcache_mla_fusion
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -369,6 +371,136 @@ def test_splitting_ops_dynamic():
     # use_inductor_graph_partition=True, and cudagraph_mode
     # is unchanged.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+
+_MLA_KV_CACHE_UPDATE = "vllm::unified_mla_kv_cache_update"
+_KV_CACHE_UPDATE = "vllm::unified_kv_cache_update"
+
+
+def _reset_mla_fusion_decision(vllm_config: VllmConfig) -> None:
+    compilation_config = vllm_config.compilation_config
+    compilation_config.mode = CompilationMode.VLLM_COMPILE
+    compilation_config.use_inductor_graph_partition = False
+    compilation_config.splitting_ops = None
+    compilation_config.pass_config.fuse_attn_quant = False
+    compilation_config.pass_config.fuse_rope_kvcache_cat_mla = None
+    compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+@pytest.mark.parametrize(
+    (
+        "use_mla",
+        "layername",
+        "cuda_alike",
+        "preset_flag",
+        "expect_enabled",
+        "expect_split",
+    ),
+    [
+        pytest.param(True, True, True, None, True, False, id="mla-layername"),
+        pytest.param(False, True, True, None, False, True, id="non-mla"),
+        pytest.param(True, False, True, None, False, True, id="plain-string-name"),
+        pytest.param(True, True, False, None, False, True, id="not-cuda-alike"),
+        pytest.param(None, True, True, None, False, True, id="no-model"),
+        pytest.param(
+            True, False, True, True, False, True, id="explicit-without-layername"
+        ),
+        pytest.param(True, True, True, True, True, False, id="explicit-with-layername"),
+    ],
+)
+def test_mla_rope_kvcache_fusion_splitting(
+    monkeypatch,
+    use_mla: bool | None,
+    layername: bool,
+    cuda_alike: bool,
+    preset_flag: bool | None,
+    expect_enabled: bool,
+    expect_split: bool,
+):
+    monkeypatch.setattr("vllm.utils.torch_utils._USE_LAYERNAME", layername)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: cuda_alike)
+
+    vllm_config = VllmConfig()
+    _reset_mla_fusion_decision(vllm_config)
+    vllm_config.model_config = (
+        None if use_mla is None else SimpleNamespace(use_mla=use_mla)
+    )
+    compilation_config = vllm_config.compilation_config
+    if preset_flag is None:
+        vllm_config._set_config_default(
+            compilation_config.pass_config,
+            "fuse_rope_kvcache_cat_mla",
+            enable_rope_kvcache_mla_fusion,
+        )
+    else:
+        compilation_config.pass_config.fuse_rope_kvcache_cat_mla = preset_flag
+
+    compilation_config.set_splitting_ops_for_v1("allgather_reducescatter")
+
+    assert compilation_config.pass_config.fuse_rope_kvcache_cat_mla is expect_enabled
+    splitting_ops = compilation_config.splitting_ops
+    assert splitting_ops is not None
+    assert (_MLA_KV_CACHE_UPDATE in splitting_ops) is expect_split
+    assert _KV_CACHE_UPDATE in splitting_ops
+
+
+def test_mla_fusion_follows_inductor_graph_partition():
+    vllm_config = VllmConfig()
+    compilation_config = vllm_config.compilation_config
+    compilation_config.use_inductor_graph_partition = True
+    compilation_config.splitting_ops = None
+    compilation_config.pass_config.fuse_rope_kvcache_cat_mla = None
+    vllm_config.model_config = None
+    vllm_config._set_config_default(
+        compilation_config.pass_config,
+        "fuse_rope_kvcache_cat_mla",
+        enable_rope_kvcache_mla_fusion,
+    )
+    assert compilation_config.pass_config.fuse_rope_kvcache_cat_mla is True
+
+
+def test_mla_fusion_disabled_when_user_splits_the_op(monkeypatch):
+    monkeypatch.setattr("vllm.utils.torch_utils._USE_LAYERNAME", True)
+    vllm_config = VllmConfig()
+    compilation_config = vllm_config.compilation_config
+    compilation_config.mode = CompilationMode.VLLM_COMPILE
+    compilation_config.use_inductor_graph_partition = False
+    compilation_config.pass_config.fuse_rope_kvcache_cat_mla = True
+    compilation_config.splitting_ops = [
+        "vllm::unified_attention_with_output",
+        _MLA_KV_CACHE_UPDATE,
+    ]
+    compilation_config.set_splitting_ops_for_v1("allgather_reducescatter")
+    assert compilation_config.pass_config.fuse_rope_kvcache_cat_mla is False
+    assert _MLA_KV_CACHE_UPDATE in compilation_config.splitting_ops
+
+
+def test_mla_fusion_stays_split_for_hisparse(monkeypatch):
+    monkeypatch.setattr("vllm.utils.torch_utils._USE_LAYERNAME", True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+
+    vllm_config = VllmConfig()
+    _reset_mla_fusion_decision(vllm_config)
+    vllm_config.model_config = SimpleNamespace(use_mla=True)
+    vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    vllm_config._set_config_default(
+        vllm_config.compilation_config.pass_config,
+        "fuse_rope_kvcache_cat_mla",
+        enable_rope_kvcache_mla_fusion,
+    )
+    assert vllm_config.compilation_config.pass_config.fuse_rope_kvcache_cat_mla is False
+
+    # HiSparseConnector fills hisparse_config after the -O2 default is applied.
+    vllm_config.compilation_config.pass_config.fuse_rope_kvcache_cat_mla = True
+    vllm_config.compilation_config.splitting_ops = None
+    vllm_config.compilation_config.set_splitting_ops_for_v1(
+        "allgather_reducescatter",
+        hisparse_enabled=True,
+    )
+    assert vllm_config.compilation_config.pass_config.fuse_rope_kvcache_cat_mla is False
+    splitting_ops = vllm_config.compilation_config.splitting_ops
+    assert splitting_ops is not None
+    assert _MLA_KV_CACHE_UPDATE in splitting_ops
 
 
 def test_moe_splitting_ops_deepep_ht_inductor_partition():
