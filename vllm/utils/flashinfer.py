@@ -616,10 +616,16 @@ def _flashinfer_b12x_w4a16_moe_is_broken() -> bool:
     any W4A16 launch crossing the custom-op boundary fails during CUDA graph
     capture with "force_tile_config fc2 tile ... does not fit problem".
     """
+    import flashinfer
     from packaging.version import InvalidVersion, Version
 
-    import flashinfer
-
+    if os.environ.get("VLLM_FLASHINFER_B12X_W4A16_IGNORE_BROKEN", "0") == "1":
+        logger.warning_once(
+            "VLLM_FLASHINFER_B12X_W4A16_IGNORE_BROKEN=1: skipping the "
+            "FlashInfer b12x W4A16 broken-version check. Only use this with "
+            "a FlashInfer build carrying the forced-tile validation fix."
+        )
+        return False
     try:
         version = Version(flashinfer.__version__)
     except (AttributeError, InvalidVersion):

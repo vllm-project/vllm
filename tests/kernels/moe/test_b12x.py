@@ -1294,7 +1294,5 @@ def test_b12x_w4a16_broken_flashinfer_version_guard(
     guard must blocklist exactly that range."""
     import vllm.utils.flashinfer as flashinfer_utils
 
-    monkeypatch.setitem(
-        sys.modules, "flashinfer", SimpleNamespace(__version__=version)
-    )
+    monkeypatch.setitem(sys.modules, "flashinfer", SimpleNamespace(__version__=version))
     assert flashinfer_utils._flashinfer_b12x_w4a16_moe_is_broken() is broken
