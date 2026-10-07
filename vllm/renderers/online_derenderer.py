@@ -9,9 +9,11 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ToolCall,
 )
-from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
+from vllm.entrypoints.generate.base.serving import decode_token_ids
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionLogProb,
     ChatCompletionLogProbs,
+    ChatCompletionLogProbsContent,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponseChoice,
@@ -28,6 +30,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
+    GenerateLogProbs,
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
 )
@@ -963,16 +966,6 @@ def _seed_stream_state(
     )
 
 
-def _parse_token_id_placeholder(token: str) -> int | None:
-    """Extract token ID from a 'token_id:N' placeholder string."""
-    if not token.startswith("token_id:"):
-        return None
-    try:
-        return int(token[len("token_id:") :])
-    except ValueError:
-        return None
-
-
 def _correct_decoded_token(
     token_id: int, context_token_ids: list[int], tokenizer: TokenizerLike
 ) -> str:
@@ -1012,53 +1005,63 @@ def _correct_decoded_token(
 
 
 def _resolve_logprobs(
-    logprobs: ChatCompletionLogProbs,
+    logprobs: GenerateLogProbs,
     tokenizer: TokenizerLike,
     initial_context_token_ids: Sequence[int] = (),
 ) -> ChatCompletionLogProbs:
-    """Resolve token_id:N placeholders in a ChatCompletionLogProbs object.
+    """Convert generate's integer-id logprobs to the OpenAI chat shape.
 
-    ``initial_context_token_ids`` seeds the byte-fallback correction context
-    with sampled IDs from preceding chunks (streaming), so multi-byte
-    characters split across chunk boundaries still resolve.
+    The generate server has no tokenizer, so `token` and `bytes` are filled
+    here, with the same U+FFFD byte-fallback correction the coupled path
+    applies (`_correct_decoded_token`, which needs the preceding sampled token
+    ids as context). ``initial_context_token_ids`` seeds that context with
+    sampled IDs from preceding chunks (streaming), so multi-byte characters
+    split across chunk boundaries still resolve.
     """
     if logprobs.content is None:
-        return logprobs
+        return ChatCompletionLogProbs()
 
     context_token_ids: list[int] = list(initial_context_token_ids)
     resolved_content = []
 
     for entry in logprobs.content:
-        token_str, token_bytes = resolve_token_id_placeholder(entry.token, tokenizer)
-        sampled_id = _parse_token_id_placeholder(entry.token)
+        # One batch per position: the sampled id and its top-k ids.
+        (token_str, token_bytes), *top_decoded = decode_token_ids(
+            [entry.token_id, *(top.token_id for top in entry.top_logprobs)],
+            tokenizer,
+        )
 
-        if token_str.endswith("�") and sampled_id is not None:
-            token_str = _correct_decoded_token(sampled_id, context_token_ids, tokenizer)
+        if token_str.endswith("\ufffd"):
+            token_str = _correct_decoded_token(
+                entry.token_id, context_token_ids, tokenizer
+            )
             token_bytes = list(token_str.encode("utf-8"))
 
         resolved_top = []
-        for top in entry.top_logprobs:
-            top_str, top_bytes = resolve_token_id_placeholder(top.token, tokenizer)
-            top_id = _parse_token_id_placeholder(top.token)
-            if top_str.endswith("�") and top_id is not None:
-                top_str = _correct_decoded_token(top_id, context_token_ids, tokenizer)
+        for top, (top_str, top_bytes) in zip(entry.top_logprobs, top_decoded):
+            if top_str.endswith("\ufffd"):
+                top_str = _correct_decoded_token(
+                    top.token_id, context_token_ids, tokenizer
+                )
                 top_bytes = list(top_str.encode("utf-8"))
             resolved_top.append(
-                top.model_copy(update={"token": top_str, "bytes": top_bytes})
+                ChatCompletionLogProb(
+                    token=top_str,
+                    logprob=top.logprob,
+                    bytes=top_bytes,
+                )
             )
 
         resolved_content.append(
-            entry.model_copy(
-                update={
-                    "token": token_str,
-                    "bytes": token_bytes,
-                    "top_logprobs": resolved_top,
-                }
+            ChatCompletionLogProbsContent(
+                token=token_str,
+                logprob=entry.logprob,
+                bytes=token_bytes,
+                top_logprobs=resolved_top,
             )
         )
 
-        if sampled_id is not None:
-            context_token_ids.append(sampled_id)
+        context_token_ids.append(entry.token_id)
 
     return ChatCompletionLogProbs(content=resolved_content)
 
