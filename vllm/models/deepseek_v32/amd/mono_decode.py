@@ -123,6 +123,8 @@ class GlmMonoDecode:
         self._layer_name = layers[self._num_dense].self_attn.layer_name
         self._max_model_len = vllm_config.model_config.max_model_len
         self._ops: dict[int, list[Glm5MonoKernel]] = {}
+        self._runtimes: dict[int, list[Glm5MonoKernel]] = {}
+        self._launch_index: list[int] = []
         self._cos: torch.Tensor | None = None
         self._sin: torch.Tensor | None = None
         self._cur_pos: torch.Tensor | None = None
@@ -183,7 +185,9 @@ class GlmMonoDecode:
             # The dense layers convert their top-k into the indexer layers'
             # metadata; the shared-index layers read another buffer.
             self._convert_indices(first.self_attn, md)
-        for layer, op in zip(model.layers[self._num_dense :], ops):
+        for layer, op, index in zip(
+            model.layers[self._num_dense :], ops, self._launch_index
+        ):
             attn = layer.self_attn
             cache = attn.kv_cache.view(fp8).view(-1, attn.kv_cache.shape[-1])
             if op.with_indexer:
@@ -195,6 +199,8 @@ class GlmMonoDecode:
                     None,
                     self._cos,
                     self._sin,
+                    layer=index,
+                    advance=False,
                     positions=kernel_positions,
                     slot_mapping=slots,
                     sparse_kv_indptr=indptr,
@@ -212,10 +218,14 @@ class GlmMonoDecode:
                 md.paged_kv_indices,
                 self._cos,
                 self._sin,
+                layer=index,
+                advance=False,
                 positions=kernel_positions,
                 slot_mapping=slots,
                 sparse_kv_indptr=indptr,
             )
+        for runtime in self._runtimes[max(n, 2)]:
+            runtime.advance_step()
         return model.norm(state[:n])
 
     @staticmethod
@@ -256,6 +266,8 @@ class GlmMonoDecode:
             prepare_glm5_weights(w, AttentionWeight.FP8_BLOCK128) for w in weights
         ]
         index_options = self._index_options(sparse, fused)
+        launches = {f: fused.count(f) for f in (False, True)}
+        self._launch_index = [fused[:i].count(f) for i, f in enumerate(fused)]
         for chunk in sorted({max(n, 2) for n in _STEP_TOKENS}):
             runtimes: dict[bool, Glm5MonoKernel | None] = {False: None, True: None}
             ops = []
@@ -267,7 +279,7 @@ class GlmMonoDecode:
                     npes=tp,
                     group=group,
                     topk=_SPARSE_TOPK,
-                    launches_per_step=1,
+                    launches_per_step=launches[f],
                     with_indexer=f,
                     attention_weight=AttentionWeight.FP8_BLOCK128,
                     kv_cache_layout=KvCacheLayout.ATOM,
@@ -280,6 +292,7 @@ class GlmMonoDecode:
                 runtimes[f] = runtimes[f] or op
                 ops.append(op)
             self._ops[chunk] = ops
+            self._runtimes[chunk] = [r for r in runtimes.values() if r is not None]
         # Drop the unpacked attention copies; every op reads the packed ones.
         for w, p in zip(weights, prepared):
             for name in ("w_qkv_a", "w_q_b", "w_uk", "w_uv", "w_o"):
