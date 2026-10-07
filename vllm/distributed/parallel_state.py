@@ -801,6 +801,19 @@ class GroupCoordinator:
             raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
+    def reduce_scatterv_into_output(
+        self,
+        input_: torch.Tensor,
+        output: torch.Tensor,
+        dim: int = -1,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.reduce_scatterv_into_output(
+            input_, output, dim, sizes
+        )
+
     def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
@@ -1442,6 +1455,32 @@ class GroupCoordinator:
         else:
             return hidden_states
 
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        if self.device_communicator is None:
+            return None
+        return self.device_communicator.allocate_combine_input(
+            shape, dtype, device, is_sequence_parallel
+        )
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            output.copy_(hidden_states)
+            return output
+        return self.device_communicator.combine_into_output(
+            hidden_states, output, is_sequence_parallel
+        )
+
 
 _WORLD: GroupCoordinator | None = None
 _INNER_DP_WORLD: GroupCoordinator | None = None
@@ -1581,6 +1620,14 @@ _DCP: GroupCoordinator | None = None
 def get_dcp_group() -> GroupCoordinator:
     assert _DCP is not None, "decode context model parallel group is not initialized"
     return _DCP
+
+
+def get_dcp_world_size_and_rank(enabled: bool = True) -> tuple[int, int]:
+    """Return ``(world_size, rank)`` in the DCP group, or ``(1, 0)`` when disabled
+    (e.g. a replicated draft cache) or the group is uninitialized (unit tests)."""
+    if not enabled or _DCP is None:
+        return 1, 0
+    return _DCP.world_size, _DCP.rank_in_group
 
 
 _PP: GroupCoordinator | None = None

@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     fused_grouped_topk,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -160,54 +161,23 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
     # its singleton to exactly one mode.
     all_reduce = not use_sequence_parallel
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
-    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
+    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_ENABLE_GEMM_RS
     if not enabled:
         return False
 
-    parallel_config = vllm_config.parallel_config
-    tp_size = parallel_config.tensor_parallel_size
-    if parallel_config.use_ubatching:
-        reason = "ubatching is enabled"
-    elif vllm_config.model_config.dtype != torch.bfloat16:
-        reason = "the model dtype is not BF16"
-    elif not current_platform.is_cuda():
-        reason = "the device is not CUDA"
-    elif not current_platform.is_device_capability_family(100):
-        reason = "the device is not SM100-family"
-    elif not 1 < tp_size <= 16:
-        reason = "TP size is not in the supported range 2-16"
-    elif 128 % tp_size != 0:
-        reason = "TP size does not divide 128"
-    else:
-        reason = None
-
-    if reason is not None:
-        logger.warning_once("%s is disabled because %s.", mode, reason)
-        return False
-
-    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_rs_ar
+    # The kernel module pulls in cute_dsl, so import it only once the flag
+    # asks for it.
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+        maybe_init_gemm_rs_ar as maybe_init_shared_gemm_rs_ar,
+    )
 
     config = vllm_config.model_config.hf_text_config
-    try:
-        init_gemm_rs_ar(
-            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
-            N=config.hidden_size,
-            all_reduce=all_reduce,
-        )
-    except RuntimeError as e:
-        logger.warning_once(
-            "%s is disabled because initialization failed: %s. This may mean "
-            "the TP ranks do not share one NVLink domain.",
-            mode,
-            e,
-        )
+    if not maybe_init_shared_gemm_rs_ar(
+        vllm_config, N=config.hidden_size, all_reduce=all_reduce
+    ):
         return False
-    if all_reduce:
-        logger.info_once(
-            "GEMM-AR is enabled. To disable it, set VLLM_KIMI_K3_GEMM_AR=0."
-        )
-    else:
-        logger.info_once("GEMM-RS is enabled.")
+    flag = "VLLM_KIMI_K3_GEMM_AR" if all_reduce else "VLLM_ENABLE_GEMM_RS"
+    logger.info_once("To disable %s, set %s=0.", mode, flag)
     return True
 
 
@@ -276,7 +246,7 @@ class KimiMLP(nn.Module):
             not use_sequence_parallel and reduce_results
         )
         if use_gemm_rs_ar and run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
@@ -309,7 +279,7 @@ class KimiMLP(nn.Module):
         x = self.act_fn(gate_up)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
-            return self.gemm_rs_ar(x, self.down_proj.weight)
+            return self.gemm_rs_ar.apply(x, self.down_proj)
 
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:
@@ -1767,6 +1737,7 @@ class KimiK3ForConditionalGeneration(
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1806,6 +1777,7 @@ class KimiK3ForConditionalGeneration(
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             if is_meta_module(self.vision_tower):
@@ -1995,13 +1967,13 @@ class KimiK3ForConditionalGeneration(
         if isinstance(patch_size, int):
             patch_size = (patch_size, patch_size)
         total_patches = sum(t * h * w for t, h, w in grid_thws)
-        pixel_values = torch.randn(
+        pixel_values = torch.zeros(
             total_patches,
             3,
             patch_size[0],
             patch_size[1],
             device=device,
-            dtype=dtype,
+            dtype=self.vision_tower.patch_embed.input_norm.input_dtype or dtype,
         )
         metadata = self.vision_tower.prepare_encoder_cudagraph_metadata(
             grid_thws,
@@ -2059,9 +2031,7 @@ class KimiK3ForConditionalGeneration(
         path: str = "default",
     ) -> torch.Tensor:
         image_features = self.vision_tower(
-            self._get_pixel_values(mm_kwargs).to(
-                next(self.vision_tower.parameters()).dtype
-            ),
+            self._get_pixel_values(mm_kwargs),
             self._get_grid_thws(mm_kwargs),
         )
         return self._project_encoder_features(torch.cat(image_features))
@@ -2094,8 +2064,6 @@ class KimiK3ForConditionalGeneration(
                 pixel_values.shape[0] * pixel_values.shape[1], *pixel_values.shape[2:]
             )
 
-        target_dtype = next(self.vision_tower.parameters()).dtype
-        pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
             f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )
