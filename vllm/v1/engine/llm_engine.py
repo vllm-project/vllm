@@ -12,9 +12,14 @@ from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.profiler import (
+    validate_profile_iteration_bounds,
+    validate_profile_prefix,
+)
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
@@ -116,6 +121,7 @@ class LLMEngine:
             log_stats=self.log_stats,
             renderer=renderer,
         )
+        self._profile_session_active = False
 
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:
@@ -254,6 +260,13 @@ class LLMEngine:
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                # This request object is owned by the engine from here on.
+                self.input_processor.apply_watermarking(
+                    request_params,
+                    self.input_processor.resolve_watermarking(request_params),
+                )
         else:
             request = self.input_processor.process_inputs(
                 request_id,
@@ -351,11 +364,33 @@ class LLMEngine:
 
         return processed_outputs.request_outputs
 
-    def start_profile(self, profile_prefix: str | None = None):
-        self.engine_core.profile(True, profile_prefix)
+    def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
+        if self._profile_session_active:
+            raise ProfilerAlreadyActiveError()
+        validate_profile_prefix(profile_prefix)
+        validate_profile_iteration_bounds(delay_iterations, max_iterations)
+
+        self._profile_session_active = True
+        try:
+            self.engine_core.profile(
+                True,
+                profile_prefix,
+                delay_iterations,
+                max_iterations,
+            )
+        except BaseException:
+            self._profile_session_active = False
+            raise
 
     def stop_profile(self):
         self.engine_core.profile(False)
+        self._profile_session_active = False
 
     def reset_mm_cache(self):
         # Join the background MM warmup first: the mm_processor_cache is not
