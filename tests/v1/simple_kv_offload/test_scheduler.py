@@ -63,6 +63,31 @@ from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
 pytestmark = pytest.mark.skip_global_cleanup
 
 
+def test_derived_cpu_config_preserves_coordinator_role_and_capacity():
+    class PluginKVCacheConfig(KVCacheConfig):
+        kv_transfer_config: KVTransferConfig
+
+    gpu = PluginKVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4096, layers=["probe"], layer_stride=4096, block_stride=256
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    role = KVTransferConfig(kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both")
+    gpu.kv_transfer_config = role
+    cpu = SimpleCPUOffloadScheduler._derive_cpu_config(gpu, 8192)
+    assert cpu is not gpu
+    assert cpu.num_blocks == 32
+    assert cpu.kv_cache_tensors[0].size == 8192
+    assert isinstance(cpu, PluginKVCacheConfig)
+    assert cpu.kv_transfer_config is role
+    assert gpu.num_blocks == 16
+    assert gpu.kv_cache_tensors[0].size == 4096
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
