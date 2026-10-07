@@ -284,6 +284,10 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    http_timeout_keep_alive: int | None = None
+    """Maximum idle time in seconds for a keep-alive HTTP connection before
+    the server closes it. Set to 0 to disable keep-alive connections. Defaults
+    to `VLLM_HTTP_TIMEOUT_KEEP_ALIVE` when set, otherwise 5 seconds."""
     grpc_port: int | None = None
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
@@ -530,6 +534,15 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise ValueError(
             "Error: --sse-keep-alive-interval must be a non-negative integer "
             "(0 disables keep-alive comments)."
+        )
+
+    if args.http_timeout_keep_alive is None:
+        args.http_timeout_keep_alive = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+
+    if args.http_timeout_keep_alive < 0:
+        raise ValueError(
+            "Error: --http-timeout-keep-alive must be a non-negative integer "
+            "(0 disables keep-alive connections)."
         )
 
     if getattr(args, "enable_per_request_metrics", False) and getattr(
