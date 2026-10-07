@@ -1002,10 +1002,16 @@ class CompilationConfig:
             # (fixme @boyuan) combo kernel does not support cpu yet.
             and not current_platform.is_cpu()
         ):
+            from torch._inductor import config as inductor_config
+
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True
-            self.inductor_compile_config["benchmark_combo_kernel"] = True
+
+            deterministic = self.inductor_compile_config.get(
+                "deterministic", getattr(inductor_config, "deterministic", False)
+            )
+            self.inductor_compile_config["benchmark_combo_kernel"] = not deterministic
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"
