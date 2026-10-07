@@ -272,6 +272,15 @@ class ServerRole:
         # Parked aborts awaiting drain, keyed by (kv_request_id, round)
         # with the abort start time.
         self._pending_aborts: dict[tuple[str, int], float] = {}
+        # Failed rounds whose sibling cancellation is still pending per
+        # ``DataTransport.cancel(..., mode="wait")``, keyed by
+        # (kv_request_id, round_seq) → (round, failed transfer id). The round
+        # stays registered in ``st.outbound`` and no TransferDoneMsg is sent
+        # until every sibling is gone; each ``collect_results`` retries the
+        # cancel and finally emits the terminal — mirrors ``_pending_aborts``.
+        self._pending_failed_rounds: dict[
+            tuple[str, int], tuple[_OutboundRequestState, int]
+        ] = {}
 
     # ------------------------------------------------------------------
     # State helpers
@@ -741,6 +750,11 @@ class ServerRole:
             results.extend(self._pending_store_results)
             self._pending_store_results.clear()
 
+        # Snapshot the failed rounds still awaiting sibling cancellation from a
+        # *previous* poll. Taken before this poll's completions are processed so
+        # a round that fails right now is not drained twice in the same tick.
+        retry_failed_rounds = list(self._pending_failed_rounds)
+
         # Scope the poll to this peer: the transport is shared across all peer
         # sessions of the engine, and poll() drains completed handles. An
         # unscoped poll here would consume sibling sessions' completions and
@@ -783,7 +797,13 @@ class ServerRole:
                     )
             self._maybe_prune(xfer.kv_request_id)
 
-        failed_rounds: list[tuple[str, _OutboundRequestState]] | None = None
+        failed_rounds: (
+            dict[
+                tuple[str, int],
+                tuple[_OutboundRequestState, int, int, _InflightXfer],
+            ]
+            | None
+        ) = None
         for tid in poll_result.failed:
             xfer = self._inflight_pop(tid)
             if xfer is None:
@@ -800,33 +820,49 @@ class ServerRole:
             rnd = xfer.round
             st = self._requests.get(xfer.kv_request_id)
             if st is not None and st.outbound.get(xfer.round_key) is rnd:
-                del st.outbound[xfer.round_key]
                 if failed_rounds is None:
-                    failed_rounds = []
-                failed_rounds.append((xfer.kv_request_id, rnd))
-                self._send(
-                    {
-                        TYPE_KEY: TransferDoneMsg.TYPE,
-                        TransferDoneMsg.KV_REQUEST_ID: xfer.kv_request_id,
-                        TransferDoneMsg.SUCCESS: False,
-                        TransferDoneMsg.ROUND_SEQ: xfer.round_key,
-                    }
+                    failed_rounds = {}
+                failed_rounds[(xfer.kv_request_id, xfer.round_key)] = (
+                    rnd,
+                    tid,
+                    xfer.round_key,
+                    xfer,
                 )
             self._maybe_prune(xfer.kv_request_id)
 
-        # Cancel each failed round's other inflight and fail its
-        # remaining store jobs — nothing else will settle them.
+        # For each failed round, cancel siblings and only then notify the peer.
+        # This ordering is deliberate: the peer must not observe
+        # ``TransferDoneMsg(success=False)`` before the server has finished the
+        # required local cancellation/drain for the round's remaining inflight
+        # transfers. See ``_send_round_failed``.
         if failed_rounds:
-            for kv_request_id, rnd in failed_rounds:
-                ids_to_cancel = [
-                    tid for tid, x in self._inflight.items() if x.round is rnd
-                ]
-                for tid in ids_to_cancel:
-                    self._inflight_pop(tid)
-                if ids_to_cancel:
-                    self._transport.cancel(ids_to_cancel)
-                results.extend(self._fail_round_jobs(rnd))
-                self._maybe_prune(kv_request_id)
+            for (
+                (kv_request_id, rk),
+                (rnd, failed_tid, failed_tid_round_key, _failed_xfer),
+            ) in failed_rounds.items():
+                results.extend(
+                    self._send_round_failed(
+                        kv_request_id, rnd, failed_tid, failed_tid_round_key
+                    )
+                )
+
+        # Retry the cancellation for rounds whose siblings were still pending on
+        # an earlier poll. Runs *after* this poll's completions so a sibling that
+        # just surfaced (done/failed) is already gone from ``self._inflight`` and
+        # the round's terminal can be emitted now. ``_send_round_failed`` itself
+        # decides whether anything is still pending, keeps the round registered
+        # in that case, and drops stale entries whose round was finalized
+        # elsewhere (abort / terminal fetch) without a second notification.
+        for key in retry_failed_rounds:
+            pending = self._pending_failed_rounds.get(key)
+            if pending is None:
+                # Resolved by this poll's completion handling.
+                continue
+            kv_request_id, round_key = key
+            rnd, failed_tid = pending
+            results.extend(
+                self._send_round_failed(kv_request_id, rnd, failed_tid, round_key)
+            )
 
         return results
 
@@ -870,6 +906,7 @@ class ServerRole:
         self._requests.clear()
         self._serve_pending.clear()
         self._pending_aborts.clear()
+        self._pending_failed_rounds.clear()
         self._finished_lookup_ctxs.clear()
         return failed_stores, failed_serves
 
@@ -906,6 +943,122 @@ class ServerRole:
         if st is not None:
             st.inflight_tids.discard(tid)
         return xfer
+
+    # ------------------------------------------------------------------
+    # Internal — failed-round cancellation / terminal notification
+    # ------------------------------------------------------------------
+
+    def _send_round_failed(
+        self,
+        kv_request_id: str,
+        rnd: _OutboundRequestState,
+        failed_tid: int,
+        failed_tid_round_key: int,
+    ) -> list[StoreResult]:
+        """Terminal handling for a failed round.
+
+        The peer must not be told the round failed until the server has
+        finished the required local cancellation/drain for every sibling
+        transfer still belonging to this round. We therefore:
+
+        1. retain the round object while we work;
+        2. identify every sibling inflight transfer for this round;
+        3. issue the transport cancel for those siblings in ``wait`` mode so
+           the transport reports which siblings it could not yet release;
+        4. update server-side inflight bookkeeping only for siblings the
+           transport says are no longer pending;
+        5. fail the round's remaining store jobs;
+        6. remove the round from ``st.outbound`` *only* when no sibling is
+           still pending; and
+        7. only then send ``TransferDoneMsg(success=False)``.
+
+        If any sibling is still pending after the cancel attempt, the round
+        stays in ``st.outbound`` and is parked in ``_pending_failed_rounds`` so
+        every later ``collect_results`` retries the cancel (via ``poll()``
+        surfacing the sibling) before the terminal is sent. This mirrors the
+        abort-drain contract in ``_drain_abort``.
+
+        One terminal notification is emitted per failed round. Siblings in
+        other rounds or other kv_request_ids are not touched.
+        """
+        results: list[StoreResult] = []
+
+        # Defer popping the failed transfer itself until sibling cleanup is
+        # complete, so the round object and its job set stay alive while we
+        # cancel the siblings. The failed tid is already gone from
+        # ``self._inflight`` (we popped it in the failed-loop above), but its
+        # ``_InflightXfer.round`` reference is still the live round object we
+        # need below.
+
+        # Siblings: every still-inflight transfer whose round is this round.
+        # Use object identity so we only touch transfers that actually belong
+        # to this round, not transfers from other rounds of the same
+        # kv_request_id.
+        sibling_tids: list[int] = []
+        for tid, x in self._inflight.items():
+            if x.round is rnd:
+                sibling_tids.append(tid)
+
+        if sibling_tids:
+            # Cancel via the existing transport contract. Use ``wait`` mode so
+            # the transport returns the subset it could *not* yet release.
+            # ``DataTransport.cancel`` already updates
+            # ``NixlTransport._inflight`` for ``mode="immediate"``; for
+            # ``mode="wait"`` a transfer that cannot yet be released stays in
+            # the transport's inflight and must be poll()ed to completion.
+            still = self._transport.cancel(sibling_tids, mode="wait")
+            still_set = set(still)
+
+            # Mirror the transport's bookkeeping in the session only for siblings
+            # the transport successfully released. For siblings still pending we
+            # leave them in ``self._inflight`` so a later poll will observe them,
+            # and we do *not* pop them or decrement the round's inflight count yet
+            # — that would lie about the round's true state and let us finalize
+            # before the sibling is actually drained.
+            for tid in sibling_tids:
+                if tid not in still_set and tid in self._inflight:
+                    self._inflight_pop(tid)
+
+        # The failed transfer itself was popped in the failed-loop above; its
+        # round reference is still valid. Drop it from the round's inflight
+        # count if it is still reflected there (it may already be zeroed by the
+        # failed-loop pop).
+        if failed_tid in self._inflight:
+            self._inflight_pop(failed_tid)
+
+        # Fail remaining store jobs attached to the now-terminated round.
+        results.extend(self._fail_round_jobs(rnd))
+
+        # Only remove the round and notify the peer if no sibling is still
+        # pending cancellation. If a sibling is still pending we keep the round
+        # in ``st.outbound`` and park it so a later ``collect_results`` retries
+        # the cancel; the terminal goes out exactly once, when the last sibling
+        # has left ``self._inflight``.
+        pending_key = (kv_request_id, failed_tid_round_key)
+        st = self._requests.get(kv_request_id)
+        registered = st is not None and st.outbound.get(failed_tid_round_key) is rnd
+        if registered and any(tid in self._inflight for tid in sibling_tids):
+            # A sibling is still in the transport: the peer must not hear
+            # TransferDoneMsg(success=False) while it may still be writing.
+            self._pending_failed_rounds[pending_key] = (rnd, failed_tid)
+        else:
+            # Everything belonging to this round is gone from the transport
+            # (or the round was already finalized elsewhere — abort, terminal
+            # fetch — in which case we owe no second notification).
+            self._pending_failed_rounds.pop(pending_key, None)
+            if registered:
+                del st.outbound[failed_tid_round_key]
+                self._send(
+                    {
+                        TYPE_KEY: TransferDoneMsg.TYPE,
+                        TransferDoneMsg.KV_REQUEST_ID: kv_request_id,
+                        TransferDoneMsg.SUCCESS: False,
+                        TransferDoneMsg.ROUND_SEQ: failed_tid_round_key,
+                    }
+                )
+
+        self._maybe_prune(kv_request_id)
+        return results
 
     def _settle_xfer_jobs(
         self, xfer: _InflightXfer, success: bool
