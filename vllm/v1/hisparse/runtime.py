@@ -544,11 +544,9 @@ class HiSparsePrefillStagingPlan:
         res_cols = resident_block_table.shape[1]
         res_blocks = torch.where(
             res_pos < res_cols,
-            torch.gather(
-                resident_block_table.to(torch.int64)[rep_row],
-                1,
-                res_pos.clamp(max=max(res_cols - 1, 0)),
-            ),
+            resident_block_table[
+                rep_row[:, None], res_pos.clamp(max=max(res_cols - 1, 0))
+            ].to(torch.int64),
             torch.zeros_like(res_pos),
         )
         offsets = torch.arange(block_size, device=device)
