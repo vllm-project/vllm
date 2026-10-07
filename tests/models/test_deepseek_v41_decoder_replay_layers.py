@@ -132,6 +132,8 @@ def test_replay_graph_matches_eager(monkeypatch):
     monkeypatch.setattr(cudagraph_utils, "graph_capture", lambda device: capture)
     compilation = CompilationConfig(decoder_replay_cudagraph_capture_sizes=[4])
     cfg = MagicMock(compilation_config=compilation, speculative_config=None)
+    # Mocking it true would capture into the cuMem pool, which breaks on ROCm.
+    cfg.use_cumem_cudagraph_pool = False
     cfg.scheduler_config = MagicMock(max_num_seqs=2, max_num_batched_tokens=64)
     cfg.cache_config.use_kda_recoverssm = False
     cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
