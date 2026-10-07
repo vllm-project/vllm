@@ -123,6 +123,9 @@ from vllm.model_executor.kernels.linear.mxfp8.humming import (
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.rocm_aiter_a16w8 import (
+    RocmAiterA16W8Mxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     RocmDotScaledMxfp8LinearKernel,
 )
@@ -329,6 +332,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
+        RocmAiterA16W8Mxfp8LinearKernel,
     },
     "machete": {
         MacheteLinearKernel,
@@ -543,6 +547,10 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         FlashInferTrtllmMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # CDNA3 (gfx942) decode via AITER's asm A16W8 GEMM, opt-in
+        # (VLLM_ROCM_USE_AITER_MXFP8_ASM_GEMM=1) and only for weight shapes AITER
+        # has tuned.
+        RocmAiterA16W8Mxfp8LinearKernel,
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
         # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
         RocmDotScaledMxfp8LinearKernel,
