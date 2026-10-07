@@ -274,6 +274,8 @@ class P2PSession:
                 req_id,
                 elapsed,
             )
+            with contextlib.suppress(Exception):
+                self._conn.send({TYPE_KEY: DisconnectMsg.TYPE})
             self._conn.mark_dead()
 
         new_fetch_ids = self._new_fetch_ids

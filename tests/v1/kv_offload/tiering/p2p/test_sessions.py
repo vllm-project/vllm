@@ -857,7 +857,10 @@ class TestLookupFlow:
         session.poll()
         assert not session.alive
 
-    def test_lookup_expiry_preserves_completed_transfers(self, lookup_clock):
+    @pytest.mark.parametrize("partial_fetch", [False, True])
+    def test_lookup_expiry_preserves_completed_transfers(
+        self, lookup_clock, partial_fetch
+    ):
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.register_lookup("stalled", b"key")
@@ -865,6 +868,8 @@ class TestLookupFlow:
         lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
         session.request_blocks(1, "load", [b"key"], [0])
         session.add_stored_blocks("store", [b"key"], [1], 2)
+        if partial_fetch:
+            session.add_stored_blocks("store", [b"unused"], [2], 3)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -888,7 +893,10 @@ class TestLookupFlow:
         result = session.poll()
         assert not session.alive
         assert result.loads == [LoadResult(1, "load", True)]
-        assert result.stores == [StoreResult(2, True)]
+        expected_stores = [StoreResult(2, True)]
+        if partial_fetch:
+            expected_stores.append(StoreResult(3, True))
+        assert result.stores == expected_stores
         closed = session.close()
         assert closed.failed_req_ids == ["stalled"]
         assert closed.failed_jobs == []
@@ -2270,20 +2278,19 @@ class TestFinishRequestServerSide:
 
         # Transfer 1 completes — now ``_has_inflight_for("req-1")`` is False
         # and the elif branch in collect_results fires _finalize(success=False).
-        # The k1 success result is direct; the k2 failure result is queued
-        # in _pending_store_results and surfaces on the NEXT poll.
+        # Both the k1 success and the deferred k2 failure surface in this poll.
         transport._poll_done.append(tid_1)
-        stores_first = session.poll().stores
-        assert StoreResult(job_id=100, success=True) in stores_first
+        assert session.poll().stores == [
+            StoreResult(job_id=100, success=True),
+            StoreResult(job_id=200, success=False),
+        ]
         # Outbound state cleaned up; peer notified with success=False.
         assert _srv_outbound(session, "req-1") is None
         done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is False
 
-        # Next poll drains the queued failure.
-        stores_second = session.poll().stores
-        assert StoreResult(job_id=200, success=False) in stores_second
+        assert session.poll().stores == []
 
 
 # ---------------------------------------------------------------------------
