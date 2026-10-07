@@ -581,6 +581,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"model_type": "deepseek_v3", "auto_map": None},
     ),
+    "EmbeddingGemma2Model": _HfExamplesInfo(
+        "google/embeddinggemma-2",
+        is_available_online=False,
+    ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
     "GteModel": _HfExamplesInfo(
