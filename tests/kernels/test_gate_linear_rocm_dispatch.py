@@ -334,14 +334,31 @@ def test_rocm_aiter_router_gemm_rejects_ineligible_gates(monkeypatch, kwargs):
     assert not gate.allow_aiter_router_gemm
 
 
-def test_rocm_aiter_router_gemm_is_checked_before_torch_mm(monkeypatch):
-    """The torch.mm epilogue is eligible on ROCm too and returns unconditionally,
-    so the AITER tier is only reachable if checked first."""
-    gate, _ = _make_aiter_gate(monkeypatch)
-    assert gate.allow_aiter_router_gemm
+@pytest.mark.parametrize(("tuned", "expected"), [(True, "aiter"), (False, "torch.mm")])
+def test_rocm_aiter_router_gemm_forward_dispatch(monkeypatch, tuned, expected):
+    """The torch.mm epilogue is eligible on ROCm too, so a tuned gate must take
+    the AITER op instead of it."""
+    gate, _ = _make_aiter_gate(monkeypatch, tuned=tuned)
     assert gate.allow_cublas_router_gemm
 
-    source = inspect.getsource(type(gate).forward)
-    assert source.index("allow_aiter_router_gemm") < source.index(
-        "allow_cublas_router_gemm"
+    calls = []
+
+    def fake_aiter(x, weight, out_dtype):
+        calls.append("aiter")
+        return x.new_zeros(x.shape[0], weight.shape[0], dtype=out_dtype)
+
+    def fake_mm(x, weight_t, out_dtype=None):
+        calls.append("torch.mm")
+        return x.new_zeros(x.shape[0], weight_t.shape[1], dtype=out_dtype)
+
+    monkeypatch.setattr(
+        torch.ops.vllm, "rocm_aiter_router_gemm", fake_aiter, raising=False
     )
+    monkeypatch.setattr(torch, "mm", fake_mm)
+
+    x = torch.zeros(4, gate.input_size, dtype=torch.bfloat16)
+    output, _ = gate(x)
+
+    assert calls == [expected]
+    assert output.shape == (4, gate.output_size)
+    assert output.dtype == torch.float32
