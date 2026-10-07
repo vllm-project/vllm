@@ -213,6 +213,7 @@ class RejectionSampler(nn.Module):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+            invalid_logits_indices=bonus_sampler_output.invalid_logits_indices,
         )
 
     def _get_logprobs_tensors(

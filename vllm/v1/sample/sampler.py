@@ -109,6 +109,14 @@ class Sampler(nn.Module):
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
+        invalid_logits_indices = []
+        if current_platform.is_cpu():
+            invalid_logits_indices = (sampled < 0).nonzero().flatten().tolist()
+            if invalid_logits_indices:
+                # Keep logprob gathers in bounds. The runner discards these
+                # placeholders and the scheduler finishes only these requests.
+                sampled[invalid_logits_indices] = 0
+
         # Handle logprob_token_ids if specified (more efficient than full vocab)
         # This is used by generative_scoring API to get logprobs for specific tokens
         logprob_token_ids_tensors = None
@@ -146,6 +154,7 @@ class Sampler(nn.Module):
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
+            invalid_logits_indices=invalid_logits_indices,
         )
         return sampler_output
 

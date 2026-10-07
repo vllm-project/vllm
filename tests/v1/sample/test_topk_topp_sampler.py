@@ -9,6 +9,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    TopKTopPSampler,
     apply_top_k_top_p_pytorch,
     random_sample,
 )
@@ -65,6 +66,129 @@ def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
     sampler = Sampler(use_fp64_gumbel=True)
 
     assert sampler.topk_topp_sampler.use_fp64_gumbel
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU sampler test")
+class TestCPUBucketedSampling:
+    @pytest.fixture(autouse=True)
+    def cpu_kernels(self):
+        current_platform.import_kernels()
+        torch.set_default_device("cpu")
+        with torch.random.fork_rng(devices=[]):
+            yield
+
+    def test_request_streams_advance_reseed_and_follow_reordered_rows(self):
+        logits = torch.randn(4, 257, generator=Generator().manual_seed(17))
+        sampler = TopKTopPSampler()
+        initial_seeds = [123, 456, 789, 321]
+
+        def run(order):
+            generators = {
+                row: Generator().manual_seed(initial_seeds[original])
+                for row, original in enumerate(order)
+            }
+            tokens = torch.stack(
+                [
+                    sampler.forward_cpu(logits[order], generators, None, None)[0]
+                    for _ in range(4)
+                ]
+            )
+            return tokens, generators
+
+        global_state = torch.get_rng_state()
+        first, generators = run([0, 1, 2, 3])
+        repeated, _ = run([0, 1, 2, 3])
+        torch.testing.assert_close(first, repeated)
+        order = [2, 0, 3, 1]
+        reordered, _ = run(order)
+        torch.testing.assert_close(reordered, first[:, order])
+        torch.testing.assert_close(torch.get_rng_state(), global_state)
+        for row, seed in enumerate(initial_seeds):
+            expected = Generator().manual_seed(seed)
+            torch.empty(4, dtype=torch.int64).random_(
+                -(2**63), None, generator=expected
+            )
+            torch.testing.assert_close(
+                generators[row].get_state(), expected.get_state()
+            )
+
+    def test_partial_batch_keeps_request_stream_independent(self):
+        logits = torch.randn(3, 257, generator=Generator().manual_seed(821))
+        sampler = TopKTopPSampler()
+        standalone = Generator().manual_seed(73)
+        expected = torch.cat(
+            [
+                sampler.forward_cpu(logits[1:2], {0: standalone}, None, None)[0]
+                for _ in range(4)
+            ]
+        )
+        for order, request_row in [([0, 1, 2], 1), ([2, 0, 1], 2)]:
+            torch.manual_seed(997)
+            expected_global = Generator().manual_seed(997)
+            request = Generator().manual_seed(73)
+            actual = []
+            for _ in range(4):
+                tokens, _ = sampler.forward_cpu(
+                    logits[order], {request_row: request}, None, None
+                )
+                actual.append(tokens[request_row])
+                torch.empty(3, dtype=torch.int64).random_(
+                    -(2**63), None, generator=expected_global
+                )
+            torch.testing.assert_close(torch.stack(actual), expected)
+            torch.testing.assert_close(request.get_state(), standalone.get_state())
+            torch.testing.assert_close(
+                torch.get_rng_state(), expected_global.get_state()
+            )
+
+    @pytest.mark.parametrize("topk,topp", [(3, None), (None, 0.65), (3, 0.8)])
+    @pytest.mark.parametrize("mode", ["processed_logits", "processed_logprobs"])
+    def test_filters_masks_and_processed_outputs(self, topk, topp, mode):
+        logits = torch.tensor(
+            [2.0, 0.5, -3.0, 1.0, 0.0, -float("inf"), -1.0, 3.0]
+        ).repeat(16, 1)
+        k = torch.full((16,), topk, dtype=torch.int32) if topk else None
+        p = torch.full((16,), topp) if topp else None
+        filtered = apply_top_k_top_p_pytorch(logits.clone(), k, p)
+        expected = (
+            filtered
+            if mode == "processed_logits"
+            else filtered.log_softmax(-1, dtype=torch.float32)
+        )
+        sampler = TopKTopPSampler(logprobs_mode=mode)
+        tokens, processed = sampler.forward_cpu(logits, {}, k, p)
+        torch.testing.assert_close(processed, expected)
+        assert torch.isfinite(filtered[torch.arange(16), tokens]).all()
+
+    def test_fp64_fallback_preserves_exponential_race(self):
+        from torch.utils._python_dispatch import TorchDispatchMode
+
+        class RejectBucketedSampling(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                assert func is not torch.ops._C.bucketed_rejection_sample.default
+                return func(*args, **(kwargs or {}))
+
+        logits = torch.randn(64, 17, generator=Generator().manual_seed(64))
+        reference_generators = {1: Generator().manual_seed(7)}
+        generators = {1: Generator().manual_seed(7)}
+        torch.manual_seed(913)
+        probs = logits.softmax(-1, dtype=torch.float32)
+        noise = torch.empty_like(probs, dtype=torch.float64).exponential_()
+        noise[1].exponential_(generator=reference_generators[1])
+        expected = noise.reciprocal_().mul_(probs).argmax(-1)
+        expected_global_state = torch.get_rng_state()
+
+        torch.manual_seed(913)
+        sampler = TopKTopPSampler(use_fp64_gumbel=True)
+        with RejectBucketedSampling():
+            tokens, processed = sampler.forward_cpu(logits, generators, None, None)
+        assert processed is None
+        torch.testing.assert_close(tokens, expected)
+        torch.testing.assert_close(torch.get_rng_state(), expected_global_state)
+        torch.testing.assert_close(
+            generators[1].get_state(), reference_generators[1].get_state()
+        )
 
 
 @pytest.mark.skipif(

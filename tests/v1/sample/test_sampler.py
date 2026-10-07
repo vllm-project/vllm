@@ -166,6 +166,58 @@ def _create_default_sampling_metadata(
     return fake_sampling_metadata
 
 
+@pytest.mark.cpu_test
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU sampler test")
+class TestCPUInvalidLogits:
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), -float("inf")])
+    @pytest.mark.parametrize("logprobs", [None, 2, "specific"])
+    @pytest.mark.parametrize("mixed_greedy", [False, True])
+    def test_error_rows_do_not_change_other_requests(
+        self, bad_value, logprobs, mixed_greedy
+    ):
+        current_platform.import_kernels()
+        sampler = Sampler()
+        logits = torch.tensor([[0.0, -0.3, -1.2, -2.0]]).repeat(3, 1)
+
+        def metadata():
+            result = _create_default_sampling_metadata(0, 3, 4, torch.device("cpu"))
+            result.all_greedy = False
+            result.all_random = not mixed_greedy
+            result.temperature = torch.tensor([1.0, 1.0, 0.0 if mixed_greedy else 1.0])
+            result.generators = {
+                i: torch.Generator().manual_seed(73 + i) for i in range(3)
+            }
+            result.max_num_logprobs = None if logprobs == "specific" else logprobs
+            if logprobs == "specific":
+                result.logprob_token_ids = {i: [0, 3] for i in range(3)}
+            return result
+
+        reference_metadata, actual_metadata = metadata(), metadata()
+        bad_logits = logits.clone()
+        bad_logits[1] = bad_value
+        healthy = [0, 2]
+        for _ in range(3):
+            expected = sampler(logits.clone(), reference_metadata)
+            actual = sampler(bad_logits.clone(), actual_metadata)
+            assert actual.invalid_logits_indices == [1]
+            assert expected.invalid_logits_indices == []
+            # The failed row has an in-range placeholder for internal gathers.
+            assert actual.sampled_token_ids[1].item() == 0
+            torch.testing.assert_close(
+                actual.sampled_token_ids[healthy], expected.sampled_token_ids[healthy]
+            )
+            if logprobs is not None:
+                for observed, reference in zip(
+                    actual.logprobs_tensors[:3], expected.logprobs_tensors[:3]
+                ):
+                    torch.testing.assert_close(observed[healthy], reference[healthy])
+            for i in healthy:
+                torch.testing.assert_close(
+                    actual_metadata.generators[i].get_state(),
+                    reference_metadata.generators[i].get_state(),
+                )
+
+
 def _create_weighted_output_token_list(
     batch_size: int, vocab_size: int
 ) -> tuple[list[list[int]], list[list[int]]]:

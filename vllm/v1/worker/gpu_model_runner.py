@@ -3686,6 +3686,13 @@ class GPUModelRunner(
             gen = self.input_batch.generators.get(int(i))
             if gen is not None:
                 gen.set_offset(gen.get_offset() - 4)
+        if sampler_output.invalid_logits_indices:
+            # Discard error placeholders before updating either token history or
+            # async sampled-token caches. Only prefill discards rewind the RNG.
+            discard_sampled_tokens_req_indices = np.union1d(
+                discard_sampled_tokens_req_indices,
+                sampler_output.invalid_logits_indices,
+            )
 
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
@@ -4552,6 +4559,12 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        invalid_logits_req_ids = {
+            self.input_batch.req_ids[i]
+            for i in sampler_output.invalid_logits_indices
+            if not self.discard_request_mask.np[i]
+        }
+
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
@@ -4740,6 +4753,7 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                invalid_logits_req_ids=invalid_logits_req_ids,
                 cudagraph_stats=cudagraph_stats,
             )
 

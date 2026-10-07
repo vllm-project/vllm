@@ -1,83 +1,237 @@
 #include "cpu_types.hpp"
 
+#include <ATen/Parallel.h>
+#include <ATen/core/PhiloxRNGEngine.h>
+#include <ATen/cpu/vec/functional.h>
 #include <torch/library.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <mutex>
-#include <random>
+#include <vector>
 
 namespace {
 
-constexpr int GUMBEL_TABLE_SIZE = 1 << 20;
-constexpr int GUMBEL_TABLE_MASK = GUMBEL_TABLE_SIZE - 1;
+using BucketMass = unsigned __int128;
+constexpr int TAIL_BUCKET = 64;
+constexpr int NUM_BUCKETS = TAIL_BUCKET + 1;
+constexpr int BLOCK_SIZE = 32;
+constexpr double LN2_HI = 0x1.62e42fefa39efp-1;
+constexpr double LN2_LO = 0x1.abc9e3b39803fp-56;
+constexpr double INV_LN2 = 0x1.71547652b82fep+0;
 
-static float g_gumbel_table[GUMBEL_TABLE_SIZE];
-static std::once_flag g_gumbel_init_flag;
+class SamplingRng {
+ public:
+  explicit SamplingRng(uint64_t seed) : engine_(seed) {}
 
-static void init_gumbel_table() {
-  std::mt19937 rng(42);
-  std::uniform_real_distribution<float> uniform(1.0e-7f, 1.0f - 1.0e-7f);
-  for (int i = 0; i < GUMBEL_TABLE_SIZE; ++i) {
-    float u = uniform(rng);
-    g_gumbel_table[i] = -std::log(-std::log(u));
+  uint64_t next64() {
+    const uint64_t low = engine_();
+    return low | (uint64_t(engine_()) << 32);
+  }
+
+  uint64_t bounded64(uint64_t bound) {
+    const uint64_t threshold = (uint64_t(0) - bound) % bound;
+    uint64_t value;
+    do {
+      value = next64();
+    } while (value < threshold);
+    return value % bound;
+  }
+
+  BucketMass bounded_mass(BucketMass bound) {
+    const BucketMass last = bound - 1;
+    if (last == 0) return 0;
+    const uint64_t high = uint64_t(last >> 64);
+    const unsigned bits = high ? 128 - __builtin_clzll(high)
+                               : 64 - __builtin_clzll(uint64_t(last));
+    // vocab_size fits int64, so the total mass is strictly below 2^127.
+    const BucketMass mask = (BucketMass(1) << bits) - 1;
+    BucketMass value;
+    do {
+      value = next64();
+      if (bits > 64) value |= BucketMass(next64()) << 64;
+      value &= mask;
+    } while (value >= bound);
+    return value;
+  }
+
+  bool bernoulli(double probability) {
+    TORCH_INTERNAL_ASSERT(probability >= 0.0 && probability <= 1.0);
+    if (probability == 0.0) return false;
+    if (probability == 1.0) return true;
+    int exponent;
+    const double fraction = std::frexp(probability, &exponent);
+    const uint64_t mantissa = uint64_t(std::ldexp(fraction, 53));
+    // Sample the exact binary64 probability, including subnormals, without
+    // quantizing tiny probabilities onto a fixed 53-bit uniform grid.
+    for (int remaining = -exponent; remaining > 0;) {
+      const int take = std::min(remaining, 64);
+      const uint64_t word = next64();
+      if ((take == 64 ? word : word >> (64 - take)) != 0) return false;
+      remaining -= take;
+    }
+    return (next64() >> 11) < mantissa;
+  }
+
+ private:
+  at::Philox4_32 engine_;
+};
+
+const std::array<double, NUM_BUCKETS> BUCKET_BOUNDARIES = [] {
+  std::array<double, NUM_BUCKETS> boundaries{};
+  for (int k = 1; k < NUM_BUCKETS; ++k) {
+    double value = std::fma(double(k), LN2_HI, double(k) * LN2_LO);
+    // Two upward ULPs cover boundary construction and logit subtraction,
+    // keeping 2^-k an upper bound even immediately beside a boundary.
+    for (int j = 0; j < 2; ++j)
+      value = std::nextafter(value, std::numeric_limits<double>::infinity());
+    boundaries[k] = value;
+  }
+  return boundaries;
+}();
+
+int bucket_for(double difference) {
+  if (difference >= BUCKET_BOUNDARIES[TAIL_BUCKET]) return TAIL_BUCKET;
+  int bucket = std::min(TAIL_BUCKET - 1, int(difference * INV_LN2));
+  while (bucket > 0 && difference < BUCKET_BOUNDARIES[bucket]) --bucket;
+  while (bucket < TAIL_BUCKET && difference >= BUCKET_BOUNDARIES[bucket + 1])
+    ++bucket;
+  return bucket;
+}
+
+template <typename Index>
+struct SamplingScratch {
+  std::vector<float> maxima;
+  std::vector<uint8_t> buckets;
+  std::vector<Index> indices;
+};
+
+float block_maximum(const float* values, int64_t size) {
+#if defined(__x86_64__)
+  using Vec = vec_op::FP32Vec16;
+  const Vec infinity(std::numeric_limits<float>::infinity());
+  Vec max_vec(-std::numeric_limits<float>::infinity());
+  unsigned invalid = 0;
+  int64_t i = 0;
+  for (; i + Vec::VEC_ELEM_NUM <= size; i += Vec::VEC_ELEM_NUM) {
+    const Vec value(values + i);
+    // x86 max can discard NaNs. Comparing "not less than +inf" detects both
+    // NaN and +inf independently, while retaining -inf as a valid mask.
+  #ifdef __AVX512F__
+    invalid |= _mm512_cmp_ps_mask(value.reg, infinity.reg, _CMP_NLT_UQ);
+  #else
+    invalid |= _mm256_movemask_ps(_mm256_or_ps(
+        _mm256_cmp_ps(value.reg_low, infinity.reg_low, _CMP_NLT_UQ),
+        _mm256_cmp_ps(value.reg_high, infinity.reg_high, _CMP_NLT_UQ)));
+  #endif
+    max_vec = max_vec.max(value);
+  }
+  if (invalid) return std::numeric_limits<float>::quiet_NaN();
+  float result = max_vec.reduce_max();
+  for (; i < size; ++i) {
+    if (std::isnan(values[i])) return values[i];
+    result = std::max(result, values[i]);
+  }
+  return result;
+#else
+  using Vec = at::vec::Vectorized<float>;
+  const auto maximum = [](const Vec& a, const Vec& b) {
+    return at::vec::maximum(a, b);
+  };
+  Vec max_vec(-std::numeric_limits<float>::infinity());
+  int64_t i = 0;
+  for (; i + Vec::size() <= size; i += Vec::size())
+    max_vec = maximum(max_vec, Vec::loadu(values + i));
+  // Unlike architecture-specific max intrinsics, maximum propagates NaNs.
+  float result = at::vec::vec_reduce_all(maximum, max_vec);
+  for (; i < size; ++i) {
+    if (std::isnan(values[i])) return values[i];
+    result = std::max(result, values[i]);
+  }
+  return result;
+#endif
+}
+
+template <typename Index>
+int64_t sample_blocks(const float* row, int64_t vocab_size, int64_t num_blocks,
+                      uint64_t seed) {
+  // Retain allocation capacity per worker, but rebuild all row-dependent data.
+  // One vocabulary scan plus O(ceil(V / 32)) grouping uses 9 bytes per block
+  // with uint32 indices (13 with uint64), rather than scratch per token.
+  thread_local SamplingScratch<Index> scratch;
+  scratch.maxima.resize(num_blocks);
+  scratch.buckets.resize(num_blocks);
+  double max_logit = -std::numeric_limits<double>::infinity();
+  for (int64_t b = 0; b < num_blocks; ++b) {
+    const int64_t start = b * BLOCK_SIZE;
+    const float value = block_maximum(
+        row + start, std::min<int64_t>(BLOCK_SIZE, vocab_size - start));
+    // Invalid rows are reported to the caller without interrupting other rows.
+    if (std::isnan(value) || value == std::numeric_limits<double>::infinity())
+      return -1;
+    scratch.maxima[b] = value;
+    max_logit = std::max(max_logit, double(value));
+  }
+  if (!std::isfinite(max_logit)) return -1;  // All tokens are masked.
+
+  std::array<uint64_t, NUM_BUCKETS> counts{}, offsets{};
+  std::array<BucketMass, NUM_BUCKETS> cumulative{};
+  for (int64_t b = 0; b < num_blocks; ++b) {
+    if (!std::isfinite(scratch.maxima[b])) {
+      scratch.buckets[b] = 255;  // Entire block is masked.
+      continue;
+    }
+    const int bucket = bucket_for(max_logit - double(scratch.maxima[b]));
+    scratch.buckets[b] = uint8_t(bucket);
+    ++counts[bucket];
+  }
+  uint64_t size = 0;
+  BucketMass mass = 0;
+  for (int k = 0; k < NUM_BUCKETS; ++k) {
+    offsets[k] = size;
+    size += counts[k];
+    mass += BucketMass(counts[k]) << (TAIL_BUCKET - k);
+    cumulative[k] = mass;
+  }
+  scratch.indices.resize(size);
+  auto cursor = offsets;
+  for (int64_t b = 0; b < num_blocks; ++b)
+    if (scratch.buckets[b] != 255)
+      scratch.indices[cursor[scratch.buckets[b]]++] = Index(b);
+
+  SamplingRng rng(seed);
+  for (;;) {
+    const auto proposal = rng.bounded_mass(mass);
+    const int bucket =
+        std::upper_bound(cumulative.begin(), cumulative.end(), proposal) -
+        cumulative.begin();
+    const uint64_t block =
+        scratch.indices[offsets[bucket] + rng.bounded64(counts[bucket])];
+    const uint64_t index = block * BLOCK_SIZE + rng.bounded64(BLOCK_SIZE);
+    // Give even the partial last block 32 slots; missing or masked slots
+    // reject the whole proposal, preserving the same per-token envelope.
+    if (index >= uint64_t(vocab_size) || !std::isfinite(row[index])) continue;
+    const double difference = max_logit - double(row[index]);
+    const double log_acceptance =
+        std::fma(double(bucket), LN2_HI, -difference) + double(bucket) * LN2_LO;
+    TORCH_INTERNAL_ASSERT(log_acceptance <= 0.0);
+    // A block has proposal mass 32*h, h=2^-bucket. The common 32 cancels
+    // when choosing blocks; uniform slot selection and acceptance p_i/h
+    // give accepted mass proportional to p_i=exp(logit_i-max). Restart
+    // globally. The capped tail retains every finite token; extreme exp may
+    // underflow.
+    if (rng.bernoulli(std::exp(log_acceptance))) return index;
   }
 }
 
-static inline void ensure_gumbel_table() {
-  std::call_once(g_gumbel_init_flag, init_gumbel_table);
-}
-
-// Fused Gumbel-max kernel
-
-static void fused_gumbel_argmax_kernel(int64_t* __restrict__ output,
-                                       const float* __restrict__ logits,
-                                       const int64_t* __restrict__ seeds,
-                                       const int64_t batch_size,
-                                       const int64_t vocab_size) {
-  ensure_gumbel_table();
-  constexpr int VEC_ELEM_NUM = vec_op::FP32Vec8::VEC_ELEM_NUM;
-  const int64_t vec_end = vocab_size - (vocab_size % VEC_ELEM_NUM);
-
-#pragma omp parallel for schedule(static)
-  for (int64_t b = 0; b < batch_size; ++b) {
-    const float* row = logits + b * vocab_size;
-    const uint32_t seed = static_cast<uint32_t>(seeds[b]);
-
-    float best_score = -std::numeric_limits<float>::infinity();
-    int64_t best_idx = 0;
-
-    for (int64_t i = 0; i < vec_end; i += VEC_ELEM_NUM) {
-      vec_op::FP32Vec8 logit_vec(row + i);
-
-      float gumbel_buf[VEC_ELEM_NUM];
-      for (int k = 0; k < VEC_ELEM_NUM; ++k)
-        gumbel_buf[k] = g_gumbel_table[(seed + i + k) & GUMBEL_TABLE_MASK];
-      vec_op::FP32Vec8 gumbel_vec(gumbel_buf);
-
-      vec_op::FP32Vec8 score = logit_vec + gumbel_vec;
-
-      float score_buf[VEC_ELEM_NUM];
-      score.save(score_buf);
-      for (int k = 0; k < VEC_ELEM_NUM; ++k) {
-        if (score_buf[k] > best_score) {
-          best_score = score_buf[k];
-          best_idx = i + k;
-        }
-      }
-    }
-
-    for (int64_t i = vec_end; i < vocab_size; ++i) {
-      float s = row[i] + g_gumbel_table[(seed + i) & GUMBEL_TABLE_MASK];
-      if (s > best_score) {
-        best_score = s;
-        best_idx = i;
-      }
-    }
-
-    output[b] = best_idx;
-  }
+int64_t bucketed_rejection_sample_row(const float* row, int64_t vocab_size,
+                                      uint64_t seed) {
+  const int64_t num_blocks = 1 + (vocab_size - 1) / BLOCK_SIZE;
+  if (uint64_t(num_blocks - 1) <= std::numeric_limits<uint32_t>::max())
+    return sample_blocks<uint32_t>(row, vocab_size, num_blocks, seed);
+  return sample_blocks<uint64_t>(row, vocab_size, num_blocks, seed);
 }
 
 static void greedy_argmax_kernel(int64_t* __restrict__ output,
@@ -115,19 +269,31 @@ static void greedy_argmax_kernel(int64_t* __restrict__ output,
 
 }  // namespace
 
-torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
-                                  const torch::Tensor& seeds) {
+torch::Tensor bucketed_rejection_sample(const torch::Tensor& logits,
+                                        const torch::Tensor& seeds) {
+  TORCH_CHECK(logits.device().is_cpu() && seeds.device().is_cpu(),
+              "logits and seeds must be CPU tensors");
   TORCH_CHECK(logits.dim() == 2, "logits must be 2-D [batch, vocab]");
   TORCH_CHECK(logits.scalar_type() == torch::kFloat32,
               "logits must be float32");
+  TORCH_CHECK(logits.size(1) > 0, "vocab_size must be positive");
+  TORCH_CHECK(seeds.scalar_type() == torch::kInt64, "seeds must be int64");
   TORCH_CHECK(seeds.dim() == 1 && seeds.size(0) == logits.size(0),
               "seeds must be 1-D with batch_size elements");
 
   auto logits_contig = logits.contiguous();
-  auto output = torch::empty({logits_contig.size(0)}, torch::kInt64);
-  fused_gumbel_argmax_kernel(
-      output.data_ptr<int64_t>(), logits_contig.data_ptr<float>(),
-      seeds.data_ptr<int64_t>(), logits_contig.size(0), logits_contig.size(1));
+  auto seeds_contig = seeds.contiguous();
+  const int64_t batch_size = logits.size(0), vocab_size = logits.size(1);
+  auto output =
+      torch::empty({batch_size}, logits.options().dtype(torch::kInt64));
+  const auto* logits_ptr = logits_contig.data_ptr<float>();
+  const auto* seeds_ptr = seeds_contig.data_ptr<int64_t>();
+  auto* output_ptr = output.data_ptr<int64_t>();
+  at::parallel_for(0, batch_size, 1, [&](int64_t begin, int64_t end) {
+    for (int64_t b = begin; b < end; ++b)
+      output_ptr[b] = bucketed_rejection_sample_row(
+          logits_ptr + b * vocab_size, vocab_size, uint64_t(seeds_ptr[b]));
+  });
   return output;
 }
 

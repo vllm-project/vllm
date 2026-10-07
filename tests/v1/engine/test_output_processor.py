@@ -3,6 +3,7 @@
 
 import math
 import time
+from copy import copy
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
@@ -1636,6 +1637,101 @@ def test_request_output_add_merges_delta_sampling_masks():
 
     assert merged.outputs[0].token_ids == [10, 20]
     assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("use_queue", [False, True])
+@pytest.mark.parametrize("streaming_input", [False, True])
+def test_generation_error_finishes_only_failed_request(use_queue, streaming_input):
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=[1, 2],
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(
+                detokenize=False, output_kind=RequestOutputKind.DELTA
+            ),
+            pooling_params=None,
+            resumable=streaming_input and idx == 0,
+        )
+        for idx in range(2)
+    ]
+    queues = [
+        RequestOutputCollector(
+            output_kind=RequestOutputKind.DELTA, request_id=request.request_id
+        )
+        for request in requests
+    ]
+    for request, queue in zip(requests, queues):
+        output_processor.add_request(
+            request, prompt=None, queue=queue if use_queue else None
+        )
+    failed_state = output_processor.request_states[requests[0].request_id]
+    if streaming_input:
+        update = copy(requests[0])
+        update.prompt_token_ids = [99]
+        output_processor.add_request(update, prompt=None)
+        queued_input = failed_state.input_chunk_queue
+        assert queued_input is not None
+        assert len(queued_input) == 1
+        if use_queue:
+            input_task = Mock()
+            queues[0]._input_stream_task = input_task
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=requests[0].request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+            ),
+            EngineCoreOutput(request_id=requests[1].request_id, new_token_ids=[123]),
+        ]
+    )
+    if use_queue:
+        assert processed.request_outputs == []
+        failed, healthy = [queue.get_nowait() for queue in queues]
+    else:
+        failed, healthy = processed.request_outputs
+    assert failed.request_id == requests[0].external_req_id
+    assert failed.finished
+    assert failed.outputs[0].finish_reason == "error"
+    assert failed.outputs[0].token_ids == []
+    assert failed.outputs[0].logprobs is None
+    assert not healthy.finished
+    assert healthy.request_id == requests[1].external_req_id
+    assert healthy.outputs[0].token_ids == [123]
+    assert healthy.outputs[0].finish_reason is None
+    assert set(output_processor.request_states) == {requests[1].request_id}
+    assert processed.reqs_to_abort == []
+    if streaming_input:
+        # A terminal error must not consume or apply queued input chunks.
+        assert len(queued_input) == 1
+        assert failed_state.prompt_token_ids == [1, 2]
+        if use_queue:
+            input_task.cancel.assert_called_once_with()
+            assert queues[0]._input_stream_task is None
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=requests[1].request_id,
+                new_token_ids=[124],
+                finish_reason=FinishReason.LENGTH,
+            )
+        ]
+    )
+    healthy = queues[1].get_nowait() if use_queue else processed.request_outputs[0]
+    assert healthy.finished
+    assert healthy.outputs[0].token_ids == [124]
+    assert healthy.outputs[0].finish_reason == "length"
+    assert not output_processor.has_unfinished_requests()
 
 
 @pytest.mark.skip_global_cleanup

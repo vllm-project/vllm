@@ -151,6 +151,27 @@ def test_perfect_match(rejection_sampler):
     assert torch.equal(output.sampled_token_ids, expected)
 
 
+def test_invalid_bonus_logits_remain_request_errors(rejection_sampler):
+    """Speculative decoding must not turn a failed bonus draw into token zero."""
+    if current_platform.is_cpu():
+        current_platform.import_kernels()
+        current_platform.register_triton_kernel_overrides()
+    spec_tokens = [[1, 2, 3], [5, 6, 7]]
+    logits = create_logits_tensor([[1, 2, 3, 4], [5, 6, 7, 0]])
+    mock_sampler_output(rejection_sampler, torch.tensor([4, 0], device=logits.device))
+    rejection_sampler.sampler.return_value.invalid_logits_indices = [1]
+
+    output = rejection_sampler(
+        create_spec_decode_metadata(spec_tokens, logits),
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=create_sampling_metadata(all_greedy=True),
+    )
+
+    assert output.invalid_logits_indices == [1]
+    assert output.sampled_token_ids[0].tolist() == [1, 2, 3, 4]
+
+
 def test_early_mismatch(rejection_sampler):
     """Test when there's an early mismatch in tokens."""
     spec_tokens = [[1, 2, 3]]
