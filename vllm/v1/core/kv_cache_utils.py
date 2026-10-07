@@ -351,7 +351,8 @@ class FreeKVCacheBlockQueue:
         if n == 1:
             assert curr_block is not None
             next_block = curr_block.next_free_block
-            curr_block.prev_free_block = curr_block.next_free_block = None
+            curr_block.prev_free_block = None
+            curr_block.next_free_block = None
             if next_block is not None:
                 self.fake_free_list_head.next_free_block = next_block
                 next_block.prev_free_block = self.fake_free_list_head
