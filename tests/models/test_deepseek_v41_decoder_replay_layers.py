@@ -21,6 +21,7 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu import cudagraph_utils
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -125,6 +126,9 @@ def _graph_context(num_tokens):
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="decoder replay CUDA graphs are NVIDIA-only"
+)
 def test_replay_graph_matches_eager(monkeypatch):
     """The replay graph of the next captured size pads and runs the rows."""
     monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
