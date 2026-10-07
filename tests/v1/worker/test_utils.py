@@ -5,7 +5,6 @@ import mmap
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, call
 
 import numpy as np
@@ -26,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -1344,16 +1344,23 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layers_only):
         for name, mixer in ctx.items()
     }
 
-    bind = bind_kv_cache_to_layers if layers_only else bind_kv_cache
-    runner_kv_caches = list(kv_cache.values()) if layers_only else []
-    args: tuple[Any, ...] = (kv_cache, ctx)
-    if not layers_only:
-        args += (runner_kv_caches,)
-    bind(
-        *args,
-        kv_cache_groups=kv_cache_groups,
-        replayssm_caches=replayssm_caches,
-    )
+    if layers_only:
+        runner_kv_caches = list(kv_cache.values())
+        bind_kv_cache_to_layers(
+            kv_cache,
+            ctx,
+            kv_cache_groups=kv_cache_groups,
+            replayssm_caches=replayssm_caches,
+        )
+    else:
+        runner_kv_caches = []
+        bind_kv_cache(
+            kv_cache,
+            ctx,
+            runner_kv_caches,
+            kv_cache_groups=kv_cache_groups,
+            replayssm_caches=replayssm_caches,
+        )
 
     assert all(len(mixer.kv_cache) == 2 for mixer in mixers)
     assert all(len(mixer.replayssm_cache) == 3 for mixer in mixers)
@@ -1393,15 +1400,6 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layers_only):
     assert mixers[1]._replayssm_prev_num_accepted[dst].item() == 31
 
 
-def test_replayssm_block_copy_excludes_triton_auxiliary_state():
-    mixer = _TestReplaySSMMixer()
-    mixer.use_flashinfer_replayssm = False
-    mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.TRITON)
-    mixer.replayssm_cache = tuple(torch.zeros((2, 1)) for _ in range(3))
-
-    assert get_replayssm_block_copy_tensors({"mixer": mixer}) == []
-
-
 def test_triton_replayssm_raw_page_copy_includes_all_five_states(monkeypatch):
     monkeypatch.setattr(
         "vllm.v1.worker.utils.async_tensor_h2d",
@@ -1416,6 +1414,7 @@ def test_triton_replayssm_raw_page_copy_includes_all_five_states(monkeypatch):
         {layer_name: mixer},
         runner_kv_caches,
     )
+    assert get_replayssm_block_copy_tensors({layer_name: mixer}) == []
 
     src, dst = 0, 1
     for state_idx, state in enumerate(mixer.kv_cache):
@@ -1434,14 +1433,10 @@ def test_triton_replayssm_raw_page_copy_includes_all_five_states(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("backend", "state_count", "auxiliary_count"),
-    [
-        (MambaBackendEnum.TRITON, 5, 0),
-        (MambaBackendEnum.FLASHINFER, 2, 3),
-    ],
+    "backend", [MambaBackendEnum.TRITON, MambaBackendEnum.FLASHINFER]
 )
 def test_replayssm_cache_layout_is_backend_scoped(
-    monkeypatch, backend: MambaBackendEnum, state_count: int, auxiliary_count: int
+    monkeypatch, backend: MambaBackendEnum
 ):
     monkeypatch.setattr(
         "vllm.model_executor.layers.mamba.mamba_mixer2."
@@ -1466,10 +1461,28 @@ def test_replayssm_cache_layout_is_backend_scoped(
     mixer.num_spec = 0
     mixer.replayssm_buffer_len = 16
 
-    assert len(mixer.get_state_shape()) == state_count
-    assert len(mixer.get_state_dtype()) == state_count
-    assert len(mixer.get_replayssm_state_shape()) == auxiliary_count
-    assert len(mixer.get_replayssm_state_dtype()) == auxiliary_count
+    conv_shape = (96, 3) if is_conv_state_dim_first() else (3, 96)
+    canonical_shapes = (conv_shape, (4, 8, 16))
+    canonical_dtypes = (torch.bfloat16, torch.bfloat16)
+    ring_dtypes = (torch.bfloat16, torch.float32, torch.bfloat16)
+    if backend == MambaBackendEnum.TRITON:
+        assert mixer.get_state_shape() == canonical_shapes + (
+            (4, 16, 8),
+            (4, 16),
+            (2, 16, 16),
+        )
+        assert mixer.get_state_dtype() == canonical_dtypes + ring_dtypes
+        assert mixer.get_replayssm_state_shape() == ()
+        assert mixer.get_replayssm_state_dtype() == ()
+    else:
+        assert mixer.get_state_shape() == canonical_shapes
+        assert mixer.get_state_dtype() == canonical_dtypes
+        assert mixer.get_replayssm_state_shape() == (
+            (4, 17, 8),
+            (4, 17),
+            (2, 17, 16),
+        )
+        assert mixer.get_replayssm_state_dtype() == ring_dtypes
 
 
 def test_bind_kv_cache(default_vllm_config):

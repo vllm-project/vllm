@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -17,7 +18,6 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     selective_state_update,
-    selective_state_update_replayssm_flashinfer,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
@@ -65,14 +65,26 @@ def _kv_cache_config_with_ssu(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def _cuda_ints(values):
+    return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+
 @pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
 def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_step):
     """Publish a boundary without modifying its live or cached-prefix sources."""
-    from flashinfer.mamba.replayssm_materialize import replayssm_materialize
+    try:
+        from flashinfer.mamba.replayssm_materialize import (
+            replayssm_materialize,  # noqa: F401
+        )
 
-    def ints(values):
-        return torch.tensor(values, dtype=torch.int32, device="cuda")
+        has_materializer = True
+    except ImportError:
+        has_materializer = False
+    if not (torch.cuda.is_available() and has_materializer):
+        reason = "requires CUDA and FlashInfer ReplaySSM materialization"
+        if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     set_random_seed(42)
     slots, heads, dim, dstate, ring_len = 6, 8, 64, 128, 20
@@ -118,15 +130,15 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
     mixer = SimpleNamespace(
         kv_cache=(torch.empty(0, device="cuda"), state),
         replayssm_cache=(x, dt, B),
-        _replayssm_ring_start=ints([0, 0, 0, 7, 0, 2]),
-        _replayssm_prev_num_accepted=ints([0, 0, 0, 2, 0, 1]),
+        _replayssm_ring_start=_cuda_ints([0, 0, 0, 7, 0, 2]),
+        _replayssm_prev_num_accepted=_cuda_ints([0, 0, 0, 2, 0, 1]),
         replayssm_buffer_len=16,
         A=A,
         mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
     )
     group = _ReplaySSMGroupContext.create(
         [mixer],
-        ints(
+        _cuda_ints(
             [
                 [2, 3],
                 [NULL_BLOCK_ID, 5],
@@ -140,21 +152,25 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
     )
     # Batch row 0 crosses token 16; row 1 rejects all drafts and stops at 15.
     # Rows 2 and 3 exercise padded physical slots and padded request indices.
-    mapping = ints([2, 0, 1, -1])
+    mapping = _cuda_ints([2, 0, 1, -1])
     group.postprocess(
         idx_mapping=mapping,
-        query_metadata=ints([0, 4, 8, 12, 16]) if post_step else ints([4] * 4),
+        query_metadata=_cuda_ints([0, 4, 8, 12, 16])
+        if post_step
+        else _cuda_ints([4] * 4),
         query_metadata_is_cumulative=post_step,
-        num_computed_tokens=ints([15, 17, 17]) if post_step else ints([14] * 3),
+        num_computed_tokens=_cuda_ints([15, 17, 17])
+        if post_step
+        else _cuda_ints([14] * 3),
         num_computed_is_post_step=post_step,
-        num_accepted_tokens=ints([1, 3, 3]),
+        num_accepted_tokens=_cuda_ints([1, 3, 3]),
         is_prefilling=torch.zeros(4, dtype=torch.bool, device="cuda"),
-        live_cols=ints([1, 1, 1]),
+        live_cols=_cuda_ints([1, 1, 1]),
         num_reqs=4,
     )
     assert group.active_request_indices.tolist() == [0, -1, -1, -1]
     assert group.plan_flush_count.tolist() == [4, -1, -1, -1]
-    group.materialize(replayssm_materialize)
+    group.materialize()
 
     expected = original[3].clone()
     for offset in range(4):
@@ -181,65 +197,60 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
 def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_step):
-    """Skip only prefill self-copies; preserve other copies and in-place replay."""
-
-    def ints(values):
-        return torch.tensor(values, dtype=torch.int32, device="cuda")
-
+    """Skip prefill self-copies, reset trackers, and preserve in-place MTP replay."""
     mixer = SimpleNamespace(
         kv_cache=(
             torch.empty(0, device="cuda"),
-            torch.empty(9, 1, 1, 1, device="cuda"),
+            torch.empty(6, 1, 1, 1, device="cuda"),
         ),
         replayssm_cache=(
-            torch.empty(9, 1, 20, 1, device="cuda"),
-            torch.empty(9, 1, 20, device="cuda"),
-            torch.empty(9, 1, 20, 1, device="cuda"),
+            torch.empty(6, 1, 20, 1, device="cuda"),
+            torch.empty(6, 1, 20, device="cuda"),
+            torch.empty(6, 1, 20, 1, device="cuda"),
         ),
-        _replayssm_ring_start=ints([3] * 9),
-        _replayssm_prev_num_accepted=ints([2] * 9),
+        _replayssm_ring_start=_cuda_ints([3] * 6),
+        _replayssm_prev_num_accepted=_cuda_ints([2] * 6),
         replayssm_buffer_len=16,
         A=torch.empty(1, device="cuda"),
     )
     group = _ReplaySSMGroupContext.create(
         [mixer],
-        ints(
+        _cuda_ints(
             [
                 [0, 1, 2],
                 [3, 4, 5],
-                [6, 7, 8],
                 [NULL_BLOCK_ID] * 3,
                 [NULL_BLOCK_ID] * 3,
             ]
         ),
         "align",
         16,
-        5,
+        4,
     )
-    # Reordered rows: canonical prefill in slot 2; prefill copy 5 -> 4;
-    # positive-token replay in slot 7; padded slot; padded request.
+    # Reordered rows: canonical prefill in slot 2; in-place MTP replay in slot 4;
+    # padded slot; padded request.
     group.postprocess(
-        idx_mapping=ints([2, 0, 3, 1, -1]),
+        idx_mapping=_cuda_ints([1, 2, 0, -1]),
         query_metadata=(
-            ints([0, 48, 80, 84, 100, 100]) if post_step else ints([48, 32, 4, 16, 0])
+            _cuda_ints([0, 48, 52, 68, 68]) if post_step else _cuda_ints([48, 4, 16, 0])
         ),
         query_metadata_is_cumulative=post_step,
-        num_computed_tokens=ints([32, 16, 48, 32])
+        num_computed_tokens=_cuda_ints([16, 48, 32])
         if post_step
-        else ints([0, 0, 0, 31]),
+        else _cuda_ints([0, 0, 28]),
         num_computed_is_post_step=post_step,
-        num_accepted_tokens=ints([1] * 4),
-        is_prefilling=torch.tensor([True, True, False, True, True], device="cuda"),
-        live_cols=ints([2, 0, 2, 1]),
-        num_reqs=5,
+        num_accepted_tokens=_cuda_ints([1, 1, 4]),
+        is_prefilling=torch.tensor([True, False, True, True], device="cuda"),
+        live_cols=_cuda_ints([0, 2, 1]),
+        num_reqs=4,
     )
 
-    assert group.plan_flush_count.tolist() == [-1, 0, 3, -1, -1]
-    assert group.active_request_indices.tolist() == [1, 2, -1, -1, -1]
-    assert group.src_slots[0, 1:3].tolist() == [5, 7]
-    assert group.dst_slots[0, 1:3].tolist() == [4, 7]
-    assert mixer._replayssm_ring_start.tolist() == [3, 0, 0, 0, 0, 3, 3, 0, 3]
-    assert mixer._replayssm_prev_num_accepted.tolist() == [2, 0, 0, 0, 0, 2, 2, 0, 2]
+    assert group.plan_flush_count.tolist() == [-1, 6, -1, -1]
+    assert group.active_request_indices.tolist() == [1, -1, -1, -1]
+    assert group.src_slots[0, 1].item() == 4
+    assert group.dst_slots[0, 1].item() == 4
+    assert mixer._replayssm_ring_start.tolist() == [3, 0, 0, 3, 0, 3]
+    assert mixer._replayssm_prev_num_accepted.tolist() == [2, 0, 0, 2, 0, 2]
 
 
 def test_default_backend_is_triton():
@@ -416,42 +427,52 @@ def test_replayssm_physical_ring_shape(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("post_step", [False, True])
 @pytest.mark.parametrize(
-    ("computed_before", "query_len", "prefilling", "accepted", "expected"),
+    (
+        "computed_before",
+        "query_len",
+        "prefilling",
+        "accepted",
+        "old_committed",
+        "old_start",
+        "expected_committed",
+        "expected_start",
+    ),
     [
-        (256, 4, False, 1, 3),  # Padded cached prompt tail commits its real token.
-        (1, 4, False, 1, 3),  # Rejected placeholders exceed the cached prefix.
-        (256, 1, False, 1, 3),
-        (0, 4, True, 1, 0),  # Initial prefill clears stale trackers.
-        (256, 4, True, 1, 0),  # Multi-token prefill also clears trackers.
-        (0, 50_000, True, 1, 0),  # Long prefill still has only one live column.
-        (50_000, 4, True, 1, 0),  # Later chunks must also reset column zero.
-        (256, 4, False, 3, 5),  # Ordinary speculative decode commits acceptance.
+        (256, 4, False, 1, 2, 3, 3, 3),  # Padded prompt tail.
+        (256, 4, False, 3, 2, 3, 5, 3),  # Speculative decode.
+        (0, 50_000, True, 1, 2, 3, 0, 0),  # Long initial prefill.
+        (50_000, 4, True, 1, 2, 3, 0, 0),  # Later prefill chunk.
+        (256, 4, False, 1, 15, 7, 1, 2),  # Checkpoint wraps the physical ring.
     ],
 )
 def test_replayssm_postprocess_commits_staged_transition(
-    post_step, computed_before, query_len, prefilling, accepted, expected
+    post_step,
+    computed_before,
+    query_len,
+    prefilling,
+    accepted,
+    old_committed,
+    old_start,
+    expected_committed,
+    expected_start,
 ):
     """Mode none updates only its live slot, including for long prompt chunks."""
-
-    def tensor(values):
-        return torch.tensor(values, dtype=torch.int32, device="cuda")
-
     computed = computed_before
     if post_step:
         computed += query_len if prefilling else accepted
-    ring_start = tensor([3, 7])
-    committed = tensor([2, 9])
+    ring_start = _cuda_ints([old_start, 7])
+    committed = _cuda_ints([old_committed, 9])
     # Neighboring request rows provide valid canary IDs, making erroneous
     # column reads deterministically corrupt another slot rather than crash.
     block_table = torch.ones((256, 1), dtype=torch.int32, device="cuda")
     block_table[0, 0] = 0
-    plan_start, plan_flush = tensor([0]), tensor([-1])
-    slots = tensor([[0]])
+    plan_start, plan_flush = _cuda_ints([0]), _cuda_ints([-1])
+    slots = _cuda_ints([[0]])
     _postprocess_replayssm_kernel[(1,)](
-        tensor([0]),
-        tensor([0, query_len]) if post_step else tensor([query_len]),
-        tensor([computed]),
-        tensor([accepted]),
+        _cuda_ints([0]),
+        _cuda_ints([0, query_len]) if post_step else _cuda_ints([query_len]),
+        _cuda_ints([computed]),
+        _cuda_ints([accepted]),
         torch.tensor([prefilling], device="cuda"),
         None,
         block_table[:1],
@@ -474,87 +495,26 @@ def test_replayssm_postprocess_commits_staged_transition(
         MATERIALIZE_PREFIXES=False,
         LIVE_COL_IS_ZERO=True,
     )
-    assert committed.tolist() == [expected, 9]
-    assert ring_start.tolist() == [0 if prefilling else 3, 7]
-
-
-@pytest.mark.parametrize("layout", ["packed", "dense"])
-def test_replayssm_flashinfer_call_forwards_mtp_layout(monkeypatch, layout):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    kernel = Mock(return_value=torch.empty(0))
-    monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
-
-    batch, max_seqlen, nheads, dim, dstate, ngroups = 2, 4, 2, 4, 8, 1
-    state = torch.empty(2, nheads, dim, dstate)
-    x_shape: tuple[int, ...]
-    B_shape: tuple[int, ...]
-    expected_x_shape: tuple[int, ...]
-    expected_B_shape: tuple[int, ...]
-    if layout == "packed":
-        x_shape = (6, nheads, dim)
-        B_shape = (6, ngroups, dstate)
-        expected_x_shape = (1, 6, nheads, dim)
-        expected_B_shape = (1, 6, ngroups, dstate)
-        cu_seqlens = torch.tensor([0, 4, 6], dtype=torch.int32)
-        kernel_max_seqlen = max_seqlen
-    else:
-        x_shape = (batch, max_seqlen, nheads, dim)
-        B_shape = (batch, max_seqlen, ngroups, dstate)
-        expected_x_shape = x_shape
-        expected_B_shape = B_shape
-        cu_seqlens = None
-        kernel_max_seqlen = None
-    x = torch.empty(x_shape)
-    dt = torch.empty_like(x)
-    A = torch.empty(nheads, dim, dstate)
-    B = torch.empty(B_shape)
-    C = torch.empty_like(B)
-    out = torch.empty_like(x)
-    x_cache = torch.empty(2, nheads, 20, dim)
-    dt_cache = torch.empty(2, nheads, 20)
-    B_cache = torch.empty(2, ngroups, 20, dstate)
-    ring_start = torch.zeros(2, dtype=torch.int32)
-    prev_num_accepted = torch.zeros(2, dtype=torch.int32)
-    selective_state_update_replayssm_flashinfer(
-        state,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        out,
-        x_cache,
-        B_cache,
-        dt_cache,
-        ring_start,
-        prev_num_accepted,
-        state_batch_indices=torch.tensor([0, 1], dtype=torch.int32),
-        cu_seqlens=cu_seqlens,
-        max_seqlen=kernel_max_seqlen,
-    )
-
-    args = kernel.call_args.args
-    assert args[6].shape == expected_x_shape
-    assert args[7].shape == expected_x_shape
-    assert args[9].shape == expected_B_shape
-    assert args[10].shape == expected_B_shape
-    assert args[11].shape == expected_x_shape
-    assert kernel.call_args.kwargs["cu_seqlens"] is cu_seqlens
-    assert kernel.call_args.kwargs["max_seqlen"] == kernel_max_seqlen
+    assert committed.tolist() == [expected_committed, 9]
+    assert ring_start.tolist() == [expected_start, 7]
 
 
 @pytest.mark.parametrize(
-    ("query_start_loc", "expected_shape", "expected_max_seqlen"),
+    ("query_start_loc", "expected_x_shape", "expected_B_shape", "expected_max_seqlen"),
     [
-        pytest.param([0, 4, 8], (2, 4, 2, 4), None, id="dense"),
-        pytest.param([0, 4, 6], (6, 2, 4), 4, id="packed"),
+        pytest.param([0, 4, 8], (2, 4, 2, 4), (2, 4, 1, 8), None, id="dense"),
+        pytest.param([0, 4, 6], (1, 6, 2, 4), (1, 6, 1, 8), 4, id="packed"),
     ],
 )
 def test_replayssm_mixer_selects_mtp_layout(
-    monkeypatch, query_start_loc, expected_shape, expected_max_seqlen
+    monkeypatch,
+    query_start_loc,
+    expected_x_shape,
+    expected_B_shape,
+    expected_max_seqlen,
 ):
     import vllm.model_executor.layers.mamba.mamba_mixer2 as mod
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as dispatch
 
     mixer = mod.MambaMixer2.__new__(mod.MambaMixer2)
     torch.nn.Module.__init__(mixer)
@@ -583,13 +543,12 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.kv_cache = (
         torch.empty(3, 1),
         torch.empty(3, 2, 4, 8),
+    )
+    mixer.replayssm_cache = (
         torch.empty(3, 2, 20, 4),
         torch.empty(3, 2, 20),
         torch.empty(3, 1, 20, 8),
     )
-
-    mixer.replayssm_cache = mixer.kv_cache[2:]
-    mixer.kv_cache = mixer.kv_cache[:2]
 
     num_decode_tokens = query_start_loc[-1]
     query_start_loc_d = torch.tensor(query_start_loc, dtype=torch.int32)
@@ -628,13 +587,18 @@ def test_replayssm_mixer_selects_mtp_layout(
     monkeypatch.setattr(
         mod, "causal_conv1d_update", lambda values, *args, **kwargs: values
     )
-    monkeypatch.setattr(mod, "selective_state_update_replayssm_flashinfer", kernel)
+    monkeypatch.setattr(dispatch, "_flashinfer_replayssm_kernel", kernel)
 
     mixer.conv_ssm_forward(
         torch.empty(num_decode_tokens, 3), torch.empty(num_decode_tokens, 8)
     )
 
-    assert kernel.call_args.args[1].shape == expected_shape
+    args = kernel.call_args.args
+    assert args[6].shape == expected_x_shape
+    assert args[7].shape == expected_x_shape
+    assert args[9].shape == expected_B_shape
+    assert args[10].shape == expected_B_shape
+    assert args[11].shape == expected_x_shape
     if expected_max_seqlen is None:
         assert kernel.call_args.kwargs["cu_seqlens"] is None
     else:

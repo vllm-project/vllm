@@ -26,7 +26,11 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
-from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy, get_replayssm_ring_layout
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlockCopy,
+    _get_per_layer_spec,
+    get_replayssm_ring_layout,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -473,15 +477,10 @@ def allocate_replayssm_caches(
     num_blocks = kv_cache_config.num_blocks
     raw = torch.zeros(num_blocks * ring_bytes, dtype=torch.uint8, device=device)
     for group in kv_cache_config.kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        layer_specs: Iterable[tuple[str, KVCacheSpec]]
-        if isinstance(group_spec, UniformTypeKVCacheSpecs):
-            layer_specs = group_spec.kv_cache_specs.items()
-        else:
-            layer_specs = ((name, group_spec) for name in group.layer_names)
-        for layer_name, spec in layer_specs:
+        for layer_name in group.layer_names:
             if layer_name not in offsets:
                 continue
+            spec = _get_per_layer_spec(group, layer_name)
             assert isinstance(spec, MambaSpec)
             assert layer_name not in caches
             states = []

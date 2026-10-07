@@ -613,6 +613,13 @@ class VllmConfig:
         )
 
     @property
+    def use_flashinfer_replayssm(self) -> bool:
+        return (
+            self.cache_config.use_replayssm
+            and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
+
+    @property
     def num_speculative_tokens(self) -> int:
         if (
             self.speculative_config is not None

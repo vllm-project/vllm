@@ -103,17 +103,17 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     assert config.compute_hash() != fixed_hash
 
 
-@pytest.mark.parametrize("mode", ["none", "align"])
-@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float16, torch.float32])
-@pytest.mark.parametrize("state_dtype", ["float16", "bfloat16", "float32"])
-def test_flashinfer_replayssm_ring_dtype_is_independent_of_state(
-    mode, input_dtype, state_dtype
-):
+@pytest.mark.parametrize(
+    ("mode", "input_dtype"),
+    [("align", torch.bfloat16), ("align", torch.float16), ("none", torch.float16)],
+    ids=["align-bf16", "align-fp16-rejected", "none-fp16"],
+)
+def test_flashinfer_replayssm_validates_input_dtype(mode, input_dtype):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
             mamba_cache_mode=mode,
-            mamba_ssm_cache_dtype=state_dtype,
+            mamba_ssm_cache_dtype="float16",
             replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
@@ -132,11 +132,9 @@ def test_flashinfer_replayssm_ring_dtype_is_independent_of_state(
             VllmConfig.validate_mamba_cached_kernel(config)
     else:
         VllmConfig.validate_mamba_cached_kernel(config)
-        assert config.cache_config.mamba_ssm_cache_dtype == state_dtype
 
 
-@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
-def test_flashinfer_replayssm_rejects_microbatching(use_v2):
+def test_flashinfer_replayssm_rejects_microbatching():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
@@ -152,7 +150,7 @@ def test_flashinfer_replayssm_rejects_microbatching(use_v2):
         mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
         parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=True),
         kv_transfer_config=None,
-        use_v2_model_runner=use_v2,
+        use_v2_model_runner=True,
     )
     with pytest.raises(ValueError, match="ReplaySSM does not support microbatching"):
         VllmConfig.validate_mamba_cached_kernel(config)

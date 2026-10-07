@@ -445,7 +445,7 @@ class _ReplaySSMGroupContext:
                 BLOCK_SIZE=triton.next_power_of_2(self.max_num_reqs),
             )
 
-    def materialize(self, materialize_fn: Callable[..., None]) -> None:
+    def materialize(self) -> None:
         """Publish the canonical prefix snapshots prepared by ``postprocess``."""
         first = self.mixers[0]
         mamba_config = first.mamba_config
@@ -456,7 +456,7 @@ class _ReplaySSMGroupContext:
                 0, 2**32, (1,), device=self.src_slots.device, dtype=torch.int64
             )
             philox_rounds = mamba_config.stochastic_rounding_philox_rounds or 10
-        materialize_fn(
+        _load_replayssm_materialize()(
             *self.materialize_tables,
             self.src_slots,
             self.dst_slots,
@@ -484,10 +484,6 @@ class ReplaySSMModelContext:
     """ReplaySSM lifecycle split by physical cache-slot namespace."""
 
     groups: list[_ReplaySSMGroupContext]
-
-    @property
-    def materialize_prefixes(self) -> bool:
-        return self.groups[0].materialize_prefixes
 
     @classmethod
     def create(
@@ -517,12 +513,10 @@ class ReplaySSMModelContext:
             group.postprocess(**kwargs)
 
     def materialize(self) -> None:
-        # Keep the optional FlashInfer dependency lazy: mode ``none`` never
-        # reaches this path. Resolve the cached callable once for this model
-        # operation, then invoke it once per physical cache-slot namespace.
-        materialize_fn = _load_replayssm_materialize()
+        if not self.groups[0].materialize_prefixes:
+            return
         for group in self.groups:
-            group.materialize(materialize_fn)
+            group.materialize()
 
 
 class MambaSSUBackend(ABC):

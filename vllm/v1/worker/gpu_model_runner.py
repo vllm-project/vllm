@@ -38,7 +38,6 @@ from vllm.config import (
 )
 from vllm.config.cache import CacheConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
-from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -942,12 +941,10 @@ class GPUModelRunner(
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         self.num_accepted_tokens_event: torch.Event | None = None
+        self._use_flashinfer_replayssm = self.vllm_config.use_flashinfer_replayssm
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
-            if not (
-                self.cache_config.use_replayssm
-                and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-            ):
+            if not self._use_flashinfer_replayssm:
                 self.num_accepted_tokens_event = torch.Event()
             self.draft_token_ids_copy_stream = torch.cuda.Stream()
             self.draft_token_ids_cpu = torch.empty(
@@ -976,10 +973,6 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
-        self._use_flashinfer_replayssm = (
-            self.cache_config.use_replayssm
-            and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-        )
         self._replayssm_prev_req_indices: dict[str, int] = {}
         self._replayssm_paused_accepted_tokens: dict[str, torch.Tensor] = {}
         self._replayssm_accepted_tokens: torch.Tensor | None = None
@@ -4412,8 +4405,6 @@ class GPUModelRunner(
                     self.input_batch.req_ids,
                     num_reqs,
                     self.requests,
-                    self.mamba_state_idx,
-                    run_prefix_state_migration=self._needs_prefix_state_migration,
                 )
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0

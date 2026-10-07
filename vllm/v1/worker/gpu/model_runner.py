@@ -1685,9 +1685,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.model_state.postprocess_state(
-            idx_mapping,
-            num_sampled,
-            self.req_states.num_computed_tokens.gpu,
+            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
         )
 
     def _merge_ec_connector_no_forward(

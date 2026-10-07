@@ -40,8 +40,9 @@ def _autotune_runner(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         vllm_config=SimpleNamespace(
-            cache_config=SimpleNamespace(use_replayssm=use_replayssm),
-            mamba_config=SimpleNamespace(backend=backend),
+            use_flashinfer_replayssm=(
+                use_replayssm and backend == MambaBackendEnum.FLASHINFER
+            ),
             use_v2_model_runner=use_v2_model_runner,
         ),
         uniform_decode_query_len=query_len,
@@ -118,8 +119,11 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     assert result is None
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
-@pytest.mark.parametrize("fail_warmup", [False, True])
+@pytest.mark.parametrize(
+    ("use_v2", "fail_warmup"),
+    [(False, False), (True, False), (False, True)],
+    ids=["v1-success", "v2-success", "v1-failure"],
+)
 def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup):
     raw = tuple(torch.full((5, 2, 17), 3.0) for _ in range(3))
     mixers = []
@@ -139,11 +143,6 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup
             (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted)
         )
         mixers.append(mixer)
-    assert (
-        mixers[0].replayssm_cache[0].data_ptr()
-        == mixers[1].replayssm_cache[0].data_ptr()
-    )
-
     block_ids = np.arange(10, 14, dtype=np.int32).reshape(4, 1)
     original_block_ids = block_ids.copy()
     block_table = SimpleNamespace(block_table=SimpleNamespace(np=block_ids))

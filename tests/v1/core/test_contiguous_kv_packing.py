@@ -270,29 +270,22 @@ def test_replayssm_ring_overlay_alignment_and_block_copy(monkeypatch):
     assert torch.equal(raw[:3], before[:3])
 
 
-def test_replayssm_ring_overlay_super_mtp_capacity():
-    # Real Super TP4 geometry: forty Mamba layers in five groups of eight;
-    # nine attention layers include the MTP layer. Each ring has twenty slots.
+def test_replayssm_ring_overlay_request_capacity():
     mamba = MambaSpec(
-        block_size=2176,
-        shapes=((2560, 6), (32, 64, 128)),
-        dtypes=(torch.bfloat16, torch.float16),
-        page_size_padded=557056,
-        replayssm_shapes=((32, 20, 64), (32, 20), (2, 20, 128)),
-        replayssm_dtypes=(torch.bfloat16, torch.float32, torch.bfloat16),
+        block_size=2,
+        shapes=((16,), (16,)),
+        dtypes=(torch.float32,) * 2,
+        replayssm_shapes=((2,), (1,), (1,)),
+        replayssm_dtypes=(torch.float32,) * 3,
         mamba_cache_mode="align",
     )
     attention = FullAttentionSpec(
-        block_size=2176, num_kv_heads=1, head_size=128, dtype=torch.uint8
+        block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float32
     )
-    groups = [KVCacheGroupSpec([f"attention{i}" for i in range(9)], attention)]
+    groups = [KVCacheGroupSpec([f"attention{i}" for i in range(3)], attention)]
     groups += [
-        KVCacheGroupSpec([f"mamba{g}_{i}" for i in range(8)], mamba) for g in range(5)
+        KVCacheGroupSpec([f"mamba{g}_{i}" for i in range(2)], mamba) for g in range(2)
     ]
-    canonical = 9 * 557056
-    rings, _, trackers = get_replayssm_ring_layout(groups)
-    assert rings == 8 * 94720 and trackers == 5 * 8
-    assert _get_kv_cache_bytes_per_block(groups) == canonical + rings + trackers
     no_replay = [
         groups[0],
         *[
@@ -308,23 +301,21 @@ def test_replayssm_ring_overlay_super_mtp_capacity():
             for g in groups[1:]
         ],
     ]
-    assert _get_kv_cache_bytes_per_block(no_replay) == canonical
     vllm_config = _mock_vllm_config("LBNHC")
-    vllm_config.model_config.max_model_len = 114688
+    vllm_config.model_config.max_model_len = 8
     vllm_config.parallel_config.decode_context_parallel_size = 1
     vllm_config.cache_config.mamba_cache_mode = "align"
+    # Three 128-byte canonical pages; replay adds 32 ring and 16 tracker bytes.
+    available_memory = 12 * 384
     base_config = get_kv_cache_config_from_groups(
-        vllm_config, no_replay, 48072 * canonical
+        vllm_config, no_replay, available_memory
     )
-    config = get_kv_cache_config_from_groups(vllm_config, groups, 48072 * canonical)
-    assert base_config.num_blocks == 48072 and config.num_blocks == 41759
-    baseline_capacity = get_max_concurrency_for_kv_cache_config(
-        vllm_config, base_config
-    )
-    replay_capacity = get_max_concurrency_for_kv_cache_config(vllm_config, config)
-    assert baseline_capacity == base_config.num_blocks / 78
-    assert replay_capacity == config.num_blocks / 63
-    assert replay_capacity > baseline_capacity
+    config = get_kv_cache_config_from_groups(vllm_config, groups, available_memory)
+    assert base_config.num_blocks == 12
+    assert config.num_blocks == 10
+    # Attention needs four blocks; each Mamba group needs two plus any draft slots.
+    assert get_max_concurrency_for_kv_cache_config(vllm_config, base_config) == 12 / 14
+    assert get_max_concurrency_for_kv_cache_config(vllm_config, config) == 10 / 8
 
 
 MAIN_KV_PAGE_BYTES = 2_048

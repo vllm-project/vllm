@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config.mamba import MambaBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     flashinfer_replayssm_autotune_supported,
@@ -24,10 +23,7 @@ def _replayssm_autotune_kwargs(
     max_token_prefill_kwargs: dict[str, Any],
 ) -> tuple[int, dict[str, Any]] | None:
     config = runner.vllm_config
-    if not (
-        config.cache_config.use_replayssm
-        and config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-    ):
+    if not config.use_flashinfer_replayssm:
         return None
     if not flashinfer_replayssm_autotune_supported():
         logger.info_once(

@@ -8,7 +8,6 @@ from typing import Any, NamedTuple
 import torch
 
 from vllm.config import CacheConfig
-from vllm.config.mamba import MambaBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncsByType,
@@ -18,6 +17,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     ReplaySSMModelContext,
+    _reinterpret_u64_as_i64,
     mamba_state_copy_boundary,
 )
 from vllm.triton_utils import tl, triton
@@ -185,11 +185,6 @@ def _memcpy_u64_tiled(
             mask = (i + offsets) < tile_end
             data = tl.load(src_u8 + i + offsets, mask=mask)
             tl.store(dst_u8 + i + offsets, data, mask=mask)
-
-
-def _reinterpret_u64_as_i64(value: int) -> int:
-    """Preserve a uint64 pointer bit pattern in a torch.int64 tensor."""
-    return value if value < (1 << 63) else value - (1 << 64)
 
 
 @triton.jit
@@ -849,10 +844,6 @@ class MambaSpecDecodeGPUContext:
 
     # Flag to track if metadata has been populated
     is_initialized: bool = False
-    # False for the ordinary hybrid spec-decode state-copy context. True only
-    # when model-wide FlashInfer ReplaySSM owns temporal state; mixed ReplaySSM
-    # and baseline Mamba layers are rejected at populate time.
-    has_flashinfer_replayssm: bool = False
     # Persistent all-layer ReplaySSM descriptors, populated with the cache
     # addresses on first real forward. None for non-FlashInfer configurations.
     replayssm: ReplaySSMModelContext | None = None
@@ -1015,6 +1006,7 @@ class MambaSpecDecodeGPUContext:
         replayssm_groups: list[tuple[list[Any], MambaSpec, torch.Tensor]] = []
         has_replayssm_layer = False
         has_baseline_layer = False
+        has_flashinfer_replayssm = False
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
             mixers: list[Any] = []
@@ -1024,9 +1016,8 @@ class MambaSpecDecodeGPUContext:
                 state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
                 attention = forward_context[layer_name]
                 kv_caches: list[torch.Tensor] = attention.kv_cache
-                is_flashinfer_replayssm = (
-                    getattr(attention, "use_replayssm", False)
-                    and attention.mamba_config.backend == MambaBackendEnum.FLASHINFER
+                is_flashinfer_replayssm = getattr(
+                    attention, "use_flashinfer_replayssm", False
                 )
                 has_replayssm_layer |= bool(is_flashinfer_replayssm)
                 has_baseline_layer |= not is_flashinfer_replayssm
@@ -1080,7 +1071,7 @@ class MambaSpecDecodeGPUContext:
                             self.state_conv_widths[idx] = state.size(1)
                             self.state_inner_sizes[idx] = state.stride(1)
                     else:
-                        self.has_flashinfer_replayssm |= bool(is_flashinfer_replayssm)
+                        has_flashinfer_replayssm |= bool(is_flashinfer_replayssm)
                         # Temporal state: inner_size = natural elements per
                         # block (prod of inner dims).  The kernel uses this
                         # to compute copy_size = inner_size * elem_size,
@@ -1144,7 +1135,7 @@ class MambaSpecDecodeGPUContext:
         for i, bt in enumerate(block_tables):
             self.block_table_ptrs[i] = _reinterpret_u64_as_i64(bt.data_ptr())
 
-        if self.has_flashinfer_replayssm:
+        if has_flashinfer_replayssm:
             self.replayssm = ReplaySSMModelContext.create(
                 replayssm_groups,
                 self.num_accepted_tokens_snapshot.numel(),
@@ -1244,7 +1235,7 @@ class MambaSpecDecodeGPUContext:
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
-            SKIP_TEMPORAL_STATE_COPY=self.has_flashinfer_replayssm,
+            SKIP_TEMPORAL_STATE_COPY=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
@@ -1346,7 +1337,7 @@ class MambaSpecDecodeGPUContext:
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
-            SKIP_TEMPORAL_STATE_COPY=self.has_flashinfer_replayssm,
+            SKIP_TEMPORAL_STATE_COPY=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
@@ -1696,8 +1687,7 @@ def postprocess_mamba_gpu(
             live_cols=live_cols,
             num_reqs=num_reqs,
         )
-        if ctx.replayssm.materialize_prefixes:
-            ctx.replayssm.materialize()
+        ctx.replayssm.materialize()
 
     if num_accepted_tokens_cpu_tensor is not None and ctx.replayssm is None:
         # CPU consumers need the normalized live counts for the next step, not
@@ -1713,16 +1703,12 @@ def stage_postprocess_inputs_to_gpu(
     req_ids: list[str],
     num_reqs: int,
     requests: dict[str, CachedRequestState],
-    mamba_state_idx: dict[str, int],
-    run_prefix_state_migration: bool,
 ) -> None:
     """Stage the per-request decisions consumed after token acceptance.
 
     One host pass writes scheduled, computed, draft, and prefill values into
     pinned views shared by generic Mamba postprocess and ReplaySSM tracker
-    publication, then launches non-blocking H→D copies. Prefix migration also
-    stages the live Mamba column used by the copy planner and ReplaySSM; mode
-    ``none`` omits it because ReplaySSM live state remains in column zero.
+    publication, then launches non-blocking H→D copies.
     """
     assert ctx.num_scheduled_tokens_buf is not None
     assert ctx.num_computed_tokens_buf is not None
@@ -1731,24 +1717,12 @@ def stage_postprocess_inputs_to_gpu(
 
     scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
     num_scheduled = scheduler_output.num_scheduled_tokens
-    state_idx_np = None
-    if run_prefix_state_migration:
-        assert ctx.mamba_state_idx_buf is not None
-        state_idx_np = ctx.mamba_state_idx_buf.np
     scheduled_np = ctx.num_scheduled_tokens_buf.np
     computed_np = ctx.num_computed_tokens_buf.np
     draft_np = ctx.num_draft_tokens_buf.np
     prefill_np = ctx.is_prefilling_buf.np
     for i in range(num_reqs):
         req_id = req_ids[i]
-        if run_prefix_state_migration:
-            state_idx = mamba_state_idx.get(req_id)
-            assert state_idx is not None, (
-                f"mamba_state_idx missing entry for {req_id!r}; "
-                "preprocess_mamba must run before stage_postprocess_inputs_to_gpu"
-            )
-            assert state_idx_np is not None
-            state_idx_np[i] = state_idx
         scheduled = num_scheduled[req_id]
         req_state = requests[req_id]
         computed = req_state.num_computed_tokens
@@ -1761,9 +1735,6 @@ def stage_postprocess_inputs_to_gpu(
         prefill_np[i] = computed < req_state.num_prompt_tokens and not (
             computed > 0 and (scheduled == 1 or scheduled == num_draft + 1)
         )
-    if run_prefix_state_migration:
-        assert ctx.mamba_state_idx_buf is not None
-        ctx.mamba_state_idx_buf.copy_to_gpu(num_reqs)
     ctx.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
     ctx.num_computed_tokens_buf.copy_to_gpu(num_reqs)
     ctx.num_draft_tokens_buf.copy_to_gpu(num_reqs)

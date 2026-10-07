@@ -955,67 +955,6 @@ def _check_enough_kv_cache_memory(
         )
 
 
-def max_memory_usage_bytes(
-    vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
-) -> int:
-    """Get the maximum memory usage in bytes for the given KV cache specs."""
-    return sum(spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_specs)
-
-
-def estimate_max_model_len(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-    available_memory: int,
-) -> int:
-    """Estimates the maximum model length that can fit in the available memory
-    using binary search.
-
-    This function temporarily modifies max_model_len during estimation but
-    restores the original value before returning, ensuring no side effects.
-
-    Args:
-        vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache spec of each attention layer in the model
-        available_memory: Memory available for KV cache in bytes.
-
-    Returns:
-        The estimated maximum model length that can fit in the available memory.
-
-    """
-    # Save the original max_model_len to restore after estimation
-    original_max_model_len = vllm_config.model_config.max_model_len
-
-    # Define a function to check if a given model length fits in memory
-    def fits_in_memory(model_len: int) -> bool:
-        # Temporarily modify the max_model_len for this calculation
-        vllm_config.model_config.max_model_len = model_len
-        # Calculate memory needed for the given model length
-        memory_needed = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
-        return memory_needed <= available_memory
-
-    try:
-        # Binary search for the maximum model length
-        left, right = 1, original_max_model_len
-
-        # If even the smallest model length doesn't fit, return 0
-        if not fits_in_memory(left):
-            return 0
-
-        # Binary search for the maximum model length that fits
-        result = 1
-        while left <= right:
-            mid = (left + right) // 2
-            if fits_in_memory(mid):
-                result = mid
-                left = mid + 1
-            else:
-                right = mid - 1
-        return result
-    finally:
-        # Always restore the original max_model_len to avoid side effects
-        vllm_config.model_config.max_model_len = original_max_model_len
-
-
 def check_enough_kv_cache_memory(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],

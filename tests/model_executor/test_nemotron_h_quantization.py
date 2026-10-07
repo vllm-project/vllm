@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 
 
 def test_nemotron_h_lm_head_receives_quant_config():
@@ -65,15 +66,10 @@ def test_relu2_fp8_fusion_uses_registry():
 
 
 @pytest.mark.parametrize(
-    ("backend", "expected_num_states"),
-    [
-        (MambaBackendEnum.TRITON, 5),
-        (MambaBackendEnum.FLASHINFER, 2),
-    ],
+    "backend", [MambaBackendEnum.TRITON, MambaBackendEnum.FLASHINFER]
 )
 def test_nemotron_h_replayssm_platform_sizing_is_backend_scoped(
     backend: MambaBackendEnum,
-    expected_num_states: int,
 ):
     from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 
@@ -95,5 +91,11 @@ def test_nemotron_h_replayssm_platform_sizing_is_backend_scoped(
     shapes = NemotronHForCausalLM.get_mamba_state_shape_from_config(config)
     dtypes = NemotronHForCausalLM.get_mamba_state_dtype_from_config(config)
 
-    assert len(shapes) == expected_num_states
-    assert len(dtypes) == expected_num_states
+    conv_shape = (4096, 3) if is_conv_state_dim_first() else (3, 4096)
+    expected_shapes: tuple[tuple[int, ...], ...] = (conv_shape, (32, 64, 128))
+    expected_dtypes: tuple[torch.dtype, ...] = (torch.bfloat16, torch.float32)
+    if backend == MambaBackendEnum.TRITON:
+        expected_shapes += ((32, 16, 64), (32, 16), (8, 16, 128))
+        expected_dtypes += (torch.bfloat16, torch.float32, torch.bfloat16)
+    assert shapes == expected_shapes
+    assert dtypes == expected_dtypes
