@@ -1005,10 +1005,6 @@ def test_aiter_moe_padding_matrix_mxfp4():
 # RankTensors.make() *before* garbage rows are injected, so it cannot be
 # inflated by a garbage row's magnitude either.
 
-_TOKEN_PADDING_M = 16
-_TOKEN_PADDING_K = 1024
-_TOKEN_PADDING_N = 512
-
 # {mode name -> {row index: fill value}}. Covers multiple garbage-row counts
 # and positions, and both inf and nan.
 _TOKEN_PADDING_GARBAGE_MODES: dict[str, dict[int, float]] = {
@@ -1107,10 +1103,15 @@ def test_aiter_moe_token_padding_garbage_rows(
 
     garbage_rows = _TOKEN_PADDING_GARBAGE_MODES[garbage_mode]
 
+    # Reuses 4b's already-confirmed 128-aligned ("padded") K/N -- these are
+    # known to work across all 5 quant schemes here, including AITER's
+    # block-quant kernel (which 4b's _PADDING_K_UNPADDED/_PADDING_N_UNPADDED
+    # sizes do not support). Token-padding safety doesn't depend on
+    # hidden_pad/intermediate_pad, so there's no need for a separate shape.
     config = Config(
-        Ms=_TOKEN_PADDING_M,
-        K=_TOKEN_PADDING_K,
-        N=_TOKEN_PADDING_N,
+        Ms=_PADDING_M,
+        K=_PADDING_K_PADDED,
+        N=_PADDING_N_PADDED,
         E=_PADDING_E,
         topks=_PADDING_TOPK,
         dtype=torch.bfloat16,
