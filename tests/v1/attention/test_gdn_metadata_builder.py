@@ -6,6 +6,7 @@ Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 import pytest
 import torch
@@ -149,6 +150,7 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    decode_backend: Literal["auto", "triton", "flashinfer"] = "auto",
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
@@ -158,6 +160,7 @@ def _create_gdn_builder(
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
+    vllm_config.kernel_config.gdn_decode_backend = decode_backend
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -244,6 +247,7 @@ def test_update_block_table_matches_build(
     fields = (
         "spec_state_indices_tensor",
         "non_spec_state_indices_tensor",
+        "non_spec_flashinfer_state_indices_tensor",
         "prefill_state_indices",
     )
     source_indices = [getattr(source, f) for f in fields]
@@ -260,6 +264,58 @@ def test_update_block_table_matches_build(
         # FULL graph state indices land in this group's own buffers.
         if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
             assert actual.data_ptr() == getattr(dst, field).data_ptr()
+
+
+@pytest.mark.parametrize("full_cuda_graph", [False, True])
+@pytest.mark.parametrize("mixed_prefill", [False, True])
+def test_flashinfer_indices_follow_group_remapping(
+    full_cuda_graph: bool, mixed_prefill: bool
+):
+    """Group reuse remaps decode slots without exposing the null cache slot."""
+    src, dst = (
+        _create_gdn_builder(
+            full_cuda_graph=full_cuda_graph, decode_backend="flashinfer"
+        )
+        for _ in range(2)
+    )
+    for builder in (src, dst):
+        builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    batch = BatchSpec(
+        seq_lens=[40, 50, 0] + ([70] if mixed_prefill else []),
+        query_lens=[1, 1, 0] + ([3] if mixed_prefill else []),
+    )
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    old_slots = [5, 2, 0] + ([7] if mixed_prefill else [])
+    source = _build(
+        src, batch, block_table=torch.tensor(old_slots, dtype=torch.int32)[:, None]
+    )
+    assert source.num_prefills == int(mixed_prefill)
+    assert source.num_decode_tokens == 2
+    source_indices = source.non_spec_flashinfer_state_indices_tensor
+    assert source_indices is not None
+    torch.testing.assert_close(
+        source_indices,
+        torch.tensor([5, 2, -1] + ([7] if mixed_prefill else []), dtype=torch.int32),
+    )
+    source_copy = source_indices.clone()
+    mapped_ptr = None
+    for slots in ([8, 3, 0], [4, 6, 0]):
+        slots = slots + ([9] if mixed_prefill else [])
+        updated = dst.update_block_table(
+            source, torch.tensor(slots, dtype=torch.int32)[:, None], common.slot_mapping
+        )
+        mapped = updated.non_spec_flashinfer_state_indices_tensor
+        assert mapped is not None
+        torch.testing.assert_close(
+            mapped, torch.tensor(slots[:2] + [-1] + slots[3:], dtype=torch.int32)
+        )
+        assert (
+            mapped.data_ptr() == dst.non_spec_flashinfer_state_indices_tensor.data_ptr()
+        )
+        if mapped_ptr is not None:
+            assert mapped.data_ptr() == mapped_ptr
+        mapped_ptr = mapped.data_ptr()
+        torch.testing.assert_close(source_indices, source_copy)
 
 
 def test_has_initial_state_after_reclassification():

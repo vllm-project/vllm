@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import inspect
 import os
+from collections.abc import Callable
 from typing import Literal
 
 import torch
@@ -450,6 +452,138 @@ class ChunkGatedDeltaRule(CustomOp):
         return o, final_state
 
 
+def _get_flashinfer_gdn_decode() -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+    try:
+        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
+    except (ImportError, RuntimeError) as exc:
+        raise ValueError("FlashInfer GDN decode is unavailable") from exc
+
+    parameters = inspect.signature(gated_delta_rule_decode_pretranspose).parameters
+    required = {"initial_state", "initial_state_indices", "output", "use_qk_l2norm"}
+    if not required.issubset(parameters):
+        raise ValueError("FlashInfer GDN decode requires the pool-indexing API")
+    return gated_delta_rule_decode_pretranspose
+
+
+@CustomOp.register("gdn_decode")
+class GDNDecode(CustomOp):
+    """Packed single-token GDN update, writing output and state in place.
+
+    FlashInfer receives padding indices remapped to -1 by attention metadata.
+    """
+
+    def __init__(
+        self,
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+        ssm_state_dtype: torch.dtype,
+    ) -> None:
+        super().__init__()
+        self.num_k_heads = num_k_heads
+        self.num_v_heads = num_v_heads
+        self.head_k_dim = head_k_dim
+        self.head_v_dim = head_v_dim
+        vllm_config = get_current_vllm_config()
+        requested = vllm_config.kernel_config.gdn_decode_backend
+        self.backend = "triton" if requested == "auto" else requested
+        if self.backend == "flashinfer":
+            if not current_platform.is_cuda() or not (
+                current_platform.has_device_capability(89)
+            ):
+                raise ValueError("FlashInfer GDN decode requires CUDA SM89+")
+            if ssm_state_dtype != torch.float32:
+                raise ValueError(
+                    "FlashInfer GDN decode requires FP32 SSM state; its BF16 "
+                    "padding path updates the null slot. Set "
+                    "--mamba-ssm-cache-dtype float32."
+                )
+            if (
+                vllm_config.model_config.dtype != torch.bfloat16
+                or head_k_dim != 128
+                or head_v_dim != 128
+                or num_v_heads % num_k_heads != 0
+            ):
+                raise ValueError(
+                    "FlashInfer GDN decode requires BF16 inputs, FP32 "
+                    "state, 128-dimensional heads, and grouped value heads"
+                )
+            if num_v_heads % 8 != 0:
+                raise ValueError(
+                    "FlashInfer GDN decode requires a per-TP-rank value-head "
+                    "count divisible by 8 to align packed gate views"
+                )
+            self._flashinfer_decode = _get_flashinfer_gdn_decode()
+            self._flashinfer_kwargs = (
+                {"backend": "flashinfer"}
+                if "backend" in inspect.signature(self._flashinfer_decode).parameters
+                else {}
+            )
+            self._forward_method = self.forward_cuda
+        else:
+            self._forward_method = self.forward_native
+        logger.info_once("GDN non-speculative decode backend: %s", self.backend)
+
+    def forward_native(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        initial_state: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        fused_recurrent_gated_delta_rule_packed_decode(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            scale=self.head_k_dim**-0.5,
+            initial_state=initial_state,
+            out=out,
+            ssm_state_indices=ssm_state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    def forward_cuda(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        initial_state: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        # Metadata maps vLLM's null block (0) to FlashInfer's padding index (-1).
+        batch_size = mixed_qkv.shape[0]
+        qk_dim = self.num_k_heads * self.head_k_dim
+        query, key, value = mixed_qkv.split(
+            (qk_dim, qk_dim, self.num_v_heads * self.head_v_dim), dim=-1
+        )
+        self._flashinfer_decode(
+            q=query.view(batch_size, 1, self.num_k_heads, self.head_k_dim),
+            k=key.view(batch_size, 1, self.num_k_heads, self.head_k_dim),
+            v=value.view(batch_size, 1, self.num_v_heads, self.head_v_dim),
+            state=None,
+            A_log=A_log.detach(),
+            a=a.unsqueeze(1),
+            dt_bias=dt_bias.detach(),
+            b=b.unsqueeze(1),
+            scale=self.head_k_dim**-0.5,
+            output=out,
+            use_qk_l2norm=True,
+            initial_state=initial_state,
+            initial_state_indices=ssm_state_indices,
+            **self._flashinfer_kwargs,
+        )
+
+
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_shape(
@@ -549,8 +683,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
+        dt_bias_dtype = (
+            torch.float32
+            if vllm_config.kernel_config.gdn_decode_backend == "flashinfer"
+            else None
+        )
         self.dt_bias = nn.Parameter(
-            torch.ones(self.num_v_heads // self.tp_size),
+            torch.ones(self.num_v_heads // self.tp_size, dtype=dt_bias_dtype),
         )
         self.A_log = nn.Parameter(
             torch.empty(
@@ -593,6 +732,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+        )
+        self.gdn_decode = GDNDecode(
+            num_k_heads=self.num_k_heads // self.tp_size,
+            num_v_heads=self.num_v_heads // self.tp_size,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            ssm_state_dtype=self.get_state_dtype()[1],
         )
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
         if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
@@ -1366,7 +1512,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         if (
-            self.enable_packed_recurrent_decode
+            (
+                self.enable_packed_recurrent_decode
+                or self.gdn_decode.backend == "flashinfer"
+            )
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
@@ -1563,7 +1712,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process non-spec-decode part
-        if split_non_spec:
+        if split_non_spec and self.gdn_decode.backend == "flashinfer":
+            state_indices = attn_metadata.non_spec_flashinfer_state_indices_tensor
+            assert state_indices is not None
+            assert mixed_qkv_non_spec is not None
+            out_decode = core_attn_out[:num_decode_tokens]
+            self.gdn_decode(
+                mixed_qkv=mixed_qkv_non_spec[:num_decode_tokens],
+                a=a[:num_decode_tokens],
+                b=b[:num_decode_tokens],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                initial_state=ssm_state,
+                ssm_state_indices=state_indices[:num_decode_tokens],
+                out=out_decode.unsqueeze(1),
+            )
+            core_attn_out_decode = out_decode.unsqueeze(0)
+        elif split_non_spec:
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
@@ -1763,17 +1928,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-        fused_recurrent_gated_delta_rule_packed_decode(
+        state_indices = (
+            attn_metadata.non_spec_flashinfer_state_indices_tensor
+            if self.gdn_decode.backend == "flashinfer"
+            else non_spec_state_indices_tensor
+        )
+        assert state_indices is not None
+        self.gdn_decode(
             mixed_qkv=mixed_qkv_non_spec,
             a=a,
             b=b,
             A_log=self.A_log,
             dt_bias=self.dt_bias,
-            scale=self.head_k_dim**-0.5,
             initial_state=ssm_state,
             out=out_buf,
-            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
-            use_qk_l2norm_in_kernel=True,
+            ssm_state_indices=state_indices[:num_actual_tokens],
         )
         return
 

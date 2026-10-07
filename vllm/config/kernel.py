@@ -330,6 +330,23 @@ class KernelConfig:
                    running QDQ on activations.
     """
 
+    gdn_decode_backend: Literal["auto", "triton", "flashinfer"] = "auto"
+    """Backend for Qwen GDN non-speculative decode.
+
+    ``auto`` preserves Triton/FLA selection. ``flashinfer`` opts into
+    FlashInfer on CUDA SM89+ with BF16 inputs, FP32 SSM state, and
+    128-dimensional heads. The value-head count per TP rank must be divisible
+    by 8 to align packed gate views. BF16 SSM state is unsupported because
+    FlashInfer's padded entries update the reserved null slot.
+    Unsupported configurations raise ValueError.
+    Mixed prefill/decode uses the selected backend for the decode portion.
+    Prefill and speculative decode retain their existing backend selection.
+
+    For example, pass
+    ``--mamba-ssm-cache-dtype float32`` and
+    ``--kernel-config '{"gdn_decode_backend":"flashinfer"}'`` to ``vllm serve``.
+    """
+
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
