@@ -17,6 +17,8 @@ from vllm.model_executor.model_loader.reload import (
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.v1.worker.gpu_worker import Worker
 
 # Not a multiple of the vocab padding, so the head has padded rows.
 VOCAB, HIDDEN = 4000, 512
@@ -99,6 +101,86 @@ def test_refresh_follows_target_update(
         if name != "workspace":
             assert torch.equal(tensor, expected[name]), name
     assert torch.equal(head.weight, new_weight)
+
+
+def _draft_update_worker(vllm_config, drafter: torch.nn.Module, **engine) -> Worker:
+    worker = object.__new__(Worker)
+    worker.vllm_config = vllm_config
+    worker.weight_transfer_engine = SimpleNamespace(
+        supports_draft_weight_update=True,
+        reset_weight_update_target=lambda: None,
+        **engine,
+    )
+    worker.model_runner = SimpleNamespace(get_draft_model=lambda: drafter)
+    worker._weight_update_active = False
+    worker._set_draft_weight_update_target = lambda: None
+    return worker
+
+
+@requires_cuda
+def test_draft_weight_update_refreshes_copy(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """A draft weight update can write a target weight the drafter shares, such
+    as an embedding tied to the lm_head; the copy must follow it."""
+    head = _target_head(monkeypatch)
+    drafter = torch.nn.Module()
+    drafter.lm_head = quantized_lm_head_copy(head, "fp8")
+    worker = _draft_update_worker(
+        default_vllm_config,
+        drafter,
+        start_weight_update=lambda: None,
+        finish_weight_update=lambda: None,
+    )
+
+    worker.start_draft_weight_update()
+    head.weight.data.copy_(_target_head(monkeypatch, seed=1).weight)
+    worker.finish_weight_update()
+
+    expected = _tensors(quantized_lm_head_copy(head, "fp8"))
+    for name, tensor in _tensors(drafter.lm_head).items():
+        assert torch.equal(tensor, expected[name]), name
+
+
+@requires_cuda
+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+def test_draft_weight_update_loads_lm_head(
+    default_vllm_config, dist_init, monkeypatch, quantization
+):
+    """A draft update carrying lm_head.weight loads the shared target head, as
+    without quantization, and the copy is re-derived from it in place."""
+    head = _target_head(monkeypatch)
+    record_metadata_for_reloading(head)
+    drafter = torch.nn.Module()
+    draft_head = quantized_lm_head_copy(head, quantization)
+    drafter.lm_head = draft_head
+    ptrs = {k: t.data_ptr() for k, t in _tensors(draft_head).items()}
+    new_weight = torch.randn(VOCAB, HIDDEN, device="cuda", dtype=torch.bfloat16)
+
+    def load(update_info):
+        param = drafter.get_parameter("lm_head.weight")
+        getattr(param, "weight_loader", default_weight_loader)(param, new_weight)
+
+    worker = _draft_update_worker(
+        default_vllm_config,
+        drafter,
+        start_weight_update=lambda: initialize_layerwise_reload(drafter),
+        update_weights=load,
+        finish_weight_update=lambda: finalize_layerwise_reload(drafter, None),
+    )
+    worker.start_draft_weight_update()
+    worker.update_weights({})
+    worker.finish_weight_update()
+
+    assert drafter.lm_head is draft_head
+    assert torch.equal(head.weight[:VOCAB], new_weight)
+    expected = _tensors(quantized_lm_head_copy(head, quantization))
+    for name, tensor in _tensors(draft_head).items():
+        assert tensor.data_ptr() == ptrs[name]
+        if name != "workspace":
+            assert torch.equal(tensor, expected[name]), name
+    hidden = torch.randn(64, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    assert LogitsProcessor(VOCAB)(draft_head, hidden).isfinite().all()
 
 
 @requires_cuda

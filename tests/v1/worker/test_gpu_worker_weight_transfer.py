@@ -61,6 +61,9 @@ class _RecordingModelRunner:
     def reset_lora_state(self) -> None:
         self.reset_lora_calls += 1
 
+    def get_draft_model(self) -> nn.Module | None:
+        return None
+
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)

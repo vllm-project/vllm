@@ -188,3 +188,39 @@ def refresh_quantized_lm_heads(model: Module) -> None:
             fresh.named_parameters(recurse=False), fresh.named_buffers(recurse=False)
         ):
             getattr(module, name).copy_(tensor)
+
+
+# (parent, attribute, copy) for each copy swapped out by share_source_lm_heads.
+_SWAPPED: dict[Module, list[tuple[Module, str, Module]]] = {}
+
+
+def share_source_lm_heads(model: Module) -> None:
+    """Replace each quantized copy in `model` with its source head.
+
+    `model` then loads weights like a drafter sharing the unquantized head,
+    until `restore_quantized_lm_heads` swaps the copies back in.
+    """
+    swapped = [
+        (module, name, child)
+        for module in model.modules()
+        for name, child in module.named_children()
+        if child in _SOURCES
+    ]
+    for module, name, child in swapped:
+        setattr(module, name, _SOURCES[child][0])
+    _SWAPPED[model] = swapped
+
+
+def restore_quantized_lm_heads(model: Module, refresh: bool = True) -> None:
+    """Undo `share_source_lm_heads`, then re-derive the copies in `model`.
+
+    Args:
+        model: The model passed to `share_source_lm_heads`, if any.
+        refresh: Whether to re-derive the copies; False when the source heads
+            may be mid-reload.
+
+    """
+    for module, name, head in _SWAPPED.pop(model, ()):
+        setattr(module, name, head)
+    if refresh:
+        refresh_quantized_lm_heads(model)
