@@ -12,8 +12,8 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/rl
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/rl/weight_transfer
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer
   mirror:
     amd:
