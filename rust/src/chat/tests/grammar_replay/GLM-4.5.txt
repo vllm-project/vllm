@@ -1,0 +1,15 @@
+# none_answer (from_token_zero)
+sequence
+  optional
+    sequence
+      tag `\n<think>` text `</think>`
+      `\n`
+  json({ answer: string })
+
+# auto_answer (from_token_zero)
+sequence
+  optional
+    sequence
+      tag `\n<think>` text `</think>`
+      `\n`
+  json({ answer: string })
