@@ -504,6 +504,28 @@ def flashinfer_sm120_paged_mqa_logits_route_available(
 
 
 @functools.cache
+def flashinfer_sm120_paged_mqa_logits_next_n() -> tuple[int, ...]:
+    """Q rows per request (next_n = 1 + num_speculative_tokens) for which
+    FlashInfer's SM120 paged MQA-logits catalog exports kernels, ascending.
+
+    The catalog is the source of truth: read its policy (``exported_next_n``)
+    rather than assuming a depth set, so a build that adds a depth widens the
+    native decode depths without a code change. A build without the query
+    exports no depths, like
+    :func:`flashinfer_sm120_paged_mqa_logits_route_available`.
+    """
+    if not has_flashinfer_sm120_paged_mqa_logits():
+        return ()
+    mod = _get_submodule(
+        "flashinfer.experimental.deepgemm_sm120_paged_mqa_logits.sm120_paged_mqa"
+    )
+    exported_next_n = getattr(mod, "exported_next_n", None) if mod else None
+    if exported_next_n is None:
+        return ()
+    return tuple(sorted({int(next_n) for next_n in exported_next_n()}))
+
+
+@functools.cache
 def flashinfer_sm120_paged_mqa_logits_max_batch() -> int | None:
     """Request-row ceiling of FlashInfer's SM120 paged MQA-logits scheduler
     (the ``context_lens.shape[0]`` it accepts), or ``None`` when the package
@@ -1388,6 +1410,7 @@ __all__ = [
     "flashinfer_sm120_get_paged_mqa_logits_metadata",
     "flashinfer_sm120_fp8_paged_mqa_logits",
     "flashinfer_sm120_paged_mqa_logits_route_available",
+    "flashinfer_sm120_paged_mqa_logits_next_n",
     "flashinfer_sm120_paged_mqa_logits_max_batch",
     "has_flashinfer_sm120_paged_mqa_logits",
     "flashinfer_recurrent_kda",

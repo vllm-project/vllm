@@ -100,8 +100,12 @@ def _reference_logits(
     reason="needs an SM12x GPU and a FlashInfer build with sm120_paged_mqa_logits",
 )
 @pytest.mark.parametrize("page_kv", [64, 128])
-# next_n = 1 + num_speculative_tokens; FlashInfer ships 1, 2 and 4.
-@pytest.mark.parametrize("batch_size,next_n", [(4, 1), (2, 2), (2, 4)])
+# next_n = 1 + num_speculative_tokens over every depth the catalog can export
+# (the pinned package ships 1, 2 and 4; a newer catalog adds 3, 5 and 6). The
+# route query below skips a depth the installed build does not ship.
+@pytest.mark.parametrize(
+    "batch_size,next_n", [(4, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6)]
+)
 @pytest.mark.parametrize("heads", [32, 64])
 # A block-outermost KV cache layout (DeepSeek-V4/V4.1) hands the indexer a
 # strided per-layer view: every layer's page sits in one block.

@@ -28,6 +28,7 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.flashinfer import (
     flashinfer_sm120_get_paged_mqa_logits_metadata,
     flashinfer_sm120_paged_mqa_logits_max_batch,
+    flashinfer_sm120_paged_mqa_logits_next_n,
     flashinfer_sm120_paged_mqa_logits_route_available,
     has_flashinfer_sm120_paged_mqa_logits,
 )
@@ -885,12 +886,6 @@ def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     )
 
 
-# Q rows per request (next_n = 1 + num_speculative_tokens) that FlashInfer's
-# SM120 paged MQA-logits kernel ships natively; other depths flatten to one
-# row per token.
-_FLASHINFER_SM120_PAGED_MQA_NEXT_N = (1, 2, 4)
-
-
 def indexer_mqa_logits_kv_pages(
     kv_cache_spec: AttentionSpec, kernel_block_size: int | None
 ) -> list[int]:
@@ -934,9 +929,10 @@ def _flashinfer_sm120_mqa_logits_constraints(
     The route scores the FP8 indexer cache on SM12x only, reads each layer's
     cache as a dense ``[blocks, page_kv, 1, 132]`` view, sizes its logits by
     the request block table, schedules at most ``max_batch`` request rows per
-    call and ships a fixed set of (indexer heads, KV page, next_n) kernels.
-    The kpool indexer (GLM) is excluded because its layer calls DeepGEMM
-    directly, and the two must agree on who built the schedule metadata.
+    call and ships the (indexer heads, KV page, next_n) kernels its catalog
+    exports. The kpool indexer (GLM) is excluded because its layer calls
+    DeepGEMM directly, and the two must agree on who built the schedule
+    metadata.
 
     ``kv_cache_spec`` is the indexer layer's spec and ``kernel_block_size`` its
     kernel block when the caller knows it (see
@@ -950,10 +946,13 @@ def _flashinfer_sm120_mqa_logits_constraints(
         return ["flashinfer.sm120_paged_mqa_logits is not importable"]
     failures: list[str] = []
     next_n = 1 + vllm_config.num_speculative_tokens
-    if next_n not in _FLASHINFER_SM120_PAGED_MQA_NEXT_N:
+    # The depths (Q rows per request) with an exported kernel come from the
+    # package's catalog; a depth outside it is not native on this route.
+    native_depths = flashinfer_sm120_paged_mqa_logits_next_n()
+    if next_n not in native_depths:
         failures.append(
-            "next_n (1 + num_speculative_tokens) must be in "
-            f"{_FLASHINFER_SM120_PAGED_MQA_NEXT_N}, got {next_n}"
+            "next_n (1 + num_speculative_tokens) must be a depth FlashInfer "
+            f"exports {native_depths}, got {next_n}"
         )
     hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
     if (getattr(hf_text_config, "index_kpool", None) or 1) > 1:
@@ -967,8 +966,9 @@ def _flashinfer_sm120_mqa_logits_constraints(
             "the route sizes its logits by max_model_len"
         )
     # FlashInfer's scheduler caps the request rows of one call. Native rows
-    # are one per request; a step whose depth has no native kernel (next_n=4
-    # with a 3-token step) or a flattening route hands it one row per token.
+    # are one per request; a step whose depth has no exported kernel (a
+    # 3-token step under next_n=4 when the catalog skips 3) or a flattening
+    # route hands it one row per token.
     max_batch = flashinfer_sm120_paged_mqa_logits_max_batch()
     max_num_seqs = vllm_config.scheduler_config.max_num_seqs
     if _use_flattening(vllm_config, "flashinfer_sm120"):
@@ -1010,9 +1010,9 @@ def _flashinfer_sm120_mqa_logits_constraints(
     if failures:
         return failures
     # A step may hand the kernel fewer rows than next_n (partial drafts, the
-    # draft-model refresh), so every shipped depth up to next_n must be
+    # draft-model refresh), so every exported depth up to next_n must be
     # reachable on the page the kernel reads.
-    depths = [d for d in _FLASHINFER_SM120_PAGED_MQA_NEXT_N if d <= next_n]
+    depths = [d for d in native_depths if d <= next_n]
     if not any(
         all(
             flashinfer_sm120_paged_mqa_logits_route_available(num_heads, page, depth)
@@ -1074,7 +1074,7 @@ def _supports_native_decode(next_n: int, mqa_logits_backend: str = "deep_gemm") 
     the KV tile once per row.
     """
     if mqa_logits_backend == "flashinfer_sm120":
-        return next_n in _FLASHINFER_SM120_PAGED_MQA_NEXT_N
+        return next_n in flashinfer_sm120_paged_mqa_logits_next_n()
     if not (current_platform.is_cuda() and has_deep_gemm()):
         return next_n in (1, 2)
     if current_platform.is_device_capability_family(100):

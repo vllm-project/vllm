@@ -351,14 +351,15 @@ class KernelConfig:
 
     - "auto": FlashInfer's SM120 kernel on SM12x GPUs (RTX 5090 / RTX PRO 6000
       Blackwell) when FlashInfer ships a route for the model's indexer heads,
-      KV page size and next_n (1 + num_speculative_tokens in {1, 2, 4}), the
-      indexer cache is a dense per-layer view (layer-compact KV cache layout,
-      unpadded page), decode context parallelism is off and max_num_seqs fits
-      FlashInfer's scheduler request ceiling; DeepGEMM everywhere else
+      KV page size and next_n (1 + num_speculative_tokens; the depths its
+      catalog exports), the indexer cache is a dense per-layer view
+      (layer-compact KV cache layout, unpadded page), decode context
+      parallelism is off and max_num_seqs fits FlashInfer's scheduler request
+      ceiling; DeepGEMM everywhere else
     - "deep_gemm": Use DeepGEMM's fp8_fp4_paged_mqa_logits kernel
     - "flashinfer_sm120": Use FlashInfer's SM120 FP8 paged MQA-logits kernel
-      (SM12x only, FP8 indexer cache, next_n in {1, 2, 4}, same constraints
-      as the "auto" selection)
+      (SM12x only, FP8 indexer cache, a next_n its catalog exports, same
+      constraints as the "auto" selection)
 
     Explicit values raise RuntimeError when their constraints are not met. The
     dense prefill indexer logits always run on DeepGEMM.

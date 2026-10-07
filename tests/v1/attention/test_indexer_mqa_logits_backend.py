@@ -24,8 +24,13 @@ from vllm.v1.kv_cache_interface import (
 )
 
 # (index_n_heads, page_kv) pairs the FlashInfer package exports, every one for
-# next_n in {1, 2, 4}. Stands in for FlashInfer's capability query.
+# each exported depth. Stands in for FlashInfer's capability query.
 SHIPPED_ROUTES = frozenset({(32, 64), (32, 128), (64, 64)})
+# Q rows per request (next_n = 1 + num_speculative_tokens) the catalog exports
+# (policy.next_n): the pinned package ships 1, 2 and 4; a build that adds 3,
+# 5 and 6 widens the native set.
+EXPORTED_NEXT_N = (1, 2, 4)
+EXTENDED_NEXT_N = (1, 2, 3, 4, 5, 6)
 # FlashInfer's scheduler request ceiling (catalog policy.max_batch).
 MAX_BATCH = 4096
 # FP8 indexer K row: 128 e4m3 values + the fp32 scale.
@@ -40,8 +45,13 @@ def _set_arch(
     deep_gemm: bool = True,
     flashinfer_sm120: bool = True,
     routes: frozenset[tuple[int, int]] = SHIPPED_ROUTES,
+    next_n: tuple[int, ...] = EXPORTED_NEXT_N,
+    route_next_n: tuple[int, ...] | None = None,
     max_batch: int | None = MAX_BATCH,
 ) -> None:
+    """``next_n`` is the catalog's exported depth set; ``route_next_n`` the
+    depths every shipped (heads, page) route has a kernel for, when a depth is
+    exported for other routes only."""
     monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
     monkeypatch.setattr(
         current_platform,
@@ -55,9 +65,13 @@ def _set_arch(
     monkeypatch.setattr(
         indexer, "flashinfer_sm120_paged_mqa_logits_max_batch", lambda: max_batch
     )
+    monkeypatch.setattr(
+        indexer, "flashinfer_sm120_paged_mqa_logits_next_n", lambda: next_n
+    )
+    routed_next_n = next_n if route_next_n is None else route_next_n
 
-    def route_available(num_heads: int, page_kv: int, next_n: int) -> bool:
-        return (num_heads, page_kv) in routes and next_n in (1, 2, 4)
+    def route_available(num_heads: int, page_kv: int, depth: int) -> bool:
+        return (num_heads, page_kv) in routes and depth in routed_next_n
 
     monkeypatch.setattr(
         indexer,
@@ -283,6 +297,79 @@ def test_scheduler_request_ceiling_bounds_the_decode_rows(
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "exported,num_spec,expected",
+    [
+        # The pinned package exports 1, 2 and 4: next_n=3 has no kernel.
+        (EXPORTED_NEXT_N, 2, "deep_gemm"),
+        (EXPORTED_NEXT_N, 3, "flashinfer_sm120"),
+        # A catalog that adds 3, 5 and 6 serves those depths natively.
+        (EXTENDED_NEXT_N, 2, "flashinfer_sm120"),
+        (EXTENDED_NEXT_N, 4, "flashinfer_sm120"),
+        (EXTENDED_NEXT_N, 5, "flashinfer_sm120"),
+        (EXTENDED_NEXT_N, 6, "deep_gemm"),
+        # A build without the depth query exports nothing.
+        ((), 0, "deep_gemm"),
+    ],
+)
+def test_native_depths_follow_the_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    exported: tuple[int, ...],
+    num_spec: int,
+    expected: str,
+) -> None:
+    """The depth set is read from FlashInfer's catalog (``exported_next_n``),
+    never assumed, so a package that ships more depths widens the route."""
+    _set_arch(monkeypatch, 12, next_n=exported)
+    config = _config(num_speculative_tokens=num_spec)
+    assert _resolve(config, _indexer_spec(64)) == expected
+    for depth in range(1, 9):
+        assert indexer._supports_native_decode(depth, "flashinfer_sm120") == (
+            depth in exported
+        ), f"next_n={depth}"
+
+
+@pytest.mark.cpu_test
+def test_exported_depth_without_a_route_for_the_model_keeps_deep_gemm(monkeypatch):
+    """Every exported depth up to next_n needs a kernel for the model's
+    (heads, page): a step may hand the kernel fewer rows than next_n, and a
+    depth the catalog exports for other routes only would abort there."""
+    _set_arch(monkeypatch, 12, next_n=EXTENDED_NEXT_N, route_next_n=EXPORTED_NEXT_N)
+    config = _config(num_speculative_tokens=3, index_n_heads=64)
+    assert _resolve(config, _indexer_spec(64)) == "deep_gemm"
+    with pytest.raises(RuntimeError, match="no SM120 paged MQA-logits route"):
+        _resolve(
+            _config("flashinfer_sm120", num_speculative_tokens=3, index_n_heads=64),
+            _indexer_spec(64),
+        )
+    # Depths below the missing one are unaffected.
+    config = _config(num_speculative_tokens=1, index_n_heads=64)
+    assert _resolve(config, _indexer_spec(64)) == "flashinfer_sm120"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "num_spec,max_num_seqs,expected",
+    [
+        # Every depth up to next_n=4 is native: one scheduler row per request.
+        (3, MAX_BATCH, "flashinfer_sm120"),
+        (3, MAX_BATCH + 1, "deep_gemm"),
+        # Likewise at the deepest exported depth.
+        (5, MAX_BATCH, "flashinfer_sm120"),
+        (5, MAX_BATCH + 1, "deep_gemm"),
+    ],
+)
+def test_full_depth_coverage_keeps_one_scheduler_row_per_request(
+    monkeypatch: pytest.MonkeyPatch, num_spec: int, max_num_seqs: int, expected: str
+) -> None:
+    """With 1..6 all exported no step depth flattens, so max_num_seqs itself
+    (not max_num_seqs x the deepest non-native depth) meets the ceiling."""
+    _set_arch(monkeypatch, 12, next_n=EXTENDED_NEXT_N)
+    config = _config(num_speculative_tokens=num_spec, max_num_seqs=max_num_seqs)
+    assert _resolve(config, _indexer_spec(64)) == expected
+
+
+@pytest.mark.cpu_test
 def test_explicit_flashinfer_sm120_names_the_request_ceiling(monkeypatch):
     _set_arch(monkeypatch, 12)
     config = _config(
@@ -336,12 +423,12 @@ def test_unresolved_spec_keeps_deep_gemm(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.cpu_test
 def test_flashinfer_route_widens_native_decode_depths(monkeypatch):
-    """FlashInfer ships next_n 1, 2 and 4 natively on SM120; DeepGEMM on SM120
-    keeps its conservative {1, 2} gate."""
+    """FlashInfer ships the catalog's depths natively on SM120 (1, 2 and 4 at
+    the pinned package); DeepGEMM on SM120 keeps its conservative {1, 2} gate."""
     _set_arch(monkeypatch, 12)
     for next_n in (1, 2, 3, 4, 5, 8):
         assert indexer._supports_native_decode(next_n, "flashinfer_sm120") == (
-            next_n in (1, 2, 4)
+            next_n in EXPORTED_NEXT_N
         ), f"next_n={next_n}"
         assert indexer._supports_native_decode(next_n) == (next_n in (1, 2)), (
             f"next_n={next_n}"
