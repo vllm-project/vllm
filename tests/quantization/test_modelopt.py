@@ -688,7 +688,8 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [
-        ("auto", MarlinNvFp4LinearKernel),
+        ("auto", None),
+        ("marlin", MarlinNvFp4LinearKernel),
         ("humming", HummingNvFp4LinearKernel),
         ("flashinfer_cutedsl", FlashInferCuteDslNvFp4W4A16LinearKernel),
     ],
@@ -696,7 +697,7 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
-    ``use_a16=True`` defaults to Marlin, but an explicit backend wins. The
+    ``use_a16=True`` follows platform priorities, but an explicit backend wins. The
     generic method routes this through ``select_linear_kernel``."""
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -704,7 +705,20 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
         select_linear_kernel,
     )
 
-    if linear_backend != "auto":
+    if linear_backend == "auto":
+        capability = current_platform.get_device_capability()
+        assert capability is not None
+        cc = capability.to_int()
+        if (
+            cc in (100, 103)
+            and FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported()[0]
+        ):
+            kernel_cls = FlashInferCuteDslNvFp4W4A16LinearKernel
+        elif cc == 90 and HummingNvFp4LinearKernel.is_supported()[0]:
+            kernel_cls = HummingNvFp4LinearKernel
+        else:
+            kernel_cls = MarlinNvFp4LinearKernel
+    else:
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             pytest.skip(reason)
@@ -843,6 +857,7 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     }
     config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
 
+    assert isinstance(config, m.ModelOptMixedPrecisionConfig)
     assert config.nvfp4_config.quant_method == "NVFP4"
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
 

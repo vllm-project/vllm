@@ -88,13 +88,11 @@ def server():
         *ROCM_EXTRA_ARGS,
     ]
 
-    # ROCm: Increase timeouts to handle potential network delays and slower
-    # video processing when downloading multiple videos from external sources
+    # ROCm: Allow more time to download videos from external sources.
     env_overrides = {
         **(
             {
                 "VLLM_VIDEO_FETCH_TIMEOUT": "120",
-                "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
             }
             if current_platform.is_rocm()
             else {}
