@@ -34,6 +34,7 @@ except json.JSONDecodeError:
 # VLLM_RAY_EXTRA_ENV_VARS_TO_COPY (additive, not replacing).
 # ---------------------------------------------------------------------------
 DEFAULT_ENV_VAR_PREFIXES: set[str] = {
+    "DUMPER_",
     "VLLM_",
     "FLASH_ATTENTION_",
     "LMCACHE_",

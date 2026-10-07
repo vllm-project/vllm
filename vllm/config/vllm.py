@@ -2040,7 +2040,9 @@ class VllmConfig:
         self._resolve_mm_video_decode_device()
         self._validate_mm_processor_device()
 
-        if self.observability_config.debug_tensor_dump_output_folder is not None and (
+        from vllm.utils.debug_utils.dumper import dumper
+
+        if dumper.may_enable and (
             not self.use_v2_model_runner or not self.model_config.enforce_eager
         ):
             raise ValueError("Tensor dumping requires eager Model Runner V2")
