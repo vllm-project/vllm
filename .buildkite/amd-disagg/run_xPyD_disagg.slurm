@@ -118,10 +118,10 @@ echo "SLURM_JOB_NODELIST: $SLURM_JOB_NODELIST"
 echo "SLURM_NNODES: $SLURM_NNODES"
 echo "SLURM_NTASKS: $SLURM_NTASKS"
 
-# scontrol is available on classic Slurm but not in the Spur job body. Use it to
-# expand compressed ranges when present, else split the (already comma-separated,
-# full-hostname) SLURM_JOB_NODELIST on commas.
-if command -v scontrol >/dev/null 2>&1; then
+# Only a compressed classic-Slurm list ("node[1-4]") needs scontrol to expand it.
+# Spur hands the job a plain comma-separated list of full hostnames, and its
+# scontrol (on PATH in the job body since 0.14) has no `show hostnames`.
+if [[ "$SLURM_JOB_NODELIST" == *"["* ]]; then
     FULL_NODELIST=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 else
     FULL_NODELIST=$(echo "$SLURM_JOB_NODELIST" | tr ',' '\n')
@@ -430,6 +430,7 @@ run_node_container() {
             IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
         echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
     fi
+    echo "Rank $rank vLLM overlay mounts: ${VLLM_OVERLAY_ARGS[*]:-<none>}"
 
     # Pull latest container.
     if [ "$DRY_RUN" != "1" ]; then
@@ -597,12 +598,14 @@ trap 'echo "[disagg-pd] signal received, tearing down containers"; teardown_cont
 
 RC=0
 if command -v srun >/dev/null 2>&1; then
-    # classic Slurm: fan out one task/node; ship the fn and call it with the
-    # srun-supplied per-task SLURM_PROCID (escaped so the remote shell expands it).
+    # classic Slurm / Spur >= 0.14: fan out one task/node; ship the fns and call
+    # them with the srun-supplied per-task SLURM_PROCID (escaped so the remote
+    # shell expands it). Arrays don't survive the environment, so the overlay
+    # mounts travel as a declaration alongside the functions.
     srun --label \
          --nodelist="$SELECTED_NODELIST_STR" \
          --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 \
-      bash -c "$(declare -f preflight_node run_node_container); run_node_container \"\$SLURM_PROCID\"" || RC=$?
+      bash -c "$(declare -p VLLM_OVERLAY_ARGS); $(declare -f preflight_node run_node_container); run_node_container \"\$SLURM_PROCID\"" || RC=$?
 else
     # Spur: the body already runs once per node; this node's rank is
     # SPUR_TASK_OFFSET (fall back to NODE_RANK, then 0 for a single-node run).
