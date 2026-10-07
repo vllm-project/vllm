@@ -102,6 +102,8 @@ plugins:
         features/quantization/int8.md: features/quantization/llm_compressor/int8_w8a8.md
         serving/openai_compatible_server.md: serving/online_serving/README.md
         examples/others/lmcache.md: examples/disaggregated/lmcache.md
+        examples/features/batch_invariance.md: examples/rl/batch_invariance.md
+        examples/features/pause_resume.md: examples/rl/pause_resume.md
 
 markdown_extensions:
   - attr_list

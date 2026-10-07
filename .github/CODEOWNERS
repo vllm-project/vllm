@@ -235,7 +235,6 @@ mkdocs.yaml @hmellor
 /tests/entrypoints/serve/dev/rlhf @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
 /tests/v1/worker/test_gpu_worker_weight_transfer.py @aoshen02
 /examples/rl @aoshen02
-/examples/features/pause_resume @aoshen02
 /docs/training/rlhf.md @aoshen02
 /docs/training/async_rl.md @aoshen02
 /docs/training/weight_transfer @aoshen02
