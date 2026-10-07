@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://huggingface.co/boltuix/NeuroBERT-NER
 
-"""
-Example online usage of Pooling API for Named Entity Recognition (NER).
+"""Example online usage of Pooling API for Named Entity Recognition (NER).
 
 Run `vllm serve <model> --runner pooling`
 to start up the server in vLLM. e.g.

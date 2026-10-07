@@ -12,7 +12,11 @@ from functools import cache
 import psutil
 import regex as re
 
+from vllm.logger import init_logger
+
 DEVICE_CONTROL_ENV_VAR = "CPU_VISIBLE_MEMORY_NODES"
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -63,21 +67,20 @@ def _read_int_file(path: str) -> int | None:
 
 
 @cache
-def get_cgroup_memory_limit() -> tuple[int | None, int | None]:
-    """Return (limit, usage) in bytes from cgroup, or (None, None).
+def get_cgroup_memory_limit() -> int | None:
+    """Return the cgroup memory limit in bytes, or None.
 
-    Supports both cgroup v2 (unified) and v1. Returns (None, None) when
+    Supports both cgroup v2 (unified) and v1. Returns None when
     not running under a constrained cgroup (e.g. bare metal, or limit
     reported as `max`/an unrealistically large value).
     """
     if sys.platform != "linux":
-        return None, None
+        return None
 
     # cgroup v2 unified hierarchy
     v2_limit = _read_int_file("/sys/fs/cgroup/memory.max")
     if v2_limit is not None:
-        v2_usage = _read_int_file("/sys/fs/cgroup/memory.current")
-        return v2_limit, v2_usage
+        return v2_limit
 
     # cgroup v1
     v1_limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
@@ -85,11 +88,75 @@ def get_cgroup_memory_limit() -> tuple[int | None, int | None]:
         # cgroup v1 reports a huge sentinel (close to PAGE_COUNTER_MAX)
         # when unlimited. Treat absurdly large values as "no limit".
         if v1_limit >= (1 << 62):
-            return None, None
-        v1_usage = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-        return v1_limit, v1_usage
+            return None
+        return v1_limit
 
-    return None, None
+    return None
+
+
+def get_cgroup_memory_usage() -> int | None:
+    """Return the current cgroup memory usage in bytes, or None.
+
+    The usage value is intentionally read on every call because cgroup
+    memory usage changes while the process is running.
+    """
+    if sys.platform != "linux":
+        return None
+
+    # cgroup v2 unified hierarchy
+    if _read_int_file("/sys/fs/cgroup/memory.max") is not None:
+        return _read_int_file("/sys/fs/cgroup/memory.current")
+
+    # cgroup v1
+    v1_limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if v1_limit is not None and v1_limit < (1 << 62):
+        return _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+
+    return None
+
+
+def check_cgroup_memory_available(
+    required_bytes: int,
+    allocation_name: str,
+) -> None:
+    """Log cgroup memory headroom for an upcoming allocation.
+
+    Args:
+        required_bytes: Bytes required by the allocation.
+        allocation_name: Human-readable name used in log messages.
+
+    Low headroom logs a warning, but does not reject the allocation because
+    cgroup usage can include reclaimable memory. If the cgroup limit or usage
+    cannot be read, the check is skipped.
+
+    """
+    cgroup_limit = get_cgroup_memory_limit()
+    cgroup_usage = get_cgroup_memory_usage()
+    if cgroup_limit is None or cgroup_usage is None:
+        return
+
+    cgroup_available = max(0, cgroup_limit - cgroup_usage)
+    mib = 1 << 20
+    remaining_bytes = cgroup_available - required_bytes
+    log_fn = logger.debug if remaining_bytes >= 0 else logger.warning
+    status = (
+        "current headroom meets the requested allocation"
+        if remaining_bytes >= 0
+        else "current headroom is below the requested allocation; allocation "
+        "will still be attempted because cgroup usage may be reclaimable"
+    )
+    log_fn(
+        "Cgroup memory preflight for %s: %.0f MiB required, %.0f MiB current "
+        "usage, %.0f MiB available under %.0f MiB limit, %.0f MiB remaining "
+        "after allocation based on current usage; %s.",
+        allocation_name,
+        required_bytes / mib,
+        cgroup_usage / mib,
+        cgroup_available / mib,
+        cgroup_limit / mib,
+        remaining_bytes / mib,
+        status,
+    )
 
 
 def get_memory_affinity(pid: int = 0) -> list[int]:
@@ -105,7 +172,7 @@ def get_memory_affinity(pid: int = 0) -> list[int]:
 
 
 def parse_id_list(raw_str: str) -> list[int]:
-    """Parses strings like '0-2,4,7-8' into [0, 1, 2, 4, 7, 8]"""
+    """Parses strings like '0-2,4,7-8' into [0, 1, 2, 4, 7, 8]."""
     result: list[int] = []
     if not raw_str:
         return result
@@ -161,7 +228,8 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
     # would be applied to host RAM instead of the pod's limit. cgroup
     # does not expose per-NUMA-node limits, so we just clamp the totals
     # against the pod-wide limit here.
-    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    cgroup_limit = get_cgroup_memory_limit()
+    cgroup_usage = get_cgroup_memory_usage()
     if cgroup_limit is not None and cgroup_limit < total_memory:
         total_memory = cgroup_limit
         cgroup_available = cgroup_limit - (cgroup_usage or 0)

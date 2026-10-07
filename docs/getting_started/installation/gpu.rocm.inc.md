@@ -187,8 +187,8 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
 install it without re-running the full installation:
 
     ```bash
-    ./build_rust.sh          # release build
-    ./build_rust.sh --debug  # faster build for development
+    ./tools/build_rust.sh          # release build
+    ./tools/build_rust.sh --debug  # faster build for development
     ```
 
     This will install the required Rust toolchain if needed, build the binary,
@@ -324,7 +324,7 @@ You can find more information about vLLM's wheels in
         # Install dependencies
         pip install --upgrade numba \
             scipy \
-            huggingface-hub[cli] \
+            huggingface-hub \
             setuptools_scm
         pip install -r requirements/rocm.txt
 
