@@ -219,7 +219,7 @@ def prepare_megamoe_inputs(
     """Quantize hidden states and repack top-k routing for DeepGEMM MegaMoE.
 
     Args:
-        hidden_states: Input activations of shape ``[num_tokens, hidden]``.
+        hidden_states: Input activations of shape ``[num_tokens, hidden_dim]``.
         topk_weights: Router top-k weights of shape ``[num_tokens, top_k]``.
         topk_ids: Router top-k expert ids of shape ``[num_tokens, top_k]``.
         x_fp8: Output buffer for the fp8-quantized hidden states.
