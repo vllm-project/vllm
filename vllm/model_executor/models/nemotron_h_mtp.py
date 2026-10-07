@@ -444,7 +444,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
                 self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="",  # Empty - non-gated MoE
+                ckpt_up_proj_name=None,  # non-gated MoE
                 num_experts=num_experts,
                 num_redundant_experts=self.num_redundant_experts,
             )
