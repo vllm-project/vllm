@@ -121,7 +121,14 @@ class LoggingStatLogger(StatLoggerBase):
 
         model_config = self.vllm_config.model_config
         is_diffusion = model_config is not None and model_config.is_diffusion
-        self.spec_decoding_logging = SpecDecodingLogging(is_diffusion=is_diffusion)
+        speculative_config = self.vllm_config.speculative_config
+        self.spec_decoding_logging = SpecDecodingLogging(
+            is_diffusion=is_diffusion,
+            enable_adaptive_verification=(
+                speculative_config is not None
+                and speculative_config.enable_adaptive_verification
+            ),
+        )
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
         ec_transfer_config = self.vllm_config.ec_transfer_config
