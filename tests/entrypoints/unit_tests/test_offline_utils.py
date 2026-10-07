@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+
 import pytest
 
 from vllm import PoolingParams, SamplingParams
@@ -144,12 +146,16 @@ def test_mixed_seed_uses_image_content():
 def test_unseeded_sampling_params_pass_through_unchanged():
     mixin = object.__new__(OfflineInferenceMixin)
     params = SamplingParams()
-    seq = _mix_prompt_seeds(mixin._params_to_seq(params, 3), ["a", "b", "c"])
+    seq: Sequence[SamplingParams] = _mix_prompt_seeds(
+        mixin._params_to_seq(params, 3), ["a", "b", "c"]
+    )
     assert all(p is params for p in seq)
 
 
 def test_pooling_params_pass_through_unchanged():
     mixin = object.__new__(OfflineInferenceMixin)
     params = PoolingParams()
-    seq = _mix_prompt_seeds(mixin._params_to_seq(params, 3), ["a", "b", "c"])
+    seq: Sequence[PoolingParams] = _mix_prompt_seeds(
+        mixin._params_to_seq(params, 3), ["a", "b", "c"]
+    )
     assert all(p is params for p in seq)
