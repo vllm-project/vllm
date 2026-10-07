@@ -6,6 +6,7 @@ import torch
 
 from vllm.outputs import (
     ClassificationRequestOutput,
+    CompletionOutput,
     EmbeddingRequestOutput,
     PoolingOutput,
     PoolingRequestOutput,
@@ -13,6 +14,7 @@ from vllm.outputs import (
     RequestOutput,
     ScoringRequestOutput,
 )
+from vllm.v1.metrics.stats import RequestSpecDecodeMetrics
 
 pytestmark = pytest.mark.cpu_test
 
@@ -61,3 +63,50 @@ def test_specialized_pooling_outputs_preserve_request_error(output_type, empty_v
     value = getattr(output.outputs, "probs", value)
     value = getattr(output.outputs, "score", value)
     assert value == empty_value
+
+
+def test_request_output_add_preserves_terminal_spec_decode_metrics():
+    accumulated = RequestOutput(
+        request_id="request",
+        prompt=None,
+        prompt_token_ids=[],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="first",
+                token_ids=[1],
+                cumulative_logprob=None,
+                logprobs=None,
+            )
+        ],
+        finished=False,
+    )
+    spec_decode_metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=2)
+    spec_decode_metrics.observe(num_draft_tokens=2, num_accepted=1)
+    terminal = RequestOutput(
+        request_id="request",
+        prompt=None,
+        prompt_token_ids=[],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="second",
+                token_ids=[2],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="length",
+                spec_decode_metrics=spec_decode_metrics,
+            )
+        ],
+        finished=True,
+    )
+
+    accumulated.add(terminal, aggregate=True)
+
+    output = accumulated.outputs[0]
+    assert output.token_ids == [1, 2]
+    assert output.finish_reason == "length"
+    assert accumulated.finished
+    assert output.spec_decode_metrics is spec_decode_metrics
