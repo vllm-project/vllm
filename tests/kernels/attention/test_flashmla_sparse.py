@@ -225,6 +225,52 @@ def test_sparse_flashmla_prefill_smoke(h_q: int):
     assert actual[0].shape == (s_q, h_q, d_v)
 
 
+@pytest.mark.parametrize("batch_size", [1, 4, 32])
+def test_sparse_flashmla_packed_request_offsets_are_bitwise(batch_size: int):
+    import vllm.v1.attention.ops.flashmla as fm
+
+    ok, reason = fm.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+
+    device = torch.device("cuda")
+    torch.manual_seed(17)
+    h_q, d_qk, d_v, width = 64, 576, 512, 128
+    lengths = [8 if index % 2 == 0 else 12 for index in range(batch_size)]
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    q = torch.randn((batch_size, h_q, d_qk), dtype=torch.bfloat16, device=device)
+    kv = torch.randn((offsets[-1], 1, d_qk), dtype=torch.bfloat16, device=device)
+    local_indices = torch.full(
+        (batch_size, 1, width), -1, dtype=torch.int32, device=device
+    )
+    local_indices[:, 0, :4] = torch.tensor([0, 1, 3, 7], device=device)
+    packed_indices = local_indices.clone()
+    packed_indices[:, :, :4] += torch.tensor(
+        offsets[:-1], dtype=torch.int32, device=device
+    ).view(-1, 1, 1)
+    topk_length = torch.full((batch_size,), 4, dtype=torch.int32, device=device)
+
+    packed = fm.flash_mla_sparse_fwd(
+        q, kv, packed_indices, 1.0, d_v, topk_length=topk_length
+    )[0]
+    references = []
+    for index in range(batch_size):
+        references.append(
+            fm.flash_mla_sparse_fwd(
+                q[index : index + 1],
+                kv[offsets[index] : offsets[index + 1]],
+                local_indices[index : index + 1],
+                1.0,
+                d_v,
+                topk_length=topk_length[index : index + 1],
+            )[0]
+        )
+    reference = torch.cat(references)
+    torch.testing.assert_close(packed, reference, rtol=0, atol=0)
+
+
 def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
@@ -244,6 +290,64 @@ def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
 
     # the adaptive plan keeps all 5 in one chunk
     assert chunk_plan == [(0, 5, 36, 103)]
+
+
+@pytest.mark.parametrize(
+    "compress_ratio,expected",
+    [
+        (1, [(0, 1, 0, 80), (1, 2, 0, 96), (2, 3, 0, 112)]),
+        (4, [(0, 1, 20, 100), (1, 2, 24, 120), (2, 3, 28, 140)]),
+    ],
+)
+def test_deepseek_v4_batch_invariant_prefill_chunks_are_request_local(
+    compress_ratio, expected
+):
+    from vllm.models.deepseek_v4.nvidia.flashmla import (
+        _batch_invariant_prefill_chunk_plan,
+    )
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int32),
+        block_size=64,
+        num_prefills=3,
+        prefill_seq_lens_cpu=torch.tensor([80, 96, 112], dtype=torch.int32),
+        prefill_query_lens_cpu=torch.tensor([80, 96, 112], dtype=torch.int32),
+        prefill_window_size=128,
+    )
+
+    assert (
+        _batch_invariant_prefill_chunk_plan(metadata, compress_ratio, 128) == expected
+    )
+
+
+@pytest.mark.parametrize("batch_size", [1, 4, 32])
+@pytest.mark.parametrize("seq_len", [2048, 6144])
+def test_deepseek_v4_batch_invariant_identical_shapes_stay_request_local(
+    batch_size: int, seq_len: int
+):
+    from vllm.models.deepseek_v4.nvidia.flashmla import (
+        _batch_invariant_prefill_chunk_plan,
+    )
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    query_len = 2
+    seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32)
+
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int32),
+        block_size=64,
+        num_prefills=batch_size,
+        prefill_seq_lens_cpu=seq_lens,
+        prefill_query_lens_cpu=torch.full((batch_size,), query_len, dtype=torch.int32),
+        prefill_window_size=128,
+    )
+    assert _batch_invariant_prefill_chunk_plan(metadata, 4, 128) == [
+        (request_index, request_index + 1, seq_len // 4, seq_len // 4 + 129)
+        for request_index in range(batch_size)
+    ]
 
 
 def test_flashinfer_sparse_indices_cache(monkeypatch):
