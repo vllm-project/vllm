@@ -1,9 +1,0 @@
-# Load the vLLM dashboards from examples/observability/dashboards/grafana.
-apiVersion: 1
-
-providers:
-  - name: vLLM
-    folder: vLLM
-    type: file
-    options:
-      path: /var/lib/grafana/dashboards/vllm
