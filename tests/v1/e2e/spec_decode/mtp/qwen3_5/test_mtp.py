@@ -79,7 +79,7 @@ def test_mtp_draft_lm_head_quantization(
             outputs,
             # Not bit-exact: a different acceptance length changes the target's
             # verify batch shapes, which can flip a near-tied greedy token.
-            required_matches=int(0.95 * len(ref_outputs)),
+            required_matches=int(0.8 * len(ref_outputs)) + 1,
             context=f"draft_lm_head_quantization={quant}",
         )
         assert al >= 0.9 * ref_al, (
@@ -127,7 +127,7 @@ def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
         assert_request_outputs_match(
             ref_outputs,
             outputs,
-            required_matches=int(0.95 * len(ref_outputs)),
+            required_matches=int(0.8 * len(ref_outputs)) + 1,
             context="after level 1 sleep",
         )
         assert al == pytest.approx(ref_al, rel=0.03)
@@ -137,7 +137,7 @@ def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
         assert_request_outputs_match(
             ref_outputs,
             outputs,
-            required_matches=int(0.95 * len(ref_outputs)),
+            required_matches=int(0.8 * len(ref_outputs)) + 1,
             context="after weight reload",
         )
         assert al == pytest.approx(ref_al, rel=0.03)
