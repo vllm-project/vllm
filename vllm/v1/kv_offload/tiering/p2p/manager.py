@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
+"""P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
 
 Owns transports and a single bidirectional P2PSession per remote peer.
 """
@@ -12,7 +11,7 @@ import time
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from typing_extensions import override
 
@@ -36,6 +35,7 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -207,6 +207,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     and existing sessions are polled even when no requests are scheduled.
     """
 
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
+
     def __init__(
         self,
         offloading_spec: OffloadingSpec,
@@ -264,8 +266,27 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Raises:
             ValueError: If ``unbound_store_timeout_s`` is not a positive
                 number, or anything convertible to one.
+
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        backpressure_detector = kwargs.pop("backpressure_detector", None)
+        if backpressure_detector is not None:
+            # The generic (store-latency) detector is unreliable for P2P: in
+            # PD mode dropping a store can leave the decoder waiting until the
+            # load timeout instead of failing fast, and rendezvous time makes
+            # store latency a poor pressure signal. Reject it until a
+            # P2P-specific fail-fast path exists.
+            raise ValueError(
+                "Backpressure is not supported for the P2P secondary tier. "
+                "The generic store-latency detector cannot fail fast in PD "
+                "mode and rendezvous time makes store latency an unreliable "
+                "pressure signal. Remove the 'backpressure' config from the "
+                "p2p tier."
+            )
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+        )
         try:
             timeout_s = float(unbound_store_timeout_s)
         except (TypeError, ValueError):

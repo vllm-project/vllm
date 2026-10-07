@@ -33,7 +33,6 @@ def should_do_global_cleanup_after_test(request) -> bool:
     This can provide a ~10x speedup for non-GPU unit tests since they don't need
     to initialize torch.
     """
-
     return not request.node.get_closest_marker("skip_global_cleanup")
 
 
@@ -75,18 +74,6 @@ def dist_init():
         initialize_model_parallel(1, 1)
         yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
-
-
-@pytest.fixture
-def dist_init_torch_only():
-    if torch.distributed.is_initialized():
-        return
-    backend = current_platform.dist_backend
-
-    temp_file = tempfile.mkstemp()[1]
-    torch.distributed.init_process_group(
-        world_size=1, rank=0, init_method=f"file://{temp_file}", backend=backend
-    )
 
 
 class DummyLoRAModel(nn.Sequential, SupportsLoRA):
@@ -207,12 +194,6 @@ def minicpmv_lora_files():
 @pytest.fixture(scope="session")
 def qwen2vl_lora_files():
     return hf_api().snapshot_download(repo_id="jeeejeee/qwen2-vl-lora-pokemon")
-
-
-@pytest.fixture(scope="session")
-def qwen25vl_base_huggingface_id():
-    # used as a base model for testing with qwen25vl lora adapter
-    return "Qwen/Qwen2.5-VL-3B-Instruct"
 
 
 @pytest.fixture(scope="session")
@@ -367,8 +348,7 @@ def qwen36_moe_3d_lora_files():
 
 @pytest.fixture
 def reset_default_device():
-    """
-    Some tests, such as `test_punica_ops.py`, explicitly set the
+    """Some tests, such as `test_punica_ops.py`, explicitly set the
     default device, which can affect subsequent tests. Adding this fixture
     helps avoid this problem.
     """

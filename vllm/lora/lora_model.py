@@ -15,7 +15,6 @@ from vllm.lora.utils import (
     is_base_embedding_weights,
     parse_fine_tuned_lora_name,
 )
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -39,9 +38,7 @@ _EXPERTS_SEPARATOR = ".experts."
 
 
 def _is_remote_expert_key(raw_name: str, spec: "MoEEPLoadSpec") -> bool:
-    """
-    Decide whether a checkpoint key belongs to a non-local expert.
-    """
+    """Decide whether a checkpoint key belongs to a non-local expert."""
     pos = raw_name.find(_EXPERTS_SEPARATOR)
     if pos < 0:
         return False
@@ -69,15 +66,14 @@ class LoRAModel:
         *,
         modules_to_save: dict[str, LoRAFullModuleWeights] | None = None,
     ) -> None:
-        """
-        Args:
-            lora_model_id: The integer id for the lora model.
-            rank: lora rank.
-            loras: module name -> weights for lora-replaced layers.
-            is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
-                fused (gate_up_proj / down_proj) layout. Propagated from the
-                originating LoRARequest. Only consulted by the LoRA model
-                manager when enable_mixed_moe_lora_format is on.
+        """Args:
+        lora_model_id: The integer id for the lora model.
+        rank: lora rank.
+        loras: module name -> weights for lora-replaced layers.
+        is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
+            fused (gate_up_proj / down_proj) layout. Propagated from the
+            originating LoRARequest. Only consulted by the LoRA model
+            manager when enable_mixed_moe_lora_format is on.
 
         """
         self.id = lora_model_id
@@ -103,7 +99,7 @@ class LoRAModel:
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
-        """Get LoRA for a given module by name"""
+        """Get LoRA for a given module by name."""
         return self.loras.get(module_name, None)
 
     def get_module_to_save(self, module_name: str) -> LoRAFullModuleWeights | None:
@@ -114,7 +110,7 @@ class LoRAModel:
 
     @staticmethod
     def _should_skip_module(module_name: str, skip_prefixes: list[str]) -> bool:
-        """Check if a module should be skipped based on skip prefixes"""
+        """Check if a module should be skipped based on skip prefixes."""
         for prefix in skip_prefixes:
             if f".{prefix}" in module_name or module_name.startswith(prefix):
                 return True
@@ -207,7 +203,6 @@ class LoRAModel:
         dtype: torch.dtype | None = None,
         model_vocab_size: int | None = None,
         weights_mapper: WeightsMapper | None = None,
-        tensorizer_config_dict: dict | None = None,
         skip_prefixes: list[str] | None = None,
         moe_ep_spec: MoEEPLoadSpec | None = None,
     ) -> "LoRAModel":
@@ -222,6 +217,10 @@ class LoRAModel:
                 a global counter.
             device: Device where the lora model is loaded.
             dtype: dtype of the lora model weights.
+            model_vocab_size: Vocab size of the base model, used to size the
+                embedding deltas.
+            weights_mapper: Optional mapper rewriting checkpoint weight names
+                to vLLM names.
             skip_prefixes: List of module name prefixes to skip during loading.
                 Models can define this to skip modules not used in inference
                 (e.g., MTP layers). Format: ["mtp."]
@@ -233,6 +232,7 @@ class LoRAModel:
 
         Returns:
             Loaded LoRA Model.
+
         """
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
@@ -276,24 +276,7 @@ class LoRAModel:
                     f" Please verify that the loaded LoRA module is correct"
                 )
 
-        if tensorizer_config_dict:
-            from tensorizer import TensorDeserializer
-
-            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
-            tensorizer_dir = tensorizer_config.tensorizer_dir
-            if tensorizer_dir is None:
-                raise ValueError("tensorizer_dir must be set in tensorizer config.")
-            lora_tensor_path = os.path.join(tensorizer_dir, "adapter_model.tensors")
-            tensorizer_args = tensorizer_config._construct_tensorizer_args()
-            tensors = TensorDeserializer(
-                lora_tensor_path,
-                dtype=tensorizer_config.dtype,
-                device=device,
-                **tensorizer_args.deserialization_kwargs,
-            )
-            check_unexpected_modules(tensors)
-
-        elif os.path.isfile(lora_tensor_path):
+        if os.path.isfile(lora_tensor_path):
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist

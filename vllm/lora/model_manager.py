@@ -97,6 +97,9 @@ class LoRAModelManager:
                 in a single batch.
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
+            device: the device the LoRA tensors are placed on.
+            vllm_config: the vLLM config for this engine.
+
         """
         self.model: SupportsLoRAModel = model
         self.supported_lora_modules = get_supported_lora_modules(self.model)
@@ -325,8 +328,8 @@ class LoRAModelManager:
                     self.punica_wrapper_mapping[prefix] = connector_punica_wrapper
             else:
                 logger.warning_once(
-                    "Connector LoRA support disabled: model does not implement "
-                    "get_num_mm_connector_tokens(). This method is required to "
+                    "Connector LoRA support disabled: get_mm_lora_token_counts() "
+                    "returned no connector token counts, which are required to "
                     "determine the connector's token budget for LoRA operations."
                 )
 
@@ -447,6 +450,16 @@ class LoRAModelManager:
             self.lora_slots + 1,
             self.vocab_size,
         )
+
+        if self._classification_head is not None:
+            _, classification_head = self._classification_head
+            if classification_head.punica_wrapper is punica_wrapper:
+                classification_head.set_output_mapping(
+                    tuple(
+                        self.lora_index_to_id.index(lora_id) if lora_id > 0 else -1
+                        for lora_id in mapping.prompt_mapping
+                    )
+                )
 
     def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
@@ -785,6 +798,7 @@ class LoRAModelManager:
 
         Returns:
             True if the module passes the filter, False otherwise.
+
         """
         return is_in_target_modules(
             module_name,
@@ -793,9 +807,7 @@ class LoRAModelManager:
         )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
-        """
-        Determine whether this module supports LoRA and which wrapper to use.
-        """
+        """Determine whether this module supports LoRA and which wrapper to use."""
         # For language model (early return)
         if not self.supports_mm:
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
@@ -1190,9 +1202,7 @@ class LoRAModelManager:
         return new_module_names[start:end]
 
     def _build_moe_ep_load_spec(self) -> MoEEPLoadSpec | None:
-        """
-        Per-rank slicing metadata for 2D RoutedEXperts LoRA modules.
-        """
+        """Per-rank slicing metadata for 2D RoutedEXperts LoRA modules."""
         if not self._use_ep or not self._is_moe:
             return None
         module = next(
@@ -1262,18 +1272,23 @@ class LoRAModelManager:
                 f"classification head {module_name!r}."
             )
 
-        expected_weight_shape = (wrapper.output_size, wrapper.input_size)
         received_weight_shape = tuple(full_module.weight.shape)
-        if received_weight_shape != expected_weight_shape:
+        if (
+            full_module.weight.ndim != 2
+            or full_module.weight.size(0) < 1
+            or full_module.weight.size(0) > wrapper.max_lora_cls_labels
+            or full_module.weight.size(1) != wrapper.input_size
+        ):
             raise ValueError(
                 f"Full module {saved_module_name!r} for {module_name!r} has "
                 "an incompatible weight shape: expected "
-                f"{expected_weight_shape}, received {received_weight_shape}."
+                f"(1..{wrapper.max_lora_cls_labels}, {wrapper.input_size}), "
+                f"received {received_weight_shape}."
             )
 
         if full_module.bias is None:
             return
-        expected_bias_shape = (wrapper.output_size,)
+        expected_bias_shape = (full_module.weight.size(0),)
         received_bias_shape = tuple(full_module.bias.shape)
         if received_bias_shape != expected_bias_shape:
             raise ValueError(
