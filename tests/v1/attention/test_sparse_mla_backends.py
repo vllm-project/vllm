@@ -38,6 +38,7 @@ from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLACommonImpl,
+    SparseMLACommonMetadataBuilder,
     SparseMLAPrefillMetadata,
     _is_masked_mha_available,
     _masked_mha_workspace_fits,
@@ -3112,7 +3113,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
     def spy_gather(self, kv, plan, resident_cache=None):
         staged = original_gather(kv, plan, resident_cache)
-        staging_calls.append((plan, staged.shape))
+        staging_calls.append((plan, staged))
         return staged
 
     cache_handle.runtime.gather_prefill_cache = MethodType(
@@ -3127,12 +3128,42 @@ def test_hisparse_mixed_batch_bf16_row_split(
     # Only the prefill rows' blocks were staged: the decode rows' 2048-token
     # contexts (32 blocks each) must stay off the staging gather.
     assert len(staging_calls) == 1
-    plan, staged_shape = staging_calls[0]
-    assert plan is metadata.prefill.host_staging_plan
+    plan, staged = staging_calls[0]
+    assert plan is metadata.prefill.host_staging_plans[0]
     prefill_blocks = cdiv(batch_spec.seq_lens[-1], block_size)
-    assert staged_shape[0] <= prefill_blocks + 1  # +1: block-0 tail padding
+    assert staged.shape[0] <= prefill_blocks + 1  # +1: block-0 tail padding
+    # Staging reuses the buffer reserved before memory profiling.
+    reserved = cache_handle.runtime.prefill_staging
+    assert staged.data_ptr() == reserved.data_ptr()
 
     torch.testing.assert_close(backend_output, reference, rtol=0.01, atol=0.01)
+
+
+def test_hisparse_staging_plans_fit_reserved_capacity():
+    """Prefills whose staged history together exceeds the reserved buffer get
+    separate plans, so no plan stages more than the buffer holds."""
+    block_size, capacity = 4, 3
+    builder = SimpleNamespace(
+        kv_cache_spec=SimpleNamespace(block_size=block_size),
+        hisparse_staging_block_capacity=capacity,
+    )
+    # One decode, then prefills of 2, 1 and 3 blocks.
+    seq_lens = torch.tensor([5, 8, 4, 12], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        seq_lens_cpu_upper_bound=seq_lens,
+        seq_lens=seq_lens,
+        query_start_loc_cpu=torch.tensor([0, 1, 3, 4, 8], dtype=torch.int32),
+    )
+    block_table = torch.arange(12, dtype=torch.int32).view(3, 4)
+
+    plans = SparseMLACommonMetadataBuilder._build_hisparse_staging_plans(
+        builder, metadata, block_table, 1, 3
+    )
+
+    assert [plan.requests for plan in plans] == [slice(0, 2), slice(2, 3)]
+    assert [plan.tokens for plan in plans] == [slice(0, 3), slice(3, 7)]
+    for plan in plans:
+        assert plan.row_ids.shape[1] <= (capacity + 1) * block_size
 
 
 def test_hisparse_prefill_staging_remap():
@@ -3262,8 +3293,15 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         .to(device)
     )
 
+    runtime = SimpleNamespace(
+        prefill_staging=torch.empty(
+            plan.row_ids.shape[1] * row_width * host_cache.element_size(),
+            dtype=torch.uint8,
+            device=device,
+        )
+    )
     staged = HiSparseRuntime.gather_prefill_cache(
-        None, host_cache, plan, resident_cache=resident_cache
+        runtime, host_cache, plan, resident_cache=resident_cache
     )
 
     staged_flat = staged.view(-1, row_width).cpu()
@@ -4019,6 +4057,8 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     plan = SimpleNamespace(
         block_table=torch.tensor([[0]], dtype=torch.int32),
         ensure_gpu_sources=MagicMock(),
+        requests=slice(0, 1),
+        tokens=slice(0, 1),
     )
     staged = torch.empty((1, 1, 8))
     calls = []
@@ -4043,12 +4083,12 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
         num_decodes=0,
         num_decode_tokens=0,
         seq_lens=torch.tensor([1], dtype=torch.int32),
-        prefill=SimpleNamespace(host_staging_plan=plan),
+        prefill=SimpleNamespace(host_staging_plans=[plan]),
         req_id_per_token=torch.tensor([0], dtype=torch.int32),
     )
 
     result, block_table, request_ids = index_group.stage_prefill_rows(
-        0, source, metadata
+        0, source, metadata, plan
     )
 
     assert result is staged
@@ -4091,7 +4131,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         ensure_gpu_sources=MagicMock(),
     )
     metadata = SimpleNamespace(
-        prefill=SimpleNamespace(host_staging_plan=plan),
+        prefill=SimpleNamespace(host_staging_plans=[plan]),
         num_decodes=0,
     )
 

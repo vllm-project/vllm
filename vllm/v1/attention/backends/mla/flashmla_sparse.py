@@ -830,10 +830,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # req_id_per_token covers the whole batch; slice it to the MQA tokens
         # (q may exclude prefill tokens routed to dense MHA).
         req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
-        decode_out: torch.Tensor | None = None
         if cache is not None:
             assert isinstance(index_group, HiSparseMLAIndexGroup)
             num_decode_tokens = attn_metadata.num_decode_tokens
+            decode_out: torch.Tensor | None = None
             if num_decode_tokens > 0:
                 decode_topk, decode_lengths = (
                     index_group.convert_logical_to_physical_topk(
@@ -853,13 +853,40 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 )
                 if num_decode_tokens == q.shape[0]:
                     return decode_out, None
-                q = q[num_decode_tokens:]
-                topk_indices = topk_indices[num_decode_tokens:]
-            kv_c_and_k_pe_cache, block_table, req_id_per_token = (
-                index_group.stage_prefill_rows(
-                    self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
+            output = q.new_empty((q.shape[0], actual_num_heads, self.kv_lora_rank))
+            if decode_out is not None:
+                output[:num_decode_tokens].copy_(decode_out)
+                del decode_out
+            assert attn_metadata.prefill is not None
+            assert attn_metadata.prefill.host_staging_plans is not None
+            for plan in attn_metadata.prefill.host_staging_plans:
+                staged_cache, plan_block_table, plan_req_ids = (
+                    index_group.stage_prefill_rows(
+                        self.index_group_index, kv_c_and_k_pe_cache, attn_metadata, plan
+                    )
                 )
-            )
+                tokens = slice(
+                    num_decode_tokens + plan.tokens.start,
+                    num_decode_tokens + plan.tokens.stop,
+                )
+                staged_rows, staged_stride = flat_kv_row_view(
+                    staged_cache, attn_metadata.block_size
+                )
+                plan_topk, plan_lengths = triton_convert_req_index_to_global_index(
+                    plan_req_ids,
+                    plan_block_table,
+                    topk_indices[tokens],
+                    BLOCK_SIZE=attn_metadata.block_size,
+                    BLOCK_STRIDE_ROWS=staged_stride,
+                    NUM_TOPK_TOKENS=topk_indices.shape[1],
+                    return_valid_counts=True,
+                )
+                plan_out, _ = self._bf16_flash_mla_kernel(
+                    q[tokens], staged_rows, plan_topk, plan_lengths, actual_num_heads
+                )
+                output[tokens].copy_(plan_out)
+                del plan_out
+            return output, None
         # Convert per-request indices to global slots (decode) or workspace offsets.
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
@@ -869,8 +896,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             == attn_metadata.num_actual_tokens
             == topk_indices.shape[0]
         )
-        uses_host_cache = isinstance(index_group, HiSparseMLAIndexGroup)
-        if not uses_host_cache and decode_only:
+        if decode_only:
             topk_indices, topk_length = self._convert_logical_to_physical_topk(
                 topk_indices,
                 attn_metadata,
@@ -888,16 +914,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 return_valid_counts=True,
             )
 
-        attn_out, lse = self._bf16_flash_mla_kernel(
+        return self._bf16_flash_mla_kernel(
             q,
             kv_rows,
             topk_indices,
             topk_length,
             actual_num_heads,
         )
-        if decode_out is None:
-            return attn_out, lse
-        return torch.cat([decode_out, attn_out], dim=0), None
 
     def _gather_prefill_chunk(
         self,

@@ -203,6 +203,8 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             row_width=row_width,
             kv_dtype=kv_dtype,
             index_group=self,
+            # fp8_ds_mla prefills stage into FlashMLA's own prefill workspace.
+            stages_prefill=kv_cache_dtype != "fp8_ds_mla",
         )
         assert cache is not None
         self.caches.append(cache)
@@ -260,36 +262,44 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         )
 
     def stage_prefill_rows(
-        self, layer_index: int, kv_cache: torch.Tensor, attn_metadata: Any
+        self,
+        layer_index: int,
+        kv_cache: torch.Tensor,
+        attn_metadata: Any,
+        plan: HiSparsePrefillStagingPlan,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Stage one plan's prefill requests; returns the staged cache, its block
+        table, and plan-relative request ids for the plan's query tokens."""
         cache = self.cache(layer_index)
-        prefill = attn_metadata.prefill
-        staging_plan = prefill.host_staging_plan if prefill is not None else None
-        assert staging_plan is not None
+        first_request = attn_metadata.num_decodes + plan.requests.start
+        last_request = first_request + plan.block_table.shape[0]
         resident_cache = None
         if cache.view is not None and cache.block_table is not None:
-            staging_plan.ensure_gpu_sources(
-                cache.block_table[attn_metadata.num_decodes :],
+            plan.ensure_gpu_sources(
+                cache.block_table[first_request:last_request],
                 cache.view.block_size,
             )
             resident_cache = cache.view.cache
         staged_cache = cache.runtime.gather_prefill_cache(
             kv_cache,
-            staging_plan,
+            plan,
             resident_cache=resident_cache,
         )
-        req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
-        if attn_metadata.num_decodes > 0:
-            req_ids = req_ids - attn_metadata.num_decodes
-        return staged_cache, staging_plan.block_table, req_ids
+        prefill_req_ids = attn_metadata.req_id_per_token[
+            attn_metadata.num_decode_tokens :
+        ]
+        req_ids = prefill_req_ids[plan.tokens]
+        if first_request > 0:
+            req_ids = req_ids - first_request
+        return staged_cache, plan.block_table, req_ids
 
     def _prefill_gather_plan(
         self, layer_index: int, attn_metadata: Any
     ) -> HiSparsePrefillStagingPlan:
         cache = self.cache(layer_index)
         prefill = attn_metadata.prefill
-        plan = prefill.host_staging_plan if prefill is not None else None
-        assert plan is not None
+        assert prefill is not None and prefill.host_staging_plans is not None
+        (plan,) = prefill.host_staging_plans
         assert cache.view is not None and cache.block_table is not None
         plan.ensure_gpu_sources(
             cache.block_table[attn_metadata.num_decodes :],

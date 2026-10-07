@@ -507,7 +507,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         index_group = self.index_group
         if isinstance(index_group, HiSparseMLAIndexGroup):
             num_decode_tokens = attn_metadata.num_decode_tokens
-            decode_out: torch.Tensor | None = None
+            output: torch.Tensor | None = None
             decode_lse: torch.Tensor | None = None
             if num_decode_tokens > 0:
                 physical_topk, valid_counts = (
@@ -519,6 +519,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                         return_valid_counts=True,
                     )
                 )
+                if num_decode_tokens < num_actual_toks:
+                    output = self._new_mqa_output(q)
                 decode_out, decode_lse = self._run_mqa_kernel(
                     q[:num_decode_tokens],
                     index_group.physical_kv_cache(self.index_group_index).view(
@@ -526,6 +528,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                     ),
                     physical_topk,
                     valid_counts,
+                    out=None if output is None else output[:num_decode_tokens],
                 )
                 if num_decode_tokens == num_actual_toks:
                     return decode_out, decode_lse
@@ -550,30 +553,39 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                     valid_counts,
                 )
 
-            prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
-                self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
-            )
-            prefill_indices, prefill_lens = triton_convert_req_index_to_global_index(
-                req_ids,
-                block_table,
-                topk_indices[num_decode_tokens:],
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                return_valid_counts=True,
-            )
-            prefill_out, prefill_lse = self._run_mqa_kernel(
-                q[num_decode_tokens:],
-                prefill_cache,
-                prefill_indices,
-                prefill_lens,
-            )
-            if decode_out is None:
-                return prefill_out, prefill_lse
-            output = torch.cat((decode_out, prefill_out))
-            if decode_lse is None:
-                return output, None
-            assert prefill_lse is not None
-            return output, torch.cat((decode_lse, prefill_lse))
+            if output is None:
+                output = self._new_mqa_output(q)
+            lses = [] if decode_lse is None else [decode_lse]
+            assert attn_metadata.prefill is not None
+            assert attn_metadata.prefill.host_staging_plans is not None
+            for plan in attn_metadata.prefill.host_staging_plans:
+                prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
+                    self.index_group_index, kv_c_and_k_pe_cache, attn_metadata, plan
+                )
+                tokens = slice(
+                    num_decode_tokens + plan.tokens.start,
+                    num_decode_tokens + plan.tokens.stop,
+                )
+                prefill_indices, prefill_lens = (
+                    triton_convert_req_index_to_global_index(
+                        req_ids,
+                        block_table,
+                        topk_indices[tokens],
+                        BLOCK_SIZE=attn_metadata.block_size,
+                        NUM_TOPK_TOKENS=topk_indices.shape[1],
+                        return_valid_counts=True,
+                    )
+                )
+                _, prefill_lse = self._run_mqa_kernel(
+                    q[tokens],
+                    prefill_cache,
+                    prefill_indices,
+                    prefill_lens,
+                    out=output[tokens],
+                )
+                if prefill_lse is not None:
+                    lses.append(prefill_lse)
+            return output, torch.cat(lses) if lses else None
 
         _, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
@@ -667,12 +679,19 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         )
         self._run_mqa_kernel(q, kv_cache, topk_indices, seq_lens)
 
+    def _new_mqa_output(self, q: torch.Tensor) -> torch.Tensor:
+        # trtllm-gen MLA always writes BF16 output.
+        return q.new_empty(
+            (q.shape[0], q.shape[1], self.kv_lora_rank), dtype=torch.bfloat16
+        )
+
     def _run_mqa_kernel(
         self,
         q: torch.Tensor,
         kv_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         seq_lens: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self._workspace_buffer is not None
         assert self.bmm1_scale is not None
@@ -725,6 +744,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
             sparse_mla_top_k=sparse_topk_capacity,
+            out=None if out is None else out.unsqueeze(1),
             return_lse=self.need_to_return_lse_for_decode,
             **extra_kwargs,
         )
