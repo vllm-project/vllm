@@ -599,7 +599,7 @@ fn parse_next_event(
     match safe_text_len_mul(input, &markers) {
         Ok(_) => return Ok(HfEvent::Text),
         // A marker, complete or partial, starts here (or the input is empty).
-        Err(ErrMode::Incomplete(_)) => {}
+        Err(ErrMode::Backtrack(_) | ErrMode::Incomplete(_)) => {}
         Err(error) => return Err(error),
     }
 
