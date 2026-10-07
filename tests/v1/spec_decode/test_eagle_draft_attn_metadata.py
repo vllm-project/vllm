@@ -156,6 +156,19 @@ def test_build_draft_attn_metadata_clamps_to_max_model_len():
     assert torch.equal(bound, torch.tensor([1024, 503], dtype=torch.int32))
 
 
+def test_build_draft_attn_metadata_caps_max_seq_len_at_max_model_len():
+    fake = _make_fake_speculator(max_model_len=512, draft_max_seq_len=1024)
+    captured = _run_build(
+        fake,
+        num_reqs=1,
+        num_reqs_padded=1,
+        base=torch.tensor([511], dtype=torch.int32),
+        step=2,
+    )
+
+    assert captured["max_seq_len"] == 512
+
+
 @pytest.mark.parametrize("draft_dcp_size", [1, 2])
 def test_build_draft_attn_metadata_recomputes_dcp_local_seq_lens(draft_dcp_size):
     fake = _make_fake_speculator()
