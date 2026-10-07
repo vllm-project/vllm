@@ -80,8 +80,25 @@ export OPENCV_REQUIREMENT
 echo "OpenCV requirement: ${OPENCV_REQUIREMENT}"
 
 
-XGRAMMAR_VERSION=$(grep -E '^xgrammar[[:space:]]*==' requirements/common.txt | sed -E 's/^xgrammar[[:space:]]*==[[:space:]]*([^,;[:space:]]+).*/\1/')
+XGRAMMAR_VERSION=$(
+    sed -nE 's/^xgrammar[[:space:]]*==[[:space:]]*([^,;[:space:]]+).*/\1/p' requirements/common.txt |
+    head -n1
+)
+
+if [ -z "${XGRAMMAR_VERSION}" ]; then
+    XGRAMMAR_VERSION=$(
+        sed -nE 's/^xgrammar[[:space:]]*>=[[:space:]]*([^,;[:space:]]+).*/\1/p' requirements/common.txt |
+        head -n1
+    )
+fi
+
 export XGRAMMAR_VERSION
+
+if [ -z "${XGRAMMAR_VERSION}" ]; then
+    echo "xgrammar version not found in requirements/common.txt"
+    exit 1
+fi
+echo "XGRAMMAR_VERSION=${XGRAMMAR_VERSION}"
 
 ########################################
 # install system dependencies
