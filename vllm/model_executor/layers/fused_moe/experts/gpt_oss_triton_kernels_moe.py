@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -41,11 +43,11 @@ def _triton_kernel_moe_supports_current_device() -> bool:
     p = current_platform
     if p.is_cuda():
         cap = p.get_device_capability()
-        # Keep the original `(9, 0) <= cap < (11, 0)` window on
-        # CUDA (covers Hopper SM90 and Blackwell SM100, excludes
-        # SM120) — this PR is ROCm-scoped and the broader CUDA
-        # range was not validated.
-        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        # Hopper SM90, datacenter Blackwell SM100/103 and consumer Blackwell
+        # SM120/121. SM12x needs the opt-flag constraints applied by
+        # `_swizzle_mxfp4` and `_constrain_sm12x_block_m` to fit its 99KB of
+        # shared memory; it is still ordered after MARLIN by the selector.
+        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9
 
@@ -55,6 +57,36 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
         return on_gfx9() or on_gfx1x()
     return False
+
+
+@functools.cache
+def _is_sm12x() -> bool:
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        120
+    )
+
+
+# Consumer Blackwell has 99KB of opt-in shared memory: with block_m >= 64 the
+# persistent mxfp4 kernel fits a single pipeline stage and runs 2-3x slower
+# than with 32, but triton_kernels' block_m heuristic still tops out at 128.
+_SM12X_MAX_BLOCK_M = 32
+
+
+def _sm12x_block_m(num_rows: int, num_experts: int) -> int:
+    """triton_kernels' tokens-per-expert block_m heuristic, capped at 32."""
+    tokens_per_expt = max(1, num_rows // num_experts)
+    return max(16, min(triton.next_power_of_2(tokens_per_expt), _SM12X_MAX_BLOCK_M))
+
+
+def _constrain_sm12x_block_m(num_rows: int, num_experts: int) -> None:
+    """Pin block_m for the following matmul_ogs calls on SM12x."""
+    if not _is_sm12x():
+        return
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
+
+    opt_flags.update_opt_flags_constraints(
+        {"block_m": _sm12x_block_m(num_rows, num_experts)}
+    )
 
 
 def _patch_make_bitmatrix_metadata() -> None:
@@ -784,6 +816,7 @@ def triton_kernel_fused_experts(
         )
     )
     gammas = routing_data.gate_scal if routing_data else None
+    _constrain_sm12x_block_m(M * topk, E)
 
     matmul_ogs(
         hidden_states,
@@ -1403,6 +1436,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         intermediate_cache2 = _resize_cache(workspace13, (M * topk, activation_out_dim))
 
         gammas = routing_data.gate_scal if routing_data else None
+        _constrain_sm12x_block_m(M * topk, E)
 
         matmul_ogs(
             hidden_states,
