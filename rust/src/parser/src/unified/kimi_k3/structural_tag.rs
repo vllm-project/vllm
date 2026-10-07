@@ -46,12 +46,12 @@ impl ArgumentSyntax for XtmlArguments {
             }
             ParameterKey::Free => ParameterKey::Free,
         };
-        let arguments = group_by(options, |option| option.ty)
+        let arguments = group_by(options, |option| xtml_type(option.ty))
             .into_iter()
-            .filter_map(|(ty, options)| {
+            .filter_map(|(type_name, options)| {
                 let values = options
                     .into_iter()
-                    .filter_map(|option| match ty {
+                    .filter_map(|option| match option.ty {
                         // The parser ends the call at its close marker, so a
                         // string value may contain neither close marker.
                         JsonType::String => option.raw_string(&[ARG_CLOSE, CALL_CLOSE]),
@@ -59,7 +59,7 @@ impl ArgumentSyntax for XtmlArguments {
                     })
                     .collect::<Vec<_>>();
                 (!values.is_empty()).then(|| {
-                    let suffix = format!("\" type=\"{}\"{SEP}", ty.name());
+                    let suffix = format!("\" type=\"{type_name}\"{SEP}");
                     key.tag(
                         &format!("{ARG_OPEN} key=\""),
                         &suffix,
@@ -70,6 +70,20 @@ impl ArgumentSyntax for XtmlArguments {
             })
             .collect::<Vec<_>>();
         (!arguments.is_empty()).then(|| one_of(arguments))
+    }
+}
+
+/// The `type` attribute K3 renders for a value of type `ty`, as
+/// `_xtml_type` in the checkpoint's `encoding_k3.py`: integers and floats are
+/// both `number`.
+fn xtml_type(ty: JsonType) -> &'static str {
+    match ty {
+        JsonType::String => "string",
+        JsonType::Integer | JsonType::Number => "number",
+        JsonType::Boolean => "boolean",
+        JsonType::Null => "null",
+        JsonType::Object => "object",
+        JsonType::Array => "array",
     }
 }
 
