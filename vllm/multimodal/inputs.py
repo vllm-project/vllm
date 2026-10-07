@@ -120,11 +120,9 @@ VisionChunk: TypeAlias = VisionChunkImage | VisionChunkVideo
 
 @dataclass(frozen=True)
 class PlaceholderRange:
-    """
-    Placeholder location information for multi-modal data.
+    """Placeholder location information for multi-modal data.
 
     Example:
-
     Prompt: `AAAA BBBB What is in these images?`
 
     Images A and B will have:
@@ -133,6 +131,7 @@ class PlaceholderRange:
     A: PlaceholderRange(offset=0, length=4)
     B: PlaceholderRange(offset=5, length=4)
     ```
+
     """
 
     offset: int
@@ -161,8 +160,7 @@ class PlaceholderRange:
     def get_embeds_indices_in_range(
         self, start_idx: int, end_idx: int
     ) -> tuple[int, int]:
-        """
-        Returns the starting and ending indices of the embeddings of encoder outputs
+        """Returns the starting and ending indices of the embeddings of encoder outputs
         in the range of [start_idx, end_idx) in the placeholders.
 
         For example, given:
@@ -190,6 +188,7 @@ class PlaceholderRange:
             A tuple `(start, end)` representing the start and end
             indices (inclusive) of the embedded region.
             Returns full placeholder range if `is_embed` is `None`.
+
         """
         if self.is_embed is None:
             return [(self.offset, self.offset + self.length - 1)]
@@ -234,8 +233,7 @@ def nested_tensors_equal(
     b: NestedTensors,
     check_dtype: bool = True,
 ) -> bool:
-    """
-    Equality check between
+    """Equality check between
     [`NestedTensors`][vllm.multimodal.inputs.NestedTensors] objects.
 
     If `check_dtype` is `True`, the tensors must have the same dtype.
@@ -336,8 +334,7 @@ A dictionary containing nested tensors which have been batched via
 
 
 def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> bool:
-    """
-    Equality check between
+    """Equality check between
     [`BatchedTensorInputs`][vllm.multimodal.inputs.BatchedTensorInputs] objects.
     """
     return all(k in b and nested_tensors_equal(a[k], b[k]) for k in a)
@@ -345,8 +342,7 @@ def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> boo
 
 @dataclass
 class MultiModalFeatureSpec:
-    """
-    Represents a single multimodal input with its processed data and metadata.
+    """Represents a single multimodal input with its processed data and metadata.
 
     Used to track multimodal data through processing and caching.
     A request containing multiple multimodal items will have one
@@ -392,8 +388,7 @@ class MultiModalFeatureSpec:
 
 @dataclass
 class MultiModalFieldElem:
-    """
-    Represents a processed keyword argument to pass to a model for a
+    """Represents a processed keyword argument to pass to a model for a
     [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem].
     """
 
@@ -429,8 +424,7 @@ class MultiModalFieldElem:
 
 @dataclass(frozen=True, kw_only=True)
 class BaseMultiModalField(ABC):
-    """
-    Defines how to interpret tensor data belonging to a keyword argument for
+    """Defines how to interpret tensor data belonging to a keyword argument for
     [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems],
     and vice versa.
     """
@@ -458,8 +452,7 @@ class BaseMultiModalField(ABC):
         key: str,
         data: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
-        """
-        Construct
+        """Construct
         [`MultiModalFieldElem`][vllm.multimodal.inputs.MultiModalFieldElem]
         instances to represent the provided data.
 
@@ -481,8 +474,7 @@ class BaseMultiModalField(ABC):
         device: torch.types.Device = None,
         pin_memory: bool = False,
     ) -> NestedTensors:
-        """
-        Merge the data from multiple instances of
+        """Merge the data from multiple instances of
         [`MultiModalFieldElem`][vllm.multimodal.inputs.MultiModalFieldElem].
 
         This is the inverse of
@@ -511,9 +503,8 @@ class BaseMultiModalField(ABC):
 
 @dataclass(frozen=True, kw_only=True)
 class MultiModalBatchedField(BaseMultiModalField):
-    """
-    Info:
-        [`MultiModalFieldConfig.batched`][vllm.multimodal.inputs.MultiModalFieldConfig.batched]
+    """Info:
+    [`MultiModalFieldConfig.batched`][vllm.multimodal.inputs.MultiModalFieldConfig.batched]
     """
 
     def build_elems(
@@ -547,10 +538,9 @@ class MultiModalBatchedField(BaseMultiModalField):
 
 @dataclass(frozen=True, kw_only=True)
 class MultiModalFlatField(BaseMultiModalField):
-    """
-    Info:
-        [`MultiModalFieldConfig.flat`][vllm.multimodal.inputs.MultiModalFieldConfig.flat]
-        [`MultiModalFieldConfig.flat_from_sizes`][vllm.multimodal.inputs.MultiModalFieldConfig.flat_from_sizes]
+    """Info:
+    [`MultiModalFieldConfig.flat`][vllm.multimodal.inputs.MultiModalFieldConfig.flat]
+    [`MultiModalFieldConfig.flat_from_sizes`][vllm.multimodal.inputs.MultiModalFieldConfig.flat_from_sizes]
     """
 
     slices: Sequence[slice] | Sequence[Sequence[slice]]
@@ -637,9 +627,8 @@ class MultiModalFlatField(BaseMultiModalField):
 
 @dataclass(frozen=True, kw_only=True)
 class MultiModalSharedField(BaseMultiModalField):
-    """
-    Info:
-        [`MultiModalFieldConfig.shared`][vllm.multimodal.inputs.MultiModalFieldConfig.shared]
+    """Info:
+    [`MultiModalFieldConfig.shared`][vllm.multimodal.inputs.MultiModalFieldConfig.shared]
     """
 
     batch_size: int
@@ -666,8 +655,7 @@ class MultiModalSharedField(BaseMultiModalField):
 class MultiModalFieldConfig:
     @staticmethod
     def batched(modality: str, *, keep_on_cpu: bool = False):
-        """
-        Defines a field where an element in the batch is obtained by
+        """Defines a field where an element in the batch is obtained by
         indexing into the first dimension of the underlying data.
 
         Args:
@@ -676,7 +664,6 @@ class MultiModalFieldConfig:
             keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
 
         Example:
-
         ```
         Input:
             Data: [[AAAA]
@@ -688,6 +675,7 @@ class MultiModalFieldConfig:
             Element 2: [BBBB]
             Element 3: [CCCC]
         ```
+
         """
         return MultiModalFieldConfig(
             field=MultiModalBatchedField(keep_on_cpu=keep_on_cpu),
@@ -702,8 +690,7 @@ class MultiModalFieldConfig:
         *,
         keep_on_cpu: bool = False,
     ):
-        """
-        Defines a field where an element in the batch is obtained by
+        """Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.
 
         Args:
@@ -716,7 +703,6 @@ class MultiModalFieldConfig:
             keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
 
         Example:
-
         ```
         Given:
             slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
@@ -746,6 +732,7 @@ class MultiModalFieldConfig:
             Element 2: [[B],[B],[B],[B]]
             Element 3: [[C],[C]]
         ```
+
         """
         return MultiModalFieldConfig(
             field=MultiModalFlatField(
@@ -764,8 +751,7 @@ class MultiModalFieldConfig:
         *,
         keep_on_cpu: bool = False,
     ):
-        """
-        Defines a field where an element in the batch is obtained by
+        """Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.
 
         Args:
@@ -777,7 +763,6 @@ class MultiModalFieldConfig:
             keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
 
         Example:
-
         ```
         Given:
             size_per_item: [3, 4, 2]
@@ -807,8 +792,8 @@ class MultiModalFieldConfig:
 
         Info:
             [`MultiModalFieldConfig.flat`][vllm.multimodal.inputs.MultiModalFieldConfig.flat]
-        """
 
+        """
         if size_per_item.ndim != 1:
             raise ValueError(
                 "size_per_item should be a 1-D tensor, "
@@ -836,8 +821,7 @@ class MultiModalFieldConfig:
         *,
         keep_on_cpu: bool = False,
     ):
-        """
-        Defines a field where an element in the batch is obtained by
+        """Defines a field where an element in the batch is obtained by
         taking the entirety of the underlying data.
 
         This means that the data is the same for each element in the batch.
@@ -849,7 +833,6 @@ class MultiModalFieldConfig:
             keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
 
         Example:
-
         ```
         Given:
             batch_size: 4
@@ -863,6 +846,7 @@ class MultiModalFieldConfig:
             Element 3: [XYZ]
             Element 4: [XYZ]
         ```
+
         """
         return MultiModalFieldConfig(
             field=MultiModalSharedField(
@@ -884,8 +868,7 @@ class MultiModalFieldConfig:
 
 
 class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
-    """
-    A dictionary of processed keyword arguments to pass to the model,
+    """A dictionary of processed keyword arguments to pass to the model,
     corresponding to a single item in
     [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
     """
@@ -912,8 +895,7 @@ _I = TypeVar(
 
 
 class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
-    """
-    A dictionary of processed multi-modal inputs by modality.
+    """A dictionary of processed multi-modal inputs by modality.
 
     For example, given a processor that processes
     images into `pixel_values` and `image_grid_thw`,

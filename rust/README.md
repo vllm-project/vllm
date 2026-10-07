@@ -43,6 +43,38 @@ For example:
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
+To also expose the Rust frontend's gRPC inference and control services, add
+`--grpc-port`. The HTTP listener remains on `--port`:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B \
+  --host 127.0.0.1 --port 8000 --grpc-port 50051
+```
+
+The gRPC listener binds on `--host` like HTTP, or on `127.0.0.1` when HTTP uses
+`--uds`. When HTTP uses TCP, its port and the gRPC port must differ unless
+requesting an automatically assigned port with `0`.
+
+This also works with Python-supervised hybrid data parallelism. It requires a
+frontend process and cannot be combined with `--headless` or
+`--data-parallel-multi-port-external-lb`.
+
+The separate `vllm serve MODEL --grpc --port 50051` command launches the Python
+SMG `VllmEngine` gRPC server in place of HTTP. The Rust listener exposes the
+`vllm.Inference` and `vllm.Control` services alongside HTTP. These are different
+gRPC APIs; `--grpc` and `--grpc-port` are mutually exclusive.
+
+### RL weight synchronization
+
+With `VLLM_SERVER_DEV_MODE=1`, the Rust frontend supports the HTTP weight-transfer
+lifecycle used by `HTTPVLLMWeightSyncClient`: initialization, starting an update,
+transferring weights, and finishing the update. It also supports draft-model
+updates and `/update_weight_version` and `/weight_info` for version tracking.
+
+For trainer-side usage, see the [IPC](../examples/rl/rlhf_http_ipc.py) and
+[NCCL](../examples/rl/rlhf_http_nccl.py) examples. Configure the weight-transfer
+backend on the server and pause generation during updates, as shown there.
+
 ### External Engine
 
 `vllm-rs serve` can be run standalone with `--data-parallel-size-local 0` when the Python engines
@@ -72,7 +104,7 @@ To build the `vllm-rs` in isolation:
 
 ```bash
 # from the local checkout
-./build_rust.sh
+./tools/build_rust.sh
 ```
 
 ### Engine-free renderer

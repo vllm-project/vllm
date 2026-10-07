@@ -18,17 +18,17 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from functools import lru_cache
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
 
 import torch
 from torch import nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -36,7 +36,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.transformers_utils.config import is_rope_parameters_nested
+from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -49,16 +49,15 @@ logger = init_logger(__name__)
 # Copied from `accelerate`
 @contextmanager
 def init_on_device_without_buffers(device: torch.device):
-    """
-    A context manager under which models are initialized with all
+    """A context manager under which models are initialized with all
     parameters on the specified device. However buffers are not
     initialized on specified device.
 
     Args:
         device (`torch.device`):
             Device to initialize all parameters on.
-    """
 
+    """
     old_register_parameter = nn.Module.register_parameter
 
     def register_empty_parameter(module, name, param):
@@ -71,7 +70,7 @@ def init_on_device_without_buffers(device: torch.device):
                 module._parameters[name].to(device), **kwargs
             )
 
-    tensor_constructors_to_patch = {}
+    tensor_constructors_to_patch: dict[str, Callable] = {}
 
     def patch_tensor_constructor(fn):
         def wrapper(*args, **kwargs):
@@ -114,17 +113,18 @@ def replace_linear_class(
     *,
     prefix: str = "",
 ) -> ColumnParallelLinear | RowParallelLinear | ReplicatedLinear:
-    """
-    Replace nn.Linear with one of vLLM's tensor parallel linear classes.
+    """Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
     Args:
         linear: `nn.Linear` to be replaced.
         style: Tensor parallel style of the new linear, e.g. "colwise".
         quant_config: Quantization config for the new linear.
+        prefix: Module prefix of the new linear, used for quantization lookup.
+
     Returns:
         The new linear.
-    """
 
+    """
     if not isinstance(style, str):
         raise ValueError(f"Unsupported parallel style type {type(style)}, expected str")
 
@@ -147,8 +147,8 @@ def replace_linear_class(
     )
 
 
-TorchConv = nn.Conv2d | nn.Conv3d
-VllmConv = Conv2dLayer | Conv3dLayer
+TorchConv: TypeAlias = nn.Conv2d | nn.Conv3d
+VllmConv: TypeAlias = Conv2dLayer | Conv3dLayer
 
 
 def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
@@ -156,9 +156,11 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
 
     Args:
         conv: `nn.Conv2d` or `nn.Conv3d` to be replaced.
+
     Returns:
         The new `Conv2dLayer` or `Conv3dLayer`. If the conv module is not supported,
         returns the original conv module.
+
     """
     # vLLM does not handle non-zero padding modes
     if conv.padding_mode != "zeros":
@@ -186,6 +188,34 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
     )
 
 
+def replace_layernorm_class(layernorm: nn.LayerNorm) -> nn.Module:
+    """Replace a standard (mean-centered) `nn.LayerNorm` with vLLM's
+    `LayerNorm`.
+
+    Args:
+        layernorm: `nn.LayerNorm` to be replaced.
+
+    Returns:
+        The new `LayerNorm`. If the layernorm is not supported (a subclass with
+        its own behavior, multi-dim `normalized_shape`, or not both
+        elementwise-affine and biased), returns the original module unchanged.
+
+    """
+    if (
+        type(layernorm) is not nn.LayerNorm
+        or len(layernorm.normalized_shape) != 1
+        or not layernorm.elementwise_affine
+        or layernorm.bias is None
+    ):
+        return layernorm
+
+    return LayerNorm(
+        layernorm.normalized_shape[0],
+        eps=layernorm.eps,
+        dtype=layernorm.weight.dtype,
+    )
+
+
 def attrsetter(attr: str) -> Callable[[object, object], None]:
     """Set a possibly nested attribute, like the inverse of attrgetter."""
     parent, _, name = attr.rpartition(".")
@@ -210,17 +240,24 @@ class _VocabParallelEmbeddingBase(VocabParallelEmbedding, _UninitializedEmbeddin
     `super().forward(...)` in an `nn.Embedding` subclass reaches vLLM's embedding."""
 
 
-@lru_cache
+_rebased_embedding_classes: dict[type[nn.Embedding], type[VocabParallelEmbedding]] = {}
+
+
 def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbedding]:
     """Subclass `cls` so that `VocabParallelEmbedding` supersedes its `nn.Embedding`.
 
     Args:
         cls: The `nn.Embedding` subclass to rebase. Cached, so a given `cls` always
             maps to the same class.
+
     Returns:
         The new class, to assign to `__class__` of an instance of `cls`.
+
     """
-    return type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+    if cls not in _rebased_embedding_classes:
+        rebased_cls = type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+        _rebased_embedding_classes[cls] = rebased_cls
+    return _rebased_embedding_classes[cls]
 
 
 def replace_embedding_class(
@@ -235,8 +272,10 @@ def replace_embedding_class(
         embedding: The `nn.Embedding` holding a vocab table.
         quant_config: Quantization config for the new embedding.
         prefix: Qualname of `embedding`, used to look up its quantization method.
+
     Returns:
         The module to install in `embedding`'s place.
+
     """
     # Tied tables are reached more than once, so don't rebase an already new embedding
     if isinstance(embedding, VocabParallelEmbedding):
@@ -272,10 +311,9 @@ def recursive_replace_linear(
             qual_name = maybe_prefix(prefix, child_name)
             # Replace modules as needed
             if isinstance(child_module, nn.Linear):
-                style = "replicate"
                 new_module = replace_linear_class(
                     child_module,
-                    style,
+                    "replicate",
                     quant_config,
                     prefix=qual_name,
                 )
@@ -320,8 +358,7 @@ def get_feature_request_tip(
 
 
 def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
-    """
-    Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
 
     Defaults to `True` but is disabled in the following situations:
 
@@ -329,10 +366,4 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
     # Dynamic rope scaling is not compatible with torch.compile
-    rope_parameters: dict | None = getattr(text_config, "rope_parameters", None) or {}
-    if rope_parameters:
-        # Nest rope_parameters if not nested already to simplify logic
-        if not is_rope_parameters_nested(rope_parameters):
-            rope_parameters = {"": rope_parameters}
-        return all(rp["rope_type"] != "dynamic" for rp in rope_parameters.values())
-    return True
+    return all(rp["rope_type"] != "dynamic" for rp in iter_rope_parameters(text_config))

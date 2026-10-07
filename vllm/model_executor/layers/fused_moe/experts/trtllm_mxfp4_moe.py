@@ -35,9 +35,7 @@ from vllm.utils.flashinfer import has_flashinfer
 
 
 class TrtLlmMxfp4ExpertsBase:
-    """
-    MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic.
-    """
+    """MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic."""
 
     def __init__(
         self,
@@ -164,8 +162,7 @@ class TrtLlmMxfp4ExpertsBase:
 class TrtLlmMxfp4ExpertsMonolithic(
     TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsMonolithic
 ):
-    """
-    Monolithic version of the MXFP4 TRTLLM kernel (router + experts).
+    """Monolithic version of the MXFP4 TRTLLM kernel (router + experts).
     Wraps flashinfer.trtllm_fp4_block_scale_moe().
     """
 
@@ -218,6 +215,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         from flashinfer import trtllm_fp4_block_scale_moe
 
@@ -239,10 +237,6 @@ class TrtLlmMxfp4ExpertsMonolithic(
                 device=hidden_states.device,
             )
 
-        routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=num_tokens,
-            device=hidden_states.device,
-        )
         flashinfer_output = trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -282,16 +276,26 @@ class TrtLlmMxfp4ExpertsMonolithic(
             top_k=self.topk,
             finalized_output=finalized_output,
         )
-        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
         return routed_output
 
 
 class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
-    """
-    Modular version of the MXFP4 TRTLLM kernel (just the experts).
+    """Modular version of the MXFP4 TRTLLM kernel (just the experts).
     Wraps flashinfer.trtllm_fp4_block_scale_routed_moe().
     Moved from trtllm_moe.py.
     """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        **kwargs,
+    ):
+        super().__init__(moe_config, quant_config, **kwargs)
+        # Each launch permutes into its own buffer, so a chunked call finalizes.
+        moe_config.limit_deferred_moe_finalize(
+            self._max_supported_tokens(self.topk, moe_config.num_experts)
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -347,7 +351,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
 
     def _invoke_kernel(
         self,
-        output: torch.Tensor,
+        output: torch.Tensor | None,
         x_quant: torch.Tensor,
         x_scale: torch.Tensor | None,
         topk_ids: torch.Tensor,
@@ -359,10 +363,11 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         local_num_experts: int,
         local_expert_offset: int,
         topk: int,
-    ) -> None:
+    ) -> UnfinalizedMoEOutput | None:
+        """Finalize into ``output``, or stop after GEMM2 when it is None."""
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
-        trtllm_fp4_block_scale_routed_moe(
+        flashinfer_output = trtllm_fp4_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=x_quant,
@@ -390,12 +395,22 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             # Modular kernel receives pre-routed tokens, so routing is already
             # done. Use Renormalize as a safe default the TRTLLM kernel supports.
             routing_method_type=RoutingMethodType.Renormalize,
-            do_finalize=True,
+            do_finalize=output is not None,
             enable_pdl=True,
             activation_type=self._flashinfer_activation_type(activation),
             output=output,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
+        if output is not None:
+            return None
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=False,
+            num_tokens=x_quant.shape[0],
+            top_k=topk,
+        )
+        assert isinstance(routed_output, UnfinalizedMoEOutput)
+        return routed_output
 
     def apply(
         self,
@@ -414,7 +429,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> UnfinalizedMoEOutput | None:
         topk_ids = topk_ids.to(dtype=torch.int32)
 
         topk = topk_ids.size(-1)
@@ -432,13 +447,17 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self.w1_scale is not None
         assert self.w2_scale is not None
 
-        # Chunk tokens so the batched-GEMM grid stays within CUDA limits.
+        # Chunk tokens so the batched-GEMM grid stays within CUDA limits. Each
+        # launch permutes into its own buffer, so only a run that fits in one
+        # launch can leave the top-k reduction to a deferring consumer.
         M = x_quant.size(0)
         chunk_size = self._max_supported_tokens(topk, global_num_experts)
+        defer = chunk_size >= M and self.moe_config.should_defer_moe_finalize(M)
+        unfinalized: UnfinalizedMoEOutput | None = None
         for start in range(0, M, chunk_size):
             end = min(start + chunk_size, M)
-            self._invoke_kernel(
-                output[start:end],
+            unfinalized = self._invoke_kernel(
+                None if defer else output[start:end],
                 x_quant[start:end],
                 None if x_scale is None else x_scale[start:end],
                 topk_ids[start:end],
@@ -452,4 +471,4 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
                 topk,
             )
 
-        return output
+        return unfinalized
