@@ -906,7 +906,10 @@ class HummingGroupedExperts(HummingExpertsBase):
             scatter_metadata = moe_prepare_scatter(topk_ids, expert_map, scratch)
             expert_offsets, scatter_idx = scatter_metadata
             inv_perm = scatter_idx.flatten()
-            num_valid_tokens = expert_offsets[-1:] if expert_map is not None else None
+            # Bound the dynamic input quantization to the valid routes. Rows
+            # past expert_offsets[-1] belong to non-local experts or to invalid
+            # routes (e.g. -1 for padding tokens), with or without expert_map.
+            num_valid_tokens = expert_offsets[-1:]
         else:
             # Prequantized inputs skip w13 quantization, so its buffer is free
             # to hold the permuted hidden states.
