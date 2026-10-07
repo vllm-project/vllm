@@ -106,8 +106,14 @@ def test_zero_requests_returns_empty():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
-@pytest.mark.parametrize("mode", ["all", "none"])
-def test_passthrough_modes_return_input(mode):
+def test_none_mode_returns_the_input_unchanged():
+    """`MambaCacheMode` is Literal["align", "none"]; only "none" passes through.
+
+    An earlier version of this test also parametrised a "mode" of "all", which
+    is not a member of that Literal. Anything that is not "none" takes the
+    align branch and returns a NEW tensor, so asserting identity for it failed
+    -- correctly. The passthrough contract applies to "none" alone.
+    """
     bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device="cuda")
     sl = torch.randint(0, 1000, (4,), dtype=torch.int32, device="cuda")
-    assert mamba_get_block_table_tensor(bt, sl, _spec(64, 3), mode) is bt
+    assert mamba_get_block_table_tensor(bt, sl, _spec(64, 3), "none") is bt
