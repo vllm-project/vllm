@@ -41,6 +41,80 @@ class TestGreedyArgmax:
 
 
 class TestBucketedRejectionSampling:
+    @pytest.mark.parametrize(
+        ("vocab_size", "value"),
+        [
+            (31, 0.0),
+            (32, torch.finfo(torch.float32).max),
+            (33, -torch.finfo(torch.float32).max),
+            (65, 0.0),
+        ],
+    )
+    def test_uniform_support_across_partial_blocks(self, vocab_size, value):
+        """Partial blocks and large common shifts must not favor token positions."""
+        from scipy.stats import chisquare
+
+        n_samples = 16_384
+        logits = torch.full((1, vocab_size), value, dtype=torch.float32)
+        seeds = torch.empty(n_samples, dtype=torch.int64).random_(
+            -(2**63), None, generator=torch.Generator().manual_seed(60221)
+        )
+        tokens = torch.ops._C.bucketed_rejection_sample(
+            logits.expand(n_samples, -1), seeds
+        )
+        assert ((tokens >= 0) & (tokens < vocab_size)).all()
+        counts = torch.bincount(tokens, minlength=vocab_size)
+        assert chisquare(counts.numpy()).pvalue > 1e-7
+
+    def test_sparse_support_across_masked_and_partial_blocks(self):
+        """Rejecting masked/padded slots must restart the whole proposal."""
+        from scipy.stats import chisquare
+
+        n_samples = 20_000
+        support = torch.tensor([0, 63, 96, 128])
+        logits = torch.full((129,), -float("inf"))
+        logits[support] = torch.tensor([0.0, -0.7, -1.4, -2.1])
+        seeds = torch.empty(n_samples, dtype=torch.int64).random_(
+            -(2**63), None, generator=torch.Generator().manual_seed(32065)
+        )
+        tokens = torch.ops._C.bucketed_rejection_sample(
+            logits.expand(n_samples, -1), seeds
+        )
+        assert torch.isin(tokens, support).all()
+        observed = torch.bincount(tokens, minlength=logits.numel())[support]
+        expected = logits[support].double().softmax(-1) * n_samples
+        assert chisquare(observed.numpy(), expected.numpy()).pvalue > 1e-7
+
+    def test_workspace_reuse_does_not_reuse_previous_logits(self):
+        """Changing row sizes and masks must not leak scratch contents."""
+        generator = torch.Generator().manual_seed(3265)
+        logits = torch.randn(8, 129, generator=generator)
+        logits[:, 1::3] = -float("inf")
+        seeds = torch.arange(8, dtype=torch.int64)
+        expected = torch.ops._C.bucketed_rejection_sample(logits, seeds)
+        for size in (4097, 1, 65, 33):
+            other = torch.full((8, size), -float("inf"))
+            other[:, -1] = -torch.finfo(torch.float32).max
+            actual = torch.ops._C.bucketed_rejection_sample(other, seeds)
+            torch.testing.assert_close(actual, torch.full((8,), size - 1))
+            other[:, -1] = float("nan")
+            actual = torch.ops._C.bucketed_rejection_sample(other, seeds)
+            torch.testing.assert_close(actual, torch.full((8,), -1))
+            torch.testing.assert_close(
+                torch.ops._C.bucketed_rejection_sample(logits, seeds), expected
+            )
+
+    @pytest.mark.parametrize("invalid", [float("nan"), float("inf")])
+    def test_invalid_value_in_any_block_lane_preserves_healthy_row(self, invalid):
+        logits = torch.zeros(66, 65)
+        seeds = torch.arange(66, dtype=torch.int64)
+        expected = torch.ops._C.bucketed_rejection_sample(logits, seeds)
+        logits[torch.arange(65), torch.arange(65)] = invalid
+        expected[:65] = -1
+        torch.testing.assert_close(
+            torch.ops._C.bucketed_rejection_sample(logits, seeds), expected
+        )
+
     def test_small_support_distribution(self):
         from scipy.stats import chisquare
 

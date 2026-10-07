@@ -2,6 +2,7 @@
 
 #include <ATen/Parallel.h>
 #include <ATen/core/PhiloxRNGEngine.h>
+#include <ATen/cpu/vec/functional.h>
 #include <torch/library.h>
 
 #include <algorithm>
@@ -16,6 +17,7 @@ namespace {
 using BucketMass = unsigned __int128;
 constexpr int TAIL_BUCKET = 64;
 constexpr int NUM_BUCKETS = TAIL_BUCKET + 1;
+constexpr int BLOCK_SIZE = 32;
 constexpr double LN2_HI = 0x1.62e42fefa39efp-1;
 constexpr double LN2_LO = 0x1.abc9e3b39803fp-56;
 constexpr double INV_LN2 = 0x1.71547652b82fep+0;
@@ -99,25 +101,62 @@ int bucket_for(double difference) {
   return bucket;
 }
 
-int64_t bucketed_rejection_sample_row(const float* row, int64_t vocab_size,
-                                      uint64_t seed) {
+template <typename Index>
+struct SamplingScratch {
+  std::vector<float> maxima;
+  std::vector<uint8_t> buckets;
+  std::vector<Index> indices;
+};
+
+float block_maximum(const float* values, int64_t size) {
+  using Vec = at::vec::Vectorized<float>;
+  const auto maximum = [](const Vec& a, const Vec& b) {
+    return at::vec::maximum(a, b);
+  };
+  Vec max_vec(-std::numeric_limits<float>::infinity());
+  int64_t i = 0;
+  for (; i + Vec::size() <= size; i += Vec::size())
+    max_vec = maximum(max_vec, Vec::loadu(values + i));
+  // Unlike architecture-specific max intrinsics, maximum propagates NaNs.
+  float result = at::vec::vec_reduce_all(maximum, max_vec);
+  for (; i < size; ++i) {
+    if (std::isnan(values[i])) return values[i];
+    result = std::max(result, values[i]);
+  }
+  return result;
+}
+
+template <typename Index>
+int64_t sample_blocks(const float* row, int64_t vocab_size, int64_t num_blocks,
+                      uint64_t seed) {
+  // Retain allocation capacity per worker, but rebuild all row-dependent data.
+  // One vocabulary scan plus O(ceil(V / 32)) grouping uses 9 bytes per block
+  // with uint32 indices (13 with uint64), rather than scratch per token.
+  thread_local SamplingScratch<Index> scratch;
+  scratch.maxima.resize(num_blocks);
+  scratch.buckets.resize(num_blocks);
   double max_logit = -std::numeric_limits<double>::infinity();
-  for (int64_t i = 0; i < vocab_size; ++i) {
-    const double value = row[i];
+  for (int64_t b = 0; b < num_blocks; ++b) {
+    const int64_t start = b * BLOCK_SIZE;
+    const float value = block_maximum(
+        row + start, std::min<int64_t>(BLOCK_SIZE, vocab_size - start));
     // Invalid rows are reported to the caller without interrupting other rows.
     if (std::isnan(value) || value == std::numeric_limits<double>::infinity())
       return -1;
-    max_logit = std::max(max_logit, value);
+    scratch.maxima[b] = value;
+    max_logit = std::max(max_logit, double(value));
   }
   if (!std::isfinite(max_logit)) return -1;  // All tokens are masked.
 
   std::array<uint64_t, NUM_BUCKETS> counts{}, offsets{};
   std::array<BucketMass, NUM_BUCKETS> cumulative{};
-  std::vector<uint8_t> buckets(vocab_size, 255);
-  for (int64_t i = 0; i < vocab_size; ++i) {
-    if (!std::isfinite(row[i])) continue;  // -inf mask
-    const int bucket = bucket_for(max_logit - double(row[i]));
-    buckets[i] = uint8_t(bucket);
+  for (int64_t b = 0; b < num_blocks; ++b) {
+    if (!std::isfinite(scratch.maxima[b])) {
+      scratch.buckets[b] = 255;  // Entire block is masked.
+      continue;
+    }
+    const int bucket = bucket_for(max_logit - double(scratch.maxima[b]));
+    scratch.buckets[b] = uint8_t(bucket);
     ++counts[bucket];
   }
   uint64_t size = 0;
@@ -128,10 +167,11 @@ int64_t bucketed_rejection_sample_row(const float* row, int64_t vocab_size,
     mass += BucketMass(counts[k]) << (TAIL_BUCKET - k);
     cumulative[k] = mass;
   }
-  std::vector<int64_t> indices(size);
+  scratch.indices.resize(size);
   auto cursor = offsets;
-  for (int64_t i = 0; i < vocab_size; ++i)
-    if (buckets[i] != 255) indices[cursor[buckets[i]]++] = i;
+  for (int64_t b = 0; b < num_blocks; ++b)
+    if (scratch.buckets[b] != 255)
+      scratch.indices[cursor[scratch.buckets[b]]++] = Index(b);
 
   SamplingRng rng(seed);
   for (;;) {
@@ -139,17 +179,31 @@ int64_t bucketed_rejection_sample_row(const float* row, int64_t vocab_size,
     const int bucket =
         std::upper_bound(cumulative.begin(), cumulative.end(), proposal) -
         cumulative.begin();
-    const int64_t index =
-        indices[offsets[bucket] + rng.bounded64(counts[bucket])];
+    const uint64_t block =
+        scratch.indices[offsets[bucket] + rng.bounded64(counts[bucket])];
+    const uint64_t index = block * BLOCK_SIZE + rng.bounded64(BLOCK_SIZE);
+    // Give even the partial last block 32 slots; missing or masked slots
+    // reject the whole proposal, preserving the same per-token envelope.
+    if (index >= uint64_t(vocab_size) || !std::isfinite(row[index])) continue;
     const double difference = max_logit - double(row[index]);
     const double log_acceptance =
         std::fma(double(bucket), LN2_HI, -difference) + double(bucket) * LN2_LO;
     TORCH_INTERNAL_ASSERT(log_acceptance <= 0.0);
-    // Proposal mass h_i=2^-bucket and acceptance exp(logit_i-max)/h_i
-    // give accepted mass proportional to exp(logit_i-max). Restart globally.
-    // The capped tail retains every finite token; extreme exp may underflow.
+    // A block has proposal mass 32*h, h=2^-bucket. The common 32 cancels
+    // when choosing blocks; uniform slot selection and acceptance p_i/h
+    // give accepted mass proportional to p_i=exp(logit_i-max). Restart
+    // globally. The capped tail retains every finite token; extreme exp may
+    // underflow.
     if (rng.bernoulli(std::exp(log_acceptance))) return index;
   }
+}
+
+int64_t bucketed_rejection_sample_row(const float* row, int64_t vocab_size,
+                                      uint64_t seed) {
+  const int64_t num_blocks = 1 + (vocab_size - 1) / BLOCK_SIZE;
+  if (uint64_t(num_blocks - 1) <= std::numeric_limits<uint32_t>::max())
+    return sample_blocks<uint32_t>(row, vocab_size, num_blocks, seed);
+  return sample_blocks<uint64_t>(row, vocab_size, num_blocks, seed);
 }
 
 static void greedy_argmax_kernel(int64_t* __restrict__ output,
