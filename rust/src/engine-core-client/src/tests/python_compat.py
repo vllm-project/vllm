@@ -442,6 +442,9 @@ class KVEventsConfig:
     hwm: int
     max_queue_size: int
     topic: str
+    snapshot_endpoint: str | None = None
+    snapshot_max_blocks: int = 1_000_000
+    snapshot_max_response_bytes: int = 256 * 1024 * 1024
 
 
 @dataclass
@@ -503,6 +506,7 @@ ready_response = EngineCoreReadyResponse(
         hwm=100_000,
         max_queue_size=100_000,
         topic="kv",
+        snapshot_endpoint="tcp://127.0.0.1:5559",
     ),
 )
 

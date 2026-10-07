@@ -185,6 +185,9 @@ message GetWeightVersionResponse { string weight_version = 1; }
 message GetKvEventSourcesRequest {}
 message GetKvEventSourcesResponse { repeated KvEventSource sources = 1; }
 
+// schema_version 1: live and replay sequence frames are an 8-byte big-endian
+// sequence. schema_version 2: snapshot_endpoint is set, and those frames append
+// a 16-byte publisher identity.
 message KvEventSource {
   string transport = 1;
   string endpoint = 2;
@@ -196,4 +199,5 @@ message KvEventSource {
   uint32 buffer_steps = 8;
   uint32 hwm = 9;
   uint32 max_queue_size = 10;
+  string snapshot_endpoint = 11;
 }
