@@ -15,6 +15,8 @@ import torch
 
 from vllm.config.kernel import KernelConfig
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
+from vllm.utils import flashinfer as flashinfer_utils
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla import indexer
 from vllm.v1.kv_cache_interface import (
@@ -33,6 +35,10 @@ EXPORTED_NEXT_N = (1, 2, 4)
 EXTENDED_NEXT_N = (1, 2, 3, 4, 5, 6)
 # FlashInfer's scheduler request ceiling (catalog policy.max_batch).
 MAX_BATCH = 4096
+# Compute capabilities the package exports the route for (its module's
+# SUPPORTED_CAPABILITIES): sm_120a only at the pinned package. 12.1 (the GB10
+# SoC) shares the family but has no exported program.
+EXPORTED_CAPABILITIES = ((12, 0),)
 # FP8 indexer K row: 128 e4m3 values + the fp32 scale.
 INDEXER_HEAD_BYTES = 132
 
@@ -41,18 +47,27 @@ def _set_arch(
     monkeypatch: pytest.MonkeyPatch,
     family: int,
     *,
+    minor: int = 0,
     cuda: bool = True,
     deep_gemm: bool = True,
     flashinfer_sm120: bool = True,
+    capabilities: tuple[tuple[int, int], ...] = EXPORTED_CAPABILITIES,
     routes: frozenset[tuple[int, int]] = SHIPPED_ROUTES,
     next_n: tuple[int, ...] = EXPORTED_NEXT_N,
     route_next_n: tuple[int, ...] | None = None,
     max_batch: int | None = MAX_BATCH,
 ) -> None:
-    """``next_n`` is the catalog's exported depth set; ``route_next_n`` the
-    depths every shipped (heads, page) route has a kernel for, when a depth is
-    exported for other routes only."""
+    """The device is compute capability ``family.minor`` (12.0 is RTX 5090 /
+    RTX PRO 6000 Blackwell, 12.1 the GB10 SoC); ``capabilities`` are the exact
+    ones FlashInfer exports the route for. ``next_n`` is the catalog's exported
+    depth set; ``route_next_n`` the depths every shipped (heads, page) route has
+    a kernel for, when a depth is exported for other routes only."""
     monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda device_id=0: DeviceCapability(family, minor),
+    )
     monkeypatch.setattr(
         current_platform,
         "is_device_capability_family",
@@ -61,6 +76,12 @@ def _set_arch(
     monkeypatch.setattr(indexer, "has_deep_gemm", lambda: deep_gemm)
     monkeypatch.setattr(
         indexer, "has_flashinfer_sm120_paged_mqa_logits", lambda: flashinfer_sm120
+    )
+    monkeypatch.setattr(
+        indexer, "flashinfer_sm120_paged_mqa_logits_capabilities", lambda: capabilities
+    )
+    monkeypatch.setattr(
+        indexer, "flashinfer_sm120_paged_mqa_logits_catalog_error", lambda: None
     )
     monkeypatch.setattr(
         indexer, "flashinfer_sm120_paged_mqa_logits_max_batch", lambda: max_batch
@@ -257,6 +278,153 @@ def test_explicit_flashinfer_sm120_resolves_when_constraints_hold(
     _set_arch(monkeypatch, 12)
     config = _config("flashinfer_sm120", num_speculative_tokens=3)
     assert _resolve(config, _indexer_spec(128)) == "flashinfer_sm120"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "minor,capabilities,expected",
+    [
+        # RTX 5090 / RTX PRO 6000 Blackwell: the exported sm_120a.
+        (0, EXPORTED_CAPABILITIES, "flashinfer_sm120"),
+        # The GB10 SoC shares the family but has no exported program.
+        (1, EXPORTED_CAPABILITIES, "deep_gemm"),
+        # A build that exports its cubin admits it.
+        (1, ((12, 0), (12, 1)), "flashinfer_sm120"),
+        # A build without the capability export admits no device.
+        (0, (), "deep_gemm"),
+    ],
+)
+def test_auto_requires_an_exported_compute_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    minor: int,
+    capabilities: tuple[tuple[int, int], ...],
+    expected: str,
+) -> None:
+    """FlashInfer compiles the route for the exact capabilities its module
+    exports and raises at the first metadata build on any other device of the
+    family, so the family check alone would crash "auto" on a 12.1 device
+    instead of falling back to DeepGEMM."""
+    _set_arch(monkeypatch, 12, minor=minor, capabilities=capabilities)
+    assert _resolve(_config(), _indexer_spec(64)) == expected
+
+
+@pytest.mark.cpu_test
+def test_explicit_flashinfer_sm120_names_the_device_capability(monkeypatch):
+    _set_arch(monkeypatch, 12, minor=1)
+    with pytest.raises(
+        RuntimeError, match=r"compute capability 12\.1, but .* 12\.0 only"
+    ):
+        _resolve(_config("flashinfer_sm120"), _indexer_spec(64))
+    _set_arch(monkeypatch, 12, capabilities=())
+    with pytest.raises(RuntimeError, match="no compute capability"):
+        _resolve(_config("flashinfer_sm120"), _indexer_spec(64))
+
+
+def _catalog_module(**overrides) -> SimpleNamespace:
+    """A stand-in for FlashInfer's ``sm120_paged_mqa`` module (the policy
+    queries the ``vllm.utils.flashinfer`` wrappers read), healthy unless a
+    query is overridden."""
+    module = SimpleNamespace(
+        SUPPORTED_CAPABILITIES=EXPORTED_CAPABILITIES,
+        exported_next_n=lambda: EXPORTED_NEXT_N,
+        max_batch=lambda: MAX_BATCH,
+        route_available=lambda num_heads, page_kv, next_n: (
+            (num_heads, page_kv) in SHIPPED_ROUTES and next_n in EXPORTED_NEXT_N
+        ),
+    )
+    for name, value in overrides.items():
+        setattr(module, name, value)
+    return module
+
+
+def _real_policy_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    module: SimpleNamespace,
+) -> None:
+    """Route the indexer's FlashInfer SM120 policy queries through the real
+    ``vllm.utils.flashinfer`` wrappers over ``module``, with the wrappers'
+    caches and the recorded catalog errors cleared before and after the test."""
+    monkeypatch.setattr(
+        flashinfer_utils, "has_flashinfer_sm120_paged_mqa_logits", lambda: True
+    )
+    monkeypatch.setattr(flashinfer_utils, "_get_submodule", lambda name: module)
+    monkeypatch.setattr(flashinfer_utils, "_sm120_paged_mqa_logits_catalog_errors", {})
+    for name in (
+        "flashinfer_sm120_paged_mqa_logits_capabilities",
+        "flashinfer_sm120_paged_mqa_logits_next_n",
+        "flashinfer_sm120_paged_mqa_logits_max_batch",
+        "flashinfer_sm120_paged_mqa_logits_route_available",
+    ):
+        query = getattr(flashinfer_utils, name)
+        query.cache_clear()
+        request.addfinalizer(query.cache_clear)
+        monkeypatch.setattr(indexer, name, query)
+    monkeypatch.setattr(
+        indexer,
+        "flashinfer_sm120_paged_mqa_logits_catalog_error",
+        flashinfer_utils.flashinfer_sm120_paged_mqa_logits_catalog_error,
+    )
+
+
+@pytest.mark.cpu_test
+def test_policy_queries_read_the_package(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """The wrappers convert the package's queries (capabilities, depths,
+    request ceiling, routes) and the route resolves through them."""
+    _set_arch(monkeypatch, 12)
+    _real_policy_queries(monkeypatch, request, _catalog_module())
+    assert (
+        indexer.flashinfer_sm120_paged_mqa_logits_capabilities()
+        == EXPORTED_CAPABILITIES
+    )
+    assert indexer.flashinfer_sm120_paged_mqa_logits_next_n() == EXPORTED_NEXT_N
+    assert indexer.flashinfer_sm120_paged_mqa_logits_max_batch() == MAX_BATCH
+    assert indexer.flashinfer_sm120_paged_mqa_logits_route_available(32, 64, 1)
+    assert not indexer.flashinfer_sm120_paged_mqa_logits_route_available(64, 128, 1)
+    assert indexer.flashinfer_sm120_paged_mqa_logits_catalog_error() is None
+    assert _resolve(_config(), _indexer_spec(64)) == "flashinfer_sm120"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError(
+            "SM120 paged MQA catalog schema 'sm120_paged_mqa.v0' is not "
+            "'sm120_paged_mqa.v1'; regenerate the export"
+        ),
+        FileNotFoundError(
+            2, "No such file or directory", "sm120_paged_mqa_catalog.json"
+        ),
+        KeyError("next_n"),
+    ],
+    ids=["schema", "missing", "malformed"],
+)
+def test_unreadable_catalog_keeps_deep_gemm_and_names_the_catalog(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest, error: Exception
+) -> None:
+    """FlashInfer reads the route policy from a catalog JSON in its wheel, so a
+    query can raise after the module imported (schema mismatch, missing file,
+    malformed data). The error must not escape into model construction: "auto"
+    falls back to DeepGEMM and an explicit request reports the catalog."""
+
+    def exported_next_n() -> tuple[int, ...]:
+        raise error
+
+    _set_arch(monkeypatch, 12)
+    _real_policy_queries(
+        monkeypatch, request, _catalog_module(exported_next_n=exported_next_n)
+    )
+    assert _resolve(_config(), _indexer_spec(64)) == "deep_gemm"
+    assert indexer.flashinfer_sm120_paged_mqa_logits_next_n() == ()
+    with pytest.raises(
+        RuntimeError,
+        match="FlashInfer SM120 catalog unavailable: exported_next_n: "
+        + type(error).__name__,
+    ):
+        _resolve(_config("flashinfer_sm120"), _indexer_spec(64))
 
 
 @pytest.mark.cpu_test

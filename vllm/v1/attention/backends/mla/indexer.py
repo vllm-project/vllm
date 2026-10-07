@@ -27,6 +27,8 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.flashinfer import (
     flashinfer_sm120_get_paged_mqa_logits_metadata,
+    flashinfer_sm120_paged_mqa_logits_capabilities,
+    flashinfer_sm120_paged_mqa_logits_catalog_error,
     flashinfer_sm120_paged_mqa_logits_max_batch,
     flashinfer_sm120_paged_mqa_logits_next_n,
     flashinfer_sm120_paged_mqa_logits_route_available,
@@ -926,8 +928,9 @@ def _flashinfer_sm120_mqa_logits_constraints(
     """Unmet constraints of the FlashInfer SM120 paged MQA-logits route (empty
     when it can serve this deployment).
 
-    The route scores the FP8 indexer cache on SM12x only, reads each layer's
-    cache as a dense ``[blocks, page_kv, 1, 132]`` view, sizes its logits by
+    The route scores the FP8 indexer cache on the SM12x compute capabilities
+    FlashInfer exports kernels for (12.0 at the pinned package), reads each
+    layer's cache as a dense ``[blocks, page_kv, 1, 132]`` view, sizes its logits by
     the request block table, schedules at most ``max_batch`` request rows per
     call and ships the (indexer heads, KV page, next_n) kernels its catalog
     exports. The kpool indexer (GLM) is excluded because its layer calls
@@ -944,11 +947,41 @@ def _flashinfer_sm120_mqa_logits_constraints(
         return ["requires an SM12x (consumer Blackwell) CUDA device"]
     if not has_flashinfer_sm120_paged_mqa_logits():
         return ["flashinfer.sm120_paged_mqa_logits is not importable"]
+    # The route's policy (exported capabilities, depths, request ceiling and
+    # routes) is read from the package's catalog. A catalog the queries cannot
+    # read makes the route unavailable here rather than failing model
+    # construction or the first decode.
+    exported_capabilities = flashinfer_sm120_paged_mqa_logits_capabilities()
+    native_depths = flashinfer_sm120_paged_mqa_logits_next_n()
+    max_batch = flashinfer_sm120_paged_mqa_logits_max_batch()
+    catalog_error = flashinfer_sm120_paged_mqa_logits_catalog_error()
+    if catalog_error is not None:
+        return [f"FlashInfer SM120 catalog unavailable: {catalog_error}"]
+    # FlashInfer compiles the route for the exact capabilities its module
+    # exports (12.0, sm_120a, at the pinned package) and raises at the first
+    # metadata build on any other device of the family (12.1, the GB10 SoC),
+    # so the family check above is only the cheap filter.
+    capability = current_platform.get_device_capability()
+    if (
+        capability is None
+        or (capability.major, capability.minor) not in exported_capabilities
+    ):
+        device = "unknown" if capability is None else capability.as_version_str()
+        exported = (
+            "compute capability "
+            + ", ".join(f"{major}.{minor}" for major, minor in exported_capabilities)
+            + " only"
+            if exported_capabilities
+            else "no compute capability (the build exports none)"
+        )
+        return [
+            f"the device is compute capability {device}, but FlashInfer exports "
+            f"SM120 paged MQA-logits kernels for {exported}"
+        ]
     failures: list[str] = []
     next_n = 1 + vllm_config.num_speculative_tokens
     # The depths (Q rows per request) with an exported kernel come from the
     # package's catalog; a depth outside it is not native on this route.
-    native_depths = flashinfer_sm120_paged_mqa_logits_next_n()
     if next_n not in native_depths:
         failures.append(
             "next_n (1 + num_speculative_tokens) must be a depth FlashInfer "
@@ -969,7 +1002,6 @@ def _flashinfer_sm120_mqa_logits_constraints(
     # are one per request; a step whose depth has no exported kernel (a
     # 3-token step under next_n=4 when the catalog skips 3) or a flattening
     # route hands it one row per token.
-    max_batch = flashinfer_sm120_paged_mqa_logits_max_batch()
     max_num_seqs = vllm_config.scheduler_config.max_num_seqs
     if _use_flattening(vllm_config, "flashinfer_sm120"):
         rows_per_request = next_n
@@ -1080,9 +1112,11 @@ def _supports_native_decode(next_n: int, mqa_logits_backend: str = "deep_gemm") 
     if current_platform.is_device_capability_family(100):
         return True
     if current_platform.is_device_capability_family(120):
-        # DeepGEMM's SM120 paged MQA-logits kernel is templated on next_n
-        # (kNextN, scheduled as two-token Q atoms), so it takes every depth
-        # natively like SM100; only SM90 ships a fixed set.
+        # DeepGEMM's SM120 paged MQA-logits kernel accepts every depth as a
+        # template parameter (kNextN, scheduled as two-token Q atoms), so it
+        # takes every next_n natively like SM100; only SM90 ships a fixed set.
+        # The hardware check is the DeepGEMM-vs-reference GPU test over
+        # next_n 1..6 (test_deep_gemm_sm120_fp8_paged_mqa_logits_native_next_n).
         return True
     if current_platform.is_device_capability_family(90):
         return native_next_n_supported(next_n)

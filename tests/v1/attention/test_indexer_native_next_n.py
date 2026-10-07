@@ -33,8 +33,10 @@ def _set_arch(monkeypatch, family: int, *, cuda: bool = True, deep_gemm: bool = 
         (9, {1, 2, 4}),
         # SM100 schedules any next_n with multi-atom tiles.
         (10, {1, 2, 3, 4, 5, 8}),
-        # SM120: DeepGEMM's paged kernel is templated on next_n (two-token Q
-        # atoms) and takes every depth, like SM100.
+        # SM120: DeepGEMM's paged kernel accepts every depth as a template
+        # parameter (kNextN, two-token Q atoms), like SM100. The hardware check
+        # is the DeepGEMM-vs-reference GPU test over next_n 1..6
+        # (test_deep_gemm_sm120_fp8_paged_mqa_logits_native_next_n).
         (12, {1, 2, 3, 4, 5, 8}),
     ],
 )
