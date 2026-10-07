@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import (
+    dataclass_tensors,
     is_weights_pre_processed,
     replace_parameter,
     set_weight_attrs,
@@ -156,7 +157,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
         self.max_capture_size = moe.max_capture_size
 
-        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
         # Used for triton kernel precision configs
@@ -351,7 +351,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
-                _cache_permute_indices=self._cache_permute_indices,
+                _cache_permute_indices={},
             )
         )
 
@@ -367,6 +367,12 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
+            # Register the torch storage behind the triton_kernels wrappers.
+            for name, tensor in (
+                dataclass_tensors(w13, "_w13_weight")
+                | dataclass_tensors(w2, "_w2_weight")
+            ).items():
+                layer.register_buffer(name, tensor, persistent=False)
 
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
@@ -573,7 +579,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self.max_capture_size = moe.max_capture_size
 
-        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
         # Used for triton kernel precision configs
@@ -819,7 +824,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
-                _cache_permute_indices=self._cache_permute_indices,
+                _cache_permute_indices={},
                 activation=self.moe.activation,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
             )
@@ -846,6 +851,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
+            # Register the torch storage behind the triton_kernels wrappers.
+            for name, tensor in (
+                dataclass_tensors(w13, "_w13_weight")
+                | dataclass_tensors(w2, "_w2_weight")
+            ).items():
+                layer.register_buffer(name, tensor, persistent=False)
 
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)

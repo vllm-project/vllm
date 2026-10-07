@@ -1987,6 +1987,14 @@ class FlashInferImpl(AttentionImpl):
         else:
             self.sinks.copy_(source_sinks)
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        tensors = {}
+        if self.alibi_slopes is not None:
+            tensors["alibi_slopes"] = self.alibi_slopes
+        if self.sinks is not None and self.sinks is not self._sinks_source:
+            tensors["sinks"] = self.sinks
+        return tensors
+
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale
         if is_quantized_kv_cache(self.kv_cache_dtype):

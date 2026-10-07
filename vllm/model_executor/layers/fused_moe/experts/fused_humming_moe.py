@@ -61,6 +61,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
     kStaticTensorScale,
 )
+from vllm.model_executor.utils import held_tensors
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
 from vllm.utils.import_utils import has_humming
@@ -152,6 +153,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self, "locks")
 
     def init_humming_moe(self):
         from vllm.utils.humming import get_heuristics_config

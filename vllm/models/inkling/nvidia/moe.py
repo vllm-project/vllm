@@ -35,7 +35,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import register_constant_buffer, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -303,7 +303,9 @@ class InklingSinkExperts(nn.Module):
             torch.empty(d_model, n_experts * intermediate_pp),
             requires_grad=False,
         )
-        self._unit: torch.Tensor | None = None
+        register_constant_buffer(
+            self, "_unit", torch.ones(n_experts, dtype=torch.float32)
+        )
 
     def load_weight(self, key: str, weight: torch.Tensor) -> list[str]:
         """Load one checkpoint sink tensor (stacked over the S experts)."""
@@ -330,10 +332,6 @@ class InklingSinkExperts(nn.Module):
         # One GEMM over the experts' stacked w13 (a view), fused epilogue,
         # then one GEMM whose K-reduction over the K-concatenated w2 performs
         # the expert sum.
-        if self._unit is None or self._unit.device != x.device:
-            self._unit = torch.ones(
-                self.n_experts, dtype=torch.float32, device=x.device
-            )
         raw = x @ self.w13_weight.view(-1, x.shape[-1]).T  # (T, S*2F)
         h = sink_silu_mul_epilogue(
             raw, self._unit, gammas, self._unit, self.n_experts, x.dtype
@@ -375,14 +373,11 @@ class InklingSinkExpertsLinear(nn.Module):
             prefix=f"{prefix}.w2",
         )
         self._w2_input_pp = self.w2.input_size_per_partition
-        self._col_expert: torch.Tensor | None = None
+        start = get_tensor_model_parallel_rank() * self._w2_input_pp
+        cols = torch.arange(start, start + self._w2_input_pp)
+        register_constant_buffer(self, "_col_expert", cols // d_mlp)
 
     def _gamma_expand(self, gammas: torch.Tensor) -> torch.Tensor:
-        if self._col_expert is None or self._col_expert.device != gammas.device:
-            local = self._w2_input_pp
-            start = get_tensor_model_parallel_rank() * local
-            cols = torch.arange(start, start + local, device=gammas.device)
-            self._col_expert = (cols // self.d_mlp).long()
         return gammas[:, self._col_expert]
 
     def load_weight(self, key: str, weight: torch.Tensor) -> list[str]:

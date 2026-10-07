@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.model_executor.utils import register_constant_buffer
 from vllm.platforms import current_platform
 
 _OPT_KV_LORA_RANK = 512
@@ -25,7 +26,13 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         super().__init__(*args, **kwargs)
         self._use_eager_qk_rmsnorm_fusion = bool(rocm_aiter_ops.is_enabled())
         self._fused_qk_prep = self._fused_qk_prep_supported()
-        self._identity_rope: tuple[torch.Tensor, torch.Tensor] | None = None
+        # cos = 1, sin = 0 makes the fused decode kernel's RoPE the identity,
+        # which is what a NoPE model needs. One row suffices because the `_opt`
+        # kernel clamps `pos` into [0, cos_cache.size(0)); a full-length cache
+        # would cost ~268 MB at K3's 1M max_position_embeddings.
+        half = self.qk_rope_head_dim // 2
+        register_constant_buffer(self, "_identity_rope_cos", torch.ones(1, half))
+        register_constant_buffer(self, "_identity_rope_sin", torch.zeros(1, half))
 
     def _fused_qk_prep_supported(self) -> bool:
         attn = self.mla_attn
@@ -119,19 +126,6 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             ql_nope = q_nope_t.new_empty((B, N, L))
             torch.bmm(q_nope_t, attn.W_UK_T, out=ql_nope.transpose(0, 1))
 
-        if self._identity_rope is None:
-            # cos = 1, sin = 0 makes the kernel's RoPE the identity, which is
-            # what a NoPE model needs. One row suffices because the `_opt`
-            # kernel clamps `pos` into [0, cos_cache.size(0)); a full-length
-            # cache would cost ~268 MB at K3's 1M max_position_embeddings.
-            half = self.qk_rope_head_dim // 2
-            opts = {"dtype": kv_c_normed.dtype, "device": kv_c_normed.device}
-            self._identity_rope = (
-                torch.ones(1, half, **opts),
-                torch.zeros(1, half, **opts),
-            )
-        cos_cache, sin_cache = self._identity_rope
-
         # An fp8 KV cache is allocated as uint8 and re-viewed as fp8 before use;
         # the AITER kernel rejects the raw uint8 dtype outright.
         fp8_dtype = current_platform.fp8_dtype()
@@ -157,8 +151,8 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             layer._k_scale,
             layer._q_scale,
             positions,
-            cos_cache,
-            sin_cache,
+            self._identity_rope_cos,
+            self._identity_rope_sin,
             is_neox=True,
             is_nope_first=True,
         )

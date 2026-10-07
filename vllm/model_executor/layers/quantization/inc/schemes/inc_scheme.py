@@ -4,6 +4,8 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from vllm.model_executor.utils import held_tensors
+
 if TYPE_CHECKING:
     import torch
 
@@ -77,6 +79,10 @@ class INCLinearScheme(ABC):
     @abstractmethod
     def process_weights_after_loading(self, layer: "torch.nn.Module") -> None:
         raise NotImplementedError
+
+    def persistent_tensors(self) -> "dict[str, torch.Tensor]":
+        """Device tensors held by this scheme's kernels."""
+        return held_tensors(self)
 
     @abstractmethod
     def apply_weights(

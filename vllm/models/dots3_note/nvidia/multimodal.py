@@ -151,6 +151,7 @@ class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 self.visual.to(dtype=model_config.dtype)
             if self.audio_tower is not None:
                 self.audio_tower.to(dtype=model_config.dtype)
+                self.audio_tower.dots_encoder.init_stft_constants()
         with self._mark_language_model(vllm_config):
             self.language_model = Dots3NoteLanguageModelForCausalLM(
                 vllm_config=vllm_config,

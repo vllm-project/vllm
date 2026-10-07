@@ -46,6 +46,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_group_gemm_supported,
 )
+from vllm.model_executor.utils import held_tensors
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -305,6 +306,11 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         self.c_strides1 = c_strides1
         self.c_strides2 = ab_strides1_c_strides2
         self._permute_scratch: MoEPermuteScratch | None = None
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(
+            self, "ab_strides1", "ab_strides2", "c_strides1", "c_strides2"
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -1297,6 +1303,19 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
         self.group_size = group_size
         self._permute_scratch: MoEPermuteScratch | None = None
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(
+            self,
+            "a_strides1",
+            "a_strides2",
+            "b_strides1",
+            "b_strides2",
+            "c_strides1",
+            "c_strides2",
+            "s_strides1",
+            "s_strides2",
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

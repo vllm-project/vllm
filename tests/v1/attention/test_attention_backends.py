@@ -1539,6 +1539,7 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     impl = object.__new__(flashinfer_backend.FlashInferImpl)
     impl._sinks_source = source_sinks
     impl.sinks = source_sinks
+    impl.alibi_slopes = None
 
     impl.process_weights_after_loading(dtype)
 
@@ -1546,6 +1547,12 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     sinks_ptr = impl.sinks.data_ptr()
     assert impl.sinks.dtype == torch.float32
     torch.testing.assert_close(impl.sinks, source_sinks.float())
+    persistent = impl.persistent_tensors()
+    if dtype == torch.float32:
+        assert persistent == {}
+    else:
+        assert persistent.keys() == {"sinks"}
+        assert persistent["sinks"] is impl.sinks
 
     source_sinks.copy_(torch.tensor([3.0, 4.0], dtype=dtype))
     impl.process_weights_after_loading(dtype)

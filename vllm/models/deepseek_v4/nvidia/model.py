@@ -69,7 +69,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import set_derived_buffer, set_weight_attrs
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -287,8 +287,17 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         set_weight_attrs(self.w2_weight_scale, weight_attrs)
         self.w2_weight_scale.quant_method = "block"
 
-        self._transformed_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
-        self._transformed_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
+        # Kernel-format tensors built by finalize_weights.
+        for name in (
+            "_mega_l1_packed",
+            "_mega_l1_scale",
+            "_mega_l2_packed",
+            "_mega_l2_scale",
+            "_shared_l1_scale",
+            "_shared_l2_packed",
+            "_shared_l2_scale",
+        ):
+            self.register_buffer(name, None, persistent=False)
         self._transformed_shared_l1_weights: (
             tuple[torch.Tensor, torch.Tensor] | None
         ) = None
@@ -302,6 +311,22 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    @property
+    def _transformed_l1_weights(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self._mega_l1_packed is None:
+            return None
+        return (self._mega_l1_packed, self._mega_l1_scale)
+
+    @property
+    def _transformed_l2_weights(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self._mega_l2_packed is None:
+            return None
+        return (self._mega_l2_packed, self._mega_l2_scale)
 
     def _map_global_expert_id(self, expert_id: int) -> list[int]:
         """Return local (per-rank) slot offsets where logical expert
@@ -475,11 +500,17 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         # The generic linear post-load hook may still repack the serial scales,
         # but this shared MLP is never called after native fusion is enabled.
         gate_up.weight.data = transformed_l1[0]
+        set_derived_buffer(self, "_shared_l1_scale", transformed_l1[1])
+        set_derived_buffer(self, "_shared_l2_packed", transformed_l2[0])
+        set_derived_buffer(self, "_shared_l2_scale", transformed_l2[1])
         self._transformed_shared_l1_weights = (
             gate_up.weight.data,
-            transformed_l1[1],
+            self._shared_l1_scale,
         )
-        self._transformed_shared_l2_weights = transformed_l2
+        self._transformed_shared_l2_weights = (
+            self._shared_l2_packed,
+            self._shared_l2_scale,
+        )
 
     def _prepare_shared_expert_scale(
         self,
@@ -545,7 +576,13 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         deep_gemm = _import_deep_gemm()
 
-        if self._transformed_l1_weights is None:
+        if self._transformed_l1_weights is not None:
+            # IPC / weight-cache path: buffers already populated.
+            self.w13_weight = None
+            self.w13_weight_scale = None
+            self.w2_weight = None
+            self.w2_weight_scale = None
+        else:
             self._check_runtime_supported()
             w13_scale = deep_gemm.transform_sf_into_required_layout(
                 self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
@@ -561,19 +598,21 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 (1, 32),
                 self.num_local_experts,
             )
-            self._transformed_l1_weights, self._transformed_l2_weights = (
-                deep_gemm.transform_weights_for_mega_moe(
-                    (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
-                    (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
-                )
+            l1_weights, l2_weights = deep_gemm.transform_weights_for_mega_moe(
+                (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
+                (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
             )
-            # Drop the original loader-side parameters: the MegaMoE kernels only
-            # consume the transformed views above. transform_weights_for_mega_moe
-            # allocates a fresh tensor for the L1 weight (see
-            # _interleave_l1_weights) and fresh SF tensors for L1/L2; the L2
-            # weight is the only tensor that aliases the original storage, and
-            # _transformed_l2_weights still holds it, so the storage stays live
-            # after we drop the Parameter.
+            set_derived_buffer(self, "_mega_l1_packed", l1_weights[0])
+            set_derived_buffer(self, "_mega_l1_scale", l1_weights[1])
+            set_derived_buffer(self, "_mega_l2_packed", l2_weights[0])
+            set_derived_buffer(self, "_mega_l2_scale", l2_weights[1])
+            # Drop the original loader-side parameters: the MegaMoE kernels
+            # only consume the buffers above (_transformed_l{1,2}_weights
+            # properties read them). transform_weights_for_mega_moe allocates
+            # a fresh tensor for the L1 weight (see _interleave_l1_weights)
+            # and fresh SF tensors for L1/L2; the L2 weight aliases the
+            # original storage, and _mega_l2_packed holds it, so the storage
+            # stays live after we drop the Parameter.
             self.w13_weight = None
             self.w13_weight_scale = None
             self.w2_weight = None
@@ -1223,7 +1262,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
-        self.hc_attn_fn_broadcast: torch.Tensor | None = None
+        self.hc_attn_fn_broadcast: torch.Tensor | None
+        self.register_buffer("hc_attn_fn_broadcast", None, persistent=False)
         self.hc_ffn_fn = nn.Parameter(
             torch.empty(
                 (mix_hc, hc_dim),
@@ -1823,10 +1863,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 .view(-1, layer.hc_mult, layer.hidden_size)
                 .sum(dim=1)
             )
-            if layer.hc_attn_fn_broadcast is None:
-                layer.hc_attn_fn_broadcast = broadcast
-            else:
-                layer.hc_attn_fn_broadcast.copy_(broadcast)
+            set_derived_buffer(layer, "hc_attn_fn_broadcast", broadcast)
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:

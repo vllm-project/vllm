@@ -578,6 +578,11 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.use_td = td_override
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        if self.alibi_slopes is None:
+            return {}
+        return {"alibi_slopes": self.alibi_slopes}
+
     def forward(
         self,
         layer: torch.nn.Module,

@@ -75,7 +75,7 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, set_derived_buffer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
@@ -332,6 +332,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self.register_buffer(
             "_one_scale", torch.ones(1, dtype=torch.float32), persistent=False
         )
+        self.register_buffer("_q_scale_inv", None, persistent=False)
+        self.register_buffer("_k_scale_inv", None, persistent=False)
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(  # type: ignore[assignment]
@@ -464,12 +466,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # K3 has no runtime calculate_kv_scales path) so the fp8 fused kernels
         # in the decode/prefill hot path take a ready inverse instead of
         # launching a per-step reciprocal kernel.
-        self.register_buffer(
-            "_q_scale_inv", self._q_scale.reciprocal().reshape(1), persistent=False
-        )
-        self.register_buffer(
-            "_k_scale_inv", self._k_scale.reciprocal().reshape(1), persistent=False
-        )
+        set_derived_buffer(self, "_q_scale_inv", self._q_scale.reciprocal().reshape(1))
+        set_derived_buffer(self, "_k_scale_inv", self._k_scale.reciprocal().reshape(1))
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor) -> None:
         """Project latent attention output back to ``v`` via ``W_UV`` (bmm)."""

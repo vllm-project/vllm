@@ -86,6 +86,16 @@ class HadamardTransform(torch.nn.Module):
             # FUTURE: avoid runtime transpose by processing weights
             # prior to apply
 
+        # Partition tensors live outside the parameter registry and are shared
+        # between layers; register the shared tensor objects themselves.
+        shared = [
+            t
+            for t in self.weight.tensors_registry.values()
+            if t in self.weight.local_tensors
+        ]
+        for i, tensor in enumerate(shared):
+            self.register_buffer(f"shared_weight_{i}", tensor, persistent=False)
+
     def forward(self, value: Tensor, part_id: int = 0) -> Tensor:
         if part_id not in self.weight.partitions:
             return value

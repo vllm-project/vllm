@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import held_tensors
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
@@ -119,6 +120,15 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 device=self.device,
                 dtype=torch.float32,
             )
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(
+            self,
+            "gemm1_clamp_limit",
+            "gemm1_alpha",
+            "gemm1_beta",
+            "fake_input_scale",
+        )
 
     @property
     def expects_unquantized_inputs(self) -> bool:

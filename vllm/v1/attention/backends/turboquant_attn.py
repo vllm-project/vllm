@@ -31,6 +31,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
+from vllm.model_executor.utils import held_tensors
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
@@ -307,8 +309,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
     supports_quant_query_input: bool = False
 
-    # Lazily populated before cudagraph capture (FlyDSL decode path only).
     _arange_cache: torch.Tensor
+    # Lazily populated before cudagraph capture (FlyDSL decode path only).
     _cu_2: torch.Tensor
 
     def __init__(
@@ -406,32 +408,60 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             fa_version=self.fa_version,
         )
 
-    def _ensure_on_device(self, layer, device):
-        """One-time derivation of TQ buffers (rotation matrix, midpoints).
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        """Build the TQ constants (rotation matrix, centroids, midpoints).
 
         The Hadamard rotation is shared across all layers: random sign
         flips do not improve Lloyd-Max quantization quality because the
         quantizer is symmetric around zero (sign-flipping a coordinate
         maps it to the mirror centroid with identical distortion).
         """
+        if hasattr(self, "_tq_Pi"):
+            return
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
+        )
+        D = self.head_size
+
+        # Pure Hadamard: orthonormal + symmetric (H = H^T), enabling
+        # in-kernel butterfly fusion and trivial inverse for continuation.
+        H = _build_hadamard(D, str(device))
+        self._tq_PiT = H
+        self._tq_Pi = H
+        # fp16 copy for rotation in continuation prefill path
+        self._tq_Pi_half = H.to(torch.float16)
+
+        # Centroids for Lloyd-Max quantization.
+        self._tq_centroids = get_centroids(D, self.tq_config.centroid_bits).to(
+            device=device, dtype=torch.float32
+        )
+
+        c_sorted, _ = self._tq_centroids.sort()
+        self._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
+
+        if self._soa_store:
+            # Allocated before any CUDA graph capture: lazy allocation during
+            # graph replay lands in the HIP graph memory pool and yields stale
+            # addresses (GPU fault / garbage).
+            self._arange_cache = torch.arange(
+                0, self._max_model_len + 2, device=device, dtype=torch.int32
+            )
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        names = ["_tq_Pi", "_tq_Pi_half", "_tq_centroids", "_tq_midpoints"]
+        if self._soa_store:
+            names.append("_arange_cache")
+        return held_tensors(self, *names)
+
+    def _ensure_on_device(self, device):
         if self._soa_store:
             # CUDA-graph capture safety for the FlyDSL decode path on ROCm.
-            # (1) Pre-allocate _arange_cache / _cu_2 BEFORE any capture; lazy
-            #     allocation during graph replay lands in the HIP graph memory
-            #     pool and yields stale addresses (GPU fault / garbage).
+            # (1) Pre-allocate _cu_2 BEFORE any capture; lazy allocation
+            #     during graph replay lands in the HIP graph memory pool and
+            #     yields stale addresses (GPU fault / garbage).
             # (2) Pre-warm the WorkspaceManager to its max size before capture
             #     so mid-capture growth cannot invalidate pointers baked into
             #     already-captured batch sizes.
-            _max_len = self._max_model_len
-            _already_ok = (
-                hasattr(self, "_arange_cache")
-                and self._arange_cache.device.type == str(device).split(":")[0]
-                and self._arange_cache.shape[0] >= _max_len + 2
-            )
-            if not _already_ok:
-                self._arange_cache = torch.arange(
-                    0, _max_len + 2, device=device, dtype=torch.int32
-                )
             if not hasattr(self, "_cu_2") or self._cu_2.device != torch.device(device):
                 self._cu_2 = torch.zeros(2, device=device, dtype=torch.int32)
             if (
@@ -451,26 +481,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     current_workspace_manager().get_simultaneous(
                         ((_pre_warm_bytes,), torch.uint8)
                     )
-
-        if not hasattr(layer, "_tq_cached"):
-            D = self.head_size
-
-            # Pure Hadamard: orthonormal + symmetric (H = H^T), enabling
-            # in-kernel butterfly fusion and trivial inverse for continuation.
-            H = _build_hadamard(D, str(device))
-            layer._tq_PiT = H
-            layer._tq_Pi = H
-            # fp16 copy for rotation in continuation prefill path
-            layer._tq_Pi_half = H.to(torch.float16)
-
-            # Centroids for Lloyd-Max quantization.
-            layer._tq_centroids = get_centroids(D, self.tq_config.centroid_bits).to(
-                device=device, dtype=torch.float32
-            )
-
-            c_sorted, _ = layer._tq_centroids.sort()
-            layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
-            layer._tq_cached = True
 
     def _max_capture_batch_size(self) -> int:
         """Largest decode batch we might see at runtime (for workspace pre-warm).
@@ -513,8 +523,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         if N <= 0:
             return
 
-        device = key.device
-        self._ensure_on_device(layer, device)
+        self._ensure_on_device(key.device)
 
         k = key[:N].view(N, self.num_kv_heads, self.head_size)
         v = value[:N].view(N, self.num_kv_heads, self.head_size)
@@ -557,14 +566,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         q = query[:N].view(N, self.num_heads, self.head_size)
 
-        # Get TQ buffers, ensure on device (one-time migration).
-        # Use Any-typed alias for dynamic _tq_* attrs set by _ensure_on_device.
-        tq_layer: Any = layer
         device = q.device
-        self._ensure_on_device(tq_layer, device)
-        Pi = tq_layer._tq_Pi
-        PiT = tq_layer._tq_PiT
-        centroids = tq_layer._tq_centroids
+        self._ensure_on_device(device)
+        Pi = self._tq_Pi
+        PiT = self._tq_PiT
+        centroids = self._tq_centroids
 
         # Compute attention (KV cache was already updated by do_kv_cache_update)
         # With reorder_batch_threshold=1, decodes come first in the batch.
@@ -694,13 +700,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 value=value,
                 kv_cache=kv_cache,
                 slot_mapping=slot_mapping,
-                PiT=layer._tq_PiT,
-                midpoints=layer._tq_midpoints,
+                PiT=self._tq_PiT,
+                midpoints=self._tq_midpoints,
                 mse_bits=self.tq_config.key_mse_bits,
                 key_packed_size=self.tq_config.key_packed_size,
                 value_quant_bits=self.tq_config.effective_value_quant_bits,
                 key_fp8=self.tq_config.key_fp8,
-                centroids=layer._tq_centroids,
+                centroids=self._tq_centroids,
                 norm_correction=self.tq_config.norm_correction,
             )
             return
@@ -709,8 +715,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             value,
             kv_cache,
             slot_mapping,
-            layer._tq_PiT,
-            layer._tq_midpoints,
+            self._tq_PiT,
+            self._tq_midpoints,
             mse_bits=self.tq_config.key_mse_bits,
             key_packed_size=self.tq_config.key_packed_size,
             value_quant_bits=self.tq_config.effective_value_quant_bits,
@@ -1031,7 +1037,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Inverse-rotate MSE keys back to original space
         if not self.tq_config.key_fp8:
             # fp16 matmul for rotation (2× less bandwidth, uses fp16 tensor cores)
-            Pi_half = layer._tq_Pi_half
+            Pi_half = self._tq_Pi_half
             k_flat = k_cached[0, :, :cached_len, :].reshape(-1, D)
             k_flat = k_flat @ Pi_half
             k_cached_trim = k_flat.reshape(Hk, cached_len, D).transpose(

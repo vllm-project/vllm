@@ -20,6 +20,7 @@ from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
     RocmSparseAttnIndexer,
     RocmSparseMQAIndexer,
 )
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -698,8 +699,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self.wo_a.is_bmm = False
         self._has_kv_transfer = vllm_config.kv_transfer_config is not None
         # Block scale for the preshuffled weight; None = not preshuffled.
-        self._wqa_wkv_scale: torch.Tensor | None = None
-        self._wo_b_scale: torch.Tensor | None = None
+        self._wqa_wkv_scale: torch.Tensor | None
+        self.register_buffer("_wqa_wkv_scale", None, persistent=False)
+        self._wo_b_scale: torch.Tensor | None
+        self.register_buffer("_wo_b_scale", None, persistent=False)
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
@@ -762,8 +765,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             return ws
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        set_derived_buffer(self, "_wqa_wkv_scale", _prep(self.fused_wqa_wkv))
+        set_derived_buffer(self, "_wo_b_scale", _prep(self.wo_b))
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         # V4.1 derives index keys from the source compressor's emitted latent

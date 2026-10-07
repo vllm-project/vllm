@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
 )
+from vllm.model_executor.utils import held_tensors
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -83,6 +84,9 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self, "locks")
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -149,6 +153,9 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self, "locks")
 
     def apply_weights(
         self,

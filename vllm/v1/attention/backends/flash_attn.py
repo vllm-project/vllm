@@ -1228,6 +1228,11 @@ class FlashAttentionImpl(AttentionImpl):
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        if self.alibi_slopes is None:
+            return {}
+        return {"alibi_slopes": self.alibi_slopes}
+
     def forward(
         self,
         layer: torch.nn.Module,

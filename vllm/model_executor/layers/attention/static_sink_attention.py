@@ -9,6 +9,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -152,12 +153,12 @@ class StaticSinkAttention(Attention, CustomOp):
         )
         self.sink_len = sink_len
         self.sink_populated = False
-        self.sink_key = None
-        self.sink_value = None
+        self.register_buffer("sink_key", None, persistent=False)
+        self.register_buffer("sink_value", None, persistent=False)
 
     def update_sink_kv(self, sink_key, sink_value) -> None:
-        self.sink_key = sink_key
-        self.sink_value = sink_value
+        set_derived_buffer(self, "sink_key", sink_key)
+        set_derived_buffer(self, "sink_value", sink_value)
 
     def forward_native(
         self,

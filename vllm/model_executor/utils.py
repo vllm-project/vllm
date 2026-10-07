@@ -3,11 +3,13 @@
 """Utils for model executor."""
 
 import copy
+import dataclasses
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
 import torch
+from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -66,6 +68,122 @@ def set_weight_attrs(
         if current_platform.use_sync_weight_loader() and key == "weight_loader":
             value = current_platform.make_synced_weight_loader(value)
         setattr(weight, key, value)
+
+
+def set_derived_buffer(
+    module: torch.nn.Module, name: str, value: torch.Tensor | None
+) -> None:
+    """Write a weight-derived tensor into a pre-registered non-persistent
+    buffer, copying in place when the buffer already holds a tensor."""
+    if name not in module._buffers:
+        raise KeyError(name)
+    old = module._buffers[name]
+    if old is not None and value is not None:
+        if old.shape != value.shape or old.dtype != value.dtype:
+            raise ValueError(
+                f"cannot copy {tuple(value.shape)}/{value.dtype} into "
+                f"existing {tuple(old.shape)}/{old.dtype} buffer"
+            )
+        old.data.copy_(value)
+    else:
+        module._buffers[name] = value
+
+
+def register_constant_buffer(
+    module: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> None:
+    """Register a non-persistent constant that no checkpoint provides, so that
+    layerwise reload does not wait for it to be loaded."""
+    tensor.weight_loader_numel = 0  # type: ignore[attr-defined]
+    module.register_buffer(name, tensor, persistent=False)
+
+
+def storage_views(tensor: torch.Tensor) -> set[tuple]:
+    """The storage views behind ``tensor``, looking through traceable wrapper
+    subclasses (e.g. TorchAO) to the inner tensors that own storage."""
+    if is_traceable_wrapper_subclass(tensor):
+        names, _ = tensor.__tensor_flatten__()  # type: ignore[attr-defined]
+        return set().union(*(storage_views(getattr(tensor, n)) for n in names))
+    return {
+        (
+            tensor.untyped_storage().data_ptr(),
+            tensor.storage_offset(),
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            tensor.dtype,
+        )
+    }
+
+
+def register_held_tensors(model: torch.nn.Module) -> None:
+    """Register tensors held by non-module objects as buffers of their module.
+
+    Quant methods, kernels and attention impls are not modules, so tensors they
+    keep are invisible to ``named_buffers()`` (sleep mode, CUDA graph checks,
+    weight reload). Such an object lists them in ``persistent_tensors()``;
+    each one is registered on the module holding the object as the
+    non-persistent buffer ``_held_<attr>_<name>``, unless the model already
+    registers that view. Re-running it (e.g. after a reload) replaces every
+    ``_held_*`` buffer with the tensors the holders keep now.
+    """
+    held = [
+        (module, f"_held_{attr}_{name}", tensor)
+        for module in model.modules()
+        for attr, holder in list(vars(module).items())
+        if not isinstance(holder, torch.nn.Module)
+        and hasattr(type(holder), "persistent_tensors")
+        for name, tensor in holder.persistent_tensors().items()
+    ]
+    # A meta holder tensor (model built on meta, e.g. the IPC weight cache)
+    # keeps the buffer imported under its name.
+    keep = {(id(m), name) for m, name, tensor in held if tensor.is_meta}
+    for module in model.modules():
+        for name in [n for n in module._buffers if n.startswith("_held_")]:
+            if (id(module), name) not in keep:
+                del module._buffers[name]
+                module._non_persistent_buffers_set.discard(name)
+    registered: set[tuple] = set()
+    for t in (*model.parameters(), *model.buffers()):
+        registered |= storage_views(t)
+    for module, name, tensor in held:
+        if tensor.is_meta or storage_views(tensor) <= registered:
+            continue
+        module.register_buffer(name, tensor, persistent=False)
+        registered |= storage_views(tensor)
+
+
+def held_tensors(obj: object, *names: str) -> dict[str, torch.Tensor]:
+    """Default ``persistent_tensors()`` of a non-module holder.
+
+    Returns the tensor attributes ``names`` of ``obj`` plus, prefixed with the
+    attribute name, the persistent tensors of every non-module object ``obj``
+    holds (quant configs, kernels, experts).
+    """
+    tensors = {
+        name: value
+        for name in names
+        if isinstance(value := getattr(obj, name, None), torch.Tensor)
+    }
+    for attr, value in vars(obj).items():
+        if not isinstance(value, torch.nn.Module) and hasattr(
+            type(value), "persistent_tensors"
+        ):
+            for name, tensor in value.persistent_tensors().items():
+                tensors[f"{attr}_{name}"] = tensor
+    return tensors
+
+
+def dataclass_tensors(obj: Any, prefix: str = "") -> dict[str, torch.Tensor]:
+    """Tensors inside the (nested) dataclass ``obj``, named by field path."""
+    if isinstance(obj, torch.Tensor):
+        return {prefix: obj}
+    if not dataclasses.is_dataclass(obj) or isinstance(obj, type):
+        return {}
+    tensors: dict[str, torch.Tensor] = {}
+    for field in dataclasses.fields(obj):
+        path = f"{prefix}_{field.name}" if prefix else field.name
+        tensors |= dataclass_tensors(getattr(obj, field.name), path)
+    return tensors
 
 
 def replace_parameter(

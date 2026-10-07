@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import types
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from transformers import PreTrainedConfig
 from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
 from vllm.config.pooler import SequencePoolingType, TokenPoolingType
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.model_executor.utils import storage_views
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.tokenizers import cached_tokenizer_from_config
 
@@ -609,3 +611,85 @@ def dummy_hf_overrides(
         )
 
     return hf_config
+
+
+# Runtime state, not model state: attributes holding it are not walked by
+# `find_unregistered_tensors`.
+RUNTIME_STATE_ATTRS: dict[str, str] = {
+    "kv_cache": "KV cache / SSM state, bound by the model runner",
+    "_replayssm_ring_start": "per-step speculative SSM replay state",
+    "_replayssm_prev_num_accepted": "per-step speculative SSM replay state",
+    "_replayssm_prev_query_len": "per-step speculative SSM replay state",
+    "deepstack_input_embeds": "per-step multimodal staging buffer",
+    "per_layer_embeddings": "per-step staging buffer",
+    "topk_indices_buffer": "per-step sparse attention scratch",
+    "_topk_indices_buffer": "per-step sparse attention scratch",
+    "_workspace_buffer": "attention workspace",
+    "index_group": "per-step sparse indexer scratch",
+    "diffusion_states": "per-request diffusion decoding state",
+    "aot_compiled_fn": "torch.compile artifacts (example inputs)",
+}
+
+
+def find_unregistered_tensors(model: torch.nn.Module) -> list[str]:
+    """Paths of device tensors a model holds outside its parameters/buffers.
+
+    Walks every module's attributes, including tuples, lists, dicts and the
+    plain objects they hold (quant methods, kernels, attention impls). A
+    tensor counts as registered when its storage belongs to a parameter or
+    buffer of ``model``. Unregistered tensors are invisible to sleep mode,
+    CUDA graph address checks and weight reload.
+    """
+    registered = {
+        ptr
+        for t in (*model.parameters(), *model.buffers())
+        for ptr, *_ in storage_views(t)
+    }
+    modules = {id(m) for m in model.modules()}
+    found: list[str] = []
+    seen: set[int] = set()
+
+    def visit(value: Any, path: str) -> None:
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, torch.Tensor):
+            if value.device.type not in ("cpu", "meta") and any(
+                ptr not in registered for ptr, *_ in storage_views(value)
+            ):
+                found.append(
+                    f"{path}: {tuple(value.shape)} {value.dtype} {value.device}"
+                )
+        elif isinstance(value, torch.nn.Module):
+            if id(value) not in modules:
+                for name, t in (
+                    *value.named_parameters(),
+                    *value.named_buffers(),
+                ):
+                    visit(t, f"{path}.{name}")
+        elif isinstance(value, (tuple, list)):
+            for i, item in enumerate(value):
+                visit(item, f"{path}[{i}]")
+        elif isinstance(value, dict):
+            for key, item in list(value.items()):
+                visit(item, f"{path}[{key!r}]")
+        elif not isinstance(value, (type, types.ModuleType)) and isinstance(
+            getattr(value, "__dict__", None), dict
+        ):
+            # Configs reach other models' layers (e.g. a drafter's
+            # static_forward_context holds the target's attention layers).
+            owner = getattr(type(value), "__module__", None)
+            if isinstance(owner, str) and owner.startswith(
+                ("vllm.config", "transformers")
+            ):
+                return
+            for name, item in list(value.__dict__.items()):
+                if name not in RUNTIME_STATE_ATTRS:
+                    visit(item, f"{path}.{name}")
+
+    skip = {"_parameters", "_buffers", "_modules", *RUNTIME_STATE_ATTRS}
+    for module_name, module in model.named_modules():
+        for name, value in vars(module).items():
+            if name not in skip and not name.startswith("_forward_"):
+                visit(value, f"{module_name or '<root>'}.{name}")
+    return found

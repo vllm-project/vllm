@@ -40,6 +40,7 @@ from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.utils import register_constant_buffer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -496,9 +497,11 @@ class GraniteSpeechCTCEncoder(nn.Module):
         # Precompute clamped relative positional encoding distances
         seq = torch.arange(config.context_size)
         relpos_dist = seq.view(-1, 1) - seq.view(1, -1)
-        self.attention_dists = (
+        register_constant_buffer(
+            self,
+            "attention_dists",
             torch.clamp(relpos_dist, -config.context_size, config.context_size)
-            + config.max_pos_emb
+            + config.max_pos_emb,
         )
 
         self.input_linear = nn.Linear(config.input_dim, config.hidden_dim, bias=True)

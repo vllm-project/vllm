@@ -327,6 +327,11 @@ class RocmAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        if self.alibi_slopes is None:
+            return {}
+        return {"alibi_slopes": self.alibi_slopes}
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,

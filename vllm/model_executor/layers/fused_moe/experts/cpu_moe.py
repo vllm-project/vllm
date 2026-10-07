@@ -46,7 +46,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
     kMxfp4Static,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import held_tensors, replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.math_utils import round_up
 
@@ -1527,6 +1527,11 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
             else self.w2_bias.detach().to(torch.bfloat16).contiguous()
         )
         logger.info_once("[zen_cpu] Using zentorch_fused_moe for W8A8 INT8 MoE")
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(
+            self, "_w1_scale_f32", "_w2_scale_f32", "_w1_bias_bf16", "_w2_bias_bf16"
+        )
 
     @property
     def expects_unquantized_inputs(self) -> bool:

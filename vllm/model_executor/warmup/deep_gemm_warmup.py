@@ -126,8 +126,10 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not isinstance(module, MoERunner):
         return False
 
+    # Read the layer's config: building another can re-register derived
+    # parameters (e.g. g1_alphas) and orphan the ones the kernel holds.
     quant_method = module._quant_method
-    moe_quant_config = quant_method.get_fused_moe_quant_config(module.routed_experts)
+    moe_quant_config = quant_method.moe_quant_config
 
     if (
         moe_quant_config is None

@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import math
-from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import WhisperConfig
 from transformers.audio_utils import mel_filter_bank
+
+from vllm.model_executor.utils import register_constant_buffer
 
 from .audio_encoder import DotsSpeechEncoder
 
@@ -94,8 +95,7 @@ def pad_or_trim(array, length=N_SAMPLES, axis=-1):
     return array
 
 
-@lru_cache(maxsize=4)
-def _mel_filters(device, n_mels=128):
+def _mel_filters(n_mels=128):
     filters = mel_filter_bank(
         num_frequency_bins=1 + N_FFT // 2,
         num_mel_filters=n_mels,
@@ -105,21 +105,12 @@ def _mel_filters(device, n_mels=128):
         norm="slaney",
         mel_scale="slaney",
     )
-    return torch.from_numpy(filters).T.contiguous().float().to(device)
+    return torch.from_numpy(filters).T.contiguous().float()
 
 
-@lru_cache(maxsize=4)
-def _hann_window(device):
-    # Generate on CPU (default) then move, to preserve the exact reference
-    # window values. Direct on-device generation changes numerics slightly.
-    return torch.hann_window(N_FFT).to(device)
-
-
-def log_mel_spectrogram(audio, n_mels=128):
-    window = _hann_window(audio.device)
+def log_mel_spectrogram(audio, window, filters):
     stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
     magnitudes = stft[..., :-1].abs() ** 2
-    filters = _mel_filters(audio.device, n_mels)
     mel_spec = filters @ magnitudes
     log_spec = torch.clamp(mel_spec, min=1e-10).log10()
     log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
@@ -127,11 +118,9 @@ def log_mel_spectrogram(audio, n_mels=128):
     return log_spec
 
 
-def batched_log_mel_spectrogram(audio, n_mels=128):
-    window = _hann_window(audio.device)
+def batched_log_mel_spectrogram(audio, window, filters):
     stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
     magnitudes = stft[..., :-1].abs() ** 2
-    filters = _mel_filters(audio.device, n_mels)
     mel_spec = filters @ magnitudes
     log_spec = torch.clamp(mel_spec, min=1e-10).log10()
     log_spec = torch.maximum(log_spec, log_spec.amax(dim=(-2, -1), keepdim=True) - 8.0)
@@ -182,6 +171,18 @@ class DotsEncoderWithMask(nn.Module):
         self.chunk_samples = config.chunk_samples
         self.chunk_mel_frames = config.chunk_mel_frames
         self.conv_temporal_stride = config.conv_temporal_stride
+
+        # float32 STFT constants, filled by init_stft_constants after the
+        # tower's dtype cast (which would otherwise cast them too).
+        self.register_buffer("mel_filters", None, persistent=False)
+        self.register_buffer("hann_window", None, persistent=False)
+
+    def init_stft_constants(self) -> None:
+        register_constant_buffer(self, "mel_filters", _mel_filters().to(self.device))
+        # Generate on CPU then move, to preserve the exact reference window
+        # values. Direct on-device generation changes numerics slightly.
+        window = torch.hann_window(N_FFT, dtype=torch.float32, device="cpu")
+        register_constant_buffer(self, "hann_window", window.to(self.device))
 
     @property
     def device(self):
@@ -243,7 +244,7 @@ class DotsEncoderWithMask(nn.Module):
                 HOP_LENGTH * self.conv_temporal_stride * self.merge_factor
             ) + 1
             pad_audio = pad_or_trim(audio_segment.flatten(), length=self.chunk_samples)
-            mel = log_mel_spectrogram(pad_audio)
+            mel = log_mel_spectrogram(pad_audio, self.hann_window, self.mel_filters)
             assert mel.shape[1] == self.chunk_mel_frames
             mel_features.append(mel)
             token_lens.append(token_len)
@@ -290,7 +291,9 @@ class DotsEncoderWithMask(nn.Module):
                 time_step += self.chunk_seconds
             audio_segment_counts.append(segment_count)
 
-        mel_features = batched_log_mel_spectrogram(torch.stack(padded_segments))
+        mel_features = batched_log_mel_spectrogram(
+            torch.stack(padded_segments), self.hann_window, self.mel_filters
+        )
         assert mel_features.shape[-1] == self.chunk_mel_frames
         input_seq_lens = (
             torch.tensor(segment_token_lengths, dtype=torch.long) * self.merge_factor

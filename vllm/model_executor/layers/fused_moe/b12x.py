@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import dataclass_tensors, replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.b12x import (
     B12xWarmupUnit,
@@ -376,6 +376,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             self._plans.clear()
         self._prepared_experts = prepared
         layer._b12x_prepared_experts = prepared
+        for name, tensor in dataclass_tensors(prepared, "_b12x_prepared").items():
+            layer.register_buffer(name, tensor, persistent=False)
         return prepared
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

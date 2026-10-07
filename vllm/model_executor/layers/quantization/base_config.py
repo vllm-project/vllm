@@ -10,6 +10,8 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
+from vllm.model_executor.utils import held_tensors
+
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.online.base import (
@@ -90,6 +92,12 @@ class QuantizeMethodBase(ABC):
             f"The quantization method {type(self)} does not implement "
             "dequantize_weight. Please open an issue."
         )
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        """Device tensors kept outside the layer's parameters and buffers,
+        including those of held quant configs and kernels. Registered on the
+        layer after loading by ``register_held_tensors``."""
+        return held_tensors(self)
 
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:

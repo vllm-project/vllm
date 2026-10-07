@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     quant_key_to_input_schema,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp6E2M3Static
+from vllm.model_executor.utils import held_tensors
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -67,6 +68,9 @@ class HummingMxFp6LinearKernel(MxFp6LinearKernel):
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self, "locks")
 
     def apply_weights(
         self,

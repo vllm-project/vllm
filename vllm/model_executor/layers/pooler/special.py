@@ -5,6 +5,7 @@ from collections.abc import Mapping, Set
 from itertools import groupby
 
 import torch
+from torch import nn
 
 from vllm.config import PoolerConfig
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
@@ -67,6 +68,15 @@ class DispatchPooler(Pooler):
                 )
 
         self.poolers_by_task = poolers_by_task
+        # Sub-poolers can hold modules owned elsewhere (e.g. a classifier), so
+        # only their ST projectors join the module tree.
+        projectors = (
+            getattr(getattr(pooler, "head", None), "projector", None)
+            for pooler in poolers_by_task.values()
+        )
+        self.projectors = nn.ModuleList(
+            dict.fromkeys(p for p in projectors if isinstance(p, nn.Module))
+        )
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return set(self.poolers_by_task)

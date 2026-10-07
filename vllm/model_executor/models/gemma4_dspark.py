@@ -20,6 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
@@ -203,6 +204,13 @@ class Gemma4DSparkModel(DFlashQwen3Model):
                 bias=True,
                 with_markov=with_markov,
             )
+        for name in (
+            "_fused_k_weight",
+            "_fused_k_bias",
+            "_k_norm_weights",
+            "_v_norm_weights",
+        ):
+            self.register_buffer(name, None, persistent=False)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids) * self.normalizer
@@ -228,20 +236,22 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         self, layers_attn: list[nn.Module], has_bias: bool
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
-        self._fused_k_weight = torch.cat([a.k_proj.weight for a in layers_attn], dim=0)
-        self._fused_k_bias: torch.Tensor | None = (
-            torch.cat([a.k_proj.bias for a in layers_attn], dim=0) if has_bias else None
+        set_derived_buffer(
+            self,
+            "_fused_k_weight",
+            torch.cat([a.k_proj.weight for a in layers_attn], dim=0),
         )
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        set_derived_buffer(
+            self,
+            "_fused_k_bias",
+            torch.cat([a.k_proj.bias for a in layers_attn], dim=0)
+            if has_bias
+            else None,
+        )
+        k_norm_weights = torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0)
+        set_derived_buffer(self, "_k_norm_weights", k_norm_weights)
         # v_norm has no learnable scale; ones matching the K-norm call shape.
-        self._v_norm_weights = torch.ones(
-            len(layers_attn),
-            layers_attn[0].head_dim,
-            dtype=self._k_norm_weights.dtype,
-            device=self._k_norm_weights.device,
-        )
+        set_derived_buffer(self, "_v_norm_weights", torch.ones_like(k_norm_weights))
 
     def _project_context_kv(
         self,

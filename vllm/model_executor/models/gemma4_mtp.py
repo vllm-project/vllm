@@ -44,6 +44,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
@@ -468,7 +469,9 @@ class Gemma4MTP(nn.Module):
         text_config = _get_text_config(config)
         self.quant_config = get_draft_quant_config(vllm_config)
         self.config = config
-        self._stable_full_lm_head_weight: torch.Tensor | None = None
+        self._stable_full_lm_head_weight: torch.Tensor | None
+        self.register_buffer("_stable_full_lm_head_weight", None, persistent=False)
+        self._full_lm_head_stale = True
 
         self.model = Gemma4MultiTokenPredictor(
             vllm_config=vllm_config,
@@ -520,7 +523,8 @@ class Gemma4MTP(nn.Module):
         # Materialized on-device in load_weights: compute_logits runs under CUDA
         # graph capture in the V2 speculator, where indexing with a Python list
         # would issue an unpinned H2D copy (illegal during capture).
-        self._suppress_idx: torch.Tensor | None = None
+        self._suppress_idx: torch.Tensor | None
+        self.register_buffer("_suppress_idx", None, persistent=False)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -545,7 +549,7 @@ class Gemma4MTP(nn.Module):
         )
 
     def _get_full_lm_head_weight(self) -> torch.Tensor:
-        if self._stable_full_lm_head_weight is not None:
+        if not self._full_lm_head_stale:
             return self._stable_full_lm_head_weight
         assert self.masked_embedding is not None
         lm_head_weight = self.lm_head.weight
@@ -558,7 +562,8 @@ class Gemma4MTP(nn.Module):
         lm_head_weight = lm_head_weight[: self.masked_embedding.vocab_size]
         if tp_size > 1:
             lm_head_weight = lm_head_weight.contiguous()
-            self._stable_full_lm_head_weight = lm_head_weight
+            set_derived_buffer(self, "_stable_full_lm_head_weight", lm_head_weight)
+            self._full_lm_head_stale = False
         return lm_head_weight
 
     def compute_logits(
@@ -589,13 +594,17 @@ class Gemma4MTP(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        self._stable_full_lm_head_weight = None
+        self._full_lm_head_stale = True
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         if self._suppress_token_ids:
-            self._suppress_idx = torch.tensor(
-                self._suppress_token_ids,
-                dtype=torch.long,
-                device=next(self.parameters()).device,
+            set_derived_buffer(
+                self,
+                "_suppress_idx",
+                torch.tensor(
+                    self._suppress_token_ids,
+                    dtype=torch.long,
+                    device=next(self.parameters()).device,
+                ),
             )
         return loaded

@@ -8,7 +8,7 @@ import torch
 __all__ = ["LayerTensors", "LayerReloadingInfo"]
 
 # encodes both parameters and buffers separately
-LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | None]]
 
 
 @dataclass

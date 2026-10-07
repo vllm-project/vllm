@@ -303,6 +303,14 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._w_uk_packed = torch.ops._C.convert_weight_packed(w_uk_for_bmm)
         self._w_uv_packed = torch.ops._C.convert_weight_packed(w_uv_for_bmm)
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        tensors = {
+            "_w_uk_packed": self._w_uk_packed,
+            "_w_uv_packed": self._w_uv_packed,
+            "_w_scale": self._w_scale,
+        }
+        return {name: t for name, t in tensors.items() if t is not None}
+
     def do_kv_cache_update(
         self,
         kv_c_normed: torch.Tensor,

@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import held_tensors
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
@@ -188,6 +189,9 @@ class FusedMoEPrepareAndFinalize(ABC):
     * FusedMoEPrepareAndFinalizeModular - this operates on topk ids and weights
     * FusedMoEPrepareAndFinalizeMonolithic - the operates on router_logits
     """
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self)
 
     def post_init_setup(self, fused_experts: "FusedMoEExperts"):
         """Initialize FusedMoEPrepareAndFinalizeModular settings that depend on
@@ -514,6 +518,11 @@ class FusedMoEExperts(ABC):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        """Device tensors these experts keep (constants, derived scales), plus
+        those of their quant config and wrapped experts."""
+        return held_tensors(self)
 
     @staticmethod
     def is_monolithic() -> bool:
@@ -1644,6 +1653,9 @@ class FusedMoEKernel:
             )
 
         self._post_init_setup()
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self.impl)
 
     @property
     def can_overlap_shared_experts(self) -> bool:

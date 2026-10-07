@@ -12,6 +12,7 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.model_executor.utils import register_constant_buffer
 
 logger = init_logger(__name__)
 
@@ -60,9 +61,11 @@ class RMSNorm(CustomOp):
         )
         weight_dtype = dtype or torch.get_default_dtype()
         self.has_weight = has_weight
-        self.weight = torch.ones(hidden_size, dtype=weight_dtype)
+        weight = torch.ones(hidden_size, dtype=weight_dtype)
         if self.has_weight:
-            self.weight = nn.Parameter(self.weight)
+            self.weight = nn.Parameter(weight)
+        else:
+            register_constant_buffer(self, "weight", weight)
 
         # When has_weight=False, pass weight=None so implementations that
         # support a weightless path can skip the per-channel multiply.

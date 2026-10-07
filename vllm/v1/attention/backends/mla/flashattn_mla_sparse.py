@@ -200,6 +200,9 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         )
         self.supports_quant_query_input = False
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return {"cu_seqlens_q_buffer": self.cu_seqlens_q_buffer}
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],

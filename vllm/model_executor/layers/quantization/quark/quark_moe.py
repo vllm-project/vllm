@@ -105,7 +105,11 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
     per_tensor_dequantize,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    dataclass_tensors,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -1830,6 +1834,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w2_weight = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
+            # Register the torch storage behind the triton_kernels wrappers.
+            for name, tensor in (
+                dataclass_tensors(w13, "_w13_weight")
+                | dataclass_tensors(w2, "_w2_weight")
+            ).items():
+                layer.register_buffer(name, tensor, persistent=False)
         else:
             # Standard backends: replace parameters
             replace_parameter(layer, "w13_weight", w13)

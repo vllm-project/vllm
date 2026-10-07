@@ -28,6 +28,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.multimodal.inputs import NestedTensors
 
 from .laguna import LagunaDecoderLayer
@@ -151,27 +152,43 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
+        for name in (
+            "_kv_weights",
+            "_kv_biases",
+            "_input_layernorm_weights",
+            "_k_norm_weights",
+        ):
+            self.register_buffer(name, None, persistent=False)
 
     def _build_context_kv_buffers(
         self,
         layers_attn: list[nn.Module],
         has_bias: bool,
     ) -> None:
-        self._kv_weights = torch.stack(
-            [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
-        ).contiguous()
-        if has_bias:
-            self._kv_biases: torch.Tensor | None = torch.stack(
-                [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
-            ).contiguous()
-        else:
-            self._kv_biases = None
-        self._input_layernorm_weights = torch.stack(
-            [layer.input_layernorm.weight.data for layer in self.layers], dim=0
-        ).contiguous()
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        set_derived_buffer(
+            self,
+            "_kv_weights",
+            torch.stack([a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0),
+        )
+        set_derived_buffer(
+            self,
+            "_kv_biases",
+            torch.stack([a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0)
+            if has_bias
+            else None,
+        )
+        set_derived_buffer(
+            self,
+            "_input_layernorm_weights",
+            torch.stack(
+                [layer.input_layernorm.weight.data for layer in self.layers], dim=0
+            ),
+        )
+        set_derived_buffer(
+            self,
+            "_k_norm_weights",
+            torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0),
+        )
 
     def _project_context_kv(
         self,
@@ -265,6 +282,11 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.draft_vocab_size)
+
+    def process_weights_after_loading(self) -> None:
+        # Dummy and IPC loading skip load_weights, which builds these buffers.
+        if not hasattr(self.model, "_num_attn_layers"):
+            self.model._build_fused_kv_buffers()
 
     def embed_input_ids(
         self,
