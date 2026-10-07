@@ -51,6 +51,7 @@ def _run(block_table, cu_num_tokens, kernel_block_size, out_len, device):
         block_table.stride(0),
         block_table.stride(1),
         cu_num_tokens,
+        cu_num_tokens[1:] - cu_num_tokens[:-1],
         KERNEL_BLOCK_SIZE=kernel_block_size,
         BLOCK_SIZE=1024,
     )
@@ -109,6 +110,7 @@ def test_ragged_batch_leaves_other_rows_untouched():
         bt.stride(0),
         bt.stride(1),
         cu,
+        cu[1:] - cu[:-1],
         KERNEL_BLOCK_SIZE=kbs,
         BLOCK_SIZE=1024,
     )
@@ -153,7 +155,47 @@ def test_over_provisioned_chunks_do_not_change_result():
             bt.stride(0),
             bt.stride(1),
             cu,
+            cu[1:] - cu[:-1],
             KERNEL_BLOCK_SIZE=kbs,
             BLOCK_SIZE=1024,
         )
         torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("kernel_block_size", [1, 16])
+def test_clamp_tail_covers_padding_past_the_block_table_width(kernel_block_size):
+    """Adaptive varlen verify pads each request's page list by
+    max_qo_len - qo_len entries that repeat its first page. A full-width
+    request then runs past block_table.shape[1] * kernel_block_size, so the
+    grid has to cover max_qo_len - 1 extra entries."""
+    kbs = kernel_block_size
+    max_qo_len = 8
+    width = 1024 // kbs
+    torch.manual_seed(0)
+    bt = torch.randint(0, 10_000, (2, width), dtype=torch.int64, device="cuda")
+    real = torch.tensor([width * kbs, 5], dtype=torch.int64, device="cuda")
+    qo_lens = torch.tensor([1, max_qo_len], dtype=torch.int64, device="cuda")
+    padded = real + (max_qo_len - qo_lens)
+    cu = torch.zeros(3, dtype=torch.int64, device="cuda")
+    cu[1:] = padded.cumsum(0)
+    total = int(cu[-1])
+    out = torch.full((total,), -1, dtype=torch.int64, device="cuda")
+    num_chunks = -(-(width * kbs + max_qo_len - 1) // 1024)
+    _expand_page_indices_kernel[(2, num_chunks)](
+        out,
+        bt,
+        bt.stride(0),
+        bt.stride(1),
+        cu,
+        real,
+        KERNEL_BLOCK_SIZE=kbs,
+        BLOCK_SIZE=1024,
+        CLAMP_TAIL=True,
+    )
+    want = []
+    for r in range(2):
+        for t in range(int(padded[r])):
+            src = t if t < int(real[r]) else 0
+            want.append(int(bt[r, src // kbs]) * kbs + src % kbs)
+    assert out.tolist() == want
