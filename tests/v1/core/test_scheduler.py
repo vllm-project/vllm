@@ -873,6 +873,23 @@ def test_long_prefill_threshold_ignored_when_alone():
 
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[request.request_id] == 1024
+    # The engine must not schedule ahead of this uncapped chunk.
+    assert output.has_uncapped_lone_prefill
+
+
+def test_long_prefill_threshold_short_step_keeps_schedule_ahead():
+    """A lone request whose chunk stays within the threshold does not block
+    scheduling the next batch behind it."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+    )
+    request = create_requests(num_requests=1, num_tokens=300)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 300
+    assert not output.has_uncapped_lone_prefill
 
 
 def test_long_prefill_threshold_applies_with_other_requests():
@@ -889,6 +906,7 @@ def test_long_prefill_threshold_applies_with_other_requests():
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[long_req.request_id] == 400
     assert output.num_scheduled_tokens[short_req.request_id] == 10
+    assert not output.has_uncapped_lone_prefill
 
 
 def test_long_prefill_threshold_floored_by_fair_share():
@@ -909,6 +927,8 @@ def test_long_prefill_threshold_floored_by_fair_share():
     # 100 is below the fair share (1024 // 2 = 512), so the floor binds.
     assert output.num_scheduled_tokens[long_req.request_id] == 512
     assert output.num_scheduled_tokens[short_req.request_id] == 10
+    # The exemption never fired, so schedule-ahead stays on.
+    assert not output.has_uncapped_lone_prefill
 
 
 def test_update_from_output_routes_sampling_masks_by_request():
