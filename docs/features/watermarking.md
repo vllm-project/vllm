@@ -51,9 +51,9 @@ edits because an insertion, deletion, or substitution changes more subsequent
 contexts for all algorithms. Values above 16 are allowed and trigger a warning.
 
 `allow_target_only_watermarking` defaults to false and only has an effect when
-speculative decoding is enabled. It permits target-only watermarking for
-algorithms without native speculative-decoding support, at the cost of weaker
-detectability. See [Speculative decoding](#speculative-decoding).
+speculative decoding is enabled. It permits target-only Gumbel-max watermarking
+at the cost of weaker detectability. See
+[Speculative decoding](#speculative-decoding).
 
 ## Architecture
 
@@ -104,10 +104,8 @@ draft tokens unwatermarked while watermarking target-side rejection recovery
 and bonus sampling. The signal is diluted in proportion to the share of output
 tokens supplied by accepted drafts.
 
-For `synthid_text`, set `"allow_target_only_watermarking": true` to leave
-accepted draft tokens unwatermarked while applying SynthID-Text to target-side
-rejection recovery and bonus sampling. Native watermarking of draft tokens is
-not currently supported.
+SynthID-Text does not support speculative decoding, including target-only
+watermarking, and is rejected before model loading.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
@@ -150,10 +148,9 @@ longer. A smaller value reduces scanning cost but only provides the guarantee
 within that window. Set it to `null` to search back to the start of the
 generation for `"single_turn"`, or of the request for `"all"`; an unbounded
 search costs more as the sequence grows. The setting has no effect when
-`deduplicate_contexts` is `"none"`. For Gumbel-max algorithms, disabling
-deduplication or setting a value below 1,024 emits a warning about degenerate
-generations, including repetition loops. A short window can miss contexts
-that recur farther apart.
+`deduplicate_contexts` is `"none"`. Disabling deduplication or setting a
+value below 1,024 emits a warning about degenerate generations, including
+repetition loops. A short window can miss contexts that recur farther apart.
 
 For example, this checks prompt and completion history within the default
 8,192-position window:
