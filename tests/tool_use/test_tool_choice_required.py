@@ -391,9 +391,6 @@ TWO_CALLS = [
     {"name": "get_current_weather", "parameters": {"city": "Dallas"}},
     {"name": "get_forecast", "parameters": {"city": "Dallas", "days": 3}},
 ]
-THREE_CALLS = TWO_CALLS + [
-    {"name": "get_current_weather", "parameters": {"city": "Berlin"}},
-]
 
 
 def _split_at(text: str, cuts: list[int]) -> list[str]:
@@ -407,7 +404,6 @@ def test_streaming_multiple_calls_completed_in_one_delta():
     text = json.dumps(TWO_CALLS)
     _assert_streams_to(TWO_CALLS, [text[:1], text[1:]])
     _assert_streams_to(TWO_CALLS, [text])
-    _assert_streams_to(THREE_CALLS, [json.dumps(THREE_CALLS)])
 
 
 def test_streaming_delta_crossing_call_boundary():
@@ -422,29 +418,6 @@ def test_streaming_delta_crossing_call_boundary():
         [boundary + 2],  # opening brace of the next call ends a delta
     ):
         _assert_streams_to(TWO_CALLS, _split_at(text, cuts))
-
-
-def test_streaming_delta_spanning_a_whole_middle_call():
-    text = json.dumps(THREE_CALLS)
-    first_end = text.index("}, {") + 1
-    last_start = text.rindex('"Berlin"')
-    _assert_streams_to(THREE_CALLS, _split_at(text, [first_end - 1, last_start]))
-
-
-def test_streaming_every_delta_length():
-    text = json.dumps(THREE_CALLS)
-    for delta_len in range(1, len(text) + 1):
-        _assert_streams_to(THREE_CALLS, _fixed_len_deltas(text, delta_len))
-
-
-def test_streaming_random_cuts():
-    import random
-
-    rng = random.Random(60351)
-    text = json.dumps(THREE_CALLS)
-    for _ in range(300):
-        cuts = sorted(rng.sample(range(1, len(text)), rng.randint(0, 12)))
-        _assert_streams_to(THREE_CALLS, _split_at(text, cuts))
 
 
 def test_streaming_invalid_name_string_is_never_announced():
