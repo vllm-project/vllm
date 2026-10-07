@@ -450,7 +450,6 @@ def unified_attention_diffkv(
         and head_size_qk == 192
         and head_size_v == 128
         and q.dtype == torch.bfloat16
-        and k.dtype == torch.bfloat16
         and not is_batch_invariant
         and current_platform.is_cuda()
         and current_platform.is_device_capability_family(120)
