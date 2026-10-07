@@ -1128,12 +1128,12 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     elif linear_backend == "auto" and use_a16:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
-        # Weight-only: prefer FlashInfer CuTe-DSL W4A16 on SM100/103/107,
+        # Weight-only: prefer FlashInfer CuTe-DSL W4A16 on SM100/103,
         # Humming then Marlin where Humming is preferred, and Marlin elsewhere.
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
-        if compute_capability in (100, 103, 107) and cutedsl_ok:
+        if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         elif not prefers_humming(compute_capability):
             force_kernel = MarlinNvFp4LinearKernel
