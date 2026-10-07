@@ -691,6 +691,50 @@ def test_engine_reasoning_no_tool_batched_holdback_not_dropped(
     assert len(tool_calls) == 0
 
 
+@pytest.mark.parametrize(
+    ("text_chunks", "include_reasoning", "expected_content"),
+    [
+        # The delta that ends reasoning is also the last one: the held-back
+        # "<" must be emitted exactly once (the end-of-stream flush skips the
+        # reasoning parser once reasoning has ended).
+        (["<think>let me think</think>a <"], True, "a <"),
+        # Whitespace-only content after the marker at the end of the stream.
+        (["<think>let me think</think>\n\n"], True, "\n\n"),
+        # Hiding reasoning must not hide the flushed content.
+        (["<think>let me think</think>\n\n", "<b>bold</b>"], False, "\n\n<b>bold</b>"),
+    ],
+)
+def test_engine_reasoning_no_tool_holdback_finished_and_hidden_reasoning(
+    tokenizer, text_chunks, include_reasoning, expected_content
+):
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        include_reasoning=include_reasoning,
+    )
+    parser = Qwen3ReasoningNoToolParser(tokenizer)
+    chunks = [tokenizer.encode(t, add_special_tokens=False) for t in text_chunks]
+
+    results: list[DeltaMessage | None] = []
+    prompt_token_ids: list[int] | None = []
+    for i, chunk in enumerate(chunks):
+        results.append(
+            parser.parse_delta(
+                tokenizer.decode(chunk),
+                chunk,
+                request,
+                prompt_token_ids=prompt_token_ids,
+                finished=i == len(chunks) - 1,
+            )
+        )
+        prompt_token_ids = None
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert reasoning == ("let me think" if include_reasoning else "")
+    assert content == expected_content
+    assert len(tool_calls) == 0
+
+
 def _decode_stream_deltas(tokenizer, groups):
     """Decode token-ID groups into ``(delta_text, group)`` pairs via the real
     incremental ``DecodeStream``.

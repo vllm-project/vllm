@@ -904,10 +904,14 @@ class DelegatingParser(Parser):
                     (delta_message.content if delta_message else None) or ""
                 ) + ((flush_delta.content if flush_delta else None) or "")
                 if self._engine_based:
-                    if delta_message and self._tool_parser is not None:
-                        delta_message.content = None
-                    elif self._tool_parser is None and current_text:
-                        # No tool phase follows to consume the flushed text.
+                    if self._tool_parser is not None:
+                        # The tool-call phase below consumes current_text.
+                        if delta_message:
+                            delta_message.content = None
+                    elif current_text:
+                        # No tool phase follows to consume the flushed text,
+                        # and the engine is not fed again after the
+                        # transition, so emit it as content here.
                         if delta_message is None:
                             delta_message = DeltaMessage()
                         delta_message.content = current_text
