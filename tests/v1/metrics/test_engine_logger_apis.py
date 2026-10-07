@@ -3,12 +3,14 @@
 import copy
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 from tests.plugins.vllm_add_dummy_stat_logger.dummy_stat_logger.dummy_stat_logger import (  # noqa E501
     DummyStatLogger,
 )
 from tests.utils import wait_for_memory_to_settle
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
+from vllm.v1.metrics.loggers import MultiprocessCounter
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
 
 
@@ -23,6 +25,33 @@ def log_stats_enabled_engine_args():
         disable_log_stats=False,
         enforce_eager=True,
     )
+
+
+@pytest.mark.cpu_test
+def test_zero_counter_increment_keeps_initialized_series_and_validation():
+    registry = CollectorRegistry()
+    counter = MultiprocessCounter("requests", "Requests", ["engine"], registry=registry)
+    labeled = counter.labels("0")
+    assert registry.get_sample_value("requests_total", {"engine": "0"}) == 0
+    labeled.inc(0)
+    assert registry.get_sample_value("requests_total", {"engine": "0"}) == 0
+    labeled.inc(0.5)
+    labeled.inc(0)
+    assert registry.get_sample_value("requests_total", {"engine": "0"}) == 0.5
+    assert registry.get_sample_value("requests_total", {"engine": "1"}) is None
+    with pytest.raises(ValueError, match="missing label values"):
+        counter.inc(0)
+
+
+@pytest.mark.cpu_test
+def test_zero_counter_increment_keeps_exemplar():
+    counter = MultiprocessCounter("requests", "Requests", registry=CollectorRegistry())
+    counter.inc(0, exemplar={"trace_id": "abc"})
+    sample = next(s for s in counter.collect()[0].samples if s.name == "requests_total")
+    assert sample.value == 0
+    assert sample.exemplar is not None
+    assert sample.exemplar.value == 0
+    assert sample.exemplar.labels == {"trace_id": "abc"}
 
 
 @pytest.mark.asyncio

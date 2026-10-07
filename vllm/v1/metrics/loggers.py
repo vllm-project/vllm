@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import Counter, Gauge, Histogram, values
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphLogging
@@ -464,6 +464,14 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
             per_engine_stat_logger.log_engine_initialized()
 
 
+class MultiprocessCounter(Counter):
+    def inc(self, amount: float = 1, exemplar: dict[str, str] | None = None) -> None:
+        if amount == 0 and exemplar is None:
+            self._raise_if_not_observable()
+            return
+        Counter.inc(self, amount, exemplar)
+
+
 class PrometheusStatLogger(AggregateStatLoggerBase):
     _gauge_cls = Gauge
     _counter_cls = Counter
@@ -480,6 +488,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             engine_indexes = [0]
 
         self.engine_indexes = engine_indexes
+
+        if self._counter_cls is Counter and values.ValueClass._multiprocess:
+            self._counter_cls = MultiprocessCounter
 
         unregister_vllm_metrics()
         self.vllm_config = vllm_config
