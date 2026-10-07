@@ -10,9 +10,28 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .op import exp, log
+
+# Launch configs for the packed decode kernel, per ROCm arch (gfx1100, gfx1201) and SSM state element
+# size in bytes (2: bf16/fp16, 4: fp32): (max_batch, BV, num_warps, waves_per_eu)
+# rows, first match wins; waves_per_eu=0 leaves the Triton default.
+_PACKED_DECODE_LAUNCH_CONFIGS: dict[int, tuple[tuple[int, int, int, int], ...]] = {}
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1100, on_gfx1201
+
+    if on_gfx1100():
+        _PACKED_DECODE_LAUNCH_CONFIGS = {
+            2: ((4, 16, 2, 0), (2**31 - 1, 8, 2, 2)),
+            4: ((2, 8, 1, 0), (2**31 - 1, 32, 8, 2)),
+        }
+    elif on_gfx1201():
+        _PACKED_DECODE_LAUNCH_CONFIGS = {
+            2: ((1, 8, 2, 0), (63, 8, 2, 2), (2**31 - 1, 8, 4, 0)),
+            4: ((1, 8, 1, 0), (2**31 - 1, 8, 2, 2)),
+        }
 
 
 @triton.heuristics(
@@ -441,6 +460,15 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     BV = min(triton.next_power_of_2(V), 32)
     num_stages = 3
     num_warps = 1
+    extra_launch_kwargs = {}
+    for max_batch, cfg_bv, cfg_warps, cfg_wpe in _PACKED_DECODE_LAUNCH_CONFIGS.get(
+        initial_state.element_size(), ()
+    ):
+        if B <= max_batch:
+            BV, num_warps = min(cfg_bv, triton.next_power_of_2(V)), cfg_warps
+            if cfg_wpe:
+                extra_launch_kwargs["waves_per_eu"] = cfg_wpe
+            break
 
     stride_mixed_qkv_tok = mixed_qkv.stride(0)
     stride_a_tok = a.stride(0)
@@ -481,6 +509,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
         num_warps=num_warps,
         num_stages=num_stages,
+        **extra_launch_kwargs,
     )
     return out, initial_state
 
