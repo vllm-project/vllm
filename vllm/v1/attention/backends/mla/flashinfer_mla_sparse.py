@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer sparse MLA attention backend."""
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
-
-import os
 
 import torch
 
@@ -564,9 +563,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # AttentionImplBase.__new__, both BEFORE this point (super().__init__ above).
         # For dcp>1 this deliberately OVER-sizes vs the dense sibling (which uses
         # runtime_num_heads); that is REQUIRED so the buffer never grows after capture.
-        self._mla_counter_max_heads: int = self.num_heads * max(
-            1, self.dcp_world_size
-        )
+        self._mla_counter_max_heads: int = self.num_heads * max(1, self.dcp_world_size)
         self._mla_counter_bytes: int | None = None
 
         # Feature toggle: persist FlashInfer's multi-CTA-KV counter buffer across
@@ -823,9 +820,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # we NEVER forward backend="cute-dsl" here. We only use the tileability
         # check to decide whether a trtllm-gen runner can consume our persistent
         # multi-CTA-KV counter buffer.
-        heads_tileable = _trtllm_gen_mla_decode_supports_num_heads(
-            runtime_num_heads
-        )
+        heads_tileable = _trtllm_gen_mla_decode_supports_num_heads(runtime_num_heads)
         if (
             self._persistent_mla_counter_enabled
             and _FI_HAS_MULTI_CTAS_COUNTER_API
@@ -841,9 +836,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                     get_device_sm_count(q.device),  # noqa: F821
                 )
             extra_kwargs["multi_ctas_kv_counter_buffer"] = (
-                _get_multi_ctas_kv_counter_buffer(
-                    self._mla_counter_bytes, q.device
-                )
+                _get_multi_ctas_kv_counter_buffer(self._mla_counter_bytes, q.device)
             )
             logger.info_once(
                 "FlashInfer sparse MLA: page size %d, num_heads %d -> "
