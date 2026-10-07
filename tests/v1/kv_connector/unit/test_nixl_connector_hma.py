@@ -1795,13 +1795,6 @@ def test_mamba_n1_p_side_truncation():
     swa_req = create_request(num_tokens=10, do_remote_decode=True)
     swa_sched.on_new_request(swa_req)
     assert len(swa_req.prompt_token_ids) == 9
-
-    # A request that skips reading external KV (prompt logprobs) is not cut:
-    # the decoder loads nothing and recomputes its whole prompt.
-    logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
-    logprobs_req.prefix_cache_hit_limit = 0
-    swa_sched.on_new_request(logprobs_req)
-    assert len(logprobs_req.prompt_token_ids) == 10
     # A prompt ending in an image is cut before the image rather than inside
     # it, since models parse an item from its whole placeholder; the decoder
     # loads the same prefix and computes the image itself.
@@ -1836,10 +1829,10 @@ def test_mamba_n1_p_side_truncation():
     d_req.mm_features = [whole]
     assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (0, False)
 
-    # A request that skips reading the prefix cache (prompt logprobs) is not
-    # cut: the decoder loads nothing and recomputes its whole prompt.
+    # A request that skips reading external KV (prompt logprobs) is not cut:
+    # the decoder loads nothing and recomputes its whole prompt.
     logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
-    logprobs_req.sampling_params.skip_reading_prefix_cache = True
+    logprobs_req.prefix_cache_hit_limit = 0
     fa_sched.on_new_request(logprobs_req)
     assert logprobs_req.num_prompt_tokens == len(logprobs_req.prompt_token_ids) == 10
 

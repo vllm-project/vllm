@@ -250,6 +250,9 @@ def create_scheduler(
                 )
             ],
         )
+    if kv_cache_config.hash_block_size is None:
+        # The engine core resolves this before it creates the scheduler.
+        kv_cache_config.hash_block_size = hash_block_size or block_size
     vllm_config.cache_config.num_gpu_blocks = num_blocks
 
     scheduler_cls = (
