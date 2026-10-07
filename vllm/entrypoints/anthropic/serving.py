@@ -59,6 +59,8 @@ from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = init_logger(__name__)
 
+_IMAGE_OMITTED = "[Image omitted: this model cannot read images.]"
+
 
 def _build_anthropic_usage(
     usage: UsageInfo | None,
@@ -189,6 +191,12 @@ class AnthropicServingMessages(OpenAIServingChat):
             None if disabled_thinking_effort == "auto" else disabled_thinking_effort
         )
 
+    @property
+    def _image_input(self) -> bool:
+        """Whether the served model accepts images."""
+        mm_config = self.model_config.multimodal_config
+        return mm_config is not None and mm_config.get_limit_per_prompt("image") > 0
+
     async def _get_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
         if self._disabled_thinking_effort is None:
             self._disabled_thinking_effort = (
@@ -295,6 +303,24 @@ class AnthropicServingMessages(OpenAIServingChat):
             return True
 
     @staticmethod
+    def _omit_images(openai_messages: list[dict[str, Any]]) -> None:
+        """Replace image parts with a note the model can read.
+
+        Rejecting the request instead would fail every later turn of an agent
+        session, since the image stays in its history.
+        """
+        for msg in openai_messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            msg["content"] = [
+                {"type": "text", "text": _IMAGE_OMITTED}
+                if isinstance(part, dict) and part.get("type") == "image_url"
+                else part
+                for part in content
+            ]
+
+    @staticmethod
     def _convert_image_source_to_url(source: dict[str, Any]) -> str:
         """Convert an Anthropic image source to an OpenAI-compatible URL.
 
@@ -322,8 +348,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
         disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
+        image_input: bool = True,
     ) -> ChatCompletionRequest:
-        """Convert Anthropic message format to OpenAI format."""
+        """Convert Anthropic message format to OpenAI format.
+
+        With ``image_input=False`` (text-only models), images are replaced by a
+        text note instead of failing the request or being dropped silently.
+        """
         openai_messages: list[dict[str, Any]] = []
 
         cls._convert_system_message(
@@ -336,6 +367,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             openai_messages,
             merge_inline_system=merge_inline_system,
         )
+        if not image_input:
+            cls._omit_images(openai_messages)
         req = cls._build_base_request(anthropic_request, openai_messages)
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
@@ -809,6 +842,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             request,
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
+            image_input=self._image_input,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
@@ -1241,6 +1275,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
+            image_input=self._image_input,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):

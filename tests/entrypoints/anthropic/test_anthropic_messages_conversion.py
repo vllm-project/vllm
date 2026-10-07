@@ -158,6 +158,34 @@ class TestImageContentBlocks:
             "image_url": {"url": "data:image/jpeg;base64,iVBORw0KGgo="},
         }
 
+    def test_image_replaced_with_note_for_text_only_model(self):
+        """A text-only model gets a note instead of an image it would either
+        reject or drop without telling the model."""
+        request = _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this image"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": "https://example.com/cat.png",
+                            },
+                        },
+                    ],
+                }
+            ]
+        )
+
+        result = _convert(request, image_input=False)
+
+        assert result.messages[0]["content"] == [
+            {"type": "text", "text": "Describe this image"},
+            {"type": "text", "text": "[Image omitted: this model cannot read images.]"},
+        ]
+
     def test_url_image_in_user_message(self):
         request = _make_request(
             [
@@ -327,6 +355,26 @@ class TestToolResultContent:
             "type": "image_url",
             "image_url": {"url": "data:image/png;base64,AAAA"},
         }
+
+    def test_tool_result_image_replaced_with_note_for_text_only_model(self):
+        request = self._make_tool_result_request(
+            [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "AAAA",
+                    },
+                }
+            ]
+        )
+
+        result = _convert(request, image_input=False)
+
+        converted = str(result.messages)
+        assert "image_url" not in converted
+        assert "[Image omitted: this model cannot read images.]" in converted
 
     def test_tool_result_with_text_and_image(self):
         """Mixed text+image tool_result: text in tool msg, image in user
