@@ -58,6 +58,22 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
 
 
+def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
+    """A drafter group can lower cache_config.block_size below the mamba
+    block size; the seeded column must still be in mamba blocks."""
+    state = object.__new__(MambaHybridModelState)
+    state.cache_config = SimpleNamespace(block_size=16, mamba_block_size=880)
+    state._align_mode = True
+    state.rope_state = None
+    state.prompt_embeds_state = None
+    state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32)
+    state._mamba_state_idx_gpu = torch.zeros(2, dtype=torch.int32)
+
+    state.add_request(1, SimpleNamespace(num_computed_tokens=107_360))
+
+    assert state._mamba_state_idx_gpu[1] == 121
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
 def test_postprocess_state_scalar_with_int32_mapping(
