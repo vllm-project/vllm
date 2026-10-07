@@ -22,10 +22,8 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX1X, _ON_GFX12X, _ON_GFX942, _ON_GFX950
+    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
 else:
-    _ON_GFX1X = False
-    _ON_GFX12X = False
     _ON_GFX942 = False
     _ON_GFX950 = False
 
@@ -939,37 +937,77 @@ def rocm_fp8_mqa_logits(
 # instead, measured on gfx950; it is not a portable choice, which is why this
 # variant lives here rather than replacing the shared one.
 _MASK_GRID_COLS = 128
-
-
-def _mask_tile(rows: int) -> int:
-    """Columns each program handles per iteration, measured on gfx950.
-
-    Every live tile pays for a scan of the row's candidate list, so wider
-    tiles win once there are enough rows to fill the GPU without them.
-    """
-    return 4096 if rows >= 64 else 2048
-
-
-# gfx9 counts stores in vmcnt; gfx10+ moved them to a separate counter.
-if _ON_GFX12X:
-    _STORE_WAIT = "s_wait_storecnt 0x0"
-elif _ON_GFX1X:
-    _STORE_WAIT = "s_waitcnt_vscnt null, 0x0"
-else:
-    _STORE_WAIT = "s_waitcnt vmcnt(0)"
-
-
-@triton.jit
-def _wait_global_stores(x, STORE_WAIT: tl.constexpr):
-    # tl.debug_barrier only waits on LDS traffic on AMD; the flags live in
-    # global memory, so their stores must land before the barrier.
-    tl.inline_asm_elementwise(
-        STORE_WAIT, "=v,v", [x], dtype=tl.int32, is_pure=False, pack=1
-    )
+# Columns each program handles per iteration. Work stops at the tile boundary
+# containing a row's end rather than at the end itself; the overshoot is
+# masked the same way the shared kernel masks it, so it costs a tile and
+# changes nothing.
+_MASK_TILE = 1024
 
 
 @triton.jit(do_not_specialize=["width", "nblocks"])
 def _mask_candidates_strided_kernel(
+    logits,
+    starts,
+    ends,
+    flags,
+    stride_row,
+    stride_col,
+    stride_start,
+    stride_end,
+    width,
+    nblocks,
+    BLOCK_SIZE: tl.constexpr,
+    HAS_STARTS: tl.constexpr,
+    ROW_REPEAT: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
+    end = tl.load(ends + row // ROW_REPEAT * stride_end)
+    edge = tl.load(flags + row * (nblocks + 1) + nblocks)
+    step = tl.num_programs(1) * TILE
+    tile_start = tl.program_id(1) * TILE
+    # The shared kernel also sanitizes columns at or past `end`. Nothing reads
+    # them: top_k_per_row_decode bounds its scan by the same row ends passed
+    # here, and persistent_topk/cooperative_topk clamp by the same lengths.
+    # Stopping at `end` is what makes the cost track the live context rather
+    # than max_model_len.
+    while tile_start < end:
+        cols = tile_start + tl.arange(0, TILE)
+        valid = (cols >= start) & (cols < end) & (cols < width)
+        block = (cols - start) // BLOCK_SIZE
+        keep = tl.load(flags + row * (nblocks + 1) + block, valid, other=0)
+        keep = (keep != 0) | ((cols == width - 1) & (edge != 0))
+        tl.store(
+            logits + row * stride_row + cols * stride_col,
+            -float("inf"),
+            (cols < width) & ~(valid & keep),
+        )
+        tile_start += step
+
+
+def _fused_mask_tile(rows: int) -> int:
+    """Fused-kernel columns per program per iteration, measured on gfx950.
+
+    Every live tile pays for a scan of the row's candidate list, so wider
+    tiles win once there are enough rows to fill the GPU without them.
+    """
+    if rows < 16:
+        return _MASK_TILE
+    return 2048 if rows < 64 else 4096
+
+
+@triton.jit
+def _wait_global_stores(x):
+    # tl.debug_barrier only waits on LDS traffic on AMD; the flags live in
+    # global memory, so their stores must land before the barrier.
+    tl.inline_asm_elementwise(
+        "s_waitcnt vmcnt(0)", "=v,v", [x], dtype=tl.int32, is_pure=False, pack=1
+    )
+
+
+@triton.jit(do_not_specialize=["width", "nblocks"])
+def _mask_candidates_fused_kernel(
     logits,
     starts,
     ends,
@@ -988,18 +1026,14 @@ def _mask_candidates_strided_kernel(
     HAS_STARTS: tl.constexpr,
     ROW_REPEAT: tl.constexpr,
     TILE: tl.constexpr,
-    STORE_WAIT: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
     end = tl.minimum(tl.load(ends + row // ROW_REPEAT * stride_end), width)
     pid = tl.program_id(1)
     num_progs = tl.num_programs(1)
-    # The shared kernel also sanitizes columns at or past `end`. Nothing reads
-    # them: top_k_per_row_decode bounds its scan by the same row ends passed
-    # here, and persistent_topk/cooperative_topk clamp by the same lengths.
-    # Stopping at `end` is what makes the cost track the live context rather
-    # than max_model_len.
+    # As in _mask_candidates_strided_kernel, nothing at or past `end` is
+    # written; here the stores stop at `end` itself, not its tile boundary.
     if HAS_STARTS:
         head_end = tl.minimum(start, end)
         head = pid * TILE
@@ -1045,10 +1079,10 @@ def _mask_candidates_strided_kernel(
             & (cand < live_blocks)
             & ((cand // TILE_BLOCKS) % num_progs == pid)
         )
-        _wait_global_stores(pid, STORE_WAIT)
+        _wait_global_stores(pid)
         tl.debug_barrier()
         tl.store(row_flags + cand, 1, owned)
-        _wait_global_stores(pid, STORE_WAIT)
+        _wait_global_stores(pid)
         tl.debug_barrier()
 
         offsets = tl.arange(0, BLOCK_P2)
@@ -1086,40 +1120,75 @@ def _apply_candidate_mask_strided(
     shorter, i.e. the paged decode path below; the prefill chunks pass
     chunk-sized logits and stay on the shared kernel.
 
-    Unlike the shared kernel the candidate flags are built by the masking
-    programs themselves, each over only its own live tiles, so the whole mask
-    is a single launch and the flags past each row's end are never cleared.
+    On gfx950 the candidate flags are built by the masking programs
+    themselves, each over only its own live tiles, so the whole mask is a
+    single launch and the flags past each row's end are never cleared.
     """
+    from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+        _candidate_flags_kernel,
+    )
+
     rows, width = logits.shape
     if not rows or not width:
         return
     nblocks = triton.cdiv(width, block_size)
-    flags = torch.empty((rows, nblocks), device=logits.device, dtype=torch.uint8)
     start_stride = row_ks.stride(0) if row_ks is not None else 0
-    tile = _mask_tile(rows)
+    tile = _fused_mask_tile(rows) if _ON_GFX950 else _MASK_TILE
     # Derived from tensor shapes, so the grid stays static and a FULL cudagraph
     # capture remains valid across replays; only the loop trip count inside
     # the kernel is data-dependent. The min keeps narrow widths from launching
     # programs that would only fall through.
     grid_cols = min(_MASK_GRID_COLS, triton.cdiv(width, tile))
-    _mask_candidates_strided_kernel[(rows, grid_cols)](
-        logits,
-        row_ks,
-        row_ke,
+    if _ON_GFX950:
+        flags = torch.empty((rows, nblocks), device=logits.device, dtype=torch.uint8)
+        _mask_candidates_fused_kernel[(rows, grid_cols)](
+            logits,
+            row_ks,
+            row_ke,
+            candidate_blocks,
+            flags,
+            *logits.stride(),
+            start_stride,
+            row_ke.stride(0),
+            *candidate_blocks.stride(),
+            width,
+            nblocks,
+            block_size,
+            candidate_blocks.shape[1],
+            row_ks is not None,
+            row_repeat,
+            tile,
+        )
+        return
+
+    flags = torch.empty((rows, nblocks + 1), device=logits.device, dtype=torch.uint8)
+    _candidate_flags_kernel[(rows,)](
         candidate_blocks,
+        row_ks,
         flags,
-        *logits.stride(),
-        start_stride,
-        row_ke.stride(0),
         *candidate_blocks.stride(),
+        start_stride,
         width,
         nblocks,
         block_size,
         candidate_blocks.shape[1],
         row_ks is not None,
         row_repeat,
+    )
+    _mask_candidates_strided_kernel[(rows, grid_cols)](
+        logits,
+        row_ks,
+        row_ke,
+        flags,
+        *logits.stride(),
+        start_stride,
+        row_ke.stride(0),
+        width,
+        nblocks,
+        block_size,
+        row_ks is not None,
+        row_repeat,
         tile,
-        _STORE_WAIT,
     )
 
 

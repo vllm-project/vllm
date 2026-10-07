@@ -138,15 +138,15 @@ def test_matches_shared_kernel_with_starts(block_size):
     _assert_agrees_within_ends(ref, got, row_ke, 1)
 
 
-@pytest.mark.parametrize("copies", [1, 8])
+@pytest.mark.parametrize("copies", [1, 4, 8])
 @pytest.mark.parametrize("max_block", [2048, None])
 def test_matches_shared_kernel_model_shape(max_block, copies):
     """DeepSeek-V4.1-Flash decode: 2048 candidate blocks of 8 columns.
 
     With ``max_block`` small the candidates crowd into a few tiles, so most
     tiles keep many blocks and the rest keep none; with it unset they spread
-    over the whole width. ``copies`` takes the batch past the row count at
-    which the kernel switches to wider tiles.
+    over the whole width. ``copies`` takes the batch across the row counts at
+    which the fused kernel switches to wider tiles.
     """
     ends = [0, 1, 2048, 15000, 16384, 32000, 131073, WIDE] * copies
     logits, row_ks, row_ke, candidates = _inputs(
@@ -216,10 +216,13 @@ def test_leaves_columns_past_end_untouched():
 
     Skipping the tail is where the speedup comes from, so a change that
     quietly restores full-width sanitizing should fail here rather than just
-    get slower. Stores are masked to ``end`` itself, so nothing at or past it
-    may change.
+    get slower. The gfx950 fused kernel masks its stores to ``end`` itself;
+    elsewhere work stops at the tile boundary containing ``end``, so that is
+    the bound asserted.
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _MASK_TILE,
+        _ON_GFX950,
         _apply_candidate_mask_strided,
     )
 
@@ -237,10 +240,14 @@ def test_leaves_columns_past_end_untouched():
     logits.fill_(sentinel)
     _apply_candidate_mask_strided(logits, row_ks, row_ke, candidates, BLOCK_SIZE, 1)
     for row, end in enumerate(ends):
-        tail = logits[row, end:]
+        touched = end if _ON_GFX950 else min(-(-end // _MASK_TILE) * _MASK_TILE, WIDE)
+        tail = logits[row, touched:]
         assert torch.equal(tail, torch.full_like(tail, sentinel)), (
-            f"row {row} was written at or past its end {end}"
+            f"row {row} (end {end}) was written past column {touched}"
         )
+        # And the bound is tight: a row that ends early must not have cost a
+        # full-width pass, which is the whole point of the kernel.
+        assert touched <= end + _MASK_TILE
 
 
 def test_cudagraph_replay_tracks_changing_ends():
