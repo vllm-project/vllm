@@ -3,6 +3,7 @@
 
 import contextlib
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -18,7 +19,44 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+
+
+def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_last_pp_rank = False
+    local_batch = object()
+    global_batch = SimpleNamespace(idx_mapping=object())
+    runner.pcp_manager = SimpleNamespace(
+        global_batch=global_batch,
+        restore_for_sampling=Mock(),
+    )
+    runner.pp_handler = SimpleNamespace(receive=Mock(return_value=False))
+    runner.postprocess_num_computed_tokens = Mock()
+    runner.model_state = SimpleNamespace(postprocess_state=Mock())
+    runner.kv_connector = SimpleNamespace(post_forward=Mock(return_value=None))
+    runner.eplb = SimpleNamespace(step=Mock())
+    runner.execute_model_state = ExecuteModelState(
+        input_batch=local_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=None,
+        aux_hidden_states=None,
+        dp_sync=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        cudagraph_stats=None,
+        num_spec_tokens_to_schedule=0,
+    )
+
+    runner.sample_tokens(None)
+
+    runner.pp_handler.receive.assert_called_once_with(global_batch)
+    runner.postprocess_num_computed_tokens.assert_called_once_with(global_batch)
+    runner.model_state.postprocess_state.assert_called_once_with(
+        global_batch.idx_mapping, 0
+    )
+    runner.pcp_manager.restore_for_sampling.assert_not_called()
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
@@ -221,7 +259,9 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
+    )
     runner.cudagraph_manager = SimpleNamespace(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
@@ -297,3 +337,23 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+
+@pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
+def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer):
+    """Targets allocate the MTP hidden buffer only for hidden-state drafters."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    hidden_states = torch.zeros(4, 8)
+    buffer = torch.arange(16 * 8, dtype=torch.float32).view(16, 8)
+    if target_buffer == "absent":
+        runner.model = SimpleNamespace()
+    else:
+        returned = buffer if target_buffer == "tensor" else None
+        runner.model = SimpleNamespace(get_mtp_target_hidden_states=lambda: returned)
+
+    out = runner._get_drafter_hidden_states(hidden_states)
+
+    if target_buffer == "tensor":
+        assert torch.equal(out, buffer[:4])
+    else:
+        assert out is hidden_states

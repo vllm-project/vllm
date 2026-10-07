@@ -206,6 +206,23 @@ mod tests {
     }
 
     #[test]
+    fn qwen_xml_streams_start_marker_without_newline_as_text() {
+        for chunk in [
+            "<tool_call>{\"name\":\"get_weather\"",
+            "hi\n<tool_call>{\"name\":\"get_weather\"",
+        ] {
+            let mut parser = Qwen3XmlToolParser::new(&test_tools());
+            let mut output = ToolParserOutput::default();
+
+            parser.parse_into(chunk, &mut output).unwrap();
+
+            // Not a tool-call start: released without waiting for the end of the stream.
+            assert_eq!(output.normal_text(), chunk);
+            assert!(output.calls().is_empty());
+        }
+    }
+
+    #[test]
     fn qwen_xml_requires_newline_before_tool_call_end() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         let error = parser

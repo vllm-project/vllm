@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import math
+import os
 
 import pytest
 import torch
@@ -9,10 +11,16 @@ import torch
 import vllm.device_allocator.cumem as cumem
 import vllm.envs as envs
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 
-from ....utils import create_new_process_for_each_test, multi_gpu_test, requires_fp8
+from ....utils import (
+    create_new_process_for_each_test,
+    multi_gpu_marks,
+    multi_gpu_test,
+    requires_fp8,
+)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -193,6 +201,73 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
+def _cudagraph_bytes(worker) -> int:
+    data = cumem.CuMemAllocator.get_instance().pointer_to_data.values()
+    return sum(d.handle[1] for d in data if d.tag == "cudagraph")
+
+
+def _custom_ar_active(worker) -> bool:
+    from vllm.distributed.parallel_state import get_tp_group
+
+    ca_comm = get_tp_group().device_communicator.ca_comm
+    return ca_comm is not None and not ca_comm.disabled
+
+
+@pytest.mark.parametrize(
+    ("mode", "breakable", "tp", "offload"),
+    [
+        ("FULL", False, 1, True),
+        ("PIECEWISE", False, 1, True),
+        ("PIECEWISE", True, 1, True),
+        pytest.param(
+            "FULL_AND_PIECEWISE", False, 2, True, marks=multi_gpu_marks(num_gpus=2)
+        ),
+        ("FULL_AND_PIECEWISE", False, 1, False),
+    ],
+    ids=["full", "piecewise", "breakable", "custom-ar-tp2", "off-by-default"],
+)
+@create_new_process_for_each_test()
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
+    """Each capture site uses the pool, exact across sleeps; TP=2 needs
+    unregistered custom AR; off changes nothing."""
+    for name, value in [
+        ("VLLM_USE_V2_MODEL_RUNNER", "1"),
+        ("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0"),
+        ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
+        ("VLLM_ALLREDUCE_USE_FLASHINFER", "0"),
+        ("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"),
+    ]:
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("NCCL_GRAPH_REGISTER", raising=False)
+    llm = LLM(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        enable_sleep_mode=True,
+        sleep_mode_offload_cudagraph=offload,
+        tensor_parallel_size=tp,
+        compilation_config={
+            "cudagraph_mode": mode,
+            "pass_config": {"fuse_allreduce_rms": False},
+        },
+    )
+    graph_bytes = llm.collective_rpc(_cudagraph_bytes)
+    assert os.environ.get("NCCL_GRAPH_REGISTER") == ("0" if offload else None)
+    assert all(graph_bytes) if offload else not any(graph_bytes)
+    if not offload:
+        return
+    if tp > 1 and not all(llm.collective_rpc(_custom_ar_active)):
+        pytest.skip("Custom allreduce is unavailable on these GPUs")
+    prompt, params = "How are you?", SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, params)[0].outputs[0].text
+    for level in (1, 2):
+        llm.sleep(level=level)
+        llm.wake_up(tags=["weights"])
+        if level == 2:
+            llm.collective_rpc("reload_weights")
+        llm.wake_up(tags=["kv_cache"])
+        assert llm.generate(prompt, params)[0].outputs[0].text == expected
+
+
 @create_new_process_for_each_test()
 def test_deep_sleep_async(gpu_memory_cleared):
     async def test():
@@ -230,6 +305,58 @@ def test_deep_sleep_async(gpu_memory_cleared):
         assert output.outputs[0].text == output2.outputs[0].text
 
     asyncio.run(test())
+
+
+def _load_weights(worker) -> None:
+    # Not reload_weights(): its layerwise finalize re-derives the KV scales.
+    model = worker.model_runner.get_model()
+    loader = get_model_loader(worker.load_config)
+    model.load_weights(loader.get_all_weights(worker.model_config, model))
+
+
+def _attn_kv_scales(model) -> dict[str, list[float]]:
+    return {
+        f"{name}.{attr}": getattr(module, attr).flatten().tolist()
+        for name, module in model.named_modules()
+        for attr in ("_q_scale", "_k_scale", "_v_scale")
+        if isinstance(getattr(module, attr, None), torch.Tensor)
+    }
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Segfaults on ROCm.")
+@requires_fp8
+@create_new_process_for_each_test()
+def test_deep_sleep_compressed_tensors_kv_scales(
+    monkeypatch: pytest.MonkeyPatch, gpu_memory_cleared
+):
+    """KV scales must survive level-2 sleep plus a weights reload (else NaN)."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = LLM(
+        "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor",
+        enable_sleep_mode=True,
+        kv_cache_dtype="fp8",
+        enforce_eager=True,
+        gpu_memory_utilization=0.6,
+    )
+    sampling_params = SamplingParams(temperature=0, max_tokens=10, logprobs=0)
+    scales = llm.apply_model(_attn_kv_scales)[0]
+    assert any(v != 1.0 for values in scales.values() for v in values)
+    expected = llm.generate("How are you?", sampling_params)[0].outputs[0]
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc(_load_weights)
+    llm.wake_up(tags=["kv_cache"])
+
+    assert llm.apply_model(_attn_kv_scales)[0] == scales
+    actual = llm.generate("How are you?", sampling_params)[0].outputs[0]
+    assert actual.token_ids == expected.token_ids
+    logprobs = [
+        [lp[t].logprob for lp, t in zip(o.logprobs, o.token_ids)]
+        for o in (expected, actual)
+    ]
+    assert all(math.isfinite(x) for x in logprobs[1])
+    assert logprobs[0] == logprobs[1]
 
 
 @requires_fp8
