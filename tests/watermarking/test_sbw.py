@@ -485,3 +485,84 @@ def test_sbw_gpu_sampler_biases_greedy_requests(monkeypatch):
     assert not torch.equal(received[0], raw_logits), (
         "SBW bias was not applied to greedy request"
     )
+
+
+# ---------------------------------------------------------------------------
+# End-to-end greedy decoding detection test
+# ---------------------------------------------------------------------------
+
+
+def test_sbw_greedy_decoding_detected():
+    """SBW watermark applied with greedy decoding (argmax) should be detectable.
+
+    This is the key advantage of SBW over Gumbel: bias-based watermarking works
+    with temperature=0 because the logit shift changes which token has the
+    highest probability, whereas Gumbel's noise-based approach requires
+    randomness from temperature > 0.
+    """
+    key, gamma, delta = 15485863, 0.25, 2.0
+    cw = 4
+    wm = _make_watermarker(
+        key=key, scheme="selfhash", context_width=cw, gamma=gamma, delta=delta
+    )
+    detector = SBWWatermarkDetector(
+        key=key, scheme="selfhash", context_width=cw, gamma=gamma
+    )
+
+    # Generate 200 tokens using pure greedy decoding (argmax on biased logits).
+    # This simulates temperature=0 inference.
+    torch.manual_seed(123)
+    tokens: list[int] = list(torch.randint(0, 500, (cw,)).tolist())  # seed context
+    for _ in range(200):
+        # Random logits to ensure varied context at each step
+        logits = torch.randn(1, 500)
+        ctx = torch.tensor([tokens[-cw:]], dtype=torch.long)
+        result = wm.sample(logits, ctx)
+        # Greedy: always pick the argmax of the biased logits
+        tokens.append(result.logits.argmax(dim=-1)[0].item())
+
+    detection = detector.detect(tokens)
+    assert detection.p_value < 0.01, (
+        f"SBW watermark not detected with greedy decoding: p_value={detection.p_value}"
+    )
+
+
+def test_sbw_greedy_vs_random_sampling_both_detected():
+    """Both greedy and random sampling should produce detectable watermarks."""
+    key, gamma, delta = 42, 0.25, 2.5
+    cw = 4
+    wm = _make_watermarker(
+        key=key, scheme="selfhash", context_width=cw, gamma=gamma, delta=delta
+    )
+    detector = SBWWatermarkDetector(
+        key=key, scheme="selfhash", context_width=cw, gamma=gamma
+    )
+
+    def generate_tokens(use_greedy: bool, seed: int) -> list[int]:
+        torch.manual_seed(seed)
+        tokens: list[int] = list(torch.randint(0, 500, (cw,)).tolist())
+        for _ in range(200):
+            logits = torch.randn(1, 500)
+            ctx = torch.tensor([tokens[-cw:]], dtype=torch.long)
+            result = wm.sample(logits, ctx)
+            if use_greedy:
+                tok = result.logits.argmax(dim=-1)[0].item()
+            else:
+                # Random sampling with softmax probabilities
+                probs = torch.softmax(result.logits[0], dim=-1)
+                tok = torch.multinomial(probs, 1).item()
+            tokens.append(tok)
+        return tokens
+
+    greedy_tokens = generate_tokens(use_greedy=True, seed=100)
+    random_tokens = generate_tokens(use_greedy=False, seed=200)
+
+    greedy_detection = detector.detect(greedy_tokens)
+    random_detection = detector.detect(random_tokens)
+
+    assert greedy_detection.p_value < 0.01, (
+        f"Greedy watermark not detected: p_value={greedy_detection.p_value}"
+    )
+    assert random_detection.p_value < 0.01, (
+        f"Random watermark not detected: p_value={random_detection.p_value}"
+    )
