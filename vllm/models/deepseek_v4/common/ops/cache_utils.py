@@ -784,7 +784,6 @@ def combine_topk_swa_indices(
         )
     else:
         combined_indices, combined_lens = out
-        combined_indices.fill_(-1)
 
     use_fused_decode = (
         envs.VLLM_BATCH_INVARIANT
@@ -809,6 +808,9 @@ def combine_topk_swa_indices(
             window_size,
         )
         return combined_indices, combined_lens
+
+    if out is not None:
+        combined_indices.fill_(-1)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
