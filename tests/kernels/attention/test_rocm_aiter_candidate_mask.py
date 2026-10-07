@@ -216,13 +216,13 @@ def test_leaves_columns_past_end_untouched():
 
     Skipping the tail is where the speedup comes from, so a change that
     quietly restores full-width sanitizing should fail here rather than just
-    get slower. The gfx950 fused kernel masks its stores to ``end`` itself;
-    elsewhere work stops at the tile boundary containing ``end``, so that is
-    the bound asserted.
+    get slower. The fused kernel on gfx942 and gfx950 masks its stores to
+    ``end`` itself; elsewhere work stops at the tile boundary containing
+    ``end``, so that is the bound asserted.
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _MASK_TILE,
-        _ON_GFX950,
+        _ON_MI3XX,
         _apply_candidate_mask_strided,
     )
 
@@ -240,7 +240,7 @@ def test_leaves_columns_past_end_untouched():
     logits.fill_(sentinel)
     _apply_candidate_mask_strided(logits, row_ks, row_ke, candidates, BLOCK_SIZE, 1)
     for row, end in enumerate(ends):
-        touched = end if _ON_GFX950 else min(-(-end // _MASK_TILE) * _MASK_TILE, WIDE)
+        touched = end if _ON_MI3XX else min(-(-end // _MASK_TILE) * _MASK_TILE, WIDE)
         tail = logits[row, touched:]
         assert torch.equal(tail, torch.full_like(tail, sentinel)), (
             f"row {row} (end {end}) was written past column {touched}"
