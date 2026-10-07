@@ -97,15 +97,13 @@ def xpu_gdn_kernel_available() -> bool:
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-    supports_sycl: bool = False,
 ) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"]]:
     """Resolve GDN prefill backend.
 
     The SYCL kernel is chosen when ``requested in ["sycl", "auto"]``, the
-    platform is XPU, the caller's layer ``supports_sycl`` and
-    ``_xpu_C::gdn_attention`` is built. Unlike the other backends it is a
-    fused whole-layer op, so selecting it also replaces the conv1d and decode
-    kernels, not just prefill.
+    platform is XPU and ``_xpu_C::gdn_attention`` is built. Unlike the other
+    backends it is a fused whole-layer op, so selecting it also replaces the
+    conv1d and decode kernels, not just prefill.
 
     FlashInfer's GDN prefill kernel is chosen when:
     * ``requested in ["flashinfer", "auto"]``;
@@ -136,8 +134,6 @@ def _resolve_gdn_prefill_backend(
         raise ValueError("GDN prefill backend 'sycl' is only supported on XPU.")
 
     if current_platform.is_xpu():
-        if not supports_sycl:
-            return backend, "triton"
         if backend in ("auto", "sycl") and xpu_gdn_kernel_available():
             return backend, "sycl"
         if backend == "sycl":
@@ -317,10 +313,7 @@ class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
         vllm_config = get_current_vllm_config()
-        # Only instantiated by QwenGatedDeltaNetAttention, which has forward_xpu.
-        backend, active_backend = _resolve_gdn_prefill_backend(
-            vllm_config, supports_sycl=True
-        )
+        backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
 
         if backend in ("flashinfer", "cutedsl") and active_backend != backend:
@@ -521,9 +514,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.gdn_xpu_backend: Literal["sycl", "triton"] | None = None
         self.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
         if current_platform.is_xpu():
-            requested, self.gdn_xpu_backend = _resolve_gdn_prefill_backend(
-                vllm_config, supports_sycl=True
-            )
+            requested, self.gdn_xpu_backend = _resolve_gdn_prefill_backend(vllm_config)
             _log_gdn_backend_decision(vllm_config, requested, self.gdn_xpu_backend)
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
