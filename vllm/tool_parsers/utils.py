@@ -432,11 +432,6 @@ def get_json_schema_from_tools(
                 continue
             for name, params in iter_response_function_tool_info(tool):
                 responses_tool_map[name] = params
-                if isinstance(tool, NamespaceTool):
-                    short_name = name.removeprefix(
-                        f"{tool.name}{_NAMESPACE_TOOL_SEPARATOR}"
-                    )
-                    responses_tool_map.setdefault(short_name, params)
         if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
         return _params_or_empty_object(responses_tool_map[tool_name])
