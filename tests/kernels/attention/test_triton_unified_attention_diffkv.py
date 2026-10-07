@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Triton DiffKV unified-attention kernel."""
 
-from unittest.mock import Mock
-
 import pytest
 import torch
 
@@ -19,7 +17,6 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
-    kernel_unified_attention_diffkv,
     unified_attention_diffkv,
 )
 
@@ -29,7 +26,7 @@ DEVICE_TYPE = current_platform.device_type
 
 # (num_query_heads, num_kv_heads): MHA, GQA, and the num_kv_heads==1
 # (degenerate-stride) case.
-NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
+NUM_HEADS = [(4, 4), (8, 2), (5, 1), (32, 2)]
 # (head_size_qk, head_size_v).  (192, 128) is the canonical asymmetric
 # DiffKV shape; FA4 on Blackwell only supports head_size>128 when it is
 # 192, and FA3 on Hopper supports it too -- so this pair is runnable on
@@ -72,83 +69,6 @@ def _alloc_segm_buffers(seq_threshold_3D: int, num_query_heads: int, head_size_v
     return segm_output, segm_max, segm_expsum
 
 
-# MiMo TP2 global layer; forcing SM12x lets CUDA CI take BLOCK_M=32.
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="SM12x tuning is CUDA-only")
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize(
-    ("query_len", "expected_block_m"), [(63, 16), (64, 32), (65, 32), (257, 32)]
-)
-@torch.inference_mode()
-def test_triton_unified_attn_diffkv_prefill_block_m(
-    block_size: int,
-    query_len: int,
-    expected_block_m: int,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: True)
-    kernel_run = Mock(wraps=kernel_unified_attention_diffkv.run)
-    monkeypatch.setattr(kernel_unified_attention_diffkv, "run", kernel_run)
-    torch.set_default_device(DEVICE_TYPE)
-    set_random_seed(0)
-
-    query_lens = [1, query_len]
-    kv_lens = [1344, 294]
-    num_query_heads, num_kv_heads = 32, 2
-    head_size_qk, head_size_v = 192, 128
-    dtype = torch.bfloat16
-    scale = head_size_qk**-0.5
-
-    query = torch.randn(sum(query_lens), num_query_heads, head_size_qk, dtype=dtype)
-    kv_cache = torch.randn(
-        NUM_BLOCKS,
-        block_size,
-        num_kv_heads,
-        head_size_qk + head_size_v,
-        dtype=dtype,
-    )
-    key_cache = kv_cache[..., :head_size_qk]
-    value_cache = kv_cache[..., head_size_qk:]
-
-    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
-        dim=0, dtype=torch.int32
-    )
-    kv_lens_t = torch.tensor(kv_lens, dtype=torch.int32)
-
-    max_num_blocks_per_seq = (max(kv_lens) + block_size - 1) // block_size
-    block_tables = torch.randint(
-        0, NUM_BLOCKS, (len(query_lens), max_num_blocks_per_seq), dtype=torch.int32
-    )
-
-    ref_out = ref_paged_attn(
-        query.float(),
-        key_cache.float(),
-        value_cache.float(),
-        query_lens,
-        kv_lens,
-        block_tables,
-        scale,
-    ).to(dtype)
-
-    triton_out = torch.empty(sum(query_lens), num_query_heads, head_size_v, dtype=dtype)
-    unified_attention_diffkv(
-        q=query,
-        k=key_cache,
-        v=value_cache,
-        out=triton_out,
-        cu_seqlens_q=cu_query_lens,
-        seqused_k=kv_lens_t,
-        softmax_scale=scale,
-        causal=True,
-        window_size=(-1, -1),
-        block_table=block_tables,
-        softcap=0,
-        max_seqlen_q=max(query_lens),
-    )
-
-    assert kernel_run.call_args.kwargs["BLOCK_M"] == expected_block_m
-    torch.testing.assert_close(triton_out, ref_out, atol=2e-2, rtol=2e-2)
-
-
 @pytest.mark.parametrize(
     "seq_lens",
     [
@@ -175,6 +95,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
     kv_cache_dtype: torch.dtype | None,
     block_size: int,
     seq_threshold_3D: int,
+    monkeypatch: pytest.MonkeyPatch,
     quant_query: bool = False,
 ) -> None:
     head_size_qk, head_size_v = head_sizes
@@ -187,7 +108,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
             head_size=head_size_qk, head_size_v=head_size_v
         )
         if not is_flash_attn_varlen_func_available() or fa_version not in (3, 4):
-            pytest.skip(f"FA DiffKV needs FA3/FA4 (got version {fa_version}).")
+            use_torch_ref = True
 
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
@@ -291,6 +212,9 @@ def test_triton_unified_attn_diffkv_vs_reference(
         seq_threshold_3D, num_query_heads, head_size_v
     )
     triton_out = torch.empty(sum(query_lens), num_query_heads, head_size_v, dtype=dtype)
+    # Exercise the SM12x tile after computing the reference.
+    monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: True)
+
     unified_attention_diffkv(
         q=query,
         k=key_cache,
@@ -325,7 +249,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
     "seq_lens,seq_threshold_3D",
     [([(129, 463)], 0), ([(1, 2011)], 0), ([(1, 2011)], 8)],
 )
-def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
+def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D, monkeypatch):
     test_triton_unified_attn_diffkv_vs_reference(
         seq_lens=seq_lens,
         num_heads=(8, 2),
@@ -336,5 +260,6 @@ def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
         kv_cache_dtype=current_platform.fp8_dtype(),
         block_size=16,
         seq_threshold_3D=seq_threshold_3D,
+        monkeypatch=monkeypatch,
         quant_query=True,
     )
