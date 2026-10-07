@@ -16,7 +16,8 @@ every rank to score every head:
 Each head's merge sees every shard's top-k *for that head*, so it is exact: a
 global winner is in its own shard's top-k. Prefill is unchanged.
 
-Enabled by ``VLLM_ROCM_MINIMAX_INDEXER_CP=1`` (ROCm, TP>1, bf16 index cache).
+Enabled by ``--attention-config '{"minimax_m3_indexer_cp": true}'`` (ROCm,
+TP>1, bf16 index cache).
 """
 
 import math
