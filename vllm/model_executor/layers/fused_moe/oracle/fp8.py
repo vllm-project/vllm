@@ -70,6 +70,8 @@ class Fp8MoeBackend(Enum):
     TRITON_MXFP8 = "TRITON_MXFP8"
     # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
     AITER_MXFP8 = "AITER_MXFP8"
+    # MXFP8 MoE via AITER Triton moe_gemm_a8w8 on gfx942.
+    AITER_MXFP8_A8W8 = "AITER_MXFP8_A8W8"
 
 
 def _get_priority_backends(
@@ -596,6 +598,13 @@ def convert_to_fp8_moe_kernel_format(
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
         w13.is_shuffled = True
         w2.is_shuffled = True
+    elif fp8_backend == Fp8MoeBackend.AITER_MXFP8_A8W8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_a8w8_moe import (
+            prepare_mxfp8_moe_weights_for_aiter_a8w8,
+        )
+
+        w13, w13_scale = prepare_mxfp8_moe_weights_for_aiter_a8w8(w13, w13_scale)
+        w2, w2_scale = prepare_mxfp8_moe_weights_for_aiter_a8w8(w2, w2_scale)
     elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
         w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
             w13, w2, w13_scale, w2_scale
