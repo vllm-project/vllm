@@ -711,6 +711,17 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        # The logits kernels (DeepGEMM and FlashInfer) index weights by the
+        # (B, next_n) q row. On the padded path q was packed from the ragged
+        # decode tokens while weights still has one row per real token, so
+        # pack it the same way: rows then line up and padded slots (whose
+        # logits are discarded by the unpack below) weigh zero.
+        if needs_padded_path and num_decode_tokens > 0:
+            weights_rows = pack_seq_triton(
+                weights[:num_decode_tokens], decode_lens, pad_value=0
+            ).reshape(num_padded_tokens, -1)
+        else:
+            weights_rows = weights[:num_padded_tokens]
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
@@ -749,17 +760,6 @@ def sparse_attn_indexer(
                 if kv_cache.dtype == torch.uint8
                 else kv_cache.view(torch.uint8)
             )
-            # FlashInfer checks weights against the (B, next_n) q rows. On the
-            # padded path q was packed from the ragged decode tokens while
-            # weights still has one row per real token, so pack it the same
-            # way: rows then line up and padded slots (whose logits are
-            # discarded by the unpack below) weigh zero.
-            if needs_padded_path and num_decode_tokens > 0:
-                weights_rows = pack_seq_triton(
-                    weights[:num_decode_tokens], decode_lens, pad_value=0
-                ).reshape(num_padded_tokens, -1)
-            else:
-                weights_rows = weights[:num_padded_tokens]
             logits = flashinfer_sm120_fp8_paged_mqa_logits(
                 padded_q_quant_cast,
                 kv_cache_bytes,
@@ -774,7 +774,7 @@ def sparse_attn_indexer(
             logits = fp8_fp4_paged_mqa_logits(
                 (padded_q_quant_cast, padded_q_scale),
                 kv_cache,
-                weights[:num_padded_tokens],
+                weights_rows,
                 seq_lens,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
