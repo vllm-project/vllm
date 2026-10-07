@@ -351,3 +351,26 @@ def test_cp_decode_owns_kv_sharded_heads(
         assert (dec.local_heads, dec.head_offset) == (local_heads, offset)
         assert dec._q_full.shape[1] == total_heads
         assert dec._scores.shape[0] == total_heads
+
+
+@pytest.mark.parametrize("indexer_kv_dtype", ["auto", "bf16"])
+def test_indexer_cp_config_accepts_bf16(indexer_kv_dtype: str):
+    from vllm.config.attention import AttentionConfig
+
+    cfg = AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype=indexer_kv_dtype)
+    assert cfg.minimax_m3_indexer_cp
+
+
+@pytest.mark.parametrize("indexer_kv_dtype", ["fp8", "mxfp4", "nvfp4"])
+def test_indexer_cp_config_rejects_non_bf16(indexer_kv_dtype: str):
+    """CP scores the index cache with no scale; fp8 uses the AITER indexer."""
+    from vllm.config.attention import AttentionConfig
+
+    with pytest.raises(ValueError, match="minimax_m3_indexer_cp requires a bf16"):
+        AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype=indexer_kv_dtype)
+
+
+def test_indexer_cp_config_default_off():
+    from vllm.config.attention import AttentionConfig
+
+    assert AttentionConfig().minimax_m3_indexer_cp is False
