@@ -92,6 +92,8 @@ def main():
     parser.add_argument("--max-model-len", type=int, default=8192)
     parser.add_argument("--port", type=int, default=18190)
     parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument("--additional-config", type=json.loads)
+    parser.add_argument("--compilation-config", type=json.loads)
     args = parser.parse_args()
     engine = VLLMStartLuxDecision(
         args.model,
@@ -101,7 +103,9 @@ def main():
         max_num_batched_tokens=args.max_model_len,
         gpu_memory_utilization=0.75,
         enforce_eager=args.enforce_eager,
-        compilation_config=(
+        additional_config=args.additional_config or {},
+        compilation_config=args.compilation_config
+        or (
             None
             if args.enforce_eager
             else {
