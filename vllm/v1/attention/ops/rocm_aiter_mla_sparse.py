@@ -986,17 +986,6 @@ def _mask_candidates_strided_kernel(
         tile_start += step
 
 
-def _fused_mask_tile(rows: int) -> int:
-    """Fused-kernel columns per program per iteration, measured on gfx950.
-
-    Every live tile pays for a scan of the row's candidate list, so wider
-    tiles win once there are enough rows to fill the GPU without them.
-    """
-    if rows < 16:
-        return _MASK_TILE
-    return 2048 if rows < 64 else 4096
-
-
 @triton.jit
 def _wait_global_stores(x):
     # tl.debug_barrier only waits on LDS traffic on AMD; the flags live in
@@ -1133,7 +1122,12 @@ def _apply_candidate_mask_strided(
         return
     nblocks = triton.cdiv(width, block_size)
     start_stride = row_ks.stride(0) if row_ks is not None else 0
-    tile = _fused_mask_tile(rows) if _ON_GFX950 else _MASK_TILE
+    tile = _MASK_TILE
+    if _ON_GFX950 and rows >= 16:
+        # Every live tile of the fused kernel scans the row's candidate list,
+        # so wider tiles win once there are enough rows to fill the GPU
+        # without them. Measured on gfx950.
+        tile = 2048 if rows < 64 else 4096
     # Derived from tensor shapes, so the grid stays static and a FULL cudagraph
     # capture remains valid across replays; only the loop trip count inside
     # the kernel is data-dependent. The min keeps narrow widths from launching
