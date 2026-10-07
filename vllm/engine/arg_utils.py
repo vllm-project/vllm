@@ -2138,6 +2138,25 @@ class EngineArgs:
             cfg = json.loads(cfg)
         return WatermarkConfig(**cfg)
 
+    def create_structured_outputs_config(self) -> StructuredOutputsConfig:
+        """Merge frontend parser flags into the structured outputs config.
+
+        Mutates `self.structured_outputs_config` in place and returns it
+        (not a copy). Model-specific defaults (e.g. gpt_oss ->
+        "openai_gptoss") are applied later by `verify_and_update_config`
+        only when the resolved value is still empty, so explicit CLI flags
+        take precedence.
+        """
+        if self.reasoning_parser:
+            self.structured_outputs_config.reasoning_parser = self.reasoning_parser
+
+        if self.reasoning_parser_plugin:
+            self.structured_outputs_config.reasoning_parser_plugin = (
+                self.reasoning_parser_plugin
+            )
+
+        return self.structured_outputs_config
+
     def create_observability_config(self) -> ObservabilityConfig:
         return ObservabilityConfig(
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
@@ -2254,7 +2273,13 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        if resolved_cache_dtype.startswith("turboquant_"):
+        # TurboQuant and UltraQuant both keep boundary attention layers at the
+        # native dtype, and compute those layers the same way.
+        uses_packed_kv_backend = (
+            resolved_cache_dtype.startswith("turboquant_")
+            or resolved_cache_dtype == "ultraquant_4bit"
+        )
+        if uses_packed_kv_backend:
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
@@ -2664,14 +2689,18 @@ class EngineArgs:
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
-        if resolved_cache_dtype.startswith("turboquant_") and (
+        # UltraQuant subclasses that impl, so it inherits the same limit.
+        if uses_packed_kv_backend and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3
         ):
             logger.warning(
-                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "%s is not yet compatible with FlashAttention >= 3. "
                 "Overriding flash_attn_version to 2. To silence this "
-                "warning, pass --attention-config.flash_attn_version=2"
+                "warning, pass --attention-config.flash_attn_version=2",
+                "TurboQuant"
+                if resolved_cache_dtype.startswith("turboquant_")
+                else "UltraQuant",
             )
             attention_config.flash_attn_version = 2
 
@@ -2730,13 +2759,7 @@ class EngineArgs:
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
-        if self.reasoning_parser:
-            self.structured_outputs_config.reasoning_parser = self.reasoning_parser
-
-        if self.reasoning_parser_plugin:
-            self.structured_outputs_config.reasoning_parser_plugin = (
-                self.reasoning_parser_plugin
-            )
+        self.create_structured_outputs_config()
 
         observability_config = self.create_observability_config()
 
