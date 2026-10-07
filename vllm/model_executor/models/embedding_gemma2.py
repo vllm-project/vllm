@@ -50,7 +50,10 @@ from vllm.model_executor.models.gemma4_mm import (
     _get_max_soft_tokens,
 )
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.interfaces_base import default_pooling_type
+from vllm.model_executor.models.interfaces_base import (
+    VllmModelForPooling,
+    default_pooling_type,
+)
 from vllm.model_executor.models.transformers.utils import (
     recursive_replace_linear,
 )
@@ -977,7 +980,7 @@ def _embedding_gemma2_weights_mapper(
     dummy_inputs=EmbeddingGemma2DummyInputsBuilder,
 )
 @default_pooling_type(seq_pooling_type="MEAN", tok_pooling_type="ALL")
-class EmbeddingGemma2Model(nn.Module, SupportsMultiModal):
+class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     """Multimodal pooling embedding model supporting text, vision, and audio."""
 
     is_pooling_model = True
