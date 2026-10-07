@@ -1135,7 +1135,7 @@ def test_aiter_moe_token_padding_garbage_rows(
     'See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").'
 )
 def test_aiter_moe_token_padding_garbage_rows_mxfp4():
-    pytest.skip("MXFP4 AiterExperts token padding requires MI350/gfx950 hardware.")
+    pass
 
 
 if __name__ == "__main__":
