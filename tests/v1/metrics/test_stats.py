@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 from prometheus_client import CollectorRegistry
 
 from vllm.config import SpeculativeConfig
@@ -14,7 +15,11 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.spec_decode.metrics import SpecDecodingProm, SpecDecodingStats
+from vllm.v1.spec_decode.metrics import (
+    SpecDecodingLogging,
+    SpecDecodingProm,
+    SpecDecodingStats,
+)
 from vllm.v1.utils import compute_iteration_details
 
 
@@ -44,6 +49,26 @@ def test_adaptive_verified_budget_counter_differs_from_proposals():
     assert samples["vllm:spec_decode_num_draft_tokens_total"] == 5
     assert samples["vllm:spec_decode_num_verified_draft_tokens_total"] == 3
     assert samples["vllm:spec_decode_num_accepted_tokens_total"] == 2
+
+
+@pytest.mark.parametrize("adaptive_verification", [True, False])
+def test_adaptive_verified_budget_logging(adaptive_verification: bool):
+    stats = SpecDecodingStats.new(num_spec_tokens=5)
+    stats.observe_draft_stats_per_req(num_draft_tokens=5, num_accepted_tokens=2)
+    stats.observe_draft_stats_per_batch(num_verified_draft_tokens=3)
+
+    spec_logging = SpecDecodingLogging(
+        enable_adaptive_verification=adaptive_verification
+    )
+    spec_logging.observe(stats)
+    messages: list[str] = []
+    spec_logging.log(log_fn=lambda fmt, *args: messages.append(fmt % args))
+
+    assert len(messages) == 1
+    if adaptive_verification:
+        assert "Verified:" in messages[0]
+    else:
+        assert "Verified:" not in messages[0]
 
 
 def test_iteration_stats_repr():
