@@ -378,9 +378,16 @@ fn safe_text_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
+    // Stop only where a tool call can start: with exact whitespace, a bare
+    // start marker without it is text.
+    let with_whitespace = |marker: &str| match config.marker_whitespace {
+        JsonToolCallWhitespace::Optional => marker.to_string(),
+        JsonToolCallWhitespace::Exact(whitespace) => format!("{marker}{whitespace}"),
+    };
+    let start_marker = with_whitespace(config.start_marker);
     match config.framed_start_marker {
-        Some(marker) => safe_text_len_mul(input, &[marker, config.start_marker]),
-        None => safe_text_len(input, config.start_marker),
+        Some(marker) => safe_text_len_mul(input, &[with_whitespace(marker), start_marker]),
+        None => safe_text_len(input, start_marker),
     }
     .map(|len| JsonToolCallEvent::Text { len })
 }
