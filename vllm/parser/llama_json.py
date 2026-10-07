@@ -59,11 +59,34 @@ PYTHON_START = "<|python_start|>"
 PYTHON_END = "<|python_end|>"
 _WS = " \t\r\n"
 _HEX = "0123456789abcdefABCDEF"
+_STRUCTURAL_RE = re.compile(r'["{}\[\]]')
+_PRIMITIVE_END_RE = re.compile(r"[,}\] \t\r\n]")
 _ESCAPES = '"\\/bfnrt'
 # Ends a JSON string token: closing quote, an escape, or an unescaped control char.
 _STR_STOP = re.compile(r'["\\\x00-\x1f]')
 # Matched by position, not this order: the first alias in the text wins.
 _ARG_KEYS = ("arguments", "parameters")
+
+
+def _string_close(raw: str, start: int, pos: int) -> tuple[int, int]:
+    """End of the string opening at ``raw[start]``, searching from ``raw[pos]``.
+
+    Returns ``(end, resume)``: index past the closing quote, or -1 and the
+    resume point while unterminated. Even trailing backslashes mean the
+    quote closes (same as toggling escape char by char), so resuming
+    mid-scan matches a scan from ``start``.
+    """
+    i = pos
+    while True:
+        quote = raw.find('"', i)
+        if quote < 0:
+            return -1, len(raw)
+        back = quote - 1
+        while back >= start and raw[back] == "\\":
+            back -= 1
+        if (quote - back) % 2:
+            return quote + 1, quote + 1
+        i = quote + 1
 
 
 def _scan_json_value(raw: str, start: int) -> int | None:
@@ -102,6 +125,88 @@ def _scan_json_value(raw: str, start: int) -> int | None:
     return None
 
 
+class _ValueScan:
+    """Resumable :func:`_scan_json_value` for one growing value.
+
+    :meth:`end` may be called again as *raw* grows by appending: a
+    left-to-right fold with no lookahead, so resuming from the saved cursor
+    matches a rescan from ``start`` -- linear rather than quadratic per
+    value. Runs between structural chars use ``str.find`` since a value is
+    looked at once per feed.
+    """
+
+    __slots__ = ("start", "_pos", "_depth", "_str_start", "_end")
+
+    def __init__(self, start: int) -> None:
+        self.start = start
+        self._pos = start
+        self._depth = 0
+        self._str_start = -1
+        self._end: int | None = None
+
+    def resumable(self, raw: str) -> bool:
+        """Whether *raw* still extends the text this scan has consumed."""
+        return len(raw) >= (self._pos if self._end is None else self._end)
+
+    def end(self, raw: str) -> int | None:
+        if self._end is not None:
+            return self._end
+        first = raw[self.start]
+        if first in "{[":
+            self._scan_container(raw)
+        elif first == '"':
+            if self._str_start < 0:
+                self._str_start = self.start
+                self._pos = self.start + 1
+            close, self._pos = _string_close(raw, self.start, self._pos)
+            if close >= 0:
+                self._end = close
+        else:
+            match = _PRIMITIVE_END_RE.search(raw, self._pos)
+            if match is None:
+                self._pos = len(raw)
+            else:
+                self._end = match.start()
+        return self._end
+
+    def _scan_container(self, raw: str) -> None:
+        pos = self._pos
+        depth = self._depth
+        if self._str_start >= 0:
+            close, pos = _string_close(raw, self._str_start, pos)
+            if close < 0:
+                self._pos = pos
+                return
+            self._str_start = -1
+            pos = close
+        while True:
+            match = _STRUCTURAL_RE.search(raw, pos)
+            if match is None:
+                self._pos = len(raw)
+                self._depth = depth
+                return
+            at = match.start()
+            ch = raw[at]
+            if ch == '"':
+                close, pos = _string_close(raw, at, at + 1)
+                if close < 0:
+                    self._str_start = at
+                    self._pos = pos
+                    self._depth = depth
+                    return
+                pos = close
+            elif ch in "{[":
+                depth += 1
+                pos = at + 1
+            else:
+                depth -= 1
+                pos = at + 1
+                if depth == 0:
+                    self._pos = self._end = pos
+                    self._depth = depth
+                    return
+
+
 def _decode_key(raw_slice: str) -> str:
     """JSON-decode a completed object-key slice (e.g. ``na\\u006de`` →
     ``name``) so escaped keys match; fall back to the raw text."""
@@ -131,6 +236,60 @@ def _scan_top_level_start(raw: str, key_names: tuple[str, ...]) -> int:
     walker = JsonWalker(brackets="any", decode_keys=_decode_key, key_depth=1)
     walker.advance(raw, on_outside_char=on_outside)
     return found[0] if found else -1
+
+
+class _KeyScan:
+    """Resumable :func:`_scan_top_level_start` for one growing envelope.
+
+    A left-to-right fold with no lookahead, so resuming from the saved
+    cursor matches a rescan from 0. Without this, an envelope whose key
+    hasn't arrived yet -- prose containing a stray ``{`` -- is rescanned
+    in full on every feed: quadratic in its length. Structural state lives
+    on a long-lived :class:`JsonWalker`; whitespace after ``:`` is settled
+    separately so a truncated ``"name":`` can resume.
+    """
+
+    __slots__ = ("_walker", "_value_from", "_result")
+
+    def __init__(self) -> None:
+        self._walker = JsonWalker(brackets="any", decode_keys=_decode_key, key_depth=1)
+        # Set once the matching key's ``:`` is seen; the value is the next
+        # non-whitespace char, which may not have arrived yet.
+        self._value_from = -1
+        self._result: int | None = None
+
+    def resumable(self, raw: str) -> bool:
+        """Whether *raw* still extends the text this scan has consumed."""
+        return len(raw) >= self._walker.pos
+
+    def start(self, raw: str, key_names: tuple[str, ...]) -> int:
+        if self._result is not None:
+            return self._result
+        n = len(raw)
+        if self._value_from >= 0:
+            return self._settle(raw, n)
+
+        def on_outside(i: int, ch: str, depth: int) -> bool:
+            if ch == ":" and depth == 1 and self._walker.last_key in key_names:
+                self._value_from = i + 1
+                return False
+            return True
+
+        self._walker.advance(raw, on_outside_char=on_outside)
+        if self._value_from >= 0:
+            return self._settle(raw, n)
+        return -1
+
+    def _settle(self, raw: str, n: int) -> int:
+        """Skip the whitespace between ``:`` and the value, resumably."""
+        i = self._value_from
+        while i < n and raw[i] in _WS:
+            i += 1
+        self._value_from = i
+        if i >= n:
+            return -1
+        self._result = i
+        return i
 
 
 def _scan_top_level(raw: str, key_names: tuple[str, ...]) -> str | None:
@@ -700,6 +859,38 @@ def llama_json_config(
     )
 
 
+class _ArgScan:
+    """Per-slot incremental state for the argument scans.
+
+    The envelope and its carved-out argument text only ever grow by
+    appending, so each scan resumes rather than rescans. ``slot`` identity
+    catches the one way text can shrink: recycled as prose JSON, or reset
+    between requests.
+    """
+
+    __slots__ = (
+        "slot",
+        "key",
+        "value",
+        "name_key",
+        "name_value",
+        "spliced",
+        "cursor",
+        "member",
+    )
+
+    def __init__(self, slot: ToolCallSlot) -> None:
+        self.slot = slot
+        self.key: _KeyScan | None = None  # args-key scan
+        # Where the envelope's top-level "name" is; same resumability need.
+        self.name_key: _KeyScan | None = None
+        self.name_value: _ValueScan | None = None
+        self.value: _ValueScan | None = None  # args value scan
+        self.spliced: str = ""  # members already spliced/streamed
+        self.cursor: int = 0
+        self.member: _ValueScan | None = None  # trailing member's scan
+
+
 class LlamaJsonParser(ParserEngine):
     """Llama 3.x/4 JSON tool-call parser backed by the parser engine."""
 
@@ -723,6 +914,7 @@ class LlamaJsonParser(ParserEngine):
         # Content withheld because a forced tool choice is active.  Released
         # at finish if no call was ever promoted -- see _filter_events.
         self._held_forced: list[str] = []
+        self._arg_scans: dict[int, _ArgScan] = {}
         self._properties_cache: dict[str, dict] = {}
         self._properties_tools: list[Tool] | None = None
         if "parser_engine_config" not in kwargs:
@@ -745,6 +937,7 @@ class LlamaJsonParser(ParserEngine):
         self._drop_content = False
         self._held_ws.clear()
         self._held_forced.clear()
+        self._arg_scans.clear()
 
     def _check_skip_tool_parsing(
         self,
@@ -844,7 +1037,30 @@ class LlamaJsonParser(ParserEngine):
         # gated on an args key proving this is actually a call.
         if self._named_bare_args_name is not None:
             return self._named_bare_args_name
-        return _envelope_name(self._tool_slots[idx].args)
+        raw = self._tool_slots[idx].args
+        span = self._resumable_name_span(idx, raw)
+        if span is None:
+            return None
+        name = _name_from_span(span)
+        if name is None:
+            return None
+        keys = _top_level_keys(raw)
+        return name if ("arguments" in keys or "parameters" in keys) else None
+
+    def _resumable_name_span(self, idx: int, raw: str) -> str | None:
+        """``_scan_top_level(raw, ("name",))`` carried across feeds."""
+        scan = self._arg_scan(idx)
+        key = scan.name_key
+        if key is None or not key.resumable(raw):
+            key = scan.name_key = _KeyScan()
+            scan.name_value = None
+        start = key.start(raw, ("name",))
+        if start < 0:
+            return None
+        value = scan.name_value
+        if value is None or not value.resumable(raw):
+            value = scan.name_value = _ValueScan(start)
+        return raw[start : value.end(raw)]
 
     def _slot_args(self, dense_idx: int) -> str:
         if dense_idx < len(self._tool_slots):
@@ -1062,6 +1278,7 @@ class LlamaJsonParser(ParserEngine):
         raw: str,
         properties: dict,
         string_keys: set[str] | None,
+        scan: _ArgScan | None = None,
     ) -> str:
         """Longest prefix of the final spliced arguments already decided.
 
@@ -1071,9 +1288,9 @@ class LlamaJsonParser(ParserEngine):
         back -- unless it's a string under a string-typed key, which
         coercion never rewrites.
 
-        Rescans the accumulated argument text from the start on every call
-        -- quadratic in argument length over a whole streamed call. A later
-        commit carries scan state across feeds instead.
+        With a *scan*, members already settled aren't walked again:
+        everything before ``scan.cursor`` is in ``scan.spliced``, and
+        *raw* only grows by appending, so resuming matches a full rescan.
         """
         if not raw.startswith("{"):
             return self._safe_arg_prefix(raw, string_keys)
@@ -1082,6 +1299,12 @@ class LlamaJsonParser(ParserEngine):
         n = len(raw)
         cursor = 0
         i = 1
+        member: _ValueScan | None = None
+        if scan is not None and scan.cursor <= n:
+            out.append(scan.spliced)
+            cursor = scan.cursor
+            i = cursor or 1
+            member = scan.member
         tail_end = n
         while True:
             while i < n and (raw[i] in _WS or raw[i] == ","):
@@ -1108,7 +1331,9 @@ class LlamaJsonParser(ParserEngine):
                 j += 1
             if j >= n:
                 break
-            value_end = _scan_json_value(raw, j)
+            if member is None or member.start != j or not member.resumable(raw):
+                member = _ValueScan(j)
+            value_end = member.end(raw)
             schema = properties.get(key)
             if not isinstance(schema, dict):
                 schema = None
@@ -1123,7 +1348,39 @@ class LlamaJsonParser(ParserEngine):
                 else _splice_types(raw, j, value_end, schema)
             )
             cursor = i = value_end
-        return "".join(out) + raw[cursor:tail_end]
+            member = None
+        settled = "".join(out)
+        if scan is not None:
+            scan.spliced = settled
+            scan.cursor = cursor
+            scan.member = member
+        return settled + raw[cursor:tail_end]
+
+    def _arg_scan(self, idx: int) -> _ArgScan:
+        slot = self._tool_slots[idx]
+        scan = self._arg_scans.get(idx)
+        if scan is None or scan.slot is not slot:
+            scan = self._arg_scans[idx] = _ArgScan(slot)
+        return scan
+
+    def _partial_args(self, scan: _ArgScan, raw: str) -> str:
+        """``_llama_arg_converter(raw, True)`` with the envelope scan
+        carried across feeds instead of restarted on every one."""
+        value = scan.value
+        if value is None:
+            key = scan.key
+            if key is None or not key.resumable(raw):
+                key = scan.key = _KeyScan()
+            start = key.start(raw, _ARG_KEYS)
+            if start < 0:
+                return ""
+            value = scan.value = _ValueScan(start)
+        elif not value.resumable(raw):
+            value = scan.value = _ValueScan(value.start)
+        # A ``None`` end means the value is still open, i.e. runs to the
+        # end of the envelope.
+        span = raw[value.start : value.end(raw)]
+        return span[: _closeable_prefix(span)[0]]
 
     def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
         """Stream a schema-spliced prefix instead of raw model text.
@@ -1136,15 +1393,23 @@ class LlamaJsonParser(ParserEngine):
         if self._arg_converter is None or not self._stream_arg_deltas:
             return super()._compute_arg_delta(idx, raw_delta)
         slot = self._tool_slots[idx]
+        # The incremental scan knows this parser's own conversion; anything
+        # else configured keeps the plain per-feed call.
+        incremental = self._arg_converter is _llama_arg_converter
+        scan = self._arg_scan(idx) if incremental else None
         try:
-            current = self._arg_converter(slot.args, True)
+            current = (
+                self._partial_args(scan, slot.args)
+                if scan is not None
+                else self._arg_converter(slot.args, True)
+            )
         except (json.JSONDecodeError, ValueError, TypeError):
             return None
         if not current:
             return None
         properties = self._tool_properties(slot.name)
         if properties:
-            safe = self._stable_arg_prefix(current, properties, slot.string_keys)
+            safe = self._stable_arg_prefix(current, properties, slot.string_keys, scan)
         else:
             safe = self._safe_arg_prefix(current, slot.string_keys)
         prev = slot.streamed_json

@@ -3,9 +3,10 @@
 """Tests for the engine-based Llama 3.x/4 JSON parser (llama3_json /
 llama4_json).
 
-Staged commit 5/7: wires up schema-coercion safety and streaming, on top
-of truncation repair and full format-shape coverage. Later commits grow
-both llama_json.py and this file together.
+Staged commit 6/7: adds resumable envelope-key and argument-value scanning
+on top of schema-coercion safety, truncation repair, and full format-shape
+coverage. One commit left -- sharing the resumable walker via
+vllm/parser/utils.py.
 """
 
 import json
@@ -355,3 +356,62 @@ class TestSchemaCoercionStreamingParity:
 
         assert json.loads(non_streaming.tool_calls[0].function.arguments) == {"n": 7}
         assert json.loads(calls[0]["args"]) == {"n": 7}
+
+
+class TestResumableScanning:
+    """The resumable envelope-key and value scans must equal the one-shot
+    functions at every prefix -- the whole point is being bit-identical,
+    just carried across feeds instead of restarted."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"a": 1, "b": [2, {"c": "d"}]}',
+            '"plain string"',
+            '"br{a}ce[s] and \\" escapes \\\\"',
+            '{"k": "unbalanced { [ \\" inside"}',
+            "12345",
+            "true",
+            '["a", "b"]',
+            "{}",
+        ],
+    )
+    def test_value_scan_matches_full_rescan_at_every_length(self, raw):
+        from vllm.parser.llama_json import _scan_json_value, _ValueScan
+
+        scan = _ValueScan(0)
+        for cut in range(1, len(raw) + 1):
+            assert scan.end(raw[:cut]) == _scan_json_value(raw[:cut], 0)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"name": "f", "parameters": {}}',
+            'prose before {"name": "g", "arguments": {"x": 1}}',
+            '{"parameters": {}, "name": "h"}',
+        ],
+    )
+    def test_key_scan_matches_full_rescan_at_every_length(self, raw):
+        from vllm.parser.llama_json import _KeyScan, _scan_top_level_start
+
+        scan = _KeyScan()
+        for cut in range(1, len(raw) + 1):
+            assert scan.start(raw[:cut], ("name",)) == _scan_top_level_start(
+                raw[:cut], ("name",)
+            )
+
+    def test_streaming_result_is_unchanged_by_resumability(self):
+        """Behavioral regression guard: resumable scanning must produce the
+        exact same streamed result as before it existed (commit 5)."""
+        text = '{"name": "f", "parameters": {"city": "San Francisco", "unit": "C"}}'
+        results = _stream(_parser(), _request(), text, chunk_size=1)
+        _, calls = _accumulate(results)
+        assert calls[0]["name"] == "f"
+        assert json.loads(calls[0]["args"]) == {"city": "San Francisco", "unit": "C"}
+
+    def test_nested_name_key_still_resolved_correctly_when_resumable(self):
+        text = '{"parameters": {"name": "Alice"}, "name": "rename_user"}'
+        results = _stream(_parser(), _request(), text, chunk_size=1)
+        _, calls = _accumulate(results)
+        assert calls[0]["name"] == "rename_user"
+        assert json.loads(calls[0]["args"]) == {"name": "Alice"}
