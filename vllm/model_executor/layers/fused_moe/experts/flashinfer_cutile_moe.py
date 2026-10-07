@@ -42,6 +42,9 @@ W4A16_BACKENDS = {
     "sm12x": "SM12xNvfp4Bf16Config",
 }
 
+# Token-bucket scratch of SM12x W4A4 runners, shared by layers of one geometry.
+_SHARED_W4A4_WORKSPACES: dict[tuple, dict[int, list[torch.Tensor]]] = {}
+
 _ACTIVATIONS = {
     MoEActivation.SILU: "SwiGLU",
     MoEActivation.RELU2_NO_MUL: "ReLU2",
@@ -193,6 +196,14 @@ class CuTileNvfp4DynamicMoE:
                 ):
                     pack.prepare_for(key, view)
         self._weights = pack
+        # SM12x W4A4 rewrites its whole scratch from the inputs on every call
+        # and MoE layers run one after another, so layers with the same
+        # geometry share one workspace per token bucket instead of keeping
+        # num_layers copies (about 5 KB per token per layer).
+        runner = self.w4a4.runner
+        if runner.backend_key == "sm12x_nvfp4" and hasattr(runner, "_workspaces"):
+            key = (str(runner.device), *self._geometry, view["w2"].shape[1])
+            runner._workspaces = _SHARED_W4A4_WORKSPACES.setdefault(key, {})
 
     def select(self, num_tokens: int) -> _Path:
         if self.w4a16 is not None and num_tokens <= self.a16_max_tokens:
@@ -321,6 +332,11 @@ class FlashInferCuTileNvfp4Experts(mk.FusedMoEExpertsModular):
         input_scales = getattr(layer, "cutile_input_global_scales", None)
         if input_scales is not None:
             view["w1_input_global_scale"], view["w2_input_global_scale"] = input_scales
+        elif self.dispatch.w4a16 is not None:
+            # No calibrated activation scales (e.g. a W4A16 checkpoint such as
+            # an MTP drafter): W4A4 would quantize with a unit global scale,
+            # so run every forward as W4A16.
+            self.dispatch.a16_max_tokens = self.dispatch.max_num_tokens
         self.dispatch.set_weights(view)
 
     @staticmethod

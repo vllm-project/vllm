@@ -235,3 +235,25 @@ def test_tuning_compiles_every_sm12x_token_bucket(backends, monkeypatch):
     limits = {"w4a4": max_num_tokens, "w4a16": CUTOFF}
     for name, calls in seen.items():
         assert set(get_hybrid_num_tokens_buckets(limits[name])) <= set(calls), name
+
+
+@torch.inference_mode()
+def test_sm12x_w4a4_layers_share_bucket_scratch():
+    """SM12x W4A4 rewrites its scratch on every call, so layers of one geometry
+    share it per token bucket instead of holding one copy per layer."""
+    backends = ("sm12x", "sm12x")
+    if not has_flashinfer_cutile_nvfp4(backends[1], backends[0]):
+        pytest.skip("FlashInfer lacks the SM12x backends")
+    first, (w13, s13, g13, w2, s2, g2), _ = _dispatch(
+        MoEActivation.SILU, backends=backends
+    )
+    second, _, _ = _dispatch(MoEActivation.SILU, backends=backends)
+    other, _, _ = _dispatch(MoEActivation.RELU2_NO_MUL, backends=backends)
+    assert first.w4a4.runner._workspaces is second.w4a4.runner._workspaces
+    assert first.w4a4.runner._workspaces is not other.w4a4.runner._workspaces
+    x, ids, w = _routing(CUTOFF + 3, 3)
+    ref = _reference(x, ids, w, w13, s13, g13, w2, s2, g2, MoEActivation.SILU)
+    outs = [d.run(torch.empty_like(x), x, ids, w) for d in (first, second, first)]
+    err = (outs[0].float() - ref).abs() / (ref.abs().mean() + 1e-6)
+    assert err.mean() < 2.5e-1, f"mean rel err {err.mean():.3e}"
+    assert torch.equal(outs[0], outs[2])
