@@ -60,6 +60,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.hisparse.layout import (
     create_hisparse_layout,
     get_hisparse_kv_cache_groups,
+    get_hisparse_steady_state_concurrency,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -196,6 +197,48 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         ),
     )
     assert scheduler_block_size == hash_block_size == gpu_block_size
+
+
+def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
+    """Running requests pin only their resident tail; the newest still needs its
+    full in-flight window to be admitted."""
+    block_size = 16
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=10 * block_size),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=10 * block_size,
+    )
+    attn_spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=64, dtype=torch.float16
+    )
+    page_size = attn_spec.page_size_bytes
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], attn_spec, host_resident=True),
+            KVCacheGroupSpec(["indexer"], attn_spec),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(block_size=block_size, page_size=page_size),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size, page_size=page_size, blocks_per_request=4
+                ),
+            ),
+        ],
+        hisparse_host_num_blocks=100,
+    )
+
+    # Admission takes indexer 10 + resident 10 + hot 4 = 24 blocks and steady
+    # state 16, so 3 fit (2 x 16 + 24 <= 64) but not 4 (3 x 16 + 24 > 64).
+    assert get_hisparse_steady_state_concurrency(config, kv_cache_config) == 3.5
+    # The worst-case bound charges all 10 resident pages.
+    assert get_max_concurrency_for_kv_cache_config(
+        config, kv_cache_config
+    ) == pytest.approx(64 / 24)
 
 
 @pytest.mark.parametrize("extra_blocks,ok", [(1, False), (2, True)])
