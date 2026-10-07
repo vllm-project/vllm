@@ -235,6 +235,7 @@ mod tests {
                     tool_choice: &tool_choice,
                     tool_strict_level: Default::default(),
                     parallel_tool_calls: true,
+                    answer: None,
                 };
                 let tool = T::create(&tools).unwrap();
                 let expected = full_format_from_builder_for_test(
@@ -524,6 +525,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
         let tool = Qwen3XmlToolParser::create(&tools).unwrap();
@@ -553,6 +555,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let visible = Format::const_string("answer");
 
@@ -586,6 +589,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let visible = Format::const_string("visible");
 
@@ -622,6 +626,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let tokenizer = Arc::new(tokenizer());
         let reasoning = Qwen3ReasoningParser::create(tokenizer.clone()).unwrap();

@@ -245,7 +245,8 @@ impl ChatRequestProcessor {
         let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
         let grammar = {
             output_processor.initialize(prompt_token_ids)?;
-            output_processor.build_output_grammar()?
+            output_processor
+                .build_output_grammar(text_request.sampling_params.structured_outputs.as_ref())?
         };
         apply_output_grammar(&mut text_request, grammar)?;
 

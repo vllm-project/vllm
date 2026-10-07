@@ -9,12 +9,14 @@ use std::sync::{Arc, Once};
 
 use futures::StreamExt as _;
 use tracing::info;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 use xgrammar_structural_tag::ToolChoice;
 
 use self::unified::unified_event_stream;
+use super::structural_tag::answer_format;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
 use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
@@ -248,16 +250,21 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
         })
     }
 
-    fn build_output_grammar(&self) -> Result<Option<BuiltOutputGrammar>> {
+    fn build_output_grammar(
+        &self,
+        structured_outputs: Option<&StructuredOutputsParams>,
+    ) -> Result<Option<BuiltOutputGrammar>> {
         let Some(inputs) = &self.grammar_inputs else {
             return Ok(None);
         };
+        let answer = structured_outputs.and_then(answer_format);
         self.parser
             .build_output_grammar(&OutputGrammarContext {
                 tools: &inputs.tools,
                 tool_choice: &inputs.tool_choice,
                 tool_strict_level: inputs.tool_strict_level,
                 parallel_tool_calls: self.parallel_tool_calls,
+                answer: answer.as_ref(),
             })
             .map_err(|error| Error::OutputGrammar {
                 error: Box::new(error),
@@ -327,7 +334,7 @@ mod tests {
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
-            processor.build_output_grammar().unwrap()
+            processor.build_output_grammar(None).unwrap()
         };
 
         assert!(build(ToolStrictLevel::Auto, None, ChatToolChoice::Auto).is_none());
@@ -369,7 +376,7 @@ mod tests {
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
-            let built = processor.build_output_grammar().unwrap().unwrap();
+            let built = processor.build_output_grammar(None).unwrap().unwrap();
             let tag =
                 serde_json::to_value(xgrammar_structural_tag::StructuralTag::new(built.format))
                     .unwrap();

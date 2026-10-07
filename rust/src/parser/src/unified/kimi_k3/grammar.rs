@@ -158,6 +158,7 @@ mod tests {
                 tool_choice: &tool_choice,
                 tool_strict_level: ToolStrictLevel::Function,
                 parallel_tool_calls,
+                answer: None,
             },
         )
         .unwrap()
@@ -348,6 +349,7 @@ mod tests {
                 tool_choice: &ToolChoice::auto(),
                 tool_strict_level: ToolStrictLevel::Auto,
                 parallel_tool_calls: true,
+                answer: None,
             },
         )
         .unwrap();

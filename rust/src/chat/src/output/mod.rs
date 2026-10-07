@@ -7,6 +7,7 @@ use std::sync::Arc;
 use futures::Stream;
 use trait_set::trait_set;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
@@ -81,8 +82,12 @@ pub trait ChatOutputProcessor: Send {
     }
 
     /// Build the structured output grammar implied by the initialized parser
-    /// state, or `None` when this request needs no parser-owned grammar.
-    fn build_output_grammar(&self) -> Result<Option<BuiltOutputGrammar>> {
+    /// state and the request's own `structured_outputs` constraint, or `None`
+    /// when this request needs no parser-owned grammar.
+    fn build_output_grammar(
+        &self,
+        _structured_outputs: Option<&StructuredOutputsParams>,
+    ) -> Result<Option<BuiltOutputGrammar>> {
         Ok(None)
     }
 

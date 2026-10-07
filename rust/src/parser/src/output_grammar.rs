@@ -132,6 +132,10 @@ pub struct OutputGrammarContext<'a> {
     pub tool_strict_level: ToolStrictLevel,
     /// Whether the request permits more than one tool call.
     pub parallel_tool_calls: bool,
+    /// The user's constraint on the answer text, such as a `response_format`
+    /// JSON schema, normalized to a format. A builder that composes it inserts
+    /// it where the model writes its answer; `None` leaves the answer free.
+    pub answer: Option<&'a Format>,
 }
 
 /// Errors produced while building an output grammar.
@@ -284,6 +288,7 @@ mod tests {
                 tool_choice,
                 tool_strict_level: ToolStrictLevel::Auto,
                 parallel_tool_calls: true,
+                answer: None,
             },
         )
         .unwrap()
@@ -310,6 +315,7 @@ mod tests {
                 tool_choice: &tool_choice,
                 tool_strict_level: level,
                 parallel_tool_calls: true,
+                answer: None,
             },
         )
         .unwrap()
