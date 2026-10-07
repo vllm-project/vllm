@@ -2760,6 +2760,193 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         ]
 
 
+_BLHNC_BLOCK_SIZE = 16
+_BLHNC_NUM_BLOCKS = 3
+_BLHNC_MLA_LAYERS = 4
+_BLHNC_DRAFT_LAYERS = 2
+_BLHNC_DRAFT_KV_HEADS = 8
+
+
+def _register_blhnc_mla_target_with_gqa_draft(
+    engine_id: str,
+    tp_size: int,
+    tp_rank: int,
+    whole_row: bool = False,
+    kv_buffer_device: str | None = None,
+):
+    """Register an MLA target (group 0) and a GQA draft (group 1) laid out as the
+    block-outermost allocator lays them out: one block row sized to the larger
+    group, with every group's pages starting at byte 0 of that row. The first
+    draft page therefore shares its base address with the first target page.
+    """
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+    mla_spec = MLAAttentionSpec(
+        block_size=_BLHNC_BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.uint8,
+    )
+    draft_spec = FullAttentionSpec(
+        block_size=_BLHNC_BLOCK_SIZE,
+        num_kv_heads=_BLHNC_DRAFT_KV_HEADS // tp_size,
+        head_size=32,
+        dtype=torch.bfloat16,
+    )
+    target_names = [
+        f"model.layers.{i}.self_attn.attn" for i in range(_BLHNC_MLA_LAYERS)
+    ]
+    draft_names = [
+        f"draft_model.model.layers.{i}.self_attn.attn"
+        for i in range(_BLHNC_DRAFT_LAYERS)
+    ]
+    row = max(
+        _BLHNC_MLA_LAYERS * mla_spec.page_size_bytes,
+        _BLHNC_DRAFT_LAYERS * draft_spec.page_size_bytes,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=_BLHNC_NUM_BLOCKS,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(target_names, mla_spec),
+            KVCacheGroupSpec(draft_names, draft_spec),
+        ],
+    )
+    vllm_config = create_vllm_config(
+        attention_backend="TRITON_ATTN",
+        kv_connector_extra_config={"whole_row_regions": True} if whole_row else None,
+    )
+    vllm_config.cache_config.block_size = _BLHNC_BLOCK_SIZE
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
+    if kv_buffer_device is not None:
+        vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
+
+    raw = torch.zeros(
+        row * _BLHNC_NUM_BLOCKS, dtype=torch.int8, device=current_platform.device_type
+    )
+
+    def page_views(names: list[str], page: int) -> dict[str, torch.Tensor]:
+        return {
+            name: raw.as_strided((_BLHNC_NUM_BLOCKS, page), (row, 1), idx * page)
+            for idx, name in enumerate(names)
+        }
+
+    nixl_worker = "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
+    with (
+        patch(f"{nixl_worker}.NixlWrapper", FakeNixlWrapper),
+        patch(f"{nixl_worker}.threading.Event"),
+        patch(f"{nixl_worker}.threading.Thread"),
+        patch(f"{nixl_worker}.get_current_attn_backends") as mock_backends,
+        patch(
+            f"{nixl_worker}.get_tensor_model_parallel_world_size",
+            return_value=tp_size,
+        ),
+        patch(f"{nixl_worker}.get_tensor_model_parallel_rank", return_value=tp_rank),
+    ):
+        mock_backends.return_value = [TritonAttentionBackend]
+        worker = FakeNixlConnectorWorker(
+            vllm_config,
+            engine_id,
+            hand_shake_latency=0,
+            kv_cache_layout="BLHNC",
+            kv_cache_config=kv_cache_config,
+        )
+        worker.use_mla = True
+        worker._head_sharded_draft_kv_heads = _BLHNC_DRAFT_KV_HEADS
+        worker.register_kv_caches(
+            page_views(target_names, mla_spec.page_size_bytes)
+            | page_views(draft_names, draft_spec.page_size_bytes)
+        )
+    meta = NixlAgentMetadata(
+        engine_id=engine_id,
+        agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+        kv_caches_base_addr=worker.kv_caches_base_addr[engine_id][worker.tp_rank],
+        device_id=worker.device_id,
+        num_blocks=worker.num_blocks,
+        block_lens=worker.block_len_per_layer,
+        block_strides=worker.block_stride_per_layer,
+        kv_cache_layout=worker.kv_cache_layout,
+        block_size=worker.block_size,
+        ssm_sizes=(0, 0),
+        attn_backend_name=worker.backend_name,
+        physical_blocks_per_logical_kv_block=1,
+        region_num_blocks=worker.region_num_blocks,
+        region_group_ids=worker.region_group_ids,
+        region_names=worker.region_names,
+        region_mem_types=worker.region_mem_types,
+    )
+    return worker, meta, raw, row, mla_spec.page_size_bytes, draft_spec.page_size_bytes
+
+
+@pytest.mark.parametrize("whole_row", [False, True])
+@pytest.mark.parametrize("tp_rank", [0, 3])
+def test_blhnc_gqa_draft_reads_own_head_slice_from_tp1_prefill(
+    default_vllm_config, dist_init, whole_row, tp_rank
+):
+    """A block-outermost layout aliases the draft's first page onto the target's
+    first page. The draft page must still be its own head-sharded region, so a
+    TP4 decode rank reads exactly its head slice of the TP1 prefill's page."""
+    tp_size = 4
+    p_worker, p_meta, p_raw, p_row, mla_page, p_draft_page = (
+        _register_blhnc_mla_target_with_gqa_draft("prefill", 1, 0, whole_row)
+    )
+    d_worker, _, d_raw, d_row, _, d_draft_page = (
+        _register_blhnc_mla_target_with_gqa_draft("decode", tp_size, tp_rank, whole_row)
+    )
+    assert p_row == d_row
+    assert p_draft_page == d_draft_page * tp_size
+
+    draft_regions = [
+        i
+        for i, name in enumerate(d_worker.region_names)
+        if name.startswith("draft_model.")
+    ]
+    target_regions = [
+        i for i in range(len(d_worker.region_names)) if i not in draft_regions
+    ]
+    assert len(draft_regions) == _BLHNC_DRAFT_LAYERS
+    assert len(target_regions) == (1 if whole_row else _BLHNC_MLA_LAYERS)
+    assert all(d_worker._is_head_sharded_draft_region(i) for i in draft_regions)
+    assert not any(d_worker._is_region_replicated(i) for i in draft_regions)
+    assert all(d_worker._is_region_replicated(i) for i in target_regions)
+    assert {d_worker.region_group_ids[i] for i in draft_regions} == {1}
+    assert {d_worker.region_group_ids[i] for i in target_regions} == {0}
+    d_bases = d_worker.kv_caches_base_addr["decode"][tp_rank]
+    assert [d_bases[i] - d_raw.data_ptr() for i in draft_regions] == [
+        j * d_draft_page for j in range(_BLHNC_DRAFT_LAYERS)
+    ]
+
+    nixl_worker = "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
+    with patch(f"{nixl_worker}.NixlWrapper", FakeNixlWrapper):
+        d_worker.nixl_wrapper = FakeNixlWrapper("decode")
+        d_worker.add_remote_agent(p_meta, remote_tp_size=1)
+    plan = d_worker.tp_mappings["prefill"]
+    rows = d_worker._build_fa_remote(plan, p_meta, block_size_ratio=1)
+    rows = rows.reshape(len(d_worker.region_names), _BLHNC_NUM_BLOCKS, 3)
+    p_base = p_raw.data_ptr()
+    for j, region in enumerate(draft_regions):
+        assert rows[region, :, :2].tolist() == [
+            [
+                p_base + j * p_draft_page + tp_rank * d_draft_page + b * p_row,
+                d_draft_page,
+            ]
+            for b in range(_BLHNC_NUM_BLOCKS)
+        ]
+    target_len = d_row if whole_row else mla_page
+    for region in target_regions:
+        offset = d_bases[region] - d_raw.data_ptr()
+        assert rows[region, :, :2].tolist() == [
+            [p_base + offset + b * p_row, target_len] for b in range(_BLHNC_NUM_BLOCKS)
+        ]
+
+
+def test_whole_row_regions_rejects_host_buffer(default_vllm_config, dist_init):
+    with pytest.raises(ValueError, match="whole_row_regions"):
+        _register_blhnc_mla_target_with_gqa_draft(
+            "decode", 1, 0, whole_row=True, kv_buffer_device="cpu"
+        )
+
+
 class FakePlatform(Platform):
     device_type: str = "oot"
 
