@@ -99,6 +99,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     is_full_attention_spec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -222,6 +223,8 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
+    _cache_hit_source = CacheHitSource.P2P
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         # The READ path always transfers the recurrent-state slot, including
@@ -1229,6 +1232,24 @@ class MoRIIOConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=kv_params,
             )
+        if (
+            self.mode == MoRIIOMode.READ
+            and self._has_mamba
+            and scheduler_output.new_block_ids_to_zero
+        ):
+            # Hybrid models zero recycled attention pages that held Mamba state.
+            # Host-submitted READs overwrite these pages and can race zeroing.
+            # Hybrid READ metadata puts the aligned attention pages first.
+            read_dst_block_ids = {
+                b
+                for _, block_ids in self._reqs_need_recv.values()
+                for b in block_ids[0]
+            }
+            scheduler_output.new_block_ids_to_zero = [
+                b
+                for b in scheduler_output.new_block_ids_to_zero
+                if b not in read_dst_block_ids
+            ]
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
