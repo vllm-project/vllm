@@ -191,14 +191,14 @@ def test_shift_block_table_to_starts_matches_seq_starts():
     request's first token, so a continuation chunk passes a shifted block table.
     Token ``t`` of the chunk must land on the same physical slot either way.
     """
-    context_lens = [2048, 32, 32]
+    context_lens = [1408, 32, 32]
     metadata = build_chunked_context(context_lens, [3, 5, 7], 1024)
     assert metadata is not None
     num_blocks = max(context_lens) // BLOCK_SIZE
     block_table = torch.randperm(len(context_lens) * num_blocks, dtype=torch.int32)
     block_table = block_table.view(len(context_lens), num_blocks)
 
-    assert any(c.is_continuation for c in metadata.chunks)
+    assert any(c.is_continuation and c.num_requests > 1 for c in metadata.chunks)
     for chunk in metadata.chunks:
         table = block_table[chunk.request_slice]
         shifted = shift_block_table_to_starts(table, chunk.starts, BLOCK_SIZE)

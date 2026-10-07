@@ -40,9 +40,8 @@ _NVFP4_ENTRY = 352  # 256 e2m1 NoPE + 64 e4m3 RoPE + 32 e4m3 scale factors
 _NUM_HEADS = 2
 _BLOCK_SIZE = 64
 _WORKSPACE_TOKENS = 512
-# The first request spans several chunks, so later chunks continue it from a
-# non-zero start; the short ones pack together and the last has no context.
-_CONTEXT_LENS = [1000, 100, 64, 0]
+# The second chunk continues the first request and also includes a fresh one.
+_CONTEXT_LENS = [900, 100, 64, 0]
 _QUERY_LENS = [8, 4, 6, 5]
 
 
@@ -126,9 +125,9 @@ def _build_prefill_metadata(
         dcp_virtual_block_size=1,
     )
     assert chunked_context is not None
-    assert any(c.is_continuation for c in chunked_context.chunks), (
-        "the batch must exercise a continuation chunk"
-    )
+    assert any(
+        c.is_continuation and c.num_requests > 1 for c in chunked_context.chunks
+    ), "the batch must exercise a mixed continuation chunk"
     return MLACommonPrefillMetadata(
         block_table=block_table,
         query_start_loc=query_start_loc_cpu.to(device),
