@@ -7,6 +7,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _per_token_group_quant_fp8_colmajor,
     silu_mul_per_token_group_quant_fp8_colmajor,
+    silu_mul_quant_fp8_packed_triton,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -106,6 +107,94 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
 
     torch.testing.assert_close(output.to(torch.float32), ref_output.to(torch.float32))
     torch.testing.assert_close(output_scales, ref_output_scales)
+
+
+@pytest.mark.parametrize(
+    "counts", [[0, 1, 127, 128, 129, 0, 257, 13], [128] * 8, [0] * 8]
+)
+@pytest.mark.parametrize("group_size", [32, 128])
+@pytest.mark.parametrize("scale_format", ["packed", "float32", "ceil_ue8m0"])
+@pytest.mark.parametrize("hidden_size", [256, 2048])
+@pytest.mark.parametrize("clamp_limit", [None, 10.0])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA graph test")
+def test_silu_quant_skips_expert_padding_on_graph_replay(
+    counts: list[int],
+    group_size: int,
+    scale_format: str,
+    hidden_size: int,
+    clamp_limit: float | None,
+):
+    """Live rows match dense quantization; gaps stay untouched as counts change."""
+    alignment = 128
+    capacity = sum(triton.cdiv(n, alignment) * alignment for n in counts)
+    # Exercise unused capacity as well as the gaps between experts.
+    capacity = max(capacity, alignment)
+    if counts != [128] * 8:
+        capacity += alignment
+    x = torch.randn((capacity, 2 * hidden_size), device=DEVICE, dtype=torch.bfloat16)
+    x *= 16
+    clean_x = x.clone()
+    ends = torch.empty(len(counts), device=DEVICE, dtype=torch.int32)
+    output = torch.empty((capacity, hidden_size), device=DEVICE, dtype=FLOAT8_DTYPE)
+
+    def set_counts(values):
+        positions = []
+        mask = torch.zeros(capacity, device=DEVICE, dtype=torch.bool)
+        start = 0
+        for count in values:
+            mask[start : start + count] = True
+            positions.append(start + count)
+            start += triton.cdiv(count, alignment) * alignment
+        ends.copy_(torch.tensor(positions, device=DEVICE, dtype=torch.int32))
+        return mask
+
+    def quantize(x, output=None, **kwargs):
+        if scale_format == "packed":
+            return silu_mul_quant_fp8_packed_triton(
+                x,
+                group_size=group_size,
+                output_q=output,
+                clamp_limit=clamp_limit,
+                **kwargs,
+            )
+        return silu_mul_per_token_group_quant_fp8_colmajor(
+            x,
+            group_size=group_size,
+            output=output,
+            clamp_limit=clamp_limit,
+            use_ue8m0=scale_format == "ceil_ue8m0",
+            **kwargs,
+        )
+
+    def invoke():
+        return quantize(
+            x,
+            output=output,
+            expert_ends=ends,
+            expert_alignment=alignment,
+        )
+
+    set_counts(counts)
+    invoke()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual_q, actual_s = invoke()
+
+    for values in (counts, counts[::-1]):
+        live = set_counts(values)
+        x.copy_(clean_x)
+        x[~live] = float("nan")
+        output.view(torch.uint8).fill_(91)
+        graph.replay()
+        reference_q, reference_s = quantize(x)
+        torch.testing.assert_close(
+            actual_q.view(torch.uint8)[live],
+            reference_q.view(torch.uint8)[live],
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(actual_s[live], reference_s[live], rtol=0, atol=0)
+        assert torch.all(actual_q.view(torch.uint8)[~live] == 91)
 
 
 @pytest.mark.parametrize("T", [128, 256, 512])
