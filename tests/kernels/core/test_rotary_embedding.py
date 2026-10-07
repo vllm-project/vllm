@@ -15,7 +15,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rop
 @pytest.mark.parametrize("rotary_dim", [32, 64])
 @pytest.mark.parametrize("max_position", [512, 8192])
 def test_dynamic_ntk_encoder_packed_sequences(
-    default_vllm_config, device, dtype, rotary_dim, max_position
+    default_vllm_config, monkeypatch, device, dtype, rotary_dim, max_position
 ):
     """Packed requests must match independently scaled, fresh RoPE instances."""
     torch.manual_seed(0)
@@ -42,6 +42,15 @@ def test_dynamic_ntk_encoder_packed_sequences(
     ).to(device)
     with set_forward_context(None, default_vllm_config, is_padding=is_padding):
         actual_q, actual_k = rope(positions, q.clone(), k.clone())
+
+        # Exercise the XPU query-only fallback without requiring XPU hardware.
+        def reject_xpu_kernel(*args, **kwargs):
+            pytest.fail("The XPU rotary kernel requires a key tensor")
+
+        with monkeypatch.context() as patch:
+            patch.setattr("vllm._custom_ops.rotary_embedding", reject_xpu_kernel)
+            query_only, no_key = rope.forward_xpu(positions, q.clone())
+        assert no_key is None
     positions = positions.masked_fill(is_padding, 0)
     start = 0
     for length in lengths:
@@ -65,6 +74,9 @@ def test_dynamic_ntk_encoder_packed_sequences(
         )
         torch.testing.assert_close(
             actual_k[start:end], expected_k, atol=atol, rtol=rtol
+        )
+        torch.testing.assert_close(
+            query_only[start:end], expected_q, atol=atol, rtol=rtol
         )
         start = end
 

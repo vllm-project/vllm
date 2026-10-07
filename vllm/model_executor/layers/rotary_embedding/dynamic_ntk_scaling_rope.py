@@ -173,4 +173,13 @@ class DynamicNTKScalingRotaryEmbeddingForEncoder(RotaryEmbedding):
 
     forward_cpu = forward_cuda
     forward_hip = forward_cuda
-    forward_xpu = forward_cuda
+
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if key is None:
+            return self.forward_native(positions, query, key)
+        return self.forward_cuda(positions, query, key)
