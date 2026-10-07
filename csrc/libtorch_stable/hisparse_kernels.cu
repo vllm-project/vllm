@@ -35,6 +35,21 @@ namespace {
 // Empty key in the shared open-addressing table of host rows.
 constexpr int32_t kHashEmpty = -1;
 
+__host__ __device__ constexpr uintptr_t align_residency_ballot(
+    uintptr_t address) {
+  constexpr uintptr_t alignment = alignof(VLLM_BALLOT_MASK_T);
+  return (address + alignment - 1) & ~(alignment - 1);
+}
+
+// The int32 tables can end at either residue modulo a ROCm ballot's alignment.
+// Both shared and scratch hash-value layouts must preserve typed alignment.
+static_assert(align_residency_ballot(0) == 0);
+static_assert(align_residency_ballot(sizeof(int32_t)) %
+                  alignof(VLLM_BALLOT_MASK_T) ==
+              0);
+static_assert(align_residency_ballot(sizeof(int32_t)) - sizeof(int32_t) <=
+              sizeof(VLLM_BALLOT_MASK_T) - sizeof(int32_t));
+
 bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
   cudaPointerAttributes attributes{};
   const auto status =
@@ -343,7 +358,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const int64_t resident_bt_stride, const int32_t resident_num_reqs,
     const int32_t resident_num_blocks, const int32_t resident_block_size,
     const int32_t resident_null_block, const int64_t input_row_stride,
-    const int64_t attention_row_stride, const int64_t valid_count_stride) {
+    const int64_t attention_row_stride, const int64_t valid_count_stride,
+    int32_t* __restrict__ hash_values_scratch) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
 
@@ -411,13 +427,19 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 
   extern __shared__ char smem_raw[];
   int32_t* s_hash_keys = reinterpret_cast<int32_t*>(smem_raw);
-  int32_t* s_hash_vals = s_hash_keys + hash_size;
-  int32_t* s_chunk_off = s_hash_vals + hash_size;
+  // A padded run can have the same request id as a live run. Isolate scratch
+  // by launch row, not request/state id, including before the empty-run exit.
+  int32_t* s_hash_vals =
+      hash_values_scratch != nullptr
+          ? hash_values_scratch + static_cast<int64_t>(first_row) * hash_size
+          : s_hash_keys + hash_size;
+  int32_t* s_chunk_off =
+      s_hash_keys + hash_size * (hash_values_scratch != nullptr ? 1 : 2);
   int32_t* s_evict_off = s_chunk_off + (num_buffer_chunks + 1);
   int32_t* s_counters = s_evict_off + (num_buffer_chunks + 1);
-  VLLM_BALLOT_MASK_T* s_done = reinterpret_cast<VLLM_BALLOT_MASK_T*>(
-      reinterpret_cast<uintptr_t>(s_counters + kResidencyCounters) +
-      (sizeof(VLLM_BALLOT_MASK_T) - sizeof(int32_t)));
+  VLLM_BALLOT_MASK_T* s_done =
+      reinterpret_cast<VLLM_BALLOT_MASK_T*>(align_residency_ballot(
+          reinterpret_cast<uintptr_t>(s_counters + kResidencyCounters)));
   int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_done + num_buffer_chunks);
 
   for (int i = tid; i < table_size; i += blockDim.x) {
@@ -1001,7 +1023,8 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block) {
+    int64_t resident_block_size, int64_t resident_null_block,
+    std::optional<torch::stable::Tensor> const& hash_values_scratch) {
   STD_TORCH_CHECK(
       host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
       "host_cache must be pinned CPU memory");
@@ -1241,10 +1264,24 @@ void hisparse_resolve_residency(
                   max_union_rows);
   // One spare entry above the union bound keeps every probe sequence finite.
   const int hash_size = static_cast<int>(max_union_rows) + 1;
+  int32_t* hash_values_ptr = nullptr;
+  if (hash_values_scratch.has_value()) {
+    auto const& scratch = hash_values_scratch.value();
+    STD_TORCH_CHECK(
+        scratch.is_cuda() &&
+            scratch.get_device_index() == hot_cache.get_device_index() &&
+            scratch.scalar_type() == torch::headeronly::ScalarType::Int &&
+            scratch.dim() == 2 && scratch.size(0) >= launch_rows &&
+            scratch.size(1) == hash_size && scratch.is_contiguous(),
+        "hash_values_scratch must be contiguous int32 on the hot-cache device, "
+        "with at least launch_rows rows and max_union_rows + 1 columns");
+    hash_values_ptr = scratch.mutable_data_ptr<int32_t>();
+  }
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
+  // Reserve the worst-case alignment padding; scratch can need zero padding.
   const size_t smem_bytes =
-      sizeof(int32_t) *
-          (2 * hash_size + 2 * (num_buffer_chunks + 1) + kResidencyCounters) +
+      sizeof(int32_t) * ((hash_values_ptr != nullptr ? 1 : 2) * hash_size +
+                         2 * (num_buffer_chunks + 1) + kResidencyCounters) +
       sizeof(VLLM_BALLOT_MASK_T) * num_buffer_chunks +
       (sizeof(VLLM_BALLOT_MASK_T) - sizeof(int32_t)) +
       sizeof(int16_t) * hot_size;
@@ -1301,7 +1338,7 @@ void hisparse_resolve_residency(
       resident_num_reqs, resident_num_blocks,
       static_cast<int32_t>(resident_block_size),
       static_cast<int32_t>(resident_null_block), global_indices.stride(0),
-      attention_row_stride, valid_count_stride);
+      attention_row_stride, valid_count_stride, hash_values_ptr);
   const cudaError_t launch_error = cudaGetLastError();
   STD_TORCH_CHECK(launch_error == cudaSuccess,
                   "HiSparse residency kernel launch failed: ",

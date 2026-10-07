@@ -994,7 +994,7 @@ class ROCMAiterMLASparseImpl(
         return None
 
     def record_logical_topk_ready(self) -> None:
-        if self.index_group is not None:
+        if isinstance(self.index_group, HiSparseMLAIndexGroup):
             self.index_group.set_logical_topk_ready(self.index_group_index)
 
     def prepare_for_batch(
@@ -1018,7 +1018,47 @@ class ROCMAiterMLASparseImpl(
         base_mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
         mla_num_heads = base_mla_num_heads
         need_lse = self.sinks is not None
-        from vllm.platforms.rocm import on_gfx942
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+        if (
+            self.use_hisparse_triton_attn
+            and on_gfx950()
+            and q.dtype == kv_c_and_k_pe_cache.dtype
+            and q.dtype in (torch.bfloat16, current_platform.fp8_dtype())
+            and self.sinks is None
+            and self.kv_lora_rank == 512
+            and q.shape[-1] == 576
+        ):
+            # AITER's Triton implementation uses 64-bit offsets for large
+            # pools and needs no persistent metadata after residency remapping.
+            output = torch.empty(
+                (num_tokens, q.shape[1], self.kv_lora_rank),
+                dtype=attn_metadata.attn_out_dtype,
+                device=q.device,
+            )
+            rocm_aiter_ops.triton_sparse_mla_fwd(
+                q,
+                kv_c_and_k_pe_cache.view(-1, 1, 1, q.shape[-1]),
+                output,
+                self.scale,
+                source.paged_kv_indptr,
+                source.paged_kv_indices,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                attn_sink=self.sinks,
+                q_scale=layer._q_scale
+                if q.dtype == current_platform.fp8_dtype()
+                else None,
+                kv_scale=layer._k_scale
+                if q.dtype == current_platform.fp8_dtype()
+                else None,
+                has_invalid=False,
+            )
+            # Graph padding can leave rows with no selected keys. AITER's
+            # no-sink normalization produces NaN for those rows.
+            empty_rows = source.paged_kv_indptr[1:] == source.paged_kv_indptr[:-1]
+            output.masked_fill_(empty_rows[:, None, None], 0)
+            return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output), None
 
         # Keep sink attention available for dtypes/head shapes without an
         # AITER return-LSE kernel. Sink layers never need persistent metadata.

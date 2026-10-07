@@ -41,6 +41,8 @@ logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
 ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S = 15.0
+# Reserve time for worker SIGTERM escalation and EngineCore exit.
+ROCM_ENGINE_PROCESS_EXIT_GRACE_S = 10.0
 
 
 def get_engine_process_shutdown_timeout(
@@ -60,9 +62,15 @@ def get_engine_process_shutdown_timeout(
     manager. Keep it unchanged unless both values are zero: a zero remaining
     budget for a positive request timeout must not receive a fresh grace period
     because EngineCore relies on that deadline to enforce request draining.
+    For immediate abort, allow the configured worker grace plus escalation and
+    engine exit time. This bounds escalation, not driver cleanup or reaping.
     """
     if request_timeout == 0 and process_timeout == 0 and current_platform.is_rocm():
-        return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
+        return max(
+            ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S,
+            envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+            + ROCM_ENGINE_PROCESS_EXIT_GRACE_S,
+        )
     return process_timeout
 
 

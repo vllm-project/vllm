@@ -916,3 +916,28 @@ async def test_shutdown_timeout(monkeypatch: pytest.MonkeyPatch):
         for p in supervisor._processes:
             assert not p.is_alive()
         print(f"Supervisor waited {elapsed:.1f}s for children to drain — expected!")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("worker_timeout", "expected"), [(5, 15), (120, 130)])
+async def test_shutdown_children_preserves_configured_worker_grace(
+    monkeypatch, worker_timeout, expected
+):
+    from vllm.v1.engine import utils as engine_utils
+
+    monkeypatch.setattr(engine_utils.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        engine_utils.envs, "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", worker_timeout
+    )
+    supervisor = DPSupervisor(_make_unit_args(shutdown_timeout=0.0))
+    supervisor._processes = [
+        SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)
+    ]
+    waits = []
+    monkeypatch.setattr(
+        dp_sup,
+        "_join_processes_with_timeout",
+        lambda processes, timeout: waits.append(timeout),
+    )
+    await supervisor._shutdown_children()
+    assert waits == [expected + CHILD_EXIT_GRACE_S]

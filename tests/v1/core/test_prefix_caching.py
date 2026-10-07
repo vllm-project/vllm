@@ -667,6 +667,130 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
     assert "first" in coordinator.take_block_table_updates()
 
 
+@pytest.mark.parametrize("num_resident_groups", [1, 3])
+@pytest.mark.parametrize("enable_caching", [False, True])
+def test_hisparse_clean_pages_reuse_tail_first_across_groups(
+    num_resident_groups, enable_caching
+):
+    """Reusing clean copies must preserve the active tail and invalidate all groups."""
+    manager = make_hisparse_kv_cache_manager(
+        128,
+        32,
+        max_model_len=256,
+        enable_caching=enable_caching,
+        num_resident_groups=num_resident_groups,
+    )
+    request = make_request("request", list(range(160)), HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_new_tokens=128) is not None
+    _publish_hisparse_pages(manager)
+    request.num_computed_tokens = 128
+    coordinator = get_hisparse_coordinator(manager)
+    for hot in coordinator.hot_managers:
+        hot.require_hot(request.request_id)
+    assert manager.allocate_slots(request, num_new_tokens=1) is not None
+
+    resident_groups = [
+        manager.get_blocks(request.request_id).blocks[2 + 2 * group]
+        for group in range(num_resident_groups)
+    ]
+    expected_reuse = [
+        blocks[page].block_id for page in range(6, -1, -1) for blocks in resident_groups
+    ]
+    pool = manager.block_pool
+    held = pool.get_new_blocks(pool.get_num_free_blocks())
+    coordinator.advance_scheduled([(request.request_id, 129)])
+    reused = pool.get_new_blocks(len(expected_reuse))
+
+    assert [block.block_id for block in reused] == expected_reuse
+    for group in range(num_resident_groups):
+        blocks = manager.get_blocks(request.request_id).blocks[2 + 2 * group]
+        assert all(block.is_null for block in blocks[:7])
+        assert all(not block.is_null and block.ref_cnt == 1 for block in blocks[7:])
+    assert request.request_id in coordinator.take_block_table_updates()
+
+    request.num_computed_tokens = 129
+    _publish_hisparse_pages(manager)
+    manager.free(request)
+    pool.free_blocks(held)
+    pool.free_blocks(reused)
+
+
+@pytest.mark.parametrize("num_resident_groups", [1, 3])
+def test_hisparse_shared_clean_copies_wait_for_both_live_owners(
+    num_resident_groups,
+):
+    """A shared copy stays pinned until both owners can read host KV."""
+    manager = make_hisparse_kv_cache_manager(
+        128,
+        32,
+        max_model_len=256,
+        enable_caching=True,
+        num_resident_groups=num_resident_groups,
+    )
+    tokens = list(range(160))
+    first = make_request("first", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, first, num_new_tokens=128) is not None
+    _publish_hisparse_pages(manager)
+    first.num_computed_tokens = 128
+
+    second = make_request("second", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(second)
+    assert num_computed == 128
+    assert (
+        _allocate_scheduled(
+            manager,
+            second,
+            num_new_tokens=1,
+            num_new_computed_tokens=num_computed,
+            new_computed_blocks=computed,
+        )
+        is not None
+    )
+    second.num_computed_tokens = 128
+    coordinator = get_hisparse_coordinator(manager)
+    for request in [first, second]:
+        for hot in coordinator.hot_managers:
+            hot.require_hot(request.request_id)
+        assert manager.allocate_slots(request, num_new_tokens=1) is not None
+
+    shared = [
+        manager.get_blocks(first.request_id).blocks[2 + 2 * group][:7]
+        for group in range(num_resident_groups)
+    ]
+    for group, blocks in enumerate(shared):
+        other = manager.get_blocks(second.request_id).blocks[2 + 2 * group]
+        assert [block.block_id for block in blocks] == [
+            block.block_id for block in other[:7]
+        ]
+        # Prefix admission already lets the second request read host KV.
+        # Its unpinned copy must still be protected by the first live owner.
+        assert all(block.ref_cnt == 1 for block in blocks)
+
+    pool = manager.block_pool
+    held = pool.get_new_blocks(pool.get_num_free_blocks())
+    coordinator.advance_scheduled([(second.request_id, 129)])
+    assert pool.get_num_free_blocks() == 0
+    assert all(block.ref_cnt == 1 for blocks in shared for block in blocks)
+
+    coordinator.advance_scheduled([(first.request_id, 129)])
+    assert pool.get_num_free_blocks() == 7 * num_resident_groups
+    reused = pool.get_new_blocks(7 * num_resident_groups)
+    for request in [first, second]:
+        for group in range(num_resident_groups):
+            blocks = manager.get_blocks(request.request_id).blocks[2 + 2 * group]
+            assert all(block.is_null for block in blocks[:7])
+            assert all(not block.is_null and block.ref_cnt >= 1 for block in blocks[7:])
+    updates = coordinator.take_block_table_updates()
+    assert {first.request_id, second.request_id} <= updates.keys()
+
+    first.num_computed_tokens = second.num_computed_tokens = 129
+    _publish_hisparse_pages(manager)
+    manager.free(first)
+    manager.free(second)
+    pool.free_blocks(held)
+    pool.free_blocks(reused)
+
+
 def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
     """Without room for a hot buffer, admission must defer instead of losing KV."""
     manager = make_hisparse_kv_cache_manager(18, 18, max_model_len=160)

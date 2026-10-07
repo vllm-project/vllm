@@ -13,7 +13,7 @@
 // This function assumes that `cpu_tensor` is a CPU tensor,
 // and that UVA (Unified Virtual Addressing) is enabled.
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
-    torch::stable::Tensor& cpu_tensor) {
+    torch::stable::Tensor& cpu_tensor, bool is_registered) {
   STD_TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
 
   const auto dtype = cpu_tensor.scalar_type();
@@ -30,13 +30,27 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
       torch::stable::detail::from(std::nullopt)};
   TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
       "aten::is_pinned", "", is_pinned_stack.data(), TORCH_ABI_VERSION));
-  if (torch::stable::detail::to<bool>(is_pinned_stack[0])) {
-    // If CPU tensor is pinned, directly get the device pointer.
+  if (is_registered || torch::stable::detail::to<bool>(is_pinned_stack[0])) {
+    // Explicit registration is not tracked by the PyTorch pinned allocator.
+    // Map the existing storage without allocating or copying a second buffer.
     void* host_ptr = const_cast<void*>(cpu_tensor.mutable_data_ptr());
     void* device_ptr = nullptr;
     cudaError_t err = cudaHostGetDevicePointer(&device_ptr, host_ptr, 0);
     STD_TORCH_CHECK(err == cudaSuccess, "cudaHostGetDevicePointer failed: ",
                     cudaGetErrorString(err));
+
+    if (is_registered && cpu_tensor.numel() > 0) {
+      STD_TORCH_CHECK(cpu_tensor.is_contiguous(),
+                      "Explicitly registered views must be contiguous");
+      const size_t last = cpu_tensor.numel() * cpu_tensor.element_size() - 1;
+      void* end_ptr = nullptr;
+      err = cudaHostGetDevicePointer(&end_ptr,
+                                     static_cast<char*>(host_ptr) + last, 0);
+      STD_TORCH_CHECK(
+          err == cudaSuccess && static_cast<char*>(end_ptr) ==
+                                    static_cast<char*>(device_ptr) + last,
+          "Registered tensor must have one contiguous device mapping");
+    }
 
     return torch::stable::from_blob(
         device_ptr, cpu_tensor.sizes(), cpu_tensor.strides(), cuda_dev, dtype,

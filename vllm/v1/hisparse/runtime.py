@@ -28,7 +28,9 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
 logger = init_logger(__name__)
 
-HOST_REGISTER_CHUNK_BYTES = 256 * 2**30
+# Match ordinary offloading's registration bound on ROCm. Very large
+# individual registrations can fail even when the shared host pool fits RAM.
+HOST_REGISTER_CHUNK_BYTES = (64 if current_platform.is_rocm() else 256) * 2**30
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
@@ -165,11 +167,12 @@ class ResolvedHiSparseConfig:
 
 def _check_residency_shared_memory(
     device: torch.device, config: ResolvedHiSparseConfig
-) -> None:
-    """Reject a config whose residency resolver exceeds per-block shared memory."""
+) -> bool:
+    """Choose ROCm hash-value scratch or reject a resolver exceeding shared memory."""
     # Mirrors hisparse_resolve_residency's layout: union hash keys and values
     # (plus an empty slot), per-chunk offsets, five counters, done bits, and
-    # the int16 compacted LRU.
+    # the int16 compacted LRU. Reserve worst-case ballot alignment padding:
+    # the scratch layout may need zero padding instead of mask_bytes - 4.
     hot_size = config.device_buffer_size
     wave_size = 64 if current_platform.is_rocm() else 32
     mask_bytes = wave_size // 8
@@ -189,6 +192,9 @@ def _check_residency_shared_memory(
     available = get_max_shared_memory_bytes(device_index)
     if current_platform.is_rocm():
         available = min(available, 64 * 1024)
+    use_scratch = current_platform.is_rocm() and required > available
+    if use_scratch:
+        required -= 4 * (config.max_union_rows + 1)
     if required > available:
         raise ValueError(
             "HiSparse residency resolution needs "
@@ -198,6 +204,8 @@ def _check_residency_shared_memory(
             "(decode query length x index_topk), but the device allows "
             f"{available} B. Lower device_buffer_size or num_speculative_tokens."
         )
+
+    return use_scratch
 
 
 def check_hisparse_host_memory(pool_bytes: int) -> None:
@@ -292,10 +300,14 @@ def _hisparse_registration_ranges(
     num_blocks: int,
     host_block_stride: int,
     max_chunk_bytes: int = HOST_REGISTER_CHUNK_BYTES,
+    *,
+    require_whole_tensors: bool = False,
 ) -> tuple[tuple[int, int], ...]:
     """Split a shared pool without bisecting any tensor's host block.
 
     CUDA batch copies reject descriptors spanning adjacent registrations.
+    ROCm registrations can have disjoint device aliases. A kernel resolves one
+    alias per layer tensor, so such tensors must each fit one registration.
     """
     total_size = num_blocks * host_block_stride
     if total_size % mmap.PAGESIZE:
@@ -318,6 +330,17 @@ def _hisparse_registration_ranges(
         raise ValueError("HiSparse host tensors exceed the shared host pool.")
 
     def last_safe_boundary(lower: int, upper: int) -> int | None:
+        if require_whole_tensors:
+            boundaries = [
+                end
+                for _, end, _ in tensors
+                if lower < end <= upper and end % mmap.PAGESIZE == 0
+            ]
+            if upper >= tensor_start:
+                padding_end = upper // mmap.PAGESIZE * mmap.PAGESIZE
+                if padding_end >= tensor_start and padding_end > lower:
+                    boundaries.append(padding_end)
+            return max(boundaries, default=None)
         best = None
         for start, end, block_bytes in tensors:
             first_block = max(0, (lower - start) // block_bytes + 1)
@@ -351,6 +374,12 @@ def _hisparse_registration_ranges(
     while total_size - start > max_chunk_bytes:
         end = last_safe_boundary(start, start + max_chunk_bytes)
         if end is None:
+            if require_whole_tensors:
+                raise ValueError(
+                    "ROCm HiSparse host layer tensors must fit entirely within "
+                    f"page-aligned registrations of at most {max_chunk_bytes} "
+                    "bytes; reduce the host pool budget."
+                )
             raise ValueError(
                 "A HiSparse host block is too large for the registration chunk limit."
             )
@@ -378,6 +407,12 @@ def allocate_hisparse_host_pools(
             None,
         )
 
+    registration_ranges = _hisparse_registration_ranges(
+        tensor_sizes,
+        num_blocks,
+        host_block_stride,
+        require_whole_tensors=current_platform.is_rocm(),
+    )
     region = SharedOffloadRegion(
         engine_id=(
             f"hisparse_{vllm_config.instance_id}_"
@@ -392,9 +427,7 @@ def allocate_hisparse_host_pools(
         populate_only_on_creator=True,
     )
     try:
-        for start, end in _hisparse_registration_ranges(
-            tensor_sizes, num_blocks, host_block_stride
-        ):
+        for start, end in registration_ranges:
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)
             region.pinned_addresses.append(tensor.data_ptr())
@@ -412,6 +445,8 @@ def release_pinned_state(
     runtimes: list[HiSparseRuntime],
     pinned_host_pools: list[torch.Tensor],
     shared_host_region: SharedOffloadRegion | None = None,
+    *,
+    allow_deferred_unmap: bool = False,
 ) -> None:
     """Synchronize and release registered host KV pools."""
     if pinned_host_pools or shared_host_region is not None:
@@ -458,7 +493,7 @@ def release_pinned_state(
         del runtime.registered_host_pool
         del runtime.hot_backing
     if shared_host_region is not None:
-        shared_host_region.cleanup()
+        shared_host_region.cleanup(allow_deferred_unmap=allow_deferred_unmap)
 
 
 def hisparse_prefill_staging_remap(
@@ -555,11 +590,11 @@ class HiSparsePrefillStagingPlan:
         res_cols = resident_block_table.shape[1]
         res_blocks = torch.where(
             res_pos < res_cols,
-            torch.gather(
-                resident_block_table.to(torch.int64)[rep_row],
-                1,
+            # Select needed pages without materializing full rows per host block.
+            resident_block_table[
+                rep_row[:, None],
                 res_pos.clamp(max=max(res_cols - 1, 0)),
-            ),
+            ].to(torch.int64),
             torch.zeros_like(res_pos),
         )
         offsets = torch.arange(block_size, device=device)
@@ -692,6 +727,7 @@ class HiSparseIndexGroup:
             2, dtype=torch.uint64, device="cpu", pin_memory=True
         )
         self.stats_row_bytes = 0
+        self.hash_values_scratch: torch.Tensor | None = None
 
 
 class HiSparseRuntime:
@@ -730,8 +766,10 @@ class HiSparseRuntime:
         # block table and need not be contiguous in the shared slab.
         self.region_stride = config.device_buffer_size
         self.max_union_rows = config.max_union_rows
-        if self.device.type == "cuda":
-            _check_residency_shared_memory(self.device, config)
+        use_hash_scratch = (
+            self.device.type == "cuda"
+            and _check_residency_shared_memory(self.device, config)
+        )
 
         row_bytes = row_width * kv_dtype.itemsize
         if row_bytes % 16 != 0:
@@ -752,6 +790,17 @@ class HiSparseRuntime:
                 config.top_k,
                 copy_stream,
                 logical_topk_ready,
+            )
+            # Persistent per-launch-row storage also covers graph padding. Shared
+            # request state cannot be used: padding may form another request-0 run.
+            index_group.hash_values_scratch = (
+                torch.empty(
+                    (max_swap_rows or max_num_reqs, config.max_union_rows + 1),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                if use_hash_scratch
+                else None
             )
             index_group.leader = self
         else:
@@ -992,6 +1041,7 @@ class HiSparseRuntime:
             if resident is not None and resident.view is not None
             else 0,
             0,
+            group.hash_values_scratch,
         )
 
     def _swap_rows(self, shared_rows: slice) -> None:

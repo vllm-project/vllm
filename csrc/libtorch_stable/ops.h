@@ -179,7 +179,7 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 
 // CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
-    torch::stable::Tensor& cpu_tensor);
+    torch::stable::Tensor& cpu_tensor, bool is_registered);
 
 // Attention kernels (shared CUDA/ROCm)
 void merge_attn_states(
@@ -694,7 +694,8 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block);
+    int64_t resident_block_size, int64_t resident_null_block,
+    std::optional<torch::stable::Tensor> const& hash_values_scratch);
 
 void hisparse_invalidate_written_slots(
     torch::stable::Tensor& device_global_indices,

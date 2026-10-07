@@ -53,17 +53,26 @@ def swap_blocks_batch(
     is_src_access_order_any: bool = False,
     *,
     bytes_per_chunk: int,
+    force_kernel: bool = False,
 ) -> None:
-    """Triton implementation of ``swap_blocks_batch`` for small CPU->GPU batches."""
+    """Copy GPU-addressable buffers, including explicitly mapped host storage.
+
+    ``force_kernel`` avoids one runtime copy submission per descriptor on
+    platforms where those submissions can fill a hardware queue.
+    Addresses and sizes must be eight-byte aligned. The caller retains the
+    host descriptors and underlying storage until this stream completes.
+    """
     n = src_addrs.numel()
     # Too few descriptors to amortize Triton's launch cost.
-    if n < MIN_N:
+    if n < MIN_N and not force_kernel:
         ops.swap_blocks_batch(
             src_addrs,
             dst_addrs,
             sizes,
             is_src_access_order_any=is_src_access_order_any,
         )
+        return
+    if n == 0:
         return
     _swap_blocks_kernel[(min(NUM_SMS, n),)](
         src_addrs.to("cuda", non_blocking=True),

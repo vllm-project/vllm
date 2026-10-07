@@ -2068,9 +2068,12 @@ def test_hisparse_maps_speculative_rows_through_request_state():
     [
         (8, 128, 128),
         (4, 32, 128),
+        (3, 2048, 2048),
+        (4, 2048, 2048),
+        (4, 1024, 2048),
         pytest.param(8, 2048, 2048, marks=requires_large_shared_memory),
     ],
-    ids=["disjoint", "overlap", "long_mtp"],
+    ids=["disjoint", "overlap", "mtp2", "mtp3", "mtp3_overlap", "long_mtp"],
 )
 def test_hisparse_speculative_rows_resolve_host_misses_consistently(
     num_rows, row_stride, top_k
@@ -2173,7 +2176,8 @@ def test_hisparse_speculative_rows_count_a_shared_load_once():
 
 
 @requires_hisparse_ops
-def test_hisparse_resolver_reads_current_request_ids():
+@pytest.mark.parametrize("top_k", [64, 2048])
+def test_hisparse_resolver_reads_current_request_ids(top_k):
     """The resolver must see this call's request ids, not the previous call's.
 
     It runs on the copy stream after waiting only on ``logical_topk_ready``,
@@ -2182,7 +2186,8 @@ def test_hisparse_resolver_reads_current_request_ids():
     against other requests' KV. Stalling the compute stream exposes the race.
     """
     device = torch.device(DEVICE_TYPE)
-    block_size, row_width, top_k, blocks_per_req, num_reqs = 64, 16, 64, 4, 2
+    block_size, row_width, num_reqs = 64, 16, 2
+    blocks_per_req = 8 * top_k // block_size
     kv_pool = torch.randn(
         (num_reqs * blocks_per_req + 1, block_size, row_width), dtype=torch.float32
     ).pin_memory()
@@ -2211,7 +2216,7 @@ def test_hisparse_resolver_reads_current_request_ids():
 
     # Four rows per request, then one per request plus a CUDA-graph padding
     # row, which maps to request 0 and must be skipped.
-    for rows_per_req, num_padding in ((4, 0), (1, 1)):
+    for rows_per_req, num_padding in ((4, 0), (1, 1), (4, 0), (1, 1)):
         num_rows = num_reqs * rows_per_req
         req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
         req_ids = torch.cat(
@@ -2315,25 +2320,6 @@ def test_hisparse_rejects_union_bound_beyond_shared_memory():
     """An oversized union bound fails at construction, not on the first forward."""
     with pytest.raises(ValueError, match="shared memory"):
         _make_hisparse_runtime(top_k=2048, device_buffer_size=32768)
-
-
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm LDS budget")
-@pytest.mark.parametrize("query_len", [1, 2, 3, 4])
-def test_hisparse_rocm_full_model_union_budget(query_len):
-    """Real DSA top-k fits for one or two rows; larger unions exceed LDS."""
-    config = ResolvedHiSparseConfig(
-        top_k=2048,
-        device_buffer_size=(query_len + 1) * 2048,
-        max_union_rows=query_len * 2048,
-        eager_host_mirror=True,
-    )
-    if query_len <= 2:
-        hisparse_runtime._check_residency_shared_memory(torch.device("cuda"), config)
-    else:
-        with pytest.raises(ValueError, match="shared memory"):
-            hisparse_runtime._check_residency_shared_memory(
-                torch.device("cuda"), config
-            )
 
 
 @requires_hisparse_ops
@@ -3223,18 +3209,40 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
             assert int(valid_rows[staged_block * 4]) == host_block * 4
 
 
-def test_hisparse_prefill_staging_plan_resolves_resident_sources():
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="requires a GPU"
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_hisparse_prefill_staging_plan_resolves_resident_sources(device, dtype):
     """Per-page resident hits become device sources; misses stay host DMAs."""
     block_size = 4
     resident_block_size = 2
-    block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32)
-    seq_lens = torch.tensor([5, 8], dtype=torch.int32)
+    block_table = torch.tensor([[5, 2, 0], [9, 5, 3]], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([5, 12], dtype=torch.int32, device=device)
     plan = build_hisparse_prefill_staging_plan(
-        block_table, seq_lens, block_size, staging_block_capacity=4
+        block_table, seq_lens, block_size, staging_block_capacity=5
     )
-    # Two resident pages per host block; 0 entries are null (not resident).
-    resident_table = torch.tensor(
-        [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]], dtype=torch.int32
+    # Shared host block 5 has the same resident pages in both requests.
+    # Exercise a storage offset, non-contiguous columns, a truncated table,
+    # null pages, and the largest resident row representable in int32.
+    last_block = torch.iinfo(torch.int32).max // resident_block_size
+    storage = torch.zeros((4, 13), dtype=dtype, device=device)
+    resident_table = storage[1:3, 1:11:2]
+    resident_table.copy_(
+        torch.tensor(
+            [[11, 12, 0, 13, 0], [last_block, 0, 11, 12, 22]],
+            dtype=dtype,
+            device=device,
+        )
     )
 
     plan.ensure_gpu_sources(resident_table, resident_block_size)
@@ -3242,7 +3250,7 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     assert plan.gpu_row_ids is not None
     unique_hosts = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
     gpu_rows = plan.gpu_row_ids[0].view(-1, block_size)
-    reps = {5: (0, 0), 2: (0, 1), 9: (1, 0), 3: (1, 1)}
+    reps = {5: (0, 0), 2: (0, 1), 9: (1, 0), 3: (1, 2)}
     for u, host_id in enumerate(unique_hosts):
         for t in range(block_size):
             if host_id < 0:
@@ -3253,14 +3261,22 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
                 continue
             row, col = reps[host_id]
             page = t // resident_block_size
-            res_block = int(resident_table[row, col * 2 + page])
+            column = col * 2 + page
+            res_block = (
+                int(resident_table[row, column])
+                if column < resident_table.shape[1]
+                else 0
+            )
             expected = (
                 res_block * resident_block_size + t % resident_block_size
                 if res_block > 0
                 else -1
             )
             assert int(gpu_rows[u, t]) == expected
+    assert plan.gpu_row_ids.dtype == torch.int32
+    assert int(plan.gpu_row_ids.max()) == torch.iinfo(torch.int32).max
     valid_rows = plan.row_ids >= 0
+    assert not bool(valid_rows.all())
     torch.testing.assert_close(
         plan.miss_mask,
         ((plan.gpu_row_ids < 0) & valid_rows).int(),
@@ -3271,6 +3287,51 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
 
     assert plan.gpu_row_ids is not None
     assert (plan.gpu_row_ids == -1).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+def test_hisparse_prefill_sources_update_on_graph_replay():
+    """Captured source resolution observes changed resident pages and masks."""
+    block_table = torch.tensor([[5]], dtype=torch.int32, device="cuda")
+    plan = build_hisparse_prefill_staging_plan(
+        block_table, torch.tensor([4], device="cuda"), 4, 1
+    )
+    resident = torch.tensor([[11, 0]], dtype=torch.int32, device="cuda")
+    stream = torch.Stream(device="cuda")
+    stream.wait_stream(torch.accelerator.current_stream())
+    with stream:
+        plan.ensure_gpu_sources(resident, 2)
+    torch.accelerator.current_stream().wait_stream(stream)
+    plan.gpu_source_key = None
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        plan.ensure_gpu_sources(resident, 2)
+
+    for pages, expected in [([11, 0], [22, 23, -1, -1]), ([0, 13], [-1, -1, 26, 27])]:
+        resident.copy_(torch.tensor([pages], dtype=torch.int32, device="cuda"))
+        graph.replay()
+        torch.accelerator.synchronize()
+        host_rows = (plan.row_ids >= 20) & (plan.row_ids < 24)
+        assert plan.gpu_row_ids[host_rows].tolist() == expected
+        assert plan.miss_mask[host_rows].tolist() == [int(x < 0) for x in expected]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+def test_hisparse_prefill_sources_do_not_expand_full_resident_rows():
+    """Short active contexts must not materialize the table's full capacity."""
+    block_table = torch.arange(1, 1025, dtype=torch.int32, device="cuda").view(2, 512)
+    plan = build_hisparse_prefill_staging_plan(
+        block_table, torch.full((2,), 8192, device="cuda"), 16, 1024
+    )
+    resident = torch.ones((2, 4096), dtype=torch.int32, device="cuda")
+    torch.accelerator.synchronize()
+    before = torch.accelerator.memory_allocated()
+    torch.accelerator.reset_peak_memory_stats()
+    plan.ensure_gpu_sources(resident, 16)
+    torch.accelerator.synchronize()
+    # The resolved rows need well below 8 MiB; expanding full table rows
+    # would allocate over 32 MiB for this small example.
+    assert torch.accelerator.max_memory_allocated() - before < 8 * 1024**2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -3716,7 +3777,8 @@ def test_rocm_hisparse_prefill_attends_staged_rows_when_not_resident():
 
 
 @requires_rocm_backend
-def test_rocm_hisparse_mixed_batch_splits_kv_bases():
+@pytest.mark.parametrize("resident", [False, True])
+def test_rocm_hisparse_mixed_batch_splits_kv_bases(resident):
     """A mixed batch attends two bases and concatenates the two outputs."""
     num_decode_tokens, num_prefill_tokens = 1, 2
     num_tokens = num_decode_tokens + num_prefill_tokens
@@ -3726,7 +3788,7 @@ def test_rocm_hisparse_mixed_batch_splits_kv_bases():
     req_ids = torch.zeros(num_prefill_tokens, dtype=torch.int32, device=DEVICE_TYPE)
     group = _rocm_index_group(
         physical_kv_cache=hot,
-        resident=True,  # Ignored: a batch with decode tokens always stages.
+        resident=resident,  # Ignored: a batch with decode tokens always stages.
         staged=(staged_cache, block_table, req_ids),
     )
     group.convert_logical_to_physical_topk = MagicMock(

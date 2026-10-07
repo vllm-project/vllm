@@ -416,6 +416,12 @@ steps:
       - csrc/libtorch_stable/torch_bindings.cpp
       - vllm/v1/worker/worker_base.py
       - vllm/model_executor/models/deepseek_mtp.py
+      - csrc/libtorch_stable/cuda_view.cu
+      - vllm/v1/simple_kv_offload/cuda_mem_ops.py
+      - tests/v1/worker/test_utils.py
+      - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+      - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+      - vllm/v1/kv_offload/
       - csrc/libtorch_stable/hisparse_kernels.cu
       - csrc/cuda_compat.h
       - vllm/v1/hisparse/
@@ -425,9 +431,13 @@ steps:
       - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
       - vllm/models/deepseek_v32/amd/
       - tests/kernels/attention/test_hisparse_kernels.py
+      - tests/kernels/attention/test_rocm_aiter_mla_sparse_metadata_sync.py
       - tests/v1/attention/test_sparse_mla_backends.py
       - tests/v1/e2e/general/test_hisparse.py
       - tests/v1/worker/test_gpu_model_runner_v2.py
+      - tests/v1/kv_connector/unit/test_hisparse_connector.py
+      - tests/v1/core/test_prefix_caching.py
+      - vllm/v1/attention/backend.py
       commands:
       - amd-smi
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
@@ -435,9 +445,12 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/kernels/attention/test_hisparse_kernels.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_sparse_metadata_sync.py -k topk_ready_event_is_only_recorded
       - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/v1/attention/test_sparse_mla_backends.py -k "hisparse or rocm_compact or index_group"
       - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/v1/e2e/general/test_hisparse.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/v1/worker/test_gpu_model_runner_v2.py -k hisparse
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/v1/worker/test_utils.py -k 'hisparse or shared_host_pool'
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/v1/kv_connector/unit/test_hisparse_connector.py tests/v1/core/test_prefix_caching.py -k hisparse
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test

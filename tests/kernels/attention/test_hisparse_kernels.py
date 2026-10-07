@@ -486,7 +486,8 @@ def test_invalidate_written_slots_clears_every_copy(region_stride: int) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse attention")
-def test_hisparse_attention_large_slab_row_offsets():
+@pytest.mark.parametrize("backend", [False, True])
+def test_hisparse_attention_large_slab_row_offsets(backend):
     """Physical row addressing must survive offsets beyond signed int32."""
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_sparse_attn_prefill
 
@@ -522,6 +523,27 @@ def test_hisparse_attention_large_slab_row_offsets():
         ragged_indptr=indptr,
         allow_aiter_opus=False,
     )
+    if backend:
+        from types import SimpleNamespace
+
+        from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+            ROCMAiterMLASparseImpl,
+        )
+
+        impl = object.__new__(ROCMAiterMLASparseImpl)
+        impl.num_heads = 16
+        impl.kv_lora_rank = 512
+        impl.qk_rope_head_dim = 64
+        impl.kv_cache_dtype = "auto"
+        impl.scale = scale
+        impl.sinks = None
+        impl.use_hisparse_triton_attn = True
+        metadata = SimpleNamespace(
+            paged_kv_indices=indices,
+            paged_kv_indptr=indptr,
+            attn_out_dtype=q.dtype,
+        )
+        output, _ = impl._forward_mla(SimpleNamespace(), q, kv, metadata)
     scores = q[0].float() @ selected[:2].float().T * scale
     expected_first = scores.softmax(-1) @ selected[:2, :512].float()
     expected = torch.stack((expected_first, selected[2, :512].float().expand(16, -1)))
@@ -558,7 +580,8 @@ def test_hisparse_gather_registered_host_device_alias():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse attention")
 @pytest.mark.parametrize("scales", [(1.0, 1.0), (0.25, 2.0)])
 @pytest.mark.parametrize("capture", [False, True])
-def test_hisparse_fp8_attention_applies_scales(scales, capture):
+@pytest.mark.parametrize("selected_rows", [3, 2048])
+def test_hisparse_fp8_attention_applies_scales(scales, capture, selected_rows):
     from types import SimpleNamespace
 
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -567,17 +590,28 @@ def test_hisparse_fp8_attention_applies_scales(scales, capture):
 
     generator = torch.Generator(device=DEVICE).manual_seed(91)
     q_scale, kv_scale = scales
-    q = (torch.randn((2, 16, 576), generator=generator, device=DEVICE) / q_scale).to(
+    q = (torch.randn((3, 16, 576), generator=generator, device=DEVICE) / q_scale).to(
         current_platform.fp8_dtype()
     )
-    kv = (torch.randn((5, 1, 576), generator=generator, device=DEVICE) / kv_scale).to(
-        current_platform.fp8_dtype()
+    kv = (
+        torch.randn((selected_rows + 2, 1, 576), generator=generator, device=DEVICE)
+        / kv_scale
+    ).to(current_platform.fp8_dtype())
+    indices = torch.cat(
+        (
+            torch.arange(selected_rows + 1, 1, -1, dtype=torch.int32, device=DEVICE),
+            torch.tensor([1], dtype=torch.int32, device=DEVICE),
+        )
     )
-    indices = torch.tensor([4, 1, 3, 2], dtype=torch.int32, device=DEVICE)
-    indptr = torch.tensor([0, 3, 4], dtype=torch.int32, device=DEVICE)
+    indptr = torch.tensor(
+        [0, selected_rows, selected_rows + 1, selected_rows + 1],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
     impl = object.__new__(ROCMAiterMLASparseImpl)
     impl.num_heads = 16
     impl.kv_lora_rank = 512
+    impl.qk_rope_head_dim = 64
     impl.kv_cache_dtype = "fp8"
     impl.scale = 576**-0.5
     impl.sinks = None
@@ -599,12 +633,160 @@ def test_hisparse_fp8_attention_applies_scales(scales, capture):
         graph.replay()
     q_reference = q.float() * q_scale
     kv_reference = kv.float()[:, 0] * kv_scale
-    selected = kv_reference[indices[:3].long()]
+    selected = kv_reference[indices[:selected_rows].long()]
     scores = q_reference[0] @ selected.T * impl.scale
     expected = torch.stack(
         (
             scores.softmax(-1) @ selected[:, :512],
-            kv_reference[2, :512].expand(16, -1),
+            kv_reference[1, :512].expand(16, -1),
+            torch.zeros((16, 512), device=DEVICE),
         )
     )
-    torch.testing.assert_close(output.float(), expected, atol=0.03, rtol=0.03)
+    # AITER uses FP8 for the PV dot as well: probabilities round to E4M3.
+    # Bound the resulting error against the dequantized FP32 reference;
+    # non-unit scales still detect missing or double-applied quantization scales.
+    torch.testing.assert_close(output.float(), expected, atol=0.06, rtol=0.03)
+    assert (output[2] == 0).all()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse attention")
+@pytest.mark.parametrize("with_sink", [False, True])
+@pytest.mark.parametrize("capture", [False, True])
+def test_hisparse_bf16_attention_ragged_rows(with_sink, capture):
+    """The backend preserves empty, short and full selected rows with graph replay."""
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    generator = torch.Generator(device=DEVICE).manual_seed(62)
+    q = torch.randn(
+        (3, 16, 576), generator=generator, device=DEVICE, dtype=torch.bfloat16
+    )
+    kv = torch.randn(
+        (2048, 1, 576), generator=generator, device=DEVICE, dtype=torch.bfloat16
+    )
+    indices = torch.cat(
+        (torch.tensor([17], device=DEVICE), torch.arange(2048, device=DEVICE))
+    ).to(torch.int32)
+    indptr = torch.tensor([0, 0, 1, 2049], device=DEVICE, dtype=torch.int32)
+    sink = torch.linspace(-1, 1, 16, device=DEVICE) if with_sink else None
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.num_heads = 16
+    impl.kv_lora_rank = 512
+    impl.qk_rope_head_dim = 64
+    impl.kv_cache_dtype = "auto"
+    impl.scale = 576**-0.5
+    impl.sinks = sink
+    impl.use_hisparse_triton_attn = True
+    metadata = SimpleNamespace(
+        paged_kv_indices=indices,
+        paged_kv_indptr=indptr,
+        attn_out_dtype=q.dtype,
+    )
+    layer = SimpleNamespace()
+    output, _ = impl._forward_mla(layer, q, kv, metadata)
+    if capture:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output, _ = impl._forward_mla(layer, q, kv, metadata)
+        graph.replay()
+
+    def reference(boundaries):
+        expected = torch.zeros_like(output, dtype=torch.float32)
+        for row, (start, end) in enumerate(
+            zip(boundaries[:-1], boundaries[1:], strict=True)
+        ):
+            selected = indices[start:end].long()
+            scores = q[row].float() @ kv[selected, 0].float().T * impl.scale
+            if sink is not None:
+                scores = torch.cat((scores, sink[:, None]), dim=-1)
+            weights = scores.softmax(-1)[:, : selected.numel()]
+            expected[row] = weights @ kv[selected, 0, :512].float()
+        return expected
+
+    torch.testing.assert_close(
+        output.float(), reference([0, 0, 1, 2049]), atol=0.03, rtol=0.03
+    )
+    if capture:
+        # Move the empty row without changing any captured tensor addresses.
+        boundaries = [0, 1, 1, 2049]
+        indptr.copy_(torch.tensor(boundaries, device=DEVICE, dtype=indptr.dtype))
+        graph.replay()
+        torch.testing.assert_close(
+            output.float(), reference(boundaries), atol=0.03, rtol=0.03
+        )
+
+
+@requires_hisparse_ops
+def test_resolve_global_hash_values_survive_padded_graph_replay():
+    """Two request-0 runs must not share scratch, including graph padding.
+
+    Four disjoint top-k rows model MTP3 at GLM's real union size. Replaying
+    changing selections checks cold loads, reuse, eviction and stale scratch.
+    """
+    k, hot_size, union_size, n = 2048, 10240, 8192, 9
+    case = Resolve(k, hot_size, num_rows=2)
+    host = _pinned(torch.zeros(case.host_rows + 8, 16, dtype=torch.uint8))
+    hot = torch.zeros(case.hot_num_blocks, 8, 16, dtype=torch.uint8, device=DEVICE)
+    table = _dev(case.hot_block_table)
+    states = _dev(case.state_indices)
+    req_ids = _dev(np.array([0] * 4 + [1] * 4 + [0], dtype=np.int32))
+    source_table = torch.arange(
+        1, case.host_rows // 8 + 1, dtype=torch.int32, device=DEVICE
+    ).repeat(2, 1)
+    indices = torch.full((n, k), -1, dtype=torch.int32, device=DEVICE)
+    out = torch.empty_like(indices)
+    scratch = torch.empty((n, union_size + 1), dtype=torch.int32, device=DEVICE)
+    counts = torch.empty(n, dtype=torch.int32, device=DEVICE)
+    swap_host, swap_dev = torch.empty_like(indices), torch.empty_like(indices)
+
+    def resolve():
+        torch.ops._C_cache_ops.hisparse_resolve_residency(
+            host,
+            hot,
+            table,
+            indices,
+            out,
+            case.dgi,
+            case.lru,
+            states,
+            hot_size,
+            union_size,
+            request_ids=req_ids,
+            source_block_table=source_table,
+            source_block_size=8,
+            swap_host_physical_rows=swap_host,
+            swap_device_physical_rows=swap_dev,
+            swap_counts=counts,
+            hash_values_scratch=scratch,
+        )
+
+    resolve()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        resolve()
+    base = torch.arange(8 * k, dtype=torch.int32, device=DEVICE).reshape(8, k)
+    for shift in (0, 0, k, 3 * k, 0):
+        indices[:8].copy_((base + shift) % case.host_rows)
+        expected_misses = sum(
+            (~torch.isin(indices[r * 4 : r * 4 + 4].unique() + 8, case.dgi[r]))
+            .sum()
+            .item()
+            for r in range(2)
+        )
+        graph.replay()
+        torch.accelerator.synchronize()
+        # The tail is a second run of request 0, with no valid selections.
+        assert (out[8] == -1).all()
+        assert counts[8].item() == 0
+        for request in range(2):
+            rows = slice(request * 4, request * 4 + 4)
+            slots = out[rows].long() - request * hot_size
+            assert ((slots >= 0) & (slots < hot_size)).all()
+            torch.testing.assert_close(case.dgi[request, slots], indices[rows] + 8)
+            # Every selected host row owns exactly one hot slot.
+            assert slots.unique().numel() == union_size
+        assert counts.sum().item() == expected_misses

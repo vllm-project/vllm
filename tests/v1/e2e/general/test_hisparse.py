@@ -84,13 +84,15 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     reason="HiSparse requires NVIDIA CUDA or AMD ROCm",
 )
 @pytest.mark.parametrize(
-    "with_offloading", [False, True], ids=["standalone", "offload"]
+    "offloading_spec",
+    [None, "CPUOffloadingSpec", "TieringOffloadingSpec"],
+    ids=["standalone", "offload", "tiering"],
 )
 @fork_new_process_for_each_test
 def test_hisparse_spill_and_prefix_restore(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
-    with_offloading: bool,
+    offloading_spec: str | None,
 ):
     """Spilled prefixes restore and FULL-graph decode writes reach host KV.
 
@@ -118,7 +120,7 @@ def test_hisparse_spill_and_prefix_restore(
         "kv_connector_extra_config": {"host_pool_gib": 1},
     }
     kv_transfer_config = KVTransferConfig(**hisparse_connector)
-    if with_offloading:
+    if offloading_spec:
         kv_transfer_config = KVTransferConfig(
             kv_connector="MultiConnector",
             kv_role="kv_both",
@@ -128,7 +130,10 @@ def test_hisparse_spill_and_prefix_restore(
                     {
                         "kv_connector": "OffloadingConnector",
                         "kv_role": "kv_both",
-                        "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 30},
+                        "kv_connector_extra_config": {
+                            "cpu_bytes_to_use": 1 << 30,
+                            "spec_name": offloading_spec,
+                        },
                     },
                 ]
             },
@@ -251,7 +256,7 @@ def test_hisparse_spill_and_prefix_restore(
         runner.generate_greedy([[42]], max_tokens=1)
 
         assert actual == expected
-        if with_offloading:
+        if offloading_spec:
             assert _offload_load_bytes() > load_bytes
 
 

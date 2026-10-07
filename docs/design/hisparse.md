@@ -219,11 +219,11 @@ offsets in the shared multi-layer KV allocation can exceed the signed 32-bit
 addressing range of the AITER assembly path. The packed `fp8_ds_mla` KV format
 is not supported on ROCm; use `auto`, `bfloat16`, or `fp8`.
 
-The residency resolver must fit within the device's per-block shared-memory
-budget. On CDNA, this is limited to 64 KiB. For `index_topk=2048`, the default
-hot buffer supports ordinary decode and one speculative token; larger defaults
-are rejected before serving. Small-top-k speculative tests do not establish
-support for larger full-model configurations.
+On CDNA, the residency resolver moves per-token scratch to reusable device-global
+storage when it would exceed the 64 KiB LDS budget. The remaining shared-memory
+state must still fit that budget; configurations exceeding it are rejected.
+Kernel tests cover `index_topk=2048` with three speculative tokens, but this
+coverage alone does not establish full-model support for every configuration.
 
 Local tensor-parallel workers share the host pool. ROCm orders host writes with
 a writer event synchronization and a TP barrier, rather than reusing imported
@@ -271,6 +271,6 @@ of the sparse cache operations.
 The command/result and attention-layer boundaries can be shared. The host
 allocator, copy implementation, hot layout, and replacement policy should stay
 platform-specific. NVIDIA uses the current accelerator LRU and fused host/hot
-kernel. ROCm is not currently supported; AMD or other accelerator backends can
-implement their own worker without forcing NVIDIA's policy into the shared
-boundary.
+kernel. ROCm uses HIP host registration, device aliases, and a shared host-pool
+worker with explicit TP synchronization. Other accelerator backends can implement
+their own worker without forcing NVIDIA's policy into the shared boundary.

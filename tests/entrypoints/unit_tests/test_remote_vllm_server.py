@@ -7,6 +7,7 @@ import pytest
 
 import tests.utils as test_utils
 from tests.utils import RemoteLaunchRenderServer, RemoteOpenAIServer
+from vllm.v1.engine import utils as engine_utils
 
 
 @pytest.mark.parametrize(
@@ -93,3 +94,21 @@ def test_openai_server_shutdown_wait_covers_engine_cleanup(
 
     assert engine_timeout_args == [(0.0, 0.0)]
     server.proc.wait.assert_called_once_with(timeout=75.0)
+
+
+@pytest.mark.parametrize(("worker_timeout", "expected"), [(5, 30), (120, 145)])
+def test_openai_server_wait_includes_configured_worker_grace(
+    monkeypatch, worker_timeout, expected
+):
+    # Exercise the real helper without constructing a model or HiSparse config.
+    monkeypatch.setattr(engine_utils.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        engine_utils.envs, "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", worker_timeout
+    )
+    server = object.__new__(RemoteOpenAIServer)
+    server._request_shutdown_timeout = 0.0
+    server.proc = Mock(pid=1234)
+    monkeypatch.setattr(test_utils.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(server, "_kill_process_group_survivors", Mock())
+    server._terminate_process_tree()
+    server.proc.wait.assert_called_once_with(timeout=expected)
