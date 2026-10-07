@@ -3709,10 +3709,17 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
 
 
 @pytest.mark.parametrize("workspace_rows", [1, 4], ids=["prefill_sized", "mixed"])
-def test_hisparse_resident_prefill_uses_attention_block_stride(workspace_rows):
-    """Resident batches with prefill rows read resident pages directly, even when
-    they fit the decode residency workspace."""
+def test_hisparse_resident_prefill_uses_attention_block_stride(
+    monkeypatch, workspace_rows
+):
+    """Resident batches with prefill rows convert directly against resident pages,
+    even when they fit the decode residency workspace, whose cached side-stream
+    conversion is only ordered for decode batches."""
     expected = torch.tensor([[19]], dtype=torch.int32)
+    convert = MagicMock(return_value=expected)
+    monkeypatch.setattr(
+        index_group_module, "triton_convert_req_index_to_global_index", convert
+    )
     cache_handle = SimpleNamespace(
         all_context_pages_resident=True,
         num_decode_tokens=1,
@@ -3725,7 +3732,7 @@ def test_hisparse_resident_prefill_uses_attention_block_stride(workspace_rows):
     index_group.physical_topk_indices = torch.empty(
         (workspace_rows, 1), dtype=torch.int32
     )
-    index_group._convert_once = MagicMock(return_value=expected)
+    index_group._convert_once = MagicMock(side_effect=AssertionError)
     topk = torch.zeros((2, 1), dtype=torch.int32)
     metadata = SimpleNamespace(
         req_id_per_token=torch.zeros(2, dtype=torch.int32),
@@ -3740,7 +3747,7 @@ def test_hisparse_resident_prefill_uses_attention_block_stride(workspace_rows):
     )
 
     assert result is expected
-    assert index_group._convert_once.call_args.kwargs["block_stride_rows"] == 832
+    assert convert.call_args.kwargs["BLOCK_STRIDE_ROWS"] == 832
 
 
 def test_hisparse_flashmla_reorders_full_speculative_window_as_decode():
