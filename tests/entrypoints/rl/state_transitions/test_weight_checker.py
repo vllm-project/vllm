@@ -9,7 +9,7 @@ import requests
 import torch
 from transformers import AutoModelForCausalLM
 
-from tests.entrypoints.serve.dev.rlhf.conftest import (
+from tests.entrypoints.rl.conftest import (
     MODEL_NAME,
     gen,
     health,
