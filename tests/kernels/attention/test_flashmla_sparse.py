@@ -861,6 +861,18 @@ def test_decode_sparse_reuses_prefill_kernel(
         captured["sparse"] = kwargs
         kwargs["out"].zero_()
 
+    fused_c128 = compress_ratio == 128 and hasattr(
+        torch.ops._C, "combine_c128_swa_decode"
+    )
+    if fused_c128:
+
+        def fake_fused_c128(indices, lengths, *args):
+            captured["fused_c128"] = args
+            indices.fill_(-1)
+            lengths.fill_(1)
+
+        monkeypatch.setattr(torch.ops._C, "combine_c128_swa_decode", fake_fused_c128)
+
     monkeypatch.setattr(
         flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "sparse", raising=False
     )
@@ -890,9 +902,14 @@ def test_decode_sparse_reuses_prefill_kernel(
     assert captured["sparse"]["q"] is q
     assert captured["sparse"]["out"] is output
     if compress_ratio == 128:
-        expected = torch.full((128,), -1, dtype=torch.int32)
-        expected[:2] = torch.arange(2, dtype=torch.int32)
-        torch.testing.assert_close(captured["local_topk"][0], expected, rtol=0, atol=0)
+        if fused_c128:
+            assert captured["fused_c128"][4:6] == (128, 128)
+        else:
+            expected = torch.full((128,), -1, dtype=torch.int32)
+            expected[:2] = torch.arange(2, dtype=torch.int32)
+            torch.testing.assert_close(
+                captured["local_topk"][0], expected, rtol=0, atol=0
+            )
     elif compress_ratio == 4:
         assert attention.topk_indices_buffer is not None
         torch.testing.assert_close(
