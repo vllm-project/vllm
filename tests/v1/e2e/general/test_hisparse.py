@@ -80,7 +80,8 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="HiSparse requires NVIDIA CUDA or AMD ROCm",
 )
 @pytest.mark.parametrize(
     "with_offloading", [False, True], ids=["standalone", "offload"]
@@ -98,9 +99,10 @@ def test_hisparse_spill_and_prefix_restore(
     MTP layers write after the target forward; their rows used to be mirrored
     before the drafter wrote them, so the drafter later read stale host rows.
     """
-    capability = current_platform.get_device_capability()
-    if capability is None or capability.major < 9:
-        pytest.skip("Sparse MLA requires Hopper or newer")
+    if current_platform.is_cuda():
+        capability = current_platform.get_device_capability()
+        if capability is None or capability.major < 9:
+            pytest.skip("Sparse MLA requires Hopper or newer")
 
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
