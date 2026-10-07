@@ -8,6 +8,7 @@ import functools
 import json
 import os
 import sys
+import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from types import UnionType
@@ -50,6 +51,7 @@ from vllm.config import (
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
+    LoggingConfig,
     LoRAConfig,
     MambaConfig,
     ModelConfig,
@@ -78,12 +80,14 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.kernel import (
+    PASSTHROUGH_ALL2ALL_BACKEND,
     IrOpPriorityConfig,
     LinearBackend,
     MoEBackend,
     SparseIndexerTopkBackend,
 )
 from vllm.config.load import SafetensorsLoadStrategy
+from vllm.config.logging import LogLevel
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
 from vllm.config.model import (
@@ -113,7 +117,7 @@ from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
-from vllm.logger import init_logger, suppress_logging
+from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
@@ -443,6 +447,20 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
+_LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
+    "--log-config-file is deprecated and will be removed in v0.33.0. "
+    "Use --logging-config.pylogging_config_file instead."
+)
+
+
+class DeprecatedLogConfigFileAction(argparse.Action):
+    """Warn when the legacy ``--log-config-file`` option is used."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
+        setattr(namespace, self.dest, values)
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -659,6 +677,7 @@ class EngineArgs:
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
     enable_mixed_moe_lora_format: bool = LoRAConfig.enable_mixed_moe_lora_format
     enable_moe_shared_loras: bool = LoRAConfig.enable_moe_shared_loras
+    max_lora_cls_labels: int | None = LoRAConfig.max_lora_cls_labels
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -705,6 +724,9 @@ class EngineArgs:
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
     )
+    custom_histogram_buckets: dict[str, list[float]] | None = (
+        ObservabilityConfig.custom_histogram_buckets
+    )
     cudagraph_metrics: bool = ObservabilityConfig.cudagraph_metrics
     enable_layerwise_nvtx_tracing: bool = (
         ObservabilityConfig.enable_layerwise_nvtx_tracing
@@ -733,6 +755,10 @@ class EngineArgs:
 
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
 
+    logging_config: LoggingConfig | None = None
+    log_level: LogLevel | None = None
+    log_config_file: str | None = None
+
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
 
@@ -744,6 +770,7 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    sleep_mode_offload_cudagraph: bool = ModelConfig.sleep_mode_offload_cudagraph
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
     )
@@ -982,6 +1009,10 @@ class EngineArgs:
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
         )
         model_group.add_argument(
+            "--sleep-mode-offload-cudagraph",
+            **model_kwargs["sleep_mode_offload_cudagraph"],
+        )
+        model_group.add_argument(
             "--sleep-preserve-parameter-names",
             **model_kwargs["sleep_preserve_parameter_names"],
         )
@@ -1079,6 +1110,10 @@ class EngineArgs:
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
+        # Bound from --moe-backend in KernelConfig.set_platform_defaults().
+        parallel_kwargs["all2all_backend"]["choices"].remove(
+            PASSTHROUGH_ALL2ALL_BACKEND
+        )
         parallel_group = parser.add_argument_group(
             title="ParallelConfig",
             description=ParallelConfig.__doc__,
@@ -1550,6 +1585,38 @@ class EngineArgs:
             "--enable-moe-shared-loras",
             **lora_kwargs["enable_moe_shared_loras"],
         )
+        lora_group.add_argument(
+            "--max-lora-cls-labels",
+            **lora_kwargs["max_lora_cls_labels"],
+        )
+
+        # Logging arguments
+        logging_group = parser.add_argument_group(
+            title="LoggingConfig",
+            description=LoggingConfig.__doc__,
+        )
+        logging_config_kwargs = get_kwargs(VllmConfig)["logging_config"]
+        logging_config_kwargs["default"] = argparse.SUPPRESS
+        logging_group.add_argument("--logging-config", **logging_config_kwargs)
+        logging_group.add_argument(
+            "--log-level",
+            choices=get_args(LogLevel),
+            default=argparse.SUPPRESS,
+            help=(
+                "Shortcut for --logging-config.log_level. "
+                "Overrides that field if both are specified."
+            ),
+        )
+        logging_group.add_argument(
+            "--log-config-file",
+            dest="log_config_file",
+            default=argparse.SUPPRESS,
+            metavar="PYLOGGING_CONFIG_FILE",
+            action=DeprecatedLogConfigFileAction,
+            help=_LOG_CONFIG_FILE_DEPRECATION_MESSAGE,
+        )
+        # Retain the warning in v0.31.0 and v0.32.0. Remove this option and its
+        # compatibility mapping in create_logging_config() in v0.33.0.
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1578,6 +1645,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--kv-cache-metrics-sample",
             **observability_kwargs["kv_cache_metrics_sample"],
+        )
+        observability_group.add_argument(
+            "--custom-histogram-buckets",
+            **observability_kwargs["custom_histogram_buckets"],
         )
         observability_group.add_argument(
             "--cudagraph-metrics",
@@ -1918,6 +1989,7 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
@@ -2064,6 +2136,25 @@ class EngineArgs:
             cfg = json.loads(cfg)
         return WatermarkConfig(**cfg)
 
+    def create_structured_outputs_config(self) -> StructuredOutputsConfig:
+        """Merge frontend parser flags into the structured outputs config.
+
+        Mutates `self.structured_outputs_config` in place and returns it
+        (not a copy). Model-specific defaults (e.g. gpt_oss ->
+        "openai_gptoss") are applied later by `verify_and_update_config`
+        only when the resolved value is still empty, so explicit CLI flags
+        take precedence.
+        """
+        if self.reasoning_parser:
+            self.structured_outputs_config.reasoning_parser = self.reasoning_parser
+
+        if self.reasoning_parser_plugin:
+            self.structured_outputs_config.reasoning_parser_plugin = (
+                self.reasoning_parser_plugin
+            )
+
+        return self.structured_outputs_config
+
     def create_observability_config(self) -> ObservabilityConfig:
         return ObservabilityConfig(
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
@@ -2072,6 +2163,7 @@ class EngineArgs:
             per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            custom_histogram_buckets=self.custom_histogram_buckets,
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
@@ -2080,6 +2172,16 @@ class EngineArgs:
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
         )
+
+    def create_logging_config(self) -> LoggingConfig:
+        config = self.logging_config or LoggingConfig()
+        if self.log_level is not None:
+            config = dataclasses.replace(config, log_level=self.log_level)
+        if self.log_config_file is not None:
+            config = dataclasses.replace(
+                config, pylogging_config_file=self.log_config_file
+            )
+        return config
 
     def create_engine_config(
         self,
@@ -2090,6 +2192,9 @@ class EngineArgs:
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
+        logging_config = self.create_logging_config()
+        configure_logging_if_needed(logging_config)
+
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
@@ -2166,7 +2271,13 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        if resolved_cache_dtype.startswith("turboquant_"):
+        # TurboQuant and UltraQuant both keep boundary attention layers at the
+        # native dtype, and compute those layers the same way.
+        uses_packed_kv_backend = (
+            resolved_cache_dtype.startswith("turboquant_")
+            or resolved_cache_dtype == "ultraquant_4bit"
+        )
+        if uses_packed_kv_backend:
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
@@ -2525,6 +2636,7 @@ class EngineArgs:
                 specialize_active_lora=self.specialize_active_lora,
                 enable_mixed_moe_lora_format=self.enable_mixed_moe_lora_format,
                 enable_moe_shared_loras=self.enable_moe_shared_loras,
+                max_lora_cls_labels=self.max_lora_cls_labels,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
@@ -2575,14 +2687,18 @@ class EngineArgs:
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
-        if resolved_cache_dtype.startswith("turboquant_") and (
+        # UltraQuant subclasses that impl, so it inherits the same limit.
+        if uses_packed_kv_backend and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3
         ):
             logger.warning(
-                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "%s is not yet compatible with FlashAttention >= 3. "
                 "Overriding flash_attn_version to 2. To silence this "
-                "warning, pass --attention-config.flash_attn_version=2"
+                "warning, pass --attention-config.flash_attn_version=2",
+                "TurboQuant"
+                if resolved_cache_dtype.startswith("turboquant_")
+                else "UltraQuant",
             )
             attention_config.flash_attn_version = 2
 
@@ -2641,13 +2757,7 @@ class EngineArgs:
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
-        if self.reasoning_parser:
-            self.structured_outputs_config.reasoning_parser = self.reasoning_parser
-
-        if self.reasoning_parser_plugin:
-            self.structured_outputs_config.reasoning_parser_plugin = (
-                self.reasoning_parser_plugin
-            )
+        self.create_structured_outputs_config()
 
         observability_config = self.create_observability_config()
 
@@ -2721,6 +2831,7 @@ class EngineArgs:
             diffusion_config=diffusion_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
+            logging_config=logging_config,
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,

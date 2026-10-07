@@ -6,14 +6,17 @@ from collections import defaultdict
 import pytest
 import regex as re
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
 
 
 def run_model(
-    compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
+    vllm_runner,
+    compile_config: CompilationMode | CompilationConfig,
+    model: str,
+    **model_kwargs,
 ):
     """Run a model with the given compilation config for E2E fusion tests."""
     compilation_config = (
@@ -36,38 +39,48 @@ def run_model(
     # No cudagraphs by default
     if compilation_config.cudagraph_mode is None:
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    llm = LLM(
-        model=model,
+
+    # trust_remote_code/enable_chunked_prefill/block_size/kernel_config are
+    # pinned to LLM()'s own defaults since VllmRunner overrides them for
+    # other test needs (e.g. it forces block_size=16, which some attention
+    # backends like FLASHINFER_MLA reject, and disables JIT warmup).
+    model_kwargs.setdefault("kernel_config", {"enable_jit_warmup": True})
+    with vllm_runner(
+        model,
         compilation_config=compilation_config,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        block_size=None,
         **model_kwargs,
-    )
-    outputs = llm.generate(prompts, sampling_params)
+    ) as vllm_model:
+        llm = vllm_model.llm
+        outputs = llm.generate(prompts, sampling_params)
 
-    # Print the outputs.
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        # Print the outputs.
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
-    # Get the compile ranges endpoints after vllm config post init
-    # in order to compute compile ranges correctly
-    compilation_config.compile_ranges_endpoints = (
-        llm.llm_engine.vllm_config.compilation_config.compile_ranges_endpoints
-    )
+        # Get the compile ranges endpoints after vllm config post init
+        # in order to compute compile ranges correctly
+        compilation_config.compile_ranges_endpoints = (
+            llm.llm_engine.vllm_config.compilation_config.compile_ranges_endpoints
+        )
 
-    # Fetch match table from each worker via RPC and sum across workers.
-    worker_tables: list[dict[str, int]] = llm.llm_engine.engine_core.collective_rpc(
-        "get_compilation_match_table"
-    )
-    combined: defaultdict[str, int] = defaultdict(int)
-    for table in worker_tables:
-        for k, v in table.items():
-            combined[k] += v
-    return dict(combined)
+        # Fetch match table from each worker via RPC and sum across workers.
+        worker_tables: list[dict[str, int]] = llm.llm_engine.engine_core.collective_rpc(
+            "get_compilation_match_table"
+        )
+        combined: defaultdict[str, int] = defaultdict(int)
+        for table in worker_tables:
+            for k, v in table.items():
+                combined[k] += v
+        return dict(combined)
 
 
 @pytest.fixture
-def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
+def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn, vllm_runner):
     def run(
         model_name: str,
         matches: Matches,
@@ -137,7 +150,9 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         )
 
         with caplog_mp_spawn(logging.DEBUG) as log_holder:
-            match_table = run_model(full_compilation_config, model_name, **model_kwargs)
+            match_table = run_model(
+                vllm_runner, full_compilation_config, model_name, **model_kwargs
+            )
 
         num_compile_ranges = len(full_compilation_config.get_compile_ranges())
         assert num_compile_ranges in [1, 2, 3]
