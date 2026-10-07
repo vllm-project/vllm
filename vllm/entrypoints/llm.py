@@ -42,7 +42,7 @@ from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import PoolingRequestOutput, RequestOutput
@@ -76,8 +76,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     Args:
         model: The name or path of a HuggingFace Transformers model.
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
-        tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
-            if available, and "slow" will always use the slow tokenizer.
+        tokenizer_mode: The tokenizer mode. See
+            [ModelConfig.tokenizer_mode][vllm.config.ModelConfig.tokenizer_mode].
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer. Expect valid prompt_token_ids and None for prompt
             from the input.
@@ -338,6 +338,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             **kwargs,
         )
 
+        configure_logging_if_needed(engine_args.create_logging_config())
         log_non_default_args(engine_args)
 
         self.llm_engine = LLMEngine.from_engine_args(
@@ -784,16 +785,30 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
-    def start_profile(self, profile_prefix: str | None = None) -> None:
-        """Start profiling with optional custom trace prefix.
+    def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides.
 
         Args:
             profile_prefix: Optional prefix for the trace file names. If provided,
                            trace files will be named as "<prefix>_dp<X>_pp<Y>_tp<Z>".
                            If not provided, default naming will be used.
+            delay_iterations: Optional number of worker iterations to skip before
+                profiling starts.
+            max_iterations: Optional maximum number of worker iterations to profile.
+                Zero means no limit.
 
         """
-        self.llm_engine.start_profile(profile_prefix)
+        self.llm_engine.start_profile(
+            profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+        )
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
@@ -838,7 +853,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         """
         self.llm_engine.release_kv_cache_memory()
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
         method for more details.
 
@@ -850,8 +865,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 (or None) before the engine is used again.
                 Use tags=["scheduling"] to resume from level 0 sleep.
 
+        Returns:
+            Whether the engine is fully awake.
+
         """
-        self.llm_engine.wake_up(tags)
+        return self.llm_engine.wake_up(tags)
 
     def get_metrics(self) -> list["Metric"]:
         """Return a snapshot of aggregated metrics from Prometheus.
