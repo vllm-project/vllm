@@ -979,6 +979,19 @@ class NixlBaseConnectorWorker:
                 f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
                 f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
             )
+        local_interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+        remote_interleave = agent_metadata.cp_kv_cache_interleave_size
+        if (
+            local_dcp_size > 1
+            and remote_dcp_size > 1
+            and local_interleave != remote_interleave
+        ):
+            raise RuntimeError(
+                "NIXL DCP peers must use the same cp_kv_cache_interleave_size, "
+                "as it determines how tokens are laid out in transferred blocks. "
+                f"Local: {local_interleave}, remote: {remote_interleave}. "
+                "Set the same --cp-kv-cache-interleave-size on both instances."
+            )
 
     def _sync_block_size_with_kernel(self) -> None:
         backends = get_current_attn_backends(self.vllm_config)
@@ -1891,6 +1904,9 @@ class NixlBaseConnectorWorker:
             pcp_size=self.pcp_size,
             region_members=self.region_members,
             packed_member_layouts=packed_member_layouts,
+            cp_kv_cache_interleave_size=(
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+            ),
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None

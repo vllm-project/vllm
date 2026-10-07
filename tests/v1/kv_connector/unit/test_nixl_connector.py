@@ -4261,6 +4261,82 @@ def test_compatibility_hash_validation(
 
 
 @pytest.mark.parametrize(
+    ("remote_dcp_size", "remote_interleave", "should_fail"),
+    [
+        (2, 16, False),
+        (2, 1, True),
+        # A DCP=1 peer's interleave does not affect its block contents.
+        (1, 1, False),
+    ],
+)
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_handshake_validates_dcp_interleave_size(
+    default_vllm_config, dist_init, remote_dcp_size, remote_interleave, should_fail
+):
+    """DCP peers with different interleave sizes lay out tokens differently
+    within a block, so copying blocks between them would corrupt the KV cache.
+    """
+    local_vllm_config = create_vllm_config(model="facebook/opt-125m", block_size=16)
+    decode_connector = NixlConnector(
+        local_vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    decode_worker = decode_connector.connector_worker
+    decode_worker.dcp_size = 2
+    decode_worker.transfer_topo = MagicMock()
+    decode_worker.transfer_topo.handshake_target_ranks.return_value = [0]
+    local_vllm_config.parallel_config.cp_kv_cache_interleave_size = 16
+    decode_worker.compat_hash = compute_nixl_compatibility_hash(
+        decode_worker.vllm_config, decode_worker.backend_name
+    )
+
+    prefill_metadata = NixlAgentMetadata(
+        engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+        agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+        kv_caches_base_addr=[0],
+        device_id=0,
+        num_blocks=1,
+        block_lens=[4096 * 16],
+        block_strides=[4096 * 16],
+        kv_cache_layout="LBHNC",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name=decode_worker.backend_name,
+        physical_blocks_per_logical_kv_block=1,
+        dcp_size=remote_dcp_size,
+        cp_kv_cache_interleave_size=remote_interleave,
+    )
+    handshake_payload = NixlHandshakePayload(
+        compatibility_hash=decode_worker.compat_hash,
+        agent_metadata_bytes=msgspec.msgpack.encode(prefill_metadata),
+    )
+    mock_socket = MagicMock()
+    mock_socket.recv_multipart.return_value = [
+        msgspec.msgpack.encode(handshake_payload),
+        msgspec.msgpack.encode(time.perf_counter()),
+    ]
+    with (
+        patch.object(decode_worker, "add_remote_agent", return_value="fake_agent"),
+        patch.object(nixl.base_worker, "zmq_ctx") as mock_zmq_ctx,
+    ):
+        mock_zmq_ctx.return_value.__enter__.return_value = mock_socket
+        handshake_kwargs: dict[str, Any] = dict(
+            host="localhost",
+            port=1234,
+            remote_tp_size=1,
+            expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+        )
+        if should_fail:
+            with pytest.raises(RuntimeError, match="cp_kv_cache_interleave_size"):
+                decode_worker._nixl_handshake(**handshake_kwargs)
+        else:
+            result, _ = decode_worker._nixl_handshake(**handshake_kwargs)
+            assert len(result) == 1
+
+
+@pytest.mark.parametrize(
     "error_scenario",
     [
         "handshake_decode_error",
