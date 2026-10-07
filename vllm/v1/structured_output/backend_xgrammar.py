@@ -532,6 +532,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         return
 
     if so_params.json:
+        check_json_nesting(so_params.json)
         if isinstance(so_params.json, str):
             try:
                 schema = json.loads(so_params.json)
