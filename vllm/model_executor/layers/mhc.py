@@ -77,27 +77,24 @@ def _has_aiter_mhc_fused_post_pre_delayed_rms_norm() -> bool:
     return on_gfx950()
 
 
-def _load_aiter_mhc_fused_post_pre_delayed():
+def _has_aiter_mhc_fused_post_pre_delayed() -> bool:
     if not HAS_AITER_MHC or not current_platform.is_rocm():
-        return None
+        return False
     from vllm.platforms.rocm import on_gfx942
 
     if not on_gfx942():
-        return None
+        return False
     try:
         from aiter.ops.mhc import mhc_fused_post_pre_delayed
     except Exception:
-        return None
-    if not callable(mhc_fused_post_pre_delayed):
-        return None
-    return mhc_fused_post_pre_delayed
+        return False
+    return callable(mhc_fused_post_pre_delayed)
 
-
-_MHC_FUSED_POST_PRE_DELAYED = _load_aiter_mhc_fused_post_pre_delayed()
 
 HAS_AITER_MHC_FUSED = _has_aiter_mhc_fused()
 HAS_AITER_MHC_PRE_NORM = _aiter_mhc_op_accepts_norm("mhc_pre")
 HAS_AITER_MHC_FUSED_NORM = _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
+HAS_AITER_MHC_FUSED_POST_PRE_DELAYED = _has_aiter_mhc_fused_post_pre_delayed()
 HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM = (
     _has_aiter_mhc_fused_post_pre_delayed_rms_norm()
 )
@@ -348,6 +345,9 @@ class MHCPreDelayedOp(CustomOp):
     """
 
     # --8<-- [end:mhc_pre_delayed]
+    # Off unless __init__ opts in. A caller that skips __init__ stays off.
+    _gfx942_seam = False
+
     @classmethod
     def enabled(cls) -> bool:
         return True
@@ -435,7 +435,7 @@ class MHCPreDelayedOp(CustomOp):
         # folded post GEMM is faster than this kernel.
         if (
             self._gfx942_seam
-            and _MHC_FUSED_POST_PRE_DELAYED is not None
+            and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED
             and sublayer_out is not None
             and post_layer_mix is not None
             and comb_res_mix is not None
@@ -450,7 +450,7 @@ class MHCPreDelayedOp(CustomOp):
                 "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",
                 _AITER_SEAM_MIN_TOKENS,
             )
-            return _MHC_FUSED_POST_PRE_DELAYED(
+            return torch.ops.vllm.mhc_fused_post_pre_delayed_aiter(
                 residual,
                 fn,
                 hc_scale,

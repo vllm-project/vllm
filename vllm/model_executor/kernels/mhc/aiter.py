@@ -207,6 +207,79 @@ def _mhc_pre_delayed_aiter_fake(
     )
 
 
+def mhc_fused_post_pre_delayed_aiter(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None,
+    sublayer_out: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """gfx942 delayed mHC seam: post, collapse, and the next pre gates.
+
+    Returns residual_out, post_mix, comb_mix, layer_input, next_pre_mix.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return rocm_aiter_ops.mhc_fused_post_pre_delayed(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        pre_mix,
+        sublayer_out,
+        post_layer_mix,
+        comb_res_mix,
+    )
+
+
+def _mhc_fused_post_pre_delayed_aiter_fake(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None,
+    sublayer_out: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_tokens, hc_mult, hidden_size = residual.shape
+    return (
+        torch.empty_like(residual),
+        torch.empty(
+            num_tokens, hc_mult, 1, dtype=torch.float32, device=residual.device
+        ),
+        torch.empty(
+            num_tokens,
+            hc_mult,
+            hc_mult,
+            dtype=torch.float32,
+            device=residual.device,
+        ),
+        torch.empty(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
+        ),
+        torch.empty(num_tokens, hc_mult, dtype=torch.float32, device=residual.device),
+    )
+
+
 def mhc_fused_post_pre_delayed_rms_norm_aiter(
     residual: torch.Tensor,
     fn: torch.Tensor,
@@ -407,6 +480,12 @@ direct_register_custom_op(
     op_func=mhc_pre_delayed_aiter,
     mutates_args=["residual_out"],
     fake_impl=_mhc_pre_delayed_aiter_fake,
+)
+direct_register_custom_op(
+    op_name="mhc_fused_post_pre_delayed_aiter",
+    op_func=mhc_fused_post_pre_delayed_aiter,
+    mutates_args=[],
+    fake_impl=_mhc_fused_post_pre_delayed_aiter_fake,
 )
 direct_register_custom_op(
     op_name="mhc_fused_post_pre_delayed_rms_norm_aiter",
