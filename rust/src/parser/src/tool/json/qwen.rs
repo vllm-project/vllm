@@ -1,44 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
+use super::super::qwen_coder::{Qwen3CoderToolParser, QwenCoderConfig};
 use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
-const QWEN_XML_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
+const QWEN_XML_CONFIG: QwenCoderConfig = QwenCoderConfig {
     parser_name: "Qwen XML",
-    start_marker: "<tool_call>",
-    framed_start_marker: Some("\n<tool_call>"),
-    end_marker: "</tool_call>",
-    marker_whitespace: JsonToolCallWhitespace::Exact("\n"),
-    delimiter: None,
-    name_key: "name",
-    arguments_key: &["arguments"],
+    tool_call_start: "<tool_call>",
+    first_tool_call_start: "\n\n<tool_call>",
+    next_tool_call_start: "\n<tool_call>",
+    tool_call_end: "</tool_call>",
+    trim_parameter_newlines: true,
 };
 
-/// Tool parser for Qwen XML-wrapped JSON tool calls.
+/// Tool parser for Qwen XML-style tool calls.
 ///
 /// Example tool call content:
 ///
 /// ```text
 /// <tool_call>
-/// {"name": "get_weather", "arguments": {"location":"Tokyo"}}
+/// <function=get_weather>
+/// <parameter=location>Tokyo</parameter>
+/// </function>
 /// </tool_call>
 /// ```
-///
-/// Arguments are already OpenAI-style JSON text, so they are streamed as raw
-/// argument deltas without schema conversion or JSON normalization.
-///
-/// Note: parallel calls are represented as repeated
-/// `<tool_call>...</tool_call>` blocks, not as multiple calls inside one tag.
 pub struct Qwen3XmlToolParser {
-    inner: JsonToolCallParser,
+    inner: Qwen3CoderToolParser,
 }
 
 impl Qwen3XmlToolParser {
     /// Create a Qwen XML tool parser.
-    fn new(_tools: &[Tool]) -> Self {
+    fn new(tools: &[Tool]) -> Self {
         Self {
-            inner: JsonToolCallParser::new(QWEN_XML_CONFIG),
+            inner: Qwen3CoderToolParser::with_config(tools, QWEN_XML_CONFIG),
         }
     }
 }
@@ -52,7 +46,7 @@ impl ToolParser for Qwen3XmlToolParser {
     }
 
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        Some(xgrammar_structural_tag::Model::Qwen3.builder())
+        Some(xgrammar_structural_tag::Model::Qwen3Coder.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -70,18 +64,22 @@ impl ToolParser for Qwen3XmlToolParser {
 
 #[cfg(test)]
 mod tests {
-    use expect_test::expect;
+    use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
+    use super::super::super::qwen_coder::Qwen3CoderToolParser;
     use super::Qwen3XmlToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
-    fn build_tool_call(function_name: &str, arguments: &str) -> String {
-        format!(
-            "<tool_call>\n{{\"name\": \"{function_name}\", \"arguments\": {arguments}}}\n</tool_call>"
-        )
+    fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
+        let params = params
+            .iter()
+            .map(|(name, value)| format!("<parameter={name}>{value}</parameter>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("<tool_call>\n<function={function_name}>\n{params}\n</function>\n</tool_call>")
     }
 
     #[test]
@@ -94,207 +92,133 @@ mod tests {
     }
 
     #[test]
-    fn qwen_xml_parse_complete_extracts_raw_json_arguments() {
+    fn qwen_xml_parse_complete_extracts_single_tool_call() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let arguments = r#"{ "location": "Tokyo", "days": "3" }"#;
         let output = parser
-            .parse_complete(&format!(
-                "Let me check.\n{}",
-                build_tool_call("get_weather", arguments)
+            .parse_complete(&build_tool_call(
+                "get_weather",
+                &[("location", "SF"), ("date", "2026-04-29")],
             ))
             .unwrap();
 
-        assert_eq!(output.normal_text(), "Let me check.");
+        assert!(output.normal_text().is_empty());
         assert_eq!(output.calls().len(), 1);
-        assert_eq!(output.calls()[0].tool_index, 0);
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls()[0].arguments, arguments);
-    }
-
-    #[test]
-    fn qwen_xml_does_not_validate_or_normalize_arguments() {
-        let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let arguments = r#"{"location":"Tokyo",}"#;
-        let output = parser.parse_complete(&build_tool_call("get_weather", arguments)).unwrap();
-
-        assert_eq!(output.calls()[0].arguments, arguments);
-    }
-
-    #[test]
-    fn qwen_xml_streaming_emits_argument_deltas() {
-        let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let chunks = [
-            "<tool_call>",
-            "\n{\"name\": \"get_weather\", \"arguments\": ",
-            "{\"location\":",
-            "\"Beijing\"",
-            "}",
-            "}\n</tool_call>",
-        ];
-
-        let mut output = ToolParserOutput::default();
-        let mut observed_arguments = Vec::new();
-        for chunk in chunks {
-            let next = parser.parse_chunk(chunk).unwrap();
-            observed_arguments.extend(
-                next.calls()
-                    .iter()
-                    .filter(|call| call.name.is_none())
-                    .map(|call| call.arguments.clone()),
-            );
-            output.append(next);
-        }
-        output.append(parser.finish().unwrap());
-
-        assert_eq!(observed_arguments, ["{\"location\":", "\"Beijing\"", "}"]);
         assert_eq!(
-            output.coalesce().calls()[0].arguments,
-            r#"{"location":"Beijing"}"#
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({
+                "location": "SF",
+                "date": "2026-04-29",
+            })
         );
     }
 
     #[test]
-    fn qwen_xml_streaming_handles_split_markers() {
-        let input = format!(
-            "hello {}",
-            build_tool_call("get_weather", r#"{"location":"Tokyo"}"#)
-        );
-        let chunks = split_by_chars(&input, 5);
-        let mut parser = Qwen3XmlToolParser::new(&test_tools());
-
-        let output = collect_stream(&mut parser, &chunks);
-
-        assert_eq!(output.normal_text(), "hello ");
-        assert_eq!(output.calls().len(), 1);
-        assert_eq!(output.calls()[0].arguments, r#"{"location":"Tokyo"}"#);
-    }
-
-    #[test]
-    fn qwen_xml_keeps_end_marker_literal_inside_json_string() {
-        let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let arguments = r#"{"text":"literal </tool_call> inside"}"#;
-        let output = parser.parse_complete(&build_tool_call("echo", arguments)).unwrap();
-
-        assert_eq!(output.calls().len(), 1);
-        assert_eq!(output.calls()[0].arguments, arguments);
-    }
-
-    #[test]
-    fn qwen_xml_decodes_escaped_function_name() {
+    fn qwen_xml_parse_complete_preserves_prefix_text() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         let output = parser
-            .parse_complete(
-                r#"<tool_call>
-{"name":"say_\"hi","arguments":{}}
-</tool_call>"#,
-            )
+            .parse_complete(&format!(
+                "Thinking... {}",
+                build_tool_call("get_weather", &[("location", "NYC")])
+            ))
             .unwrap();
 
-        assert_eq!(output.calls()[0].name.as_deref(), Some("say_\"hi"));
+        assert_eq!(output.normal_text(), "Thinking... ");
+        assert_eq!(output.calls().len(), 1);
     }
 
     #[test]
-    fn qwen_xml_requires_newline_after_tool_call_start() {
-        let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let input = r#"<tool_call>{"name":"get_weather","arguments":{}}
-</tool_call>"#;
-
-        let output = parser.parse_complete(input).unwrap();
-
-        assert_eq!(output.normal_text(), input);
-        assert!(output.calls().is_empty());
-    }
-
-    #[test]
-    fn qwen_xml_requires_newline_before_tool_call_end() {
-        let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let error = parser
-            .parse_complete(
-                r#"<tool_call>
-{"name":"get_weather","arguments":{}}</tool_call>"#,
-            )
-            .unwrap_err();
-
-        assert!(error.to_report_string().starts_with("tool parser parsing failed:"));
-    }
-
-    #[test]
-    fn qwen_xml_streaming_extracts_multiple_tool_calls() {
-        let input = format!(
-            "{}{}",
-            build_tool_call("get_weather", r#"{"location":"Shanghai"}"#),
-            build_tool_call("add", r#"{"x":1,"y":2}"#),
+    fn qwen_xml_streaming_extracts_multiple_tool_calls_in_order() {
+        let text = format!(
+            "{}\n{}",
+            build_tool_call("get_weather", &[("location", "SF")]),
+            build_tool_call("get_weather", &[("location", "NYC")])
         );
-        let chunks = split_by_chars(&input, 7);
+        let chunks = split_by_chars(&text, 7);
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
 
         let output = collect_stream(&mut parser, &chunks);
 
-        expect![[r#"
-            ToolParserOutput {
-                events: [
-                    ToolCall(
-                        ToolCallDelta {
-                            tool_index: 0,
-                            name: Some(
-                                "get_weather",
-                            ),
-                            arguments: "{\"location\":\"Shanghai\"}",
-                        },
-                    ),
-                    ToolCall(
-                        ToolCallDelta {
-                            tool_index: 1,
-                            name: Some(
-                                "add",
-                            ),
-                            arguments: "{\"x\":1,\"y\":2}",
-                        },
-                    ),
-                ],
-            }
-        "#]]
-        .assert_debug_eq(&output);
+        assert_eq!(output.calls().len(), 2);
+        assert_eq!(output.calls()[0].tool_index, 0);
+        assert_eq!(output.calls()[1].tool_index, 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "location": "SF" })
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[1].arguments).unwrap(),
+            json!({ "location": "NYC" })
+        );
     }
 
     #[test]
     fn qwen_xml_finish_fails_incomplete_tool_call() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         parser
-            .parse_chunk(
-                r#"<tool_call>
-{"name":"get_weather","arguments":{"location""#,
-            )
+            .parse_chunk("<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>")
             .unwrap();
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete Qwen XML tool call"]
-            .assert_eq(&error.to_report_string());
+        assert_eq!(
+            error.to_report_string(),
+            "tool parser parsing failed: incomplete Qwen XML tool call"
+        );
     }
 
     #[test]
-    fn qwen_xml_malformed_field_order_fails_fast() {
-        let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let error = parser
-            .parse_chunk(
-                r#"<tool_call>
-{"arguments":{},"name":"get_weather"}
-</tool_call>"#,
-            )
-            .unwrap_err();
-
-        expect![[r#"
-            tool parser parsing failed: near "{\"arguments\":{},\"name\":\"get_weather\"}\n</tool_call>": invalid Qwen XML
-            expected `name`"#]]
-        .assert_eq(&error.to_report_string());
+    fn qwen_xml_matches_qwen_coder_parser() {
+        let inputs = [
+            "Hello, world!".to_string(),
+            build_tool_call("get_weather", &[("location", "SF"), ("date", "2026-04-29")]),
+            format!(
+                "Thinking... {}",
+                build_tool_call("get_weather", &[("location", "NYC")])
+            ),
+            format!(
+                "{}\n{}",
+                build_tool_call("get_weather", &[("location", "SF")]),
+                build_tool_call("add", &[("x", "1"), ("y", "2")]),
+            ),
+        ];
+        for input in &inputs {
+            let chunks = split_by_chars(input, 7);
+            let mut xml = Qwen3XmlToolParser::new(&test_tools());
+            let mut coder = Qwen3CoderToolParser::create(&test_tools()).unwrap();
+            let mut xml_output = ToolParserOutput::default();
+            let mut coder_output = ToolParserOutput::default();
+            for chunk in &chunks {
+                xml.parse_into(chunk, &mut xml_output).unwrap();
+                coder.parse_into(chunk, &mut coder_output).unwrap();
+            }
+            xml_output.append(xml.finish().unwrap());
+            coder_output.append(coder.finish().unwrap());
+            let xml_output = xml_output.coalesce();
+            let coder_output = coder_output.coalesce();
+            assert_eq!(xml_output.normal_text(), coder_output.normal_text());
+            assert_eq!(
+                xml_output.calls().len(),
+                coder_output.calls().len(),
+                "input: {input}"
+            );
+            for (xml_call, coder_call) in xml_output.calls().iter().zip(coder_output.calls().iter())
+            {
+                assert_eq!(xml_call.name, coder_call.name, "input: {input}");
+                assert_eq!(
+                    serde_json::from_str::<Value>(&xml_call.arguments).unwrap(),
+                    serde_json::from_str::<Value>(&coder_call.arguments).unwrap(),
+                    "input: {input}"
+                );
+            }
+        }
     }
 
     #[test]
     fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
         assert_tool_framing_preserves_body_whitespace::<Qwen3XmlToolParser>(
-            "\n",
-            "<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{}}\n</tool_call>",
+            "\n\n",
+            "<tool_call>\n<function=get_weather>\n</function>\n</tool_call>",
         );
     }
 }
