@@ -302,6 +302,7 @@ class TestStreamingScheduler(unittest.TestCase):
             request_id="session",
             prompt_token_ids=[4, 5, 6],
             mm_features=[new_mm],
+            max_tokens=4,
         )
         update = StreamingUpdate.from_request(new_request)
         scheduler._update_request_as_session(session, update)
@@ -321,6 +322,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.mm_features[0].identifier == "segment-2"
         assert session.mm_features[0].mm_position.offset == 1
         assert session.status == RequestStatus.WAITING
+        assert session.max_tokens == 4
 
     def test_context_carrying_realtime_model_is_unchanged(self):
         """The default policy must keep appending the previous chunk's output,
