@@ -2083,6 +2083,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     worker.kv_caches_base_addr = {"local": {0: [100, 200]}}
     worker._has_mamba = False
     worker._mixed_mem_types = True
+    worker._skip_dram_xfer = False
     worker.region_mem_types = ["DRAM", "VRAM"]
     worker.region_num_blocks = [2, 2]
     worker._desc_is_dram_by_block_size = {}
@@ -2150,6 +2151,7 @@ def recv_worker():
     worker.enable_permute_local_kv = False
     worker.enable_heterogeneous_attn_post_process = False
     worker.tp_rank = 0
+    worker._skip_dram_xfer = False
     worker._log_failure = MagicMock()  # type: ignore[method-assign]
     worker.xfer_stats = NixlKVConnectorStats()
     worker.nixl_wrapper = MagicMock()
@@ -2205,6 +2207,140 @@ def test_mixed_memory_read_failure_does_not_notify_producer(recv_worker):
 
     assert "request" not in worker._pending_recv_notifs
     worker.nixl_wrapper.send_notif.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "enabled,tp_rank,shared,expected",
+    [
+        (True, 1, True, True),
+        (True, 0, True, False),
+        (True, 1, False, False),
+        (False, 1, True, False),
+    ],
+)
+def test_hisparse_dram_rank0_only_decision(
+    monkeypatch, enabled, tp_rank, shared, expected
+):
+    """Only non-zero TP ranks sharing the host pool skip DRAM, and only opt-in."""
+    monkeypatch.setenv("VLLM_NIXL_HISPARSE_DRAM_RANK0_ONLY", str(int(enabled)))
+    monkeypatch.setattr(
+        "vllm.v1.hisparse.runtime.use_shared_hisparse_host_pool",
+        lambda vllm_config: shared,
+    )
+    worker = object.__new__(NixlConnectorWorker)
+    worker.tp_rank = tp_rank
+    worker.vllm_config = MagicMock()
+
+    worker._mixed_mem_types = True
+    assert worker._leaves_dram_xfer_to_rank0() is expected
+    worker._mixed_mem_types = False
+    assert worker._leaves_dram_xfer_to_rank0() is False
+
+
+def test_hisparse_dram_rank0_only_skips_local_dram_dlist():
+    """A rank leaving DRAM to rank 0 prepares only its device descriptors."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.block_size = 16
+    worker.engine_id = "local"
+    worker.tp_rank = 1
+    worker.device_id = 3
+    worker.kv_caches_base_addr = {"local": {1: [100, 200]}}
+    worker._has_mamba = False
+    worker._mixed_mem_types = True
+    worker._skip_dram_xfer = True
+    worker.region_mem_types = ["DRAM", "VRAM"]
+    worker.region_num_blocks = [2, 2]
+    worker._desc_is_dram_by_block_size = {}
+    worker._desc_pos_by_block_size = {}
+    worker._dram_src_handles_by_block_size = {}
+    worker.nixl_memory_type = "VRAM"
+    worker._build_fa_local = MagicMock(  # type: ignore[method-assign]
+        return_value=np.array(
+            [[100, 10, 3], [110, 10, 3], [200, 10, 3], [210, 10, 3]]
+        )
+    )
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.get_xfer_descs.side_effect = lambda blocks, memory_type: (
+        memory_type,
+        blocks,
+    )
+    worker.nixl_wrapper.prep_xfer_dlist.side_effect = [22]
+
+    handle, _ = worker.register_local_xfer_handler(worker.block_size)
+
+    assert handle == 22
+    assert worker._dram_src_handles_by_block_size[worker.block_size] is None
+    memory_types = [
+        call.args[1] for call in worker.nixl_wrapper.get_xfer_descs.call_args_list
+    ]
+    assert memory_types == ["VRAM"]
+    # Descriptor positions still cover the DRAM regions, so ids stay aligned
+    # with the remote side.
+    np.testing.assert_array_equal(
+        worker._desc_is_dram_by_block_size[worker.block_size],
+        [True, True, False, False],
+    )
+
+
+def test_hisparse_dram_rank0_only_read_keeps_device_part(recv_worker):
+    worker = recv_worker
+    worker.tp_rank = 1
+    worker._skip_dram_xfer = True
+    worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
+    worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
+    worker._dram_src_handles_by_block_size = {16: None}
+    worker.nixl_wrapper.make_prepped_xfer.side_effect = [102]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+    worker._read_blocks_mixed(
+        request_id="request",
+        local_block_size_key=16,
+        local_device_handle=20,
+        local_dram_handle=None,
+        remote_xfer_side_handle=30,
+        local_block_descs_ids=np.array([0, 2]),
+        remote_block_descs_ids=np.array([5, 7]),
+        notif_agent="prefill",
+        notif_id=b"request:1",
+    )
+
+    (device_read,) = worker.nixl_wrapper.make_prepped_xfer.call_args_list
+    assert device_read.args[:2] == ("READ", 20)
+    np.testing.assert_array_equal(device_read.args[2], [0])
+    np.testing.assert_array_equal(device_read.args[4], [7])
+
+    assert worker.get_finished() == (set(), {"request"})
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "prefill", notif_msg=b"request:1"
+    )
+
+
+def test_hisparse_dram_rank0_only_dram_only_read_completes(recv_worker):
+    """With nothing left to read, the request still completes and notifies."""
+    worker = recv_worker
+    worker.tp_rank = 1
+    worker._skip_dram_xfer = True
+    worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
+    worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
+
+    worker._read_blocks_mixed(
+        request_id="request",
+        local_block_size_key=16,
+        local_device_handle=20,
+        local_dram_handle=None,
+        remote_xfer_side_handle=30,
+        local_block_descs_ids=np.array([0, 1]),
+        remote_block_descs_ids=np.array([5, 6]),
+        notif_agent="prefill",
+        notif_id=b"request:1",
+    )
+
+    worker.nixl_wrapper.make_prepped_xfer.assert_not_called()
+    assert worker.get_finished() == (set(), {"request"})
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "prefill", notif_msg=b"request:1"
+    )
 
 
 def element_byte_addrs(view: torch.Tensor) -> list[int]:

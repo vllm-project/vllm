@@ -230,6 +230,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_NIXL_HISPARSE_DRAM_RANK0_ONLY: bool = False
     VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
@@ -1720,6 +1721,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")
+    ),
+    # With a HiSparse host pool shared by the local TP ranks, register the
+    # pool with NIXL and pull host KV into it on TP rank 0 only. The other
+    # ranks keep the regions in their metadata but skip the registration and
+    # the DRAM part of each read, so the pool is registered once per node
+    # instead of once per rank (and per NIC).
+    "VLLM_NIXL_HISPARSE_DRAM_RANK0_ONLY": lambda: bool(
+        int(os.getenv("VLLM_NIXL_HISPARSE_DRAM_RANK0_ONLY", "0"))
     ),
     # Address the P2P KV-offload control socket binds to. Defaults to
     # ``localhost`` (loopback only); must be set to the node IP for
