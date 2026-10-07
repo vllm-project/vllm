@@ -292,9 +292,12 @@ fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
 
     match ctx.tool_choice {
         ToolChoice::Value(ToolChoiceValue::None) => false,
+        // With an answer constraint, the grammar must hold the calls `auto`
+        // allows, or the answer would exclude them.
         ToolChoice::Value(ToolChoiceValue::Auto) => {
             ctx.tool_strict_level >= ToolStrictLevel::Function
                 || ctx.tools.iter().any(|tool| tool.strict == Some(true))
+                || ctx.answer.is_some()
         }
         ToolChoice::Value(ToolChoiceValue::Required)
         | ToolChoice::NamedFunction(_)
