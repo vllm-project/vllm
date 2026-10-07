@@ -9,8 +9,10 @@ from pydantic import ValidationError
 
 from vllm.config.watermarking import WatermarkConfig
 from vllm.v1.watermarking.factory import create_watermarker
+from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.synthid import (
+    _STREAM_DOMAIN,
     SynthIDWatermarkDetector,
     SynthIDWatermarker,
 )
@@ -79,7 +81,7 @@ def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
     expected_probs = torch.softmax(logits, dim=1)
 
     for depth_index in range(depth):
-        stream = depth_index // 32
+        stream = _STREAM_DOMAIN | depth_index // 32
         bit = depth_index % 32
 
         words = prf.uint32(
@@ -140,10 +142,17 @@ def test_synthid_sample_uses_watermarked_logits_and_skip_mask():
     expected = watermarker.watermark_logits(logits, contexts)
 
     assert len(sampled_logits) == 1
-    torch.testing.assert_close(result.logits[0], expected[0])
-    torch.testing.assert_close(result.logits[1], logits[1])
-    torch.testing.assert_close(sampled_logits[0], result.logits)
-    assert torch.equal(result.token_ids, result.logits.argmax(dim=-1))
+    torch.testing.assert_close(sampled_logits[0][0], expected[0])
+    torch.testing.assert_close(sampled_logits[0][1], logits[1])
+    assert torch.equal(result.token_ids, sampled_logits[0].argmax(dim=-1))
+    assert result.logits is logits
+
+    # A peaked row underflows in-support tokens; only the input's -inf stay -inf.
+    peaked = torch.tensor([[20.0, 0.0, 0.0, float("-inf")]])
+    actual = SynthIDWatermarker(42, context_width=3, depth=32).watermark_logits(
+        peaked, contexts[:1]
+    )
+    assert torch.equal(actual.isneginf(), peaked.isneginf())
 
 
 def test_synthid_requires_random_sampler():
@@ -179,7 +188,7 @@ def test_synthid_detector_matches_independent_bit_count(
 
     hits = 0
     for depth_index in range(depth):
-        stream = depth_index // 32
+        stream = _STREAM_DOMAIN | depth_index // 32
         bit = depth_index % 32
 
         # [N, C] and [N, 1] -> [N, 1] -> [N]
@@ -242,3 +251,35 @@ def test_synthid_detector_recognizes_generated_tokens():
 
     assert matched.is_watermarked
     assert matched.p_value < 0.01
+
+
+def test_synthid_runs_tournament_in_fp32_for_bf16_logits():
+    logits = torch.randn(4, 1000, generator=torch.Generator().manual_seed(0))
+    logits = logits.to(torch.bfloat16)
+    contexts = torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]])
+    watermarker = SynthIDWatermarker(42, context_width=3, depth=32)
+
+    actual = watermarker.watermark_logits(logits, contexts)
+    expected = watermarker.watermark_logits(logits.float(), contexts)
+
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, expected)
+
+
+def test_synthid_detector_ignores_gumbel_text_with_same_key():
+    key = 42
+    width = 4
+    generator = torch.Generator().manual_seed(0)
+    watermarker = GumbelWatermarker(key, width)
+    tokens: list[int] = []
+
+    for _ in range(400):
+        logits = torch.randn(1, 4096, generator=generator) * 2
+        context = ([-1] * width + tokens)[-width:]
+        sample = watermarker.sample(logits, torch.tensor([context]))
+        tokens.append(int(sample.token_ids.item()))
+
+    result = SynthIDWatermarkDetector(key, width, 32).detect(tokens)
+
+    assert not result.is_watermarked
+    assert result.p_value > 1e-4
