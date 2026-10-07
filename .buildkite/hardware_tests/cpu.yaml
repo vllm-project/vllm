@@ -87,7 +87,7 @@ steps:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s \
-      tests/v1/worker/test_gpu_autoregressive_speculator.py \
+      tests/v1/worker/test_gpu_target_dependent_ar_speculator.py \
       tests/v1/worker/test_gpu_extract_hidden_states_speculator.py \
       tests/v1/worker/test_gpu_batch_ordering.py \
       tests/v1/worker/test_gpu_rejection_sampler_chunking.py \

@@ -22,17 +22,17 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    AutoRegressiveSpeculator,
-)
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as spec_module
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 
-class _TestSpeculator(AutoRegressiveSpeculator):
+class _TestSpeculator(TargetDependentARSpeculator):
     def load_draft_model(self, target_model, target_attn_layer_names):
         return self.test_draft_model
 

@@ -71,11 +71,11 @@ def init_speculator(
 
         return EagleSpeculator(vllm_config, device)
     elif speculative_config.uses_draft_model():
-        from vllm.v1.worker.gpu.spec_decode.draft_model.speculator import (
-            PlainDraftModelSpeculator,
+        from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
+            StandaloneARSpeculator,
         )
 
-        return PlainDraftModelSpeculator(vllm_config, device)
+        return StandaloneARSpeculator(vllm_config, device)
     elif speculative_config.use_ngram():
         from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
             NgramGPUSpeculator,
