@@ -10,7 +10,7 @@ TP: QwenNext 2, Qwen3.5 1, GLM 4; full Kimi 16/four nodes on GB200 and 8/two nod
 
 | Model / GPU | Job | State | Audited launches |
 | --- | --- | --- | ---: |
-| Kimi-K3 / GB200 | 3257663 | partial | 2/6 |
+| Kimi-K3 / GB200 | 3257663 | partial | 3/6 |
 | Kimi-K3 / GB300 | 3257664 | PENDING | 0/6 |
 | GLM-5.3-Flash / GB200 | 3257665 | model_validation_failed | 0/6 |
 | GLM-5.3-Flash / GB300 | 3257666 | PENDING | 0/6 |
@@ -18,8 +18,8 @@ TP: QwenNext 2, Qwen3.5 1, GLM 4; full Kimi 16/four nodes on GB200 and 8/two nod
 | Qwen3-Next-80B-A3B-Instruct / GB300 | 3257668 | PENDING | 0/6 |
 | Qwen3.5-35B-A3B / GB200 | 3257669 | model_validation_failed | 3/6 |
 | Qwen3.5-35B-A3B / GB300 | 3257670 | PENDING | 0/6 |
-| GLM-5.3-Flash / GB200 | 3258192 | PENDING | 0/6 |
-| Qwen3.5-35B-A3B / GB200 | 3258435 | PENDING | 0/6 |
+| GLM-5.3-Flash / GB200 | 3258192 | partial | 0/6 |
+| Qwen3.5-35B-A3B / GB200 | 3258435 | partial | 0/6 |
 
 Original GLM GB200 job3257665 stopped at FlashKDA GSM64 54/64 (floor55) before any timing. Qwen3.5 job3257669 stopped at reverse FI cuDNN 55/64 (floor56); its three forward launches are incomplete controls. Both failures remain excluded from balanced comparisons. Fixed-count diagnostics found GLM scores54–58/64 and Qwen3.5 scores55–58/64 on unchanged code; causes remain unknown. Each has one fresh comparison with unchanged gates (GLM3258192, Qwen3.5 3258435). No old partial timings are combined with these runs, and another gate failure stops the comparison.
 
@@ -91,7 +91,9 @@ GLM GB200 adapted/original TTFT improves 4.19% / 4.03% / 4.30%; GSM64 is 55/56 v
 
 Kimi GB200 adapted/original TTFT changes are +27.78% / -0.38% / +0.16%. The C1 mean includes a 759.915 ms first repeat; the other five are 276.352–280.989 ms. No samples are removed; cause remains unknown. FlashKDA C1 launch means also vary (349.517/290.448 ms). All eight GSM scores are 64/64, but original/adapted exact continuations match 0/3 per direction.
 
-Current GB300 prefill comparisons remain queued. GLM uses TP4; Kimi uses TP16/four nodes on GB200 and TP8/two nodes on GB300. GLM/Kimi BF16 state is a controlled comparison, not stock FP32. Sequential order and topology prevent a GPU-architecture or CPU-boundness conclusion.
+Current GB300 prefill status: kimi / GB300 job3255983: RUNNING; glm / GB300 job3255985: FAILED. GLM uses TP4; Kimi uses TP16/four nodes on GB200 and TP8/two nodes on GB300. GLM/Kimi BF16 state is a controlled comparison, not stock FP32. Sequential order and topology prevent a GPU-architecture or CPU-boundness conclusion.
+
+GLM GB300 prefill job 3255985 failed in FI auto's first measured C8 burst, after its warmup. Generation and GSM 56/64 passed with zero invalid; three C1 repeats were saved. Worker TP3 reported a CUDA illegal instruction at `cu_seqlens.tolist()` in `flashinfer.kda_prefill._cached_packed_task_metadata`, through the small-BH path. The error may be asynchronous, so the faulting kernel remains unknown. Neither cuDNN arm started. All 55 files / 996,510 bytes are archived and verified; no balanced result or automatic retry. This does not establish the cause of the earlier RPC timeout.
 
 ## Active CPU per KDA adapter call
 

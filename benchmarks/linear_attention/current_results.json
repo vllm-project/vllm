@@ -571,6 +571,68 @@
       ]
     }
   ],
+  "prefill_failure_reviews": [
+    {
+      "status": "failure_evidence_verified",
+      "job": "3255985",
+      "accounting": {
+        "state": "FAILED",
+        "exit": "1:0",
+        "elapsed": "00:32:14",
+        "nodes": "theia0172"
+      },
+      "bundle_guard": "5b284ed2d59551121b740ce56af2d245b098596197b360bfb8036db11c9020e4",
+      "archive": "failure-evidence/serving-v14-glm-GB300-3255985",
+      "files": 55,
+      "bytes": 996510,
+      "reused_files": 43,
+      "downloaded_bytes": 627274,
+      "checked": [
+        "all archive SHA/size",
+        "manifest/source/native/staging hashes",
+        "actual worker runtime equality",
+        "checkpoint",
+        "NCCL",
+        "generation and GSM gates"
+      ],
+      "arms": [
+        {
+          "arm": "00-candidate-vllm_auto",
+          "gsm_correct": 57,
+          "invalid": 0,
+          "runtime_sha256": "5d384713fcdc7a0d1b98369b163edf42ed05d1ff38dc048511277a1233137f1c",
+          "hostname": "theia0172.lyris.clusters.nvidia.com"
+        },
+        {
+          "arm": "01-candidate-flashinfer_auto",
+          "gsm_correct": 56,
+          "invalid": 0,
+          "runtime_sha256": "5d384713fcdc7a0d1b98369b163edf42ed05d1ff38dc048511277a1233137f1c",
+          "hostname": "theia0172.lyris.clusters.nvidia.com"
+        }
+      ],
+      "completed_arms": 1,
+      "failed_arm": "01-candidate-flashinfer_auto",
+      "failure_phase": "first measured C8 burst after its warmup; three C1 repeats saved",
+      "error": "Worker_TP3 CUDA illegal instruction reported by cu_seqlens.tolist()",
+      "stack": [
+        "vllm glm5next/common/kda.py:_forward",
+        "vllm flashinfer_kda.py:flashinfer_kda_prefill",
+        "flashinfer kda.py:recurrent_kda",
+        "flashinfer kda_prefill_cute_small_bh.py:_run_kda_prefill_cute_small_bh",
+        "flashinfer kda_prefill_cute_small_bh.py:_packed_max_sequence_length",
+        "flashinfer kda_prefill.py:_cached_packed_task_metadata:2672"
+      ],
+      "stack_log_line": 972,
+      "cudnn_arms_started": false,
+      "performance_comparison_usable": false,
+      "limitations": [
+        "Asynchronous CUDA errors can surface at a later synchronization; stack does not identify faulting kernel.",
+        "Earlier GLM GB300 RPC timeout had no explicit CUDA error; same root cause is not established.",
+        "No automatic rerun; preserve all completed and partial receipts."
+      ]
+    }
+  ],
   "full_8192_1024": {
     "audits": {
       "serving-v15-current-full": {
@@ -885,6 +947,144 @@
                     "output_throughput": 1565.8185654057038,
                     "duration": 83.7082934739883,
                     "sha256": "4a6f25f886346189788e2cf032222ccb9823f23d9e90f1259876acb036854cf3",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  }
+                ],
+                "hosts": [
+                  "lyris0171.lyris.clusters.nvidia.com",
+                  "lyris0173.lyris.clusters.nvidia.com",
+                  "lyris0174.lyris.clusters.nvidia.com",
+                  "lyris0175.lyris.clusters.nvidia.com"
+                ]
+              },
+              {
+                "name": "02-candidate-flashinfer_cudnn",
+                "choice": "flashinfer_cudnn",
+                "gsm64_correct": 64,
+                "gsm1319": {
+                  "accuracy": 0.9446550416982562,
+                  "invalid_rate": 0.000758150113722517,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 304.69468398950994,
+                    "mean_tpot_ms": 8.101853676425259,
+                    "output_throughput": 119.15867967198504,
+                    "duration": 8.593582967005204,
+                    "sha256": "466214b6faf8099927e3d1fda8f423dfd5fbf9c8ec7287fb57478dbba84b7689",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 298.83024899754673,
+                    "mean_tpot_ms": 8.079574753670068,
+                    "output_throughput": 119.55795146002956,
+                    "duration": 8.564884121005889,
+                    "sha256": "d6378739a1fdddf829b4f5903d8731026a7fc47ee42495a604c688b823c90e5f",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 306.96983996313065,
+                    "mean_tpot_ms": 8.080430501477496,
+                    "output_throughput": 119.43284231039212,
+                    "duration": 8.573856069997419,
+                    "sha256": "32b52cfdfff62b1c670b38c61b3d28e525765faea8fc0d511d08f2f05af663a4",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1986.8649119889596,
+                    "mean_tpot_ms": 13.052139185861305,
+                    "output_throughput": 532.7124921604611,
+                    "duration": 15.377901063999161,
+                    "sha256": "beb1de9ab8e34175cbd1c04b1c46f550fc7d2b28954ac395e4c363f20f260860",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1931.013720255578,
+                    "mean_tpot_ms": 13.103285598352572,
+                    "output_throughput": 532.8208431075021,
+                    "duration": 15.37477391504217,
+                    "sha256": "ec4238e490c7521cf8a02acfc594414886d1c85a080d9f7db87be47dfccbd37e",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1871.4245487426524,
+                    "mean_tpot_ms": 13.022321449915726,
+                    "output_throughput": 537.8104616963336,
+                    "duration": 15.232132104982156,
+                    "sha256": "72b17b0a44b9f37a0f67b6f7f8467b7b2600e45f0791bb26ff56bcc3a7679dd4",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 5928.5852807806805,
+                    "mean_tpot_ms": 22.162333979897358,
+                    "output_throughput": 1137.3392084852521,
+                    "duration": 28.81110556598287,
+                    "sha256": "833e941c7c68d53d2325ed7bf6784349b557a277f0abf706b06e0e7e6d2f5af6",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 5565.90128112839,
+                    "mean_tpot_ms": 21.851345284052183,
+                    "output_throughput": 1164.8814436518715,
+                    "duration": 28.129901268985122,
+                    "sha256": "8b97a278bba1775c1293dedff596740c2cf22479e6d831711686633202ab0704",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 5465.98803150664,
+                    "mean_tpot_ms": 21.445899230727413,
+                    "output_throughput": 1186.6771965113692,
+                    "duration": 27.61323812097544,
+                    "sha256": "d02b6123d915adfb47725b3a79fd8c8d0d3dfc2dc2c899e775df23ff42fdfff3",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 19553.26904895219,
+                    "mean_tpot_ms": 54.53871878855089,
+                    "output_throughput": 1568.9513230773225,
+                    "duration": 83.54115138697671,
+                    "sha256": "1f4f0d4799db4e7c533797e18d6196a61ca9e89625e23222f13f5dd820704bf4",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 19413.84597371689,
+                    "mean_tpot_ms": 54.68977344910962,
+                    "output_throughput": 1568.1263840021304,
+                    "duration": 83.58509960497031,
+                    "sha256": "a63e6c3d75ddb764bcfcc8a388a1351f1e30e013afeeaac9deb12caed5d225e6",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 19383.842402654864,
+                    "mean_tpot_ms": 54.7976266807195,
+                    "output_throughput": 1566.99135108039,
+                    "duration": 83.64564355101902,
+                    "sha256": "f6516585bdc50ce77dcc97e6c1bd8dd125b73bdfe57bea1ab71f3669d7565882",
                     "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
                   }
                 ],
@@ -2234,8 +2434,18 @@
         "jobs": [
           "3258192"
         ],
-        "results": [],
-        "reviewer_sha256": "1e65ba9fdc393949ce0d83b545f33bdc162c500acc678acc994158d99cd00adb",
+        "results": [
+          {
+            "status": "partial",
+            "model": "glm",
+            "gpu": "GB200",
+            "job": "3258192",
+            "arms": [],
+            "means": {},
+            "failures": []
+          }
+        ],
+        "reviewer_sha256": "4944f7019eb7a8a3c033ffc94ae6de7e9c2ed8fb305bb1cab188ceba9c57bdf7",
         "limitations": [
           "All repeats retained; no historical measurements substituted.",
           "Correctness floors are safety gates, not accuracy equivalence. Keep full GSM scores and invalid rates.",
@@ -2249,7 +2459,17 @@
         "jobs": [
           "3258435"
         ],
-        "results": [],
+        "results": [
+          {
+            "status": "partial",
+            "model": "qwen35",
+            "gpu": "GB200",
+            "job": "3258435",
+            "arms": [],
+            "means": {},
+            "failures": []
+          }
+        ],
         "reviewer_sha256": "4944f7019eb7a8a3c033ffc94ae6de7e9c2ed8fb305bb1cab188ceba9c57bdf7",
         "limitations": [
           "All repeats retained; no historical measurements substituted.",
