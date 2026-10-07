@@ -3,9 +3,9 @@
 """Tests for the engine-based Llama 3.x/4 JSON parser (llama3_json /
 llama4_json).
 
-Staged commit 4/7: adds truncation repair and the schema-type groundwork
-for coercion safety (not wired in yet). Later commits grow both
-llama_json.py and this file together.
+Staged commit 5/7: wires up schema-coercion safety and streaming, on top
+of truncation repair and full format-shape coverage. Later commits grow
+both llama_json.py and this file together.
 """
 
 import json
@@ -309,3 +309,49 @@ class TestDeclaredTypes:
 
         assert _is_valid_for_schema_type(7, {"type": "integer"}) is True
         assert _is_valid_for_schema_type("7", {"type": "integer"}) is False
+
+
+class TestSchemaCoercionSafety:
+    """Coercion must not corrupt an already-valid value -- the shared
+    engine's ``_coerce_value`` rewrites unconditionally, e.g. turning an
+    already-correct int into a string under an ambiguous ``{}`` schema."""
+
+    def test_already_valid_int_is_not_rewritten_as_string(self):
+        from vllm.parser.llama_json import _splice_types
+
+        raw = '{"n": 7}'
+        result = _splice_types(raw, 0, len(raw), {"properties": {"n": {}}})
+        assert result == raw
+
+    def test_wrong_type_value_is_coerced(self):
+        from vllm.parser.llama_json import _splice_types
+
+        raw = '{"n": "7"}'
+        schema = {"properties": {"n": {"type": "integer"}}}
+        result = _splice_types(raw, 0, len(raw), schema)
+        assert result == '{"n": 7}'
+
+
+class TestSchemaCoercionStreamingParity:
+    """Schema coercion must not silently drop a correction -- the shared
+    engine re-serialises at flush, which fails the append-only streaming
+    guard and leaves the uncoerced verbatim text streamed instead."""
+
+    def test_coerced_value_streams_matching_non_streaming(self):
+        schema = {
+            "type": "object",
+            "properties": {"n": {"type": "integer"}},
+        }
+        tool = _function_tool("f", schema)
+        text = '{"name": "f", "parameters": {"n": "7"}}'
+
+        non_streaming = LlamaJsonParser(
+            _mock_tokenizer()
+        ).extract_tool_calls_from_content(text, _request(tools=[tool]))
+        streamed_results = _stream(
+            _parser(), _request(tools=[tool]), text, chunk_size=1
+        )
+        _, calls = _accumulate(streamed_results)
+
+        assert json.loads(non_streaming.tool_calls[0].function.arguments) == {"n": 7}
+        assert json.loads(calls[0]["args"]) == {"n": 7}

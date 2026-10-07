@@ -12,12 +12,16 @@ not a call; its text is restored as content in place.
 
 This commit adds truncation repair: a value cut off mid-stream is cut back
 to the last completable point and closed by appending ``"``/``}``/``]``, so
-every streamed delta -- not just the final one -- is valid JSON. It also
-adds the groundwork for schema-coercion safety: ``_declared_types`` answers
-which JSON types a schema actually permits (not the shared engine's string
-fallback, which rewrites an already-valid integer under ``{}`` as a string).
-Nothing calls it yet -- the next commit wires it into argument splicing.
-Resumable scanning is not implemented yet.
+every streamed delta -- not just the final one -- is valid JSON.
+
+It also wires up schema-coercion safety and streaming: argument values are
+spliced in place against the tool's schema (``_declared_types`` answers
+which JSON types a schema actually permits, unlike the shared engine's
+string fallback, which rewrites an already-valid integer under ``{}`` as a
+string) instead of re-serialised, so a correction survives the engine's
+append-only streaming guard instead of being silently dropped. Resumable
+scanning is not implemented yet -- the argument prefix is rescanned from
+the start on every streamed delta.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.json_scan import JsonWalker
+from vllm.tool_parsers.utils import find_tool_properties
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -383,6 +388,61 @@ def _closeable_prefix(raw: str) -> tuple[int, str]:
     return best, best_closers
 
 
+def _object_members(raw: str, start: int, end: int) -> list[tuple[str, int, int]]:
+    """Return ``(key, value_start, value_end)`` for each complete member of
+    the object ``raw[start:end]``, stopping at the first incomplete one."""
+    members: list[tuple[str, int, int]] = []
+    i = start + 1
+    while i < end:
+        while i < end and (raw[i] in _WS or raw[i] == ","):
+            i += 1
+        if i >= end or raw[i] != '"':
+            break
+        key_end = _scan_json_value(raw, i)
+        if key_end is None or key_end > end:
+            break
+        key = _decode_key(raw[i + 1 : key_end - 1])
+        i = key_end
+        while i < end and raw[i] in _WS:
+            i += 1
+        if i >= end or raw[i] != ":":
+            break
+        i += 1
+        while i < end and raw[i] in _WS:
+            i += 1
+        if i >= end:
+            break
+        value_end = _scan_json_value(raw, i)
+        if value_end is None or value_end > end:
+            break
+        members.append((key, i, value_end))
+        i = value_end
+    return members
+
+
+def _array_items(raw: str, start: int, end: int) -> list[tuple[int, int]]:
+    """Return ``(value_start, value_end)`` for each complete element of the
+    array ``raw[start:end]``."""
+    items: list[tuple[int, int]] = []
+    i = start + 1
+    while i < end:
+        while i < end and (raw[i] in _WS or raw[i] == ","):
+            i += 1
+        if i >= end or raw[i] == "]":
+            break
+        value_end = _scan_json_value(raw, i)
+        if value_end is None or value_end > end:
+            break
+        if value_end <= i:
+            # No progress: a closer at an element position (``[1}``) scans
+            # as a zero-length value, and the loop would spin. Guarded here
+            # since callers are expected to sanitise through _closeable_prefix.
+            break
+        items.append((i, value_end))
+        i = value_end
+    return items
+
+
 def _llama_bare_arg_converter(raw_args: str, partial: bool) -> str:
     """Convert a named choice's bare parameter object to arguments."""
     end, closers = _closeable_prefix(raw_args)
@@ -521,6 +581,75 @@ def _is_valid_for_schema_type(value: object, schema: dict) -> bool:
     return _json_type_name(value) in _declared_types(schema)
 
 
+def _collect_type_edits(
+    raw: str,
+    start: int,
+    end: int,
+    schema: dict,
+    edits: list[tuple[int, int, str]],
+) -> None:
+    """Record ``(start, end, replacement)`` for every scalar span in
+    ``raw[start:end]`` whose literal type disagrees with *schema*.
+
+    Mirrors ``ParserEngine._coerce_dict``/``_coerce_value`` but works on
+    text spans (objects recurse through ``properties``, arrays ``items``).
+    """
+    if raw[start] == "{":
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for key, value_start, value_end in _object_members(raw, start, end):
+                sub_schema = properties.get(key)
+                if isinstance(sub_schema, dict):
+                    _collect_type_edits(raw, value_start, value_end, sub_schema, edits)
+        return
+    if raw[start] == "[":
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for value_start, value_end in _array_items(raw, start, end):
+                _collect_type_edits(raw, value_start, value_end, items, edits)
+        return
+    try:
+        value = json.loads(raw[start:end])
+    except (json.JSONDecodeError, ValueError):
+        return
+    if _is_valid_for_schema_type(value, schema):
+        return
+    try:
+        coerced, changed = ParserEngine._coerce_value(value, schema)
+    except RecursionError:
+        # json.loads above only covers this span; _coerce_value re-enters
+        # json.loads on the decoded string via coerce_to_schema_type, whose
+        # deep nesting can raise RecursionError too -- left uncoerced, as legacy did.
+        return
+    if changed:
+        edits.append((start, end, json.dumps(coerced, ensure_ascii=False)))
+
+
+def _splice_types(raw: str, start: int, end: int, schema: dict) -> str:
+    """``raw[start:end]`` with schema-coerced scalars substituted in place,
+    every other byte kept verbatim.
+
+    Re-serialising the decoded object (what the engine does) rewrites the
+    model's separators, so the append-only guard drops the correction.
+    Splicing only rewrites values that actually change, keeping the
+    result prefix-compatible.
+    """
+    edits: list[tuple[int, int, str]] = []
+    _collect_type_edits(raw, start, end, schema, edits)
+    if not edits:
+        return raw[start:end]
+    # Edits arrive in document order and never overlap, so the result is
+    # assembled in one pass instead of copying the whole string per edit.
+    out: list[str] = []
+    cursor = start
+    for edit_start, edit_end, text in edits:
+        out.append(raw[cursor:edit_start])
+        out.append(text)
+        cursor = edit_end
+    out.append(raw[cursor:end])
+    return "".join(out)
+
+
 @functools.cache
 def llama_json_config(
     markers: tuple[str, ...] = (PYTHON_TAG, PYTHON_START, PYTHON_END),
@@ -594,6 +723,8 @@ class LlamaJsonParser(ParserEngine):
         # Content withheld because a forced tool choice is active.  Released
         # at finish if no call was ever promoted -- see _filter_events.
         self._held_forced: list[str] = []
+        self._properties_cache: dict[str, dict] = {}
+        self._properties_tools: list[Tool] | None = None
         if "parser_engine_config" not in kwargs:
             vocab = kwargs.get("vocab")
             if vocab is None:
@@ -895,6 +1026,132 @@ class LlamaJsonParser(ParserEngine):
                 out.append(event)
         flush()
         return out
+
+    def _tool_properties(self, func_name: str) -> dict:
+        """Cache the tool's schema properties by name: ``find_tool_properties``
+        walks the whole tool list, and streaming resolves the schema again
+        per argument chunk. Dropped when a request swaps the tool list.
+        """
+        if not func_name:
+            return {}
+        if self._properties_tools is not self._tools:
+            self._properties_tools = self._tools
+            self._properties_cache = {}
+        properties = self._properties_cache.get(func_name)
+        if properties is None:
+            properties = find_tool_properties(self._tools, func_name)
+            self._properties_cache[func_name] = properties
+        return properties
+
+    def _fix_arg_types(self, args_json: str, func_name: str) -> str:
+        """Coerce argument values in place instead of re-serialising.
+
+        The engine's ``json.dumps`` of the coerced object needn't match
+        the verbatim model text Llama streams, so it fails the append-only
+        ``startswith`` guard and is dropped -- leaving truncated JSON.
+        Splicing also works on a truncated envelope, keeping non-streaming
+        byte-identical to streaming there too.
+        """
+        properties = self._tool_properties(func_name)
+        if not properties or not args_json.startswith("{"):
+            return args_json
+        return _splice_types(args_json, 0, len(args_json), {"properties": properties})
+
+    def _stable_arg_prefix(
+        self,
+        raw: str,
+        properties: dict,
+        string_keys: set[str] | None,
+    ) -> str:
+        """Longest prefix of the final spliced arguments already decided.
+
+        Every byte outside a value span survives splicing verbatim, and a
+        coerced value depends only on itself, so a completed value can be
+        spliced and streamed at once. Only an unfinished value is held
+        back -- unless it's a string under a string-typed key, which
+        coercion never rewrites.
+
+        Rescans the accumulated argument text from the start on every call
+        -- quadratic in argument length over a whole streamed call. A later
+        commit carries scan state across feeds instead.
+        """
+        if not raw.startswith("{"):
+            return self._safe_arg_prefix(raw, string_keys)
+        streamable = string_keys or set()
+        out: list[str] = []
+        n = len(raw)
+        cursor = 0
+        i = 1
+        tail_end = n
+        while True:
+            while i < n and (raw[i] in _WS or raw[i] == ","):
+                i += 1
+            if i >= n or raw[i] == "}":
+                break
+            if raw[i] != '"':
+                tail_end = i
+                break
+            key_end = _scan_json_value(raw, i)
+            if key_end is None:
+                break
+            key = _decode_key(raw[i + 1 : key_end - 1])
+            j = key_end
+            while j < n and raw[j] in _WS:
+                j += 1
+            if j >= n:
+                break
+            if raw[j] != ":":
+                tail_end = j
+                break
+            j += 1
+            while j < n and raw[j] in _WS:
+                j += 1
+            if j >= n:
+                break
+            value_end = _scan_json_value(raw, j)
+            schema = properties.get(key)
+            if not isinstance(schema, dict):
+                schema = None
+            if value_end is None:
+                stable = raw[j] == '"' and (schema is None or key in streamable)
+                tail_end = n if stable else j
+                break
+            out.append(raw[cursor:j])
+            out.append(
+                raw[j:value_end]
+                if schema is None
+                else _splice_types(raw, j, value_end, schema)
+            )
+            cursor = i = value_end
+        return "".join(out) + raw[cursor:tail_end]
+
+    def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
+        """Stream a schema-spliced prefix instead of raw model text.
+
+        The engine streams verbatim and only coerces at flush; the
+        re-serialised result then isn't an extension of what was already
+        sent, so the correction is silently dropped. Splicing each value
+        as it streams keeps the stream append-only and non-streaming-convergent.
+        """
+        if self._arg_converter is None or not self._stream_arg_deltas:
+            return super()._compute_arg_delta(idx, raw_delta)
+        slot = self._tool_slots[idx]
+        try:
+            current = self._arg_converter(slot.args, True)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return None
+        if not current:
+            return None
+        properties = self._tool_properties(slot.name)
+        if properties:
+            safe = self._stable_arg_prefix(current, properties, slot.string_keys)
+        else:
+            safe = self._safe_arg_prefix(current, slot.string_keys)
+        prev = slot.streamed_json
+        if not safe or safe == prev or (prev and not safe.startswith(prev)):
+            return None
+        slot.streamed_json = safe
+        return safe[len(prev) :]
 
     def _events_to_delta(
         self,
