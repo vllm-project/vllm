@@ -53,6 +53,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "octave_k3v4": torch.uint8,
     "octave_k3v3": torch.uint8,
     "octave_k3v3_compact": torch.uint8,
+    "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
 }

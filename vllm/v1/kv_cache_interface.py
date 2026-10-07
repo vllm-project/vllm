@@ -55,10 +55,11 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
+    ULTRAQUANT_4BIT = 11  # packed FP4 values + UE8M0 group scales
     # Hadamard-rotated Lloyd-Max codes, packed K+V per slot (ROCm).
-    OCTAVE_K3V4 = 11
-    OCTAVE_K3V3 = 12
-    OCTAVE_K3V3_COMPACT = 13
+    OCTAVE_K3V4 = 12
+    OCTAVE_K3V3 = 13
+    OCTAVE_K3V3_COMPACT = 14
 
     @property
     def is_per_token_head(self) -> bool:
@@ -93,6 +94,11 @@ class KVQuantMode(IntEnum):
             KVQuantMode.TURBOQUANT_3BIT_NC,
         )
 
+    @property
+    def is_ultraquant(self) -> bool:
+        """True for the UltraQuant 4-bit KV-cache format."""
+        return self == KVQuantMode.ULTRAQUANT_4BIT
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -113,6 +119,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode[kv_cache_dtype.upper()]
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("octave_"):
         return KVQuantMode[kv_cache_dtype.upper()]
+    if kv_cache_dtype == "ultraquant_4bit":
+        return KVQuantMode.ULTRAQUANT_4BIT
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE

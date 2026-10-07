@@ -53,6 +53,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.triton_flash_attn.TritonFlashAttentionBackend"
     )
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
+    ROCM_SEGMENTED_ATTN = (
+        "vllm.v1.attention.backends.rocm_segmented_attn.RocmSegmentedAttentionBackend"
+    )
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
         "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend"
@@ -152,6 +155,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     ROCM_OCTAVE = (
         "vllm.v1.attention.backends.rocm_octave_attn.RocmOctaveAttentionBackend"
     )
+    ULTRAQUANT = "vllm.v1.attention.backends.ultraquant_attn.UltraQuantAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string
     CUSTOM = None
