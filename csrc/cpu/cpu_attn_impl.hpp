@@ -438,6 +438,7 @@ class AttentionScheduler {
     const int64_t cache_size = cpu_utils::get_available_l2_size();
     const int32_t max_num_q_per_iter = input.max_num_q_per_iter;
     const int32_t kv_len_alignment = input.kv_block_alignment;
+    const int32_t sliding_window_size = input.sliding_window_size;
     const auto request_q_token_num = [&](const int32_t req_id) {
       return input.query_start_loc[req_id + 1] - input.query_start_loc[req_id];
     };
@@ -482,11 +483,11 @@ class AttentionScheduler {
 
     struct PartitionItem {
       int32_t req_id;
-      int32_t token_start;
-      int32_t token_num = 0;
-      int32_t kv_start;
-      int32_t kv_end;
-      int64_t kv_len = 0;
+      int32_t q_token_id_start;
+      int32_t q_token_num = 0;
+      int32_t kv_split_pos_start;
+      int32_t kv_split_pos_end;
+      int64_t total_kv_len = 0;
       int32_t split_id = -1;
       int32_t local_split_id = 0;
       int32_t group;
@@ -494,9 +495,9 @@ class AttentionScheduler {
       PartitionItem(int32_t req, int32_t token, int32_t start, int32_t end,
                     int32_t q_group)
           : req_id(req),
-            token_start(token),
-            kv_start(start),
-            kv_end(end),
+            q_token_id_start(token),
+            kv_split_pos_start(start),
+            kv_split_pos_end(end),
             group(q_group) {}
     };
     struct PartitionReduction {
@@ -526,153 +527,234 @@ class AttentionScheduler {
                    ? adaptive_group
                    : legacy_tile_group;
       };
-      int64_t total_kv_len = 0;
+      const int32_t split_kv_q_token_num_threshold =
+          input.enable_kv_split ? 1 : 0;
       Partitions result;
       result.head_stride = original_q_head_per_kv;
+
+      // get total kv len
+      int64_t total_kv_len = 0;
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
         result.head_stride =
             std::gcd(result.head_stride, group_for_request(req_id));
-        const int32_t max_tokens =
+        const int32_t max_num_q_token_per_iter =
             max_num_q_per_iter / tile_group_for_request(req_id);
-        const int32_t q_tokens = request_q_token_num(req_id);
-        const int32_t q_start = input.seq_lens[req_id] - q_tokens;
-        for (int32_t token = 0; token < q_tokens; token += max_tokens) {
-          const int32_t tile_q = std::min(max_tokens, q_tokens - token);
-          const auto [left, right] = calcu_kv_tile_pos(
-              0, input.seq_lens[req_id], q_start + token,
-              q_start + token + tile_q, input.sliding_window_size,
-              request_causal(req_id));
-          const auto [aligned_left, aligned_right] =
-              align_kv_tile_pos(left, right, kv_len_alignment);
-          total_kv_len += aligned_right - aligned_left;
+        const int32_t seq_len = input.seq_lens[req_id];
+        const int32_t q_token_num = request_q_token_num(req_id);
+        const bool req_causal = request_causal(req_id);
+        const int32_t q_start_pos = seq_len - q_token_num;
+        const int32_t kv_start_pos = 0;
+        const int32_t kv_end_pos = seq_len;
+
+        for (int32_t token_id = 0; token_id < q_token_num;
+             token_id += max_num_q_token_per_iter) {
+          const int32_t q_tile_token_num =
+              std::min(max_num_q_token_per_iter, q_token_num - token_id);
+          const int32_t q_tile_pos_left = q_start_pos + token_id;
+          const int32_t q_tile_pos_right = q_tile_pos_left + q_tile_token_num;
+          const auto [kv_tile_pos_left, kv_tile_pos_right] = calcu_kv_tile_pos(
+              kv_start_pos, kv_end_pos, q_tile_pos_left, q_tile_pos_right,
+              sliding_window_size, req_causal);
+          const auto [aligned_kv_tile_pos_left, aligned_kv_tile_pos_right] =
+              align_kv_tile_pos(kv_tile_pos_left, kv_tile_pos_right,
+                                kv_len_alignment);
+
+          int32_t curr_kv_len =
+              aligned_kv_tile_pos_right - aligned_kv_tile_pos_left;
+          total_kv_len += curr_kv_len;
         }
       }
-      const int64_t kv_per_thread =
+      const int64_t kv_len_per_thread =
           (((total_kv_len / thread_num) + kv_len_alignment - 1) /
            kv_len_alignment) *
           kv_len_alignment;
-      std::vector<int32_t> items_per_thread(thread_num, 0);
-      int32_t current_thread = 0;
-      int64_t remaining = kv_per_thread;
+      auto& workitems = result.items;
+      auto& reduce_workitems = result.reductions;
+      std::vector<int32_t> workitem_num_per_thread(thread_num, 0);
+
+      // split tasks
+      int32_t curr_thread_id = 0;
+      int64_t remaining_kv_len = kv_len_per_thread;
+      int32_t cum_split_num = 0;
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
         const int32_t group = group_for_request(req_id);
         const int32_t tile_group = tile_group_for_request(req_id);
-        const int32_t max_tokens = max_num_q_per_iter / tile_group;
-        const int32_t default_tokens = default_tile_size / tile_group;
+        const int32_t max_num_q_token_per_iter =
+            max_num_q_per_iter / tile_group;
+        const int32_t default_tile_token_num = default_tile_size / tile_group;
         const int32_t seq_len = input.seq_lens[req_id];
-        const int32_t q_tokens = request_q_token_num(req_id);
-        const int32_t q_start = seq_len - q_tokens;
+        const int32_t q_token_num = request_q_token_num(req_id);
+        const bool req_causal = request_causal(req_id);
+        const int32_t q_start_pos = seq_len - q_token_num;
+        const int32_t kv_start_pos = 0;
+        const int32_t kv_end_pos = seq_len;
         const bool adaptive = request_adaptive_eligible(req_id) && group > 1;
-        PartitionItem item(req_id, 0, 0, seq_len, group);
-        for (int32_t token = 0; token < q_tokens; token += max_tokens) {
-          const int32_t tile_q = std::min(max_tokens, q_tokens - token);
-          const int32_t scale = adaptive ? tile_q : 1;
-          const int32_t min_kv =
+
+        PartitionItem curr_workitem(req_id, 0, 0, seq_len, group);
+        for (int32_t token_id = 0; token_id < q_token_num;
+             token_id += max_num_q_token_per_iter) {
+          const int32_t q_tile_token_num =
+              std::min(max_num_q_token_per_iter, q_token_num - token_id);
+          const int32_t q_tile_pos_left = q_start_pos + token_id;
+          const int32_t q_tile_pos_right = q_tile_pos_left + q_tile_token_num;
+          const auto [kv_tile_pos_left, kv_tile_pos_right] = calcu_kv_tile_pos(
+              kv_start_pos, kv_end_pos, q_tile_pos_left, q_tile_pos_right,
+              sliding_window_size, req_causal);
+          const auto [aligned_kv_tile_pos_left, aligned_kv_tile_pos_right] =
+              align_kv_tile_pos(kv_tile_pos_left, kv_tile_pos_right,
+                                kv_len_alignment);
+          // Adaptive tiles charge by tile rows and need a longer minimum split.
+          const int32_t scale = adaptive ? q_tile_token_num : 1;
+          const int32_t min_kv_len =
               adaptive ? min_adaptive_split_kv_len : min_split_kv_len;
           const auto charge = [&](const int64_t len) {
             return ((len + scale * kv_len_alignment - 1) /
                     (scale * kv_len_alignment)) *
                    kv_len_alignment;
           };
-          const int64_t min_credit = charge(min_kv);
-          const auto [left, right] = calcu_kv_tile_pos(
-              0, seq_len, q_start + token, q_start + token + tile_q,
-              input.sliding_window_size, request_causal(req_id));
-          const auto [aligned_left, aligned_right] =
-              align_kv_tile_pos(left, right, kv_len_alignment);
-          int32_t kv_len = aligned_right - aligned_left;
-          int32_t kv_start = aligned_left;
-          int32_t local_split = 0;
-          while (kv_len > 0) {
-            if (charge(kv_len) <= remaining + min_credit ||
-                current_thread == thread_num - 1) {
-              item.token_num += tile_q;
-              item.kv_len += kv_len;
-              remaining -= charge(kv_len);
-              kv_len = 0;
-              if (remaining < 0) {
-                remaining -= min_credit;
+          const int64_t min_credit = charge(min_kv_len);
+          int32_t curr_kv_len =
+              aligned_kv_tile_pos_right - aligned_kv_tile_pos_left;
+          int32_t kv_token_pos_start = aligned_kv_tile_pos_left;
+          int32_t local_split_id = 0;
+
+          while (curr_kv_len > 0) {
+            if (charge(curr_kv_len) <= (remaining_kv_len + min_credit) ||
+                curr_thread_id == (thread_num - 1)) {
+              curr_workitem.q_token_num += q_tile_token_num;
+              curr_workitem.total_kv_len += curr_kv_len;
+              remaining_kv_len -= charge(curr_kv_len);
+              curr_kv_len = 0;
+
+              if (remaining_kv_len < 0) {
+                // stop to accept more workitems
+                remaining_kv_len -= min_credit;
               }
-              if (item.kv_start != 0) {
-                item.split_id = result.total_splits++;
-                item.local_split_id = local_split;
-                result.items.emplace_back(item);
-                ++items_per_thread[current_thread];
-                ++result.reductions.back().split_num;
-                item = PartitionItem(req_id, token + max_tokens, 0, seq_len,
-                                     group);
+
+              if (curr_workitem.kv_split_pos_start != 0) {
+                // got a partial kv spilt, need to create a single workitem
+                curr_workitem.split_id = cum_split_num;
+                curr_workitem.local_split_id = local_split_id;
+                workitems.emplace_back(curr_workitem);
+                ++workitem_num_per_thread[curr_thread_id];
+                ++reduce_workitems.back().split_num;
+                ++cum_split_num;
+
+                curr_workitem =
+                    PartitionItem(req_id, token_id + max_num_q_token_per_iter,
+                                  0, seq_len, group);
               }
+
               break;
             }
-            if (remaining < min_credit &&
-                (item.kv_len > 0 || items_per_thread[current_thread] > 0)) {
-              if (item.kv_len > 0) {
-                result.items.emplace_back(item);
-                ++items_per_thread[current_thread];
-                item = PartitionItem(req_id, token, 0, seq_len, group);
+
+            if (remaining_kv_len < min_credit &&
+                (curr_workitem.total_kv_len > 0 ||
+                 workitem_num_per_thread[curr_thread_id] > 0)) {
+              // remaining_kv_len is too short, and have allocated workitems,
+              // just leave to next thread
+              if (curr_workitem.total_kv_len > 0) {
+                workitems.emplace_back(curr_workitem);
+                ++workitem_num_per_thread[curr_thread_id];
+                curr_workitem =
+                    PartitionItem(req_id, token_id, 0, seq_len, group);
               }
-              ++current_thread;
-              remaining = kv_per_thread;
+
+              // switch to next thread
+              ++curr_thread_id;
+              remaining_kv_len = kv_len_per_thread;
+
+              // retry this iteration
               continue;
             }
-            const bool splittable =
-                input.enable_kv_split &&
-                (adaptive || (token + max_tokens >= q_tokens && tile_q == 1));
-            if (!splittable) {
-              if (item.token_num % default_tokens == 0 &&
-                  (item.kv_len > 0 || items_per_thread[current_thread] > 0)) {
-                if (item.kv_len > 0) {
-                  result.items.emplace_back(item);
-                  ++items_per_thread[current_thread];
+
+            // only split tail splits with q_tile_token_num <=
+            // split_kv_q_token_num_threshold; adaptive tiles always split
+            if (!adaptive &&
+                (token_id + max_num_q_token_per_iter < q_token_num ||
+                 q_tile_token_num > split_kv_q_token_num_threshold)) {
+              // if requires a new q tile iteration and already has workitems,
+              // leave this workitem to next thread
+              if (curr_workitem.q_token_num % default_tile_token_num == 0 &&
+                  (curr_workitem.total_kv_len > 0 ||
+                   workitem_num_per_thread[curr_thread_id] > 0)) {
+                if (curr_workitem.total_kv_len > 0) {
+                  workitems.emplace_back(curr_workitem);
+                  ++workitem_num_per_thread[curr_thread_id];
                 }
-                item = PartitionItem(req_id, token, 0, seq_len, group);
-                ++current_thread;
-                remaining = kv_per_thread;
+                curr_workitem =
+                    PartitionItem(req_id, token_id, 0, seq_len, group);
+
+                // switch to next thread
+                ++curr_thread_id;
+                remaining_kv_len = kv_len_per_thread;
               }
-              item.token_num += tile_q;
-              item.kv_len += kv_len;
-              remaining -= charge(kv_len);
-              kv_len = 0;
+
+              curr_workitem.q_token_num += q_tile_token_num;
+              curr_workitem.total_kv_len += curr_kv_len;
+              remaining_kv_len -= charge(curr_kv_len);
+              curr_kv_len = 0;
               break;
             }
-            if (item.kv_len > 0) {
-              result.items.emplace_back(item);
-              ++items_per_thread[current_thread];
+
+            // split kv
+            if (curr_workitem.total_kv_len > 0) {
+              // write back curr workitem
+              workitems.emplace_back(curr_workitem);
+              ++workitem_num_per_thread[curr_thread_id];
             }
-            if (kv_start == aligned_left) {
-              result.reductions.push_back(
-                  {req_id, token, tile_q, result.total_splits, group});
+
+            if (kv_token_pos_start == aligned_kv_tile_pos_left) {
+              // first split, init the workitem
+              reduce_workitems.push_back(
+                  {req_id, token_id, q_tile_token_num, cum_split_num, group});
             }
-            const int32_t split_size = std::min<int64_t>(
-                std::max<int64_t>(remaining * scale, min_kv), kv_len);
-            item = PartitionItem(req_id, token, kv_start, kv_start + split_size,
-                                 group);
-            item.token_num = tile_q;
-            item.kv_len = split_size;
-            item.split_id = result.total_splits++;
-            item.local_split_id = local_split++;
-            result.items.emplace_back(item);
-            ++items_per_thread[current_thread];
-            ++result.reductions.back().split_num;
-            kv_start += split_size;
-            kv_len -= split_size;
-            item = PartitionItem(req_id, token, kv_start, seq_len, group);
-            ++current_thread;
-            remaining = kv_per_thread;
+
+            int32_t spilt_size = std::min<int64_t>(
+                std::max<int64_t>(remaining_kv_len * scale, min_kv_len),
+                curr_kv_len);
+            curr_workitem =
+                PartitionItem(req_id, token_id, kv_token_pos_start,
+                              kv_token_pos_start + spilt_size, group);
+            curr_workitem.q_token_num += q_tile_token_num;
+            curr_workitem.total_kv_len += spilt_size;
+            curr_workitem.split_id = cum_split_num;
+            curr_workitem.local_split_id = local_split_id;
+            workitems.emplace_back(curr_workitem);
+            ++workitem_num_per_thread[curr_thread_id];
+            ++reduce_workitems.back().split_num;
+            ++cum_split_num;
+            ++local_split_id;
+
+            kv_token_pos_start += spilt_size;
+            curr_kv_len -= spilt_size;
+            curr_workitem = PartitionItem(req_id, token_id, kv_token_pos_start,
+                                          seq_len, group);
+
+            // switch to next thread
+            ++curr_thread_id;
+            remaining_kv_len = kv_len_per_thread;
           }
-          if (adaptive && item.kv_len > 0) {
-            result.items.emplace_back(item);
-            ++items_per_thread[current_thread];
-            item = PartitionItem(req_id, token + max_tokens, 0, seq_len, group);
+
+          if (adaptive && curr_workitem.total_kv_len > 0) {
+            // adaptive tiles never share a workitem
+            workitems.emplace_back(curr_workitem);
+            ++workitem_num_per_thread[curr_thread_id];
+            curr_workitem = PartitionItem(
+                req_id, token_id + max_num_q_token_per_iter, 0, seq_len, group);
           }
         }
-        if (item.kv_len > 0) {
-          result.items.emplace_back(item);
-          ++items_per_thread[current_thread];
+
+        if (curr_workitem.total_kv_len > 0) {
+          // write back curr workitem
+          workitems.emplace_back(curr_workitem);
+          ++workitem_num_per_thread[curr_thread_id];
         }
       }
+      result.total_splits = cum_split_num;
       result.offsets.resize(thread_num + 1, 0);
-      std::partial_sum(items_per_thread.begin(), items_per_thread.end(),
+      std::partial_sum(workitem_num_per_thread.begin(),
+                       workitem_num_per_thread.end(),
                        result.offsets.begin() + 1);
       return result;
     };
@@ -761,36 +843,37 @@ class AttentionScheduler {
         reduction.split_num = source.split_num;
         reduce_workitems.emplace_back(reduction);
       }
-      for_each_span(
-          partitions, head, [&](const int32_t first, const int32_t last) {
-            const int32_t start = workitems.size();
-            for (int32_t idx = first; idx < last; ++idx) {
-              const auto& source = partitions.items[idx];
-              if (head % source.group != 0) {
-                continue;
-              }
-              AttentionWorkItemGroup item(source.req_id, source.token_start,
-                                          source.kv_start, source.kv_end,
-                                          source.group);
-              item.kv_head_idx = head / original_q_head_per_kv;
-              item.q_head_start = head;
-              item.q_token_num = source.token_num;
-              item.local_split_id = source.local_split_id;
-              if (source.split_id >= 0) {
-                const int32_t reduction_idx =
-                    reduction_for_split[source.split_id];
-                item.reduction_id = reduction_ids[reduction_idx];
-                item.split_id =
-                    source.split_id -
-                    partitions.reductions[reduction_idx].split_start;
-              }
-              workitems.emplace_back(item);
-            }
-            const int32_t count = workitems.size() - start;
-            if (count > 0) {
-              task_spans.push_back({start, count});
-            }
-          });
+      for_each_span(partitions, head,
+                    [&](const int32_t first, const int32_t last) {
+                      const int32_t start = workitems.size();
+                      for (int32_t idx = first; idx < last; ++idx) {
+                        const auto& source = partitions.items[idx];
+                        if (head % source.group != 0) {
+                          continue;
+                        }
+                        AttentionWorkItemGroup item(
+                            source.req_id, source.q_token_id_start,
+                            source.kv_split_pos_start, source.kv_split_pos_end,
+                            source.group);
+                        item.kv_head_idx = head / original_q_head_per_kv;
+                        item.q_head_start = head;
+                        item.q_token_num = source.q_token_num;
+                        item.local_split_id = source.local_split_id;
+                        if (source.split_id >= 0) {
+                          const int32_t reduction_idx =
+                              reduction_for_split[source.split_id];
+                          item.reduction_id = reduction_ids[reduction_idx];
+                          item.split_id =
+                              source.split_id -
+                              partitions.reductions[reduction_idx].split_start;
+                        }
+                        workitems.emplace_back(item);
+                      }
+                      const int32_t count = workitems.size() - start;
+                      if (count > 0) {
+                        task_spans.push_back({start, count});
+                      }
+                    });
     }
     TORCH_CHECK_LE(task_spans.size(), std::numeric_limits<int32_t>::max());
 
@@ -1778,7 +1861,8 @@ class AttentionMainLoop {
             const int32_t q_token_id_start =
                 current_workitem_group->q_token_id_start;
             const int32_t q_token_num = current_workitem_group->q_token_num;
-            const int32_t kv_head_idx = current_workitem_group->kv_head_idx;
+            const int32_t curr_kv_head_idx =
+                current_workitem_group->kv_head_idx;
             const int32_t curr_q_heads_per_kv =
                 current_workitem_group->q_head_num;
             const int32_t curr_max_q_token_num_per_iter =
@@ -1860,10 +1944,10 @@ class AttentionMainLoop {
               // move buffers
               kv_cache_t* curr_k_cache =
                   reinterpret_cast<kv_cache_t*>(input->key_cache) +
-                  kv_head_idx * kv_cache_head_num_stride;
+                  curr_kv_head_idx * kv_cache_head_num_stride;
               kv_cache_t* curr_v_cache =
                   reinterpret_cast<kv_cache_t*>(input->value_cache) +
-                  kv_head_idx * kv_cache_head_num_stride;
+                  curr_kv_head_idx * kv_cache_head_num_stride;
               query_t* const q_tile_ptr =
                   reinterpret_cast<query_t*>(input->query) +
                   q_token_start_idx * q_token_num_stride +
