@@ -1,20 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for kernel-block selection of storage-block specs (no GPU).
-
-`prepare_kernel_block_sizes` is the one consumer that, until #58858, did not
-treat `MLAAttentionSpec.storage_block_size` as the kernel block (cache views,
-metadata builders and hisparse already do). For the GLM-5.3-Flash kpool indexer
-cache that meant the manager block (640/1152/2176/4352 at TP8/4/2/1) was kept
-as the kernel block while every reader addresses pool pages of
-`page_size * index_kpool` = 128/256 tokens, aliasing the index cache:
-
-#54359 (gfx950), #56380 (gfx942), #55280 (TP4 GPU fault), #58858.
-
-These tests pin the contract: when the group's spec carries a
-`storage_block_size` the group's backends accept, that is the kernel block;
-otherwise selection falls back to `select_common_block_size` unchanged.
-"""
+"""CPU tests for storage-block kernel-block selection in prepare_kernel_block_sizes."""
 
 from types import SimpleNamespace
 
@@ -34,6 +20,8 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.utils import prepare_kernel_block_sizes
+
+pytestmark = pytest.mark.cpu_test
 
 # ``index_kpool`` of zai-org/GLM-5.3-Flash: one indexer state pools 4
 # compressed states (hence storage_block_size = page * 4).
@@ -86,7 +74,7 @@ def test_prepare_uses_storage_block_for_the_kpool_group(
 
     Manager-granular selection is what made the block table address manager
     blocks while the kpool writer and the index-cache gather read pool pages,
-    aliasing every cache column past the request's row (#58858).
+    aliasing every cache column past the request's row.
     """
     _mock_rocm_platform(monkeypatch)
     spec = _kpool_storage_spec(manager_block)
