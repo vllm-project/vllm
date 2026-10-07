@@ -140,6 +140,56 @@ def test_cgroup_usage_is_read_without_cache(monkeypatch):
     assert cru.get_cgroup_memory_usage() == 768 << 20
 
 
+@pytest.mark.parametrize("cgroup_version", [1, 2])
+@pytest.mark.parametrize(
+    ("limit_gib", "usage_gib", "expected_total_gib", "expected_available_gib"),
+    [
+        (4, 3, 4, 1),
+        (8, 7, 8, 1),
+        (16, 15, 8, 1),
+        (16, 17, 8, 0),
+        (16, 0, 8, 6),
+        (None, None, 8, 6),
+    ],
+)
+def test_numa_memory_respects_cgroup_headroom(
+    monkeypatch,
+    cgroup_version,
+    limit_gib,
+    usage_gib,
+    expected_total_gib,
+    expected_available_gib,
+):
+    """Cgroup usage bounds available memory even when a NUMA node is smaller."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    meminfo_path = "/sys/devices/system/node/node0/meminfo"
+    monkeypatch.setattr(cru.os.path, "exists", lambda path: path == meminfo_path)
+    files = {
+        meminfo_path: (
+            f"Node 0 MemTotal: {8 * GiB_bytes // 1024} kB\n"
+            f"Node 0 MemFree: {6 * GiB_bytes // 1024} kB\n"
+            "Node 0 Active(file): 0 kB\n"
+            "Node 0 Inactive(file): 0 kB\n"
+            "Node 0 SReclaimable: 0 kB\n"
+        ),
+        _V2_LIMIT_PATH: None,
+        _V1_LIMIT_PATH: None,
+    }
+    if limit_gib is not None:
+        limit_path, usage_path = (
+            (_V2_LIMIT_PATH, _V2_USAGE_PATH)
+            if cgroup_version == 2
+            else (_V1_LIMIT_PATH, _V1_USAGE_PATH)
+        )
+        files[limit_path] = f"{limit_gib * GiB_bytes}\n"
+        files[usage_path] = f"{usage_gib * GiB_bytes}\n"
+    _stub_files(monkeypatch, files)
+
+    info = cru.get_memory_node_info(0)
+    assert info.total_memory == expected_total_gib * GiB_bytes
+    assert info.available_memory == expected_available_gib * GiB_bytes
+
+
 def test_check_cgroup_memory_available_warns_on_low_headroom(monkeypatch):
     monkeypatch.setattr(cru, "get_cgroup_memory_limit", lambda: 1 << 30)
     monkeypatch.setattr(cru, "get_cgroup_memory_usage", lambda: 512 << 20)
