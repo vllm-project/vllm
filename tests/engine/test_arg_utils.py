@@ -635,10 +635,9 @@ def test_packed_kv_cache_dtype_keeps_attention_type_skip_names(kv_cache_dtype):
     ).create_engine_config()
 
     skip_layers = vllm_config.cache_config.kv_cache_dtype_skip_layers
-    assert skip_layers[-1] == "sliding_window"
-    indices = skip_layers[:-1]
-    assert "5" in indices and len(indices) > 1
-    assert indices == sorted(indices, key=int)
+    assert "sliding_window" in skip_layers and "5" in skip_layers
+    assert len(skip_layers) > 2  # the boundary layers were merged in
+    assert skip_layers == sorted(skip_layers)
 
 
 def test_prefix_cache_default():

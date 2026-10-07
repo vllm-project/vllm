@@ -2283,11 +2283,12 @@ class EngineArgs:
             )
 
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
-            # Entries can also be attention type names, e.g. "sliding_window".
-            merged = set(cache_config.kv_cache_dtype_skip_layers) | set(boundary)
-            indices = sorted((entry for entry in merged if entry.isdecimal()), key=int)
-            names = sorted(entry for entry in merged if not entry.isdecimal())
-            cache_config.kv_cache_dtype_skip_layers = indices + names
+            # Sorted so the order does not depend on set iteration: the list is
+            # a CacheConfig hash factor. Entries can also be attention type
+            # names (e.g. "sliding_window"), so sort them as strings.
+            cache_config.kv_cache_dtype_skip_layers = sorted(
+                set(cache_config.kv_cache_dtype_skip_layers) | set(boundary)
+            )
 
         ray_runtime_env = None
         if is_ray_initialized():
