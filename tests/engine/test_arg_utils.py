@@ -624,6 +624,23 @@ def test_multi_node_world_size_includes_pcp(monkeypatch):
     assert vllm_config.parallel_config.world_size == 2
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["turboquant_4bit_nc", "ultraquant_4bit"])
+def test_packed_kv_cache_dtype_keeps_attention_type_skip_names(kv_cache_dtype):
+    """Packed KV dtypes merge their boundary layers into the user's skip list,
+    and that list may name an attention type instead of a layer index."""
+    vllm_config = EngineArgs(
+        model="facebook/opt-125m",
+        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_dtype_skip_layers=["sliding_window", "5"],
+    ).create_engine_config()
+
+    skip_layers = vllm_config.cache_config.kv_cache_dtype_skip_layers
+    assert skip_layers[-1] == "sliding_window"
+    indices = skip_layers[:-1]
+    assert "5" in indices and len(indices) > 1
+    assert indices == sorted(indices, key=int)
+
+
 def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
