@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
+from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
@@ -18,11 +19,14 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.cohere_command import (
     CohereCommandParser,
+    CohereNormalizedTool,
     _has_effective_tools,
     _response_format_type,
     _schema_dict_from_structured_outputs,
+    collect_tool_schema,
     convert_schema_to_structural_tags,
 )
 from vllm.sampling_params import StructuredOutputsParams
@@ -40,6 +44,48 @@ GET_WEATHER_TOOL = {
             "properties": {"city": {"type": "string"}},
         },
     },
+}
+NESTED_DEFS_PARAMETERS = {
+    "$defs": {
+        "Location": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "country": {"type": "string"},
+            },
+            "required": ["city"],
+        }
+    },
+    "type": "object",
+    "properties": {"location": {"$ref": "#/$defs/Location"}},
+    "required": ["location"],
+}
+NESTED_DEFS_TOOL = {
+    "type": "function",
+    "function": {"name": "get_weather", "parameters": NESTED_DEFS_PARAMETERS},
+}
+RECURSIVE_DEFS_PARAMETERS = {
+    "$defs": {
+        "Finding": {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string"},
+                "related": {"type": "array", "items": {"$ref": "#/$defs/Finding"}},
+            },
+        }
+    },
+    "type": "object",
+    "properties": {"finding": {"$ref": "#/$defs/Finding"}},
+}
+DRAFT07_DEFINITIONS_PARAMETERS = {
+    "definitions": {
+        "Location": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+        }
+    },
+    "type": "object",
+    "properties": {"location": {"$ref": "#/definitions/Location"}},
 }
 VALID_STRUCTURAL_TAG = {
     "type": "structural_tag",
@@ -294,6 +340,14 @@ class TestAdjustRequestFoldFromStructuredOutputs:
                 _make_chat_request(structured_outputs={"json": json_value}),
             )
 
+    def test_deeply_nested_json_string_rejected(self, parser) -> None:
+        """json.loads raises RecursionError on a string nested this deeply."""
+        schema = '{"type": "array", "items": ' * 20_000 + "{}" + "}" * 20_000
+        with pytest.raises(VLLMValidationError, match="nested too deeply"):
+            parser.adjust_request(
+                _make_chat_request(structured_outputs={"json": schema}),
+            )
+
     @pytest.mark.parametrize(
         "construct",
         [
@@ -302,7 +356,7 @@ class TestAdjustRequestFoldFromStructuredOutputs:
                 id="chat_completion_request",
             ),
             pytest.param(
-                lambda: StructuredOutputsParams(json=[1, 2, 3]),  # type: ignore[arg-type]
+                lambda: StructuredOutputsParams(json=[1, 2, 3]),
                 id="structured_outputs_params",
             ),
         ],
@@ -360,3 +414,63 @@ class TestAdjustRequestTools:
         types = _content_types(o.structured_outputs.structural_tag)
         assert "grammar" in types
         assert "json_schema" in types
+
+
+class TestCollectToolSchemaDefs:
+    def test_nested_defs_tool_adjust_request(self, parser) -> None:
+        o = parser.adjust_request(
+            _make_chat_request(tools=[NESTED_DEFS_TOOL], tool_choice="auto"),
+        )
+        assert "grammar" in _content_types(o.structured_outputs.structural_tag)
+
+    @staticmethod
+    def _tool_calls_json(name: str, parameters: dict) -> str:
+        return json.dumps(
+            [{"tool_call_id": "0", "tool_name": name, "parameters": parameters}]
+        )
+
+    def test_recursive_defs(self) -> None:
+        grammar = collect_tool_schema(
+            [CohereNormalizedTool(name="report", parameters=RECURSIVE_DEFS_PARAMETERS)]
+        )
+        nested = {"note": "a", "related": [{"note": "b", "related": []}]}
+        assert _is_grammar_accept_string(
+            grammar, self._tool_calls_json("report", {"finding": nested})
+        )
+        bad = {"note": 1, "related": []}
+        assert not _is_grammar_accept_string(
+            grammar, self._tool_calls_json("report", {"finding": bad})
+        )
+
+    def test_draft07_definitions(self) -> None:
+        grammar = collect_tool_schema(
+            [
+                CohereNormalizedTool(
+                    name="get_weather", parameters=DRAFT07_DEFINITIONS_PARAMETERS
+                )
+            ]
+        )
+        assert _is_grammar_accept_string(
+            grammar,
+            self._tool_calls_json("get_weather", {"location": {"city": "Prague"}}),
+        )
+        assert not _is_grammar_accept_string(
+            grammar,
+            self._tool_calls_json("get_weather", {"location": {"city": 1}}),
+        )
+
+    def test_deeply_nested_parameters_rejected(self) -> None:
+        """Tool schemas are compiled here, before request validation, and end up
+        inside an EBNF grammar that the nesting check cannot see later."""
+        parameters = json.loads('{"type": "array", "items": ' * 200 + "{}" + "}" * 200)
+        with pytest.raises(VLLMValidationError, match="nested too deeply"):
+            collect_tool_schema(
+                [CohereNormalizedTool(name="deep", parameters=parameters)]
+            )
+
+    def test_input_parameters_not_mutated(self) -> None:
+        params = json.loads(json.dumps(NESTED_DEFS_PARAMETERS))
+        collect_tool_schema(
+            [CohereNormalizedTool(name="get_weather", parameters=params)]
+        )
+        assert params == NESTED_DEFS_PARAMETERS
