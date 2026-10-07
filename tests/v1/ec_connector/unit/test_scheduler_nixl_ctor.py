@@ -62,6 +62,9 @@ def test_string_false_in_extra_config_leaves_nixl_off(monkeypatch):
 @pytest.mark.cpu_test
 def test_missing_nixl_releases_shared_region(monkeypatch):
     """A failed constructor leaves no scheduler for the caller to shut down."""
+    # Import before patching to avoid caching the missing-NIXL values.
+    from vllm.distributed.ec_transfer.ec_connector.cpu.data import nixl  # noqa: F401
+
     region = _region()
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
     monkeypatch.setattr(nixl_utils, "NixlWrapper", None)
