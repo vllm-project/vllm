@@ -1098,18 +1098,22 @@ class VllmConfig:
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-    def _maybe_disable_dynamic_sd_for_unsupported_method(self) -> None:
+    def _maybe_disable_dynamic_sd_for_v1(self) -> None:
         speculative_config = self.speculative_config
+        # V2 truncates drafts centrally. V1 requires proposer support.
         if (
             speculative_config is None
             or not speculative_config.uses_dynamic_speculative_decoding()
-            or speculative_config.supports_dynamic_speculative_decoding()
+            or self.use_v2_model_runner
+            or speculative_config.method
+            in ("ngram", "eagle", "eagle3", "mtp", "draft_model", "dflash")
         ):
             return
 
         logger.warning_once(
             "Dynamic speculative decoding is not supported with the '%s' "
-            "speculative method. Disabling num_speculative_tokens_per_batch_size "
+            "speculative method on Model Runner V1. "
+            "Disabling num_speculative_tokens_per_batch_size "
             "and falling back to static num_speculative_tokens=%d.",
             speculative_config.method,
             speculative_config.num_speculative_tokens,
@@ -1878,7 +1882,7 @@ class VllmConfig:
             )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
-        self._maybe_disable_dynamic_sd_for_unsupported_method()
+        self._maybe_disable_dynamic_sd_for_v1()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
