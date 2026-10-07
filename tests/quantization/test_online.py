@@ -97,6 +97,10 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_nvfp4_moe_weights,
+    ref_nvfp4_quant,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
@@ -1571,6 +1575,123 @@ def _quantize_moe(weight, scheme, moe_tp_size):
         quant = _fp8_quant_per_channel
     qweight = torch.stack([quant(w, s) for w, s in zip(weight, scale)])
     return qweight, scale
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics() -> None:
+    """NVFP4 checkpoint weights survive dequantization and FP8 requantization."""
+
+    def pack_e2m1(values: torch.Tensor) -> torch.Tensor:
+        codes = torch.zeros_like(values, dtype=torch.uint8)
+        for code, magnitude in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)):
+            codes[values.abs() == magnitude] = code
+        codes |= (values < 0).to(torch.uint8) << 3
+        return codes[..., 0::2] | (codes[..., 1::2] << 4)
+
+    def serialize_experts(
+        weights: torch.Tensor, global_scales: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        packed_weights = []
+        block_scales = []
+        reconstructed_weights = []
+        for weight, global_scale in zip(weights, global_scales, strict=True):
+            fp4_values, block_scale = ref_nvfp4_quant(
+                weight, global_scale, block_size=16
+            )
+            packed_weights.append(pack_e2m1(fp4_values))
+            block_scales.append(block_scale.to(torch.float8_e4m3fn))
+            reconstructed_weights.append(
+                (
+                    fp4_values.reshape(*fp4_values.shape[:-1], -1, 16)
+                    * (block_scale / global_scale).unsqueeze(-1)
+                )
+                .reshape_as(weight)
+                .to(weight.dtype)
+            )
+        return (
+            torch.stack(packed_weights),
+            torch.stack(block_scales),
+            torch.stack(reconstructed_weights),
+        )
+
+    torch.manual_seed(11)
+    num_experts = 2
+    hidden_size = intermediate_size = 32
+    device = current_platform.device_type
+
+    w1 = torch.randn(
+        num_experts,
+        intermediate_size,
+        hidden_size,
+        device=device,
+        dtype=torch.bfloat16,
+    ) * 0.35 + 0.2
+    w3 = torch.randn_like(w1) * 1.7 - 0.15
+    w2 = torch.randn(
+        num_experts,
+        hidden_size,
+        intermediate_size,
+        device=device,
+        dtype=torch.bfloat16,
+    ) * 0.8 + 0.05
+
+    # Checkpoints store encode scales. Deliberately use distinct values for
+    # every expert and w13 shard to catch reciprocal, ordering, and chunking bugs.
+    w1_global_scale = torch.tensor([96.0, 160.0], device=device)
+    w3_global_scale = torch.tensor([40.0, 72.0], device=device)
+    w2_global_scale = torch.tensor([128.0, 56.0], device=device)
+
+    w1_packed, w1_scale, w1_reference = serialize_experts(w1, w1_global_scale)
+    w3_packed, w3_scale, w3_reference = serialize_experts(w3, w3_global_scale)
+    w2_packed, w2_scale, w2_reference = serialize_experts(w2, w2_global_scale)
+
+    w13_dequantized, w2_dequantized = dequantize_nvfp4_moe_weights(
+        torch.cat((w1_packed, w3_packed), dim=1),
+        torch.cat((w1_scale, w3_scale), dim=1),
+        torch.stack((w1_global_scale, w3_global_scale), dim=1),
+        w2_packed,
+        w2_scale,
+        w2_global_scale,
+        torch.bfloat16,
+    )
+    w13 = torch.cat((w1, w3), dim=1)
+    w13_reference = torch.cat((w1_reference, w3_reference), dim=1)
+    torch.testing.assert_close(w13_dequantized, w13_reference, rtol=0, atol=0)
+    torch.testing.assert_close(w2_dequantized, w2_reference, rtol=0, atol=0)
+
+    w13_fp8, w13_fp8_scale = _quantize_moe(w13_dequantized, "per_tensor", 1)
+    w2_fp8, w2_fp8_scale = _quantize_moe(w2_dequantized, "per_tensor", 1)
+    w13_requantized = w13_fp8.float() * w13_fp8_scale[:, None, None]
+    w2_requantized = w2_fp8.float() * w2_fp8_scale[:, None, None]
+
+    inputs = torch.randn(
+        num_experts, 8, hidden_size, device=device, dtype=torch.bfloat16
+    ) * 0.4
+
+    def expert_output(
+        w13_weight: torch.Tensor, w2_weight: torch.Tensor
+    ) -> torch.Tensor:
+        gate_up = torch.einsum(
+            "eth,eih->eti", inputs.float(), w13_weight.float()
+        )
+        gate, up = gate_up.chunk(2, dim=-1)
+        hidden = torch.nn.functional.silu(gate) * up
+        return torch.einsum("eti,ehi->eth", hidden, w2_weight.float())
+
+    reference_output = expert_output(w13, w2)
+    requantized_output = expert_output(w13_requantized, w2_requantized)
+    relative_error = torch.linalg.vector_norm(
+        requantized_output - reference_output
+    ) / torch.linalg.vector_norm(reference_output)
+
+    # This includes NVFP4 error in both expert matrices plus a second FP8
+    # quantization. A 20% relative L2 bound allows for that compounded error
+    # while still rejecting scale inversion or w1/w3 layout errors by orders
+    # of magnitude.
+    assert relative_error < 0.2
 
 
 @pytest.mark.parametrize("scheme", ["per_tensor", "per_channel", "nvfp4"])
