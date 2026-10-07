@@ -345,6 +345,7 @@ def _rocm_aiter_fused_moe_impl(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
 ) -> torch.Tensor:
     has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
         shared_w1,
@@ -378,6 +379,12 @@ def _rocm_aiter_fused_moe_impl(
             shared_w2_scale=shared_w2_scale,
             shared_expert_id=shared_expert_id,
         )
+    if q_dtype_a is not None:
+        # DeepSeek V4.1 a4w4 override (use_mxfp4_w4a4_dsv4 in
+        # rocm_aiter_moe.py). rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
+        # is checked at config time, so this is only reached on an AITER
+        # build new enough to accept it.
+        extra_kwargs["quant_dtype_a"] = q_dtype_a
 
     return fused_moe(
         hidden_states,
@@ -435,6 +442,7 @@ def _rocm_aiter_fused_moe_fake(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -1905,6 +1913,11 @@ def _sync_aiter_situv2_moe_env() -> None:
             os.environ.pop(name, None)
 
 
+_GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
+_GFX950_C4A_NATIVE_MAX_ROWS = 256
+_GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
+
+
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -1927,6 +1940,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
+        VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -1998,6 +2012,7 @@ class rocm_aiter_ops:
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+    _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2027,6 +2042,7 @@ class rocm_aiter_ops:
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+        cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
@@ -2393,6 +2409,25 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_triton_sparse_mla_enabled(cls) -> bool:
+        if not cls._TRITON_SPARSE_MLA:
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        if not cls._AITER_ENABLED:
+            reason = "VLLM_ROCM_USE_AITER is off"
+        elif not on_gfx950():
+            reason = "the kernel is gfx950-only"
+        else:
+            return True
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; ignoring it.",
+            reason,
+        )
+        return False
+
+    @classmethod
+    @if_aiter_supported
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
 
@@ -2463,6 +2498,21 @@ class rocm_aiter_ops:
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_quant_dtype_a(cls) -> bool:
+        """Probe whether the installed aiter.fused_moe accepts `quant_dtype_a`.
+
+        Added in https://github.com/ROCm/aiter/pull/5439 (unreleased at
+        merge time). Older AITER can't override the activation quant dtype.
+        """
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        return "quant_dtype_a" in inspect.signature(fused_moe).parameters
+
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
@@ -2500,6 +2550,100 @@ class rocm_aiter_ops:
     def fused_moe_supports_heterogeneous_shared_expert(cls, num_tokens: int) -> bool:
         """Whether AITER has DSV4 native-I384 configs through the given M."""
         return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
+
+    @classmethod
+    @if_aiter_supported
+    def is_indexer_top_k_enabled(cls) -> bool:
+        """gfx950 is the only arch with tuned AITER indexer top-k kernels."""
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and on_gfx950()
+
+    @classmethod
+    def is_indexer_top_k_supported(
+        cls,
+        *,
+        is_prefill: bool,
+        compress_ratio: int,
+        num_rows: int,
+        max_valid_seq_len: int | None = None,
+    ) -> bool:
+        """Whether AITER's sparse indexer top-k beats the in-tree kernel for
+        this shape."""
+        if compress_ratio <= 1 or not cls.is_indexer_top_k_enabled():
+            return False
+
+        if not is_prefill:
+            assert max_valid_seq_len is not None
+            # AITER v0.1.19 decode is one-block only. This measured gfx950
+            # FP32/k=1024 compressed-row boundary is independent of the native
+            # split-count boundary in sampler.cu.
+            if (
+                num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
+                and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
+            ):
+                return False
+
+        return True
+
+    @staticmethod
+    def dsv4_indexer_prefers_native_top_k(
+        *,
+        num_rows: int,
+        num_columns: int,
+        topk_tokens: int,
+    ) -> bool:
+        """The in-tree decode kernel's measured advantage window over AITER.
+        Tuned on DSV4's compressed-KV logits, so it applies to that indexer
+        only."""
+        return (
+            topk_tokens == 512
+            and 0 < num_rows <= 384
+            and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
+        )
+
+    @staticmethod
+    def indexer_top_k_decode(
+        logits: torch.Tensor,
+        next_n: int,
+        seq_lens: torch.Tensor,
+        topk_indices: torch.Tensor,
+        topk_tokens: int,
+    ) -> None:
+        from aiter.ops.topk import top_k_per_row_decode
+
+        top_k_per_row_decode(
+            logits,
+            next_n,
+            seq_lens,
+            topk_indices,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            k=topk_tokens,
+        )
+
+    @staticmethod
+    def indexer_top_k_prefill(
+        logits: torch.Tensor,
+        row_starts: torch.Tensor,
+        row_ends: torch.Tensor,
+        indices: torch.Tensor,
+        topk_tokens: int,
+    ) -> None:
+        from aiter.ops.topk import top_k_per_row_prefill
+
+        top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            indices,
+            None,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            k=topk_tokens,
+        )
 
     @staticmethod
     def register_ops_once() -> None:
@@ -2851,6 +2995,10 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def get_fused_mla_dual_rms_norm_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm_group_quant.default
+
+    @staticmethod
     def rms_norm(
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -2983,6 +3131,7 @@ class rocm_aiter_ops:
         shared_w1_scale: torch.Tensor | None = None,
         shared_w2_scale: torch.Tensor | None = None,
         shared_expert_id: int = -1,
+        q_dtype_a: torch.dtype | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -3014,6 +3163,7 @@ class rocm_aiter_ops:
             shared_w1_scale,
             shared_w2_scale,
             shared_expert_id,
+            q_dtype_a,
         )
 
     @staticmethod
@@ -3136,6 +3286,57 @@ class rocm_aiter_ops:
         gate_up: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+
+    @staticmethod
+    def triton_sparse_mla_fwd(
+        q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        o: torch.Tensor,
+        sm_scale: float,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        kv_lora_rank: int = 512,
+        qk_rope_head_dim: int = 64,
+        q_scale: torch.Tensor | None = None,
+        kv_scale: torch.Tensor | None = None,
+        attn_sink: torch.Tensor | None = None,
+        extra_kv_buffer: torch.Tensor | None = None,
+        extra_kv_indptr: torch.Tensor | None = None,
+        extra_kv_indices: torch.Tensor | None = None,
+        has_invalid: bool = True,
+    ) -> None:
+        """Sparse MLA read straight from the KV cache, for prefill and decode.
+
+        kv_indices are ragged global slot ids. With has_invalid they may hold
+        -1, which the kernel masks; a caller whose stream never holds a
+        negative slot passes False, which lets the fp8 kernel stage K straight
+        into LDS. The cache format (bf16, per-tensor fp8, or DeepSeek V4's
+        paged fp8_ds_mla) is inferred from kv_buffer and kv_scale. An fp8 q
+        must come with its q_scale and runs both dots in fp8. The extra segment
+        is DeepSeek V4's second cache: SWA window in kv_buffer, top-k
+        compressed tokens here.
+        """
+        from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
+
+        fp8_q = q.dtype == FP8_DTYPE
+        sparse_mla_fwd(
+            q,
+            kv_buffer,
+            kv_indptr,
+            kv_indices,
+            sm_scale,
+            kv_scale=kv_scale,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            has_invalid=has_invalid,
+            dot_precision="fp8" if fp8_q else "bf16",
+            q_scale=q_scale if fp8_q else None,
+            out=o,
+            attn_sink=attn_sink,
+            extra_kv=extra_kv_buffer,
+            extra_indptr=extra_kv_indptr,
+            extra_indices=extra_kv_indices,
+        )
 
     @staticmethod
     def mla_decode_fwd(
@@ -4161,6 +4362,57 @@ class rocm_aiter_ops:
             layer_input.view(*outer_shape, hidden_size),
             next_pre_mix.view(*outer_shape, hc_mult),
         )
+
+    @staticmethod
+    def mhc_fused_post_pre_delayed_rms_norm(
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None,
+        sublayer_out: torch.Tensor | None,
+        post_layer_mix: torch.Tensor | None,
+        comb_res_mix: torch.Tensor | None,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+        residual_out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """:meth:`mhc_pre_delayed` with the RMSNorm of the collapse folded in.
+
+        Runs aiter's fused Triton kernel ``mhc_fused_post_pre_delayed_rmsnorm``;
+        the returned ``layer_input`` is already normalised with ``norm_weight`` /
+        ``norm_eps``.
+        """
+        from aiter.ops.triton.fusions.mhc_fused_post_pre_delayed_rmsnorm import (
+            mhc_fused_post_pre_delayed_rmsnorm,
+        )
+
+        _, post_mix, comb_mix, layer_input, next_pre_mix = (
+            mhc_fused_post_pre_delayed_rmsnorm(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                sublayer_out,
+                post_layer_mix,
+                comb_res_mix,
+                norm_weight,
+                norm_eps,
+                residual_out=residual_out,
+            )
+        )
+        return post_mix, comb_mix, layer_input, next_pre_mix
 
     @staticmethod
     def mhc_fused_post_pre_delayed_prefers_unfused(num_tokens: int) -> bool:

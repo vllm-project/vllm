@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -46,6 +47,7 @@ from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
+from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
@@ -146,12 +148,104 @@ def test_rocm_mm_prefix_lm_disables_chunked_mm_input(
     assert config.scheduler_config.disable_chunked_mm_input is expected
 
 
+def _sampling_replay_config(
+    *,
+    return_sampling_mask: bool = True,
+    use_v2_model_runner: bool = True,
+    speculative_method: str | None = None,
+    rejection_sample_method: str = "standard",
+    adaptive: bool = False,
+    is_diffusion: bool = False,
+    logits_processors: list[str] | None = None,
+    logprobs_mode: str = "processed_logprobs",
+):
+    speculative_config = None
+    if speculative_method is not None:
+        speculative_config = SimpleNamespace(
+            method=speculative_method,
+            enable_adaptive_verification=adaptive,
+            rejection_sample_method=rejection_sample_method,
+        )
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            return_sampling_mask=return_sampling_mask,
+            is_diffusion=is_diffusion,
+            logits_processors=logits_processors or [],
+            logprobs_mode=logprobs_mode,
+        ),
+        use_v2_model_runner=use_v2_model_runner,
+        speculative_config=speculative_config,
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (_sampling_replay_config(), None),
+        *(
+            (_sampling_replay_config(speculative_method=method), None)
+            for method in (
+                "mtp",
+                "eagle",
+                "eagle3",
+                "dflash",
+                "dspark",
+                "draft_model",
+            )
+        ),
+        *(
+            (
+                _sampling_replay_config(
+                    speculative_method="mtp",
+                    rejection_sample_method=rejection_sample_method,
+                ),
+                None,
+            )
+            for rejection_sample_method in ("standard", "block", "synthetic")
+        ),
+        (
+            _sampling_replay_config(
+                return_sampling_mask=False, speculative_method="dspark", adaptive=True
+            ),
+            None,
+        ),
+        (
+            _sampling_replay_config(speculative_method="dspark", adaptive=True),
+            "requires fixed verification boundaries",
+        ),
+        (
+            _sampling_replay_config(is_diffusion=True),
+            "does not support diffusion models",
+        ),
+        (
+            _sampling_replay_config(logits_processors=["custom"]),
+            "does not support custom logits processors",
+        ),
+        (
+            _sampling_replay_config(logprobs_mode="raw_logprobs"),
+            "requires logprobs_mode='processed_logprobs'",
+        ),
+        (
+            _sampling_replay_config(use_v2_model_runner=False),
+            "requires Model Runner V2",
+        ),
+    ],
+)
+def test_sampling_replay_config(config, message):
+    if message is None:
+        VllmConfig._verify_sampling_replay_config(config)
+    else:
+        with pytest.raises(ValueError, match=message):
+            VllmConfig._verify_sampling_replay_config(config)
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
             use_kda_recoverssm=False,
             mamba_cache_mode="none",
+            replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
         model_config=SimpleNamespace(
@@ -177,19 +271,23 @@ def test_kda_recoverssm_derivation_is_revalidated():
     with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
     config.use_v2_model_runner = True
-    config.cache_config.mamba_cache_mode = "all"
-    with pytest.raises(ValueError, match="only none and align"):
-        VllmConfig.validate_mamba_cached_kernel(config)
     config.cache_config.mamba_cache_mode = "none"
 
     config.model_config.architecture = "NemotronHForCausalLM"
-    with pytest.raises(ValueError, match="only supported for Kimi-K3 KDA"):
-        VllmConfig.validate_mamba_cached_kernel(config)
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert not config.cache_config.use_kda_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_mamba_cache_mode_all_is_rejected():
+    """The removed 'all' mode must fail validation instead of being ignored."""
+    with pytest.raises(ValidationError, match="mamba_cache_mode"):
+        CacheConfig(mamba_cache_mode="all")
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
@@ -405,6 +503,17 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
         )
 
 
+def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+        )
+
+
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
@@ -415,6 +524,19 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
                 max_model_len=2048,
                 is_encoder_decoder=False,
                 disable_hybrid_kv_cache_manager=True,
+            ),
+        )
+
+
+def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="requires --scheduler-reserve-full-isl"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                scheduler_reserve_full_isl=False,
             ),
         )
 
@@ -800,18 +922,43 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     assert hf_config.architectures == [expected_architecture]
 
 
-def test_v2_model_runner_supports_extract_hidden_states():
+@pytest.mark.parametrize("method", ["extract_hidden_states", "ngram", "ngram_gpu"])
+def test_v2_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
         SpeculativeConfig,
         SimpleNamespace(
-            method="extract_hidden_states",
+            method=method,
             parallel_drafting=False,
             enable_adaptive_verification=False,
         ),
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+@pytest.mark.parametrize("use_heterogeneous_vocab", [False, True])
+def test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1(
+    use_heterogeneous_vocab,
+):
+    """The V2 draft-model speculator exchanges token ids with the target
+    without a vocab mapping, so a heterogeneous-vocab (TLI) draft must stay on
+    V1, where VocabMapping translates them."""
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="draft_model",
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+            use_heterogeneous_vocab=use_heterogeneous_vocab,
+        ),
+    )
+
+    expected = ["heterogeneous-vocabulary draft models"]
+    assert config._get_v2_model_runner_unsupported_features() == (
+        expected if use_heterogeneous_vocab else []
+    )
 
 
 def test_v2_model_runner_supports_custom_logits_processors():
@@ -1464,6 +1611,20 @@ def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
+def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):
+    monkeypatch.setattr(vllm_config_module, "_current_vllm_config", None)
+    config = ParallelConfig(cpu_distributed_timeout_seconds=30)
+    with (
+        patch(
+            "vllm.distributed.utils.rendezvous",
+            return_value=iter([(torch.distributed.HashStore(), 0, 1)]),
+        ),
+        patch("vllm.distributed.utils.init_gloo_process_group") as init_group,
+    ):
+        config.stateless_init_dp_group()
+    assert init_group.call_args.kwargs["timeout"] == timedelta(seconds=30)
+
+
 @pytest.mark.parametrize(
     "dp_size, across_dp, expected",
     [(1, False, 4), (1, True, 4), (2, False, 4), (2, True, 8)],
@@ -1495,19 +1656,40 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "cpu_offload,dp_size,elastic_ep,expected",
-    [(True, 2, False, True), (False, 2, False, False), (True, 1, False, False)],
+    "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",
+    [
+        (True, False, None, 2, False, True),
+        (False, False, None, 2, False, False),
+        (True, False, None, 1, False, False),
+        (True, False, None, 2, True, False),
+        # use_thp backs private tables; sharing would silently ignore it.
+        (True, True, None, 2, False, False),
+        (True, True, False, 2, False, False),
+    ],
 )
 def test_engram_dp_shared_memory_defaults_when_supported(
-    cpu_offload, dp_size, elastic_ep, expected
+    cpu_offload, use_thp, dp_shared_memory, dp_size, elastic_ep, expected
 ):
-    """Unset dp_shared_memory enables sharing only for offloaded, non-elastic DP."""
+    """Resolve sharing only where supported, preserving an explicit false."""
     parallel = ParallelConfig(data_parallel_size=dp_size)
     parallel.enable_elastic_ep = elastic_ep
-    config = EngramConfig(cpu_offload=cpu_offload)
+    config = EngramConfig(
+        cpu_offload=cpu_offload,
+        use_thp=use_thp,
+        dp_shared_memory=dp_shared_memory,
+    )
     config.resolve_dp_shared_memory(parallel)
     assert config.dp_shared_memory is expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_engram_thp_rejects_explicit_shared_memory():
+    with pytest.raises(
+        ValueError, match="use_thp requires cpu_offload=True and dp_shared_memory=False"
+    ):
+        EngramConfig(use_thp=True, dp_shared_memory=True)
 
 
 @pytest.mark.parametrize(
@@ -1552,14 +1734,14 @@ def test_engram_dp_shared_memory_config_validation(
         ("DeepseekV41ForCausalLM", [1], "cuda", True),
         ("DeepseekV41ForCausalLM", [1], "rocm", True),
         ("DeepseekV41ForCausalLM", [], "cuda", False),
-        ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("DeepseekV41ForCausalLM", [1], "cpu", True),
         ("Qwen4ExpForCausalLM", [1], "cuda", True),
         ("Qwen4ExpForCausalLM", [1], "rocm", True),
         ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
         ("Qwen4ExpForConditionalGeneration", [1], "rocm", True),
         ("Qwen4ExpForCausalLM", [], "cuda", False),
         ("Qwen4ExpForCausalLM", None, "cuda", False),
-        ("Qwen4ExpForCausalLM", [1], "cpu", False),
+        ("Qwen4ExpForCausalLM", [1], "cpu", True),
         ("LlamaForCausalLM", [1], "cuda", False),
         ("Qwen4ExpMTP", [], "cuda", False),
         (None, None, "cuda", False),
@@ -3474,10 +3656,9 @@ def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log
     )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "Target-only watermarking leaves accepted draft tokens" in caplog_vllm.text
-    assert "Context deduplication is not supported" in caplog_vllm.text
 
 
 def test_speculative_watermarking_without_context_dedup_does_not_warn(
@@ -3494,10 +3675,32 @@ def test_speculative_watermarking_without_context_dedup_does_not_warn(
         parallel_drafting=False,
     )
 
+    caplog_vllm.clear()
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
-    assert "Context deduplication is not supported" not in caplog_vllm.text
+    assert "dedup" not in caplog_vllm.text.lower()
+
+
+def test_speculative_context_dedup_logs_no_unsupported_warning(
+    caplog_vllm, disable_log_dedup
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="dual_key_gumbel", key=42, deduplicate_contexts="single_turn"
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    caplog_vllm.clear()
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_supports_watermarking()
+
+    assert "dedup" not in caplog_vllm.text.lower()
 
 
 def test_gumbel_rejects_speculative_decoding_without_target_only():
@@ -3513,7 +3716,7 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
     )
 
     with pytest.raises(ValueError, match="'gumbel'.*allow_target_only_watermarking"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
@@ -3531,7 +3734,7 @@ def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
     )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "The configured alpha=0.25 is not used" in caplog_vllm.text
 
@@ -3557,7 +3760,7 @@ def test_dual_key_gumbel_alpha_warning_is_not_emitted(
         )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "is not used" not in caplog_vllm.text
 
@@ -3573,7 +3776,7 @@ def test_dual_key_gumbel_requires_probabilistic_drafting():
     )
 
     with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
@@ -3587,7 +3790,7 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
         parallel_drafting=False,
     )
 
-    config._check_watermarking_unsupported()
+    config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_supports_dspark():
@@ -3600,7 +3803,7 @@ def test_dual_key_gumbel_supports_dspark():
         parallel_drafting=True,
     )
 
-    config._check_watermarking_unsupported()
+    config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
@@ -3614,7 +3817,7 @@ def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
     )
 
     with pytest.raises(ValueError, match="autoregressive model-based"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 @pytest.mark.parametrize(
@@ -3638,17 +3841,40 @@ def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match
     config.speculative_config = SimpleNamespace(**values)
 
     with pytest.raises(ValueError, match=match):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
-def test_gumbel_watermark_rejects_beam_search():
-    with pytest.raises(ValueError, match="Beam search is not supported"):
-        _watermarked_vllm_config()._check_watermarking_unsupported(beam_search=True)
+def test_gumbel_watermark_disables_beam_search_watermarking(caplog_vllm):
+    enabled = _watermarked_vllm_config()._check_supports_watermarking(
+        BeamSearchParams(beam_width=2, max_tokens=1)
+    )
+
+    assert not enabled
+    assert "beam search requests will run without watermarking" in caplog_vllm.text
+
+
+def test_gumbel_watermark_allows_unwatermarked_beam_search():
+    _watermarked_vllm_config()._check_supports_watermarking(
+        BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
+    )
+
+
+def test_unwatermarked_beam_does_not_bypass_engine_incompatibilities():
+    config = _watermarked_vllm_config()
+    config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="Speculative decoding with watermarking"):
+        config._check_supports_watermarking(
+            BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
+        )
 
 
 def test_gumbel_watermark_rejects_custom_sampler():
     with pytest.raises(ValueError, match="custom samplers are not supported"):
-        _watermarked_vllm_config()._check_watermarking_unsupported(custom_sampler=True)
+        _watermarked_vllm_config()._check_supports_watermarking(custom_sampler=True)
 
 
 def test_watermark_key_must_fit_in_64_bits():
@@ -3948,3 +4174,47 @@ def test_revision_resolved_for_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    ("layer_types", "expected_attention"),
+    [
+        # Qwen3-Next / Qwen3.5 spell their attention layers "full_attention".
+        (["linear_attention", "full_attention"], 1),
+        # GLM-5.3-Flash and Qwen4-Exp use sparse attention, which still caches
+        # every token and so must count as attention.
+        (["linear_attention", "deepseek_sparse_attention"], 1),
+        (["linear_attention", "qwen_sparse_attention"], 1),
+        (["linear_attention", "linear_attention"], 0),
+    ],
+)
+def test_hybrid_layer_counts_sparse_attention_as_attention(
+    layer_types, expected_attention
+):
+    """Sparse-attention layer types consume a full attention KV cache."""
+    model_config = object.__new__(ModelConfig)
+    model_config.hf_config = SimpleNamespace()
+    model_config.hf_text_config = SimpleNamespace(layer_types=layer_types)
+    model_config.model_arch_config = SimpleNamespace(text_model_type="glm5_next")
+
+    parallel_config = SimpleNamespace()
+    with (
+        patch.object(ModelConfig, "is_hybrid", True),
+        patch.object(ModelConfig, "has_noops", False),
+        patch.object(ModelConfig, "is_attention_free", False),
+        patch.object(
+            ModelConfig,
+            "get_layers_start_end_indices",
+            return_value=(0, len(layer_types)),
+        ),
+    ):
+        assert (
+            model_config.get_num_layers_by_block_type(parallel_config, "attention")
+            == expected_attention
+        )
+        assert (
+            model_config.get_num_layers_by_block_type(
+                parallel_config, "linear_attention"
+            )
+            == len(layer_types) - expected_attention
+        )
