@@ -34,6 +34,12 @@ else:
 logger = init_logger(__name__)
 
 
+def _inductor_supports_batch_invariant() -> bool:
+    from torch._inductor import config as inductor_config
+
+    return hasattr(inductor_config, "batch_invariant")
+
+
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
     model."""
@@ -995,6 +1001,11 @@ class CompilationConfig:
         ):
             self.custom_ops.append("+rotary_embedding")
 
+        if envs.VLLM_BATCH_INVARIANT and _inductor_supports_batch_invariant():
+            # Pin generated reduction kernel configs instead of autotuning
+            # them on the device, which can pick a different config per run.
+            self.inductor_compile_config.setdefault("batch_invariant", True)
+
         if (
             is_torch_equal_or_newer("2.9.0.dev")
             and "combo_kernels" not in self.inductor_compile_config
@@ -1005,7 +1016,10 @@ class CompilationConfig:
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True
-            self.inductor_compile_config["benchmark_combo_kernel"] = True
+            # Combo kernel benchmarking also picks kernels by on-device timing.
+            self.inductor_compile_config["benchmark_combo_kernel"] = not (
+                self.inductor_compile_config.get("batch_invariant", False)
+            )
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"
