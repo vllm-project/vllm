@@ -101,6 +101,38 @@ def test_peft_helper_error(
         ).validate_legal(lora_config)
 
 
+@pytest.mark.parametrize(
+    "config_change,expected_error",
+    [
+        ({"init_lora_weights": "pissa"}, "init_lora_weights='pissa'"),
+        ({"init_lora_weights": "pissa_niter_4"}, "init_lora_weights='pissa_niter_4'"),
+        ({"init_lora_weights": "olora"}, "init_lora_weights='olora'"),
+        ({"init_lora_weights": "corda"}, "init_lora_weights='corda'"),
+        ({"init_lora_weights": "loftq"}, "init_lora_weights='loftq'"),
+        ({"layer_replication": [[0, 2], [1, 2]]}, "layer_replication"),
+    ],
+)
+def test_peft_helper_rejects_base_model_changes(
+    config_change: dict, expected_error: str
+):
+    """PEFT changes the base model for these adapters, so vLLM must reject
+    them instead of serving them on the unchanged base model."""
+    config = {"r": 8, "lora_alpha": 16, "target_modules": ["q_proj"]}
+    lora_config = LoRAConfig(max_lora_rank=16, max_cpu_loras=3, max_loras=2)
+    with pytest.raises(ValueError, match=expected_error):
+        PEFTHelper.from_dict({**config, **config_change}).validate_legal(lora_config)
+
+
+@pytest.mark.parametrize("init_lora_weights", [False, "gaussian", "eva", "lora_ga"])
+def test_peft_helper_accepts_base_preserving_init(init_lora_weights):
+    """PEFT does not change the base model when loading these adapters."""
+    config = {"r": 8, "lora_alpha": 16, "target_modules": ["q_proj"]}
+    lora_config = LoRAConfig(max_lora_rank=16, max_cpu_loras=3, max_loras=2)
+    PEFTHelper.from_dict(
+        {**config, "init_lora_weights": init_lora_weights}
+    ).validate_legal(lora_config)
+
+
 @pytest.mark.parametrize("bad_rank", [0, -1, -8])
 def test_peft_helper_invalid_rank_direct(bad_rank: int):
     """Regression test: constructing a PEFTHelper with a non-positive rank

@@ -33,6 +33,8 @@ class PEFTHelper:
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
+    init_lora_weights: bool | str = field(default=True)
+    layer_replication: list[list[int]] | None = field(default=None)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: int | None = field(default=False)
@@ -52,6 +54,19 @@ class PEFTHelper:
                 )
         if self.use_dora:
             error_msg.append("vLLM does not yet support DoRA.")
+        if isinstance(self.init_lora_weights, str) and (
+            self.init_lora_weights.lower().startswith(
+                ("pissa", "corda", "olora", "loftq")
+            )
+        ):
+            error_msg.append(
+                "vLLM does not support "
+                f"init_lora_weights={self.init_lora_weights!r}, because PEFT "
+                "modifies the base model weights when loading such an adapter. "
+                "Convert it into a regular LoRA adapter first."
+            )
+        if self.layer_replication:
+            error_msg.append("vLLM does not support layer_replication.")
         return error_msg
 
     def __post_init__(self):

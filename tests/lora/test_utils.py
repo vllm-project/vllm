@@ -112,6 +112,14 @@ def test_parse_fine_tuned_lora_name_invalid():
             parse_fine_tuned_lora_name(name)
 
 
+@pytest.mark.parametrize("lora_param", ["lora_A.bias", "lora_B.bias"])
+def test_parse_fine_tuned_lora_name_rejects_lora_bias(lora_param: str):
+    """A PEFT `lora_bias=True` bias must not be loaded as the LoRA weight."""
+    name = f"base_model.model.model.layers.0.self_attn.q_proj.{lora_param}"
+    with pytest.raises(ValueError, match="unsupported LoRA weight"):
+        parse_fine_tuned_lora_name(name)
+
+
 def test_replace_submodule():
     model = nn.Sequential(
         OrderedDict(
