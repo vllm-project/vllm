@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
@@ -26,6 +27,7 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    kept_context_len: int = 16,
 ):
     device = torch.device("cuda")
     max_num_reqs = 4
@@ -90,7 +92,7 @@ def _run_prepare(
         sample_idx_mapping=sample_idx_mapping,
         temperature=temperature,
         seeds=seeds,
-        hidden_states=torch.zeros(4, 1, device=device),
+        hidden_states=torch.arange(4.0, device=device).view(4, 1),
         prepare_context_anchor=lambda *args: None,
         query_cudagraph_manager=None,
         dp_size=1,
@@ -99,6 +101,9 @@ def _run_prepare(
         draft_kv_cache_group_id=0,
         draft_kv_cache_group_ids=[0],
         _layer_group_idx=None,
+        device=device,
+        _kept_context_len=kept_context_len,
+        _kept_lens=UvaBufferPool(max_num_reqs, torch.int64),
         block_tables=SimpleNamespace(
             slot_mappings=query_slot_mapping.unsqueeze(0),
             input_block_tables=[block_table],
@@ -140,6 +145,7 @@ def _run_prepare(
     torch.accelerator.synchronize()
     return SimpleNamespace(
         input_buffers=input_buffers,
+        hidden_states=draft.hidden_states.cpu(),
         query_slot_mapping=query_slot_mapping.cpu(),
         context_positions=context_positions.cpu(),
         context_slot_mapping=context_slot_mapping.cpu(),
@@ -212,3 +218,20 @@ def test_prepare_dflash_inputs_never_writes_the_null_block():
         PAD_SLOT_ID,
         PAD_SLOT_ID,
     ]
+
+
+def test_prepare_dflash_inputs_trims_context_to_window(monkeypatch):
+    # A windowed draft keeps only each request's trailing context rows, compacted
+    # to the front of the context buffers (here: one accepted and two rejected).
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.dflash.speculator.MIN_TRIMMED_CONTEXT_ROWS", 0
+    )
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        kept_context_len=3,
+    )
+
+    assert out.hidden_states[:3, 0].tolist() == [1.0, 2.0, 3.0]
+    assert out.context_positions[:3].tolist() == [11, 0, 0]
+    assert out.context_slot_mapping[:3].tolist() == [31, PAD_SLOT_ID, PAD_SLOT_ID]
