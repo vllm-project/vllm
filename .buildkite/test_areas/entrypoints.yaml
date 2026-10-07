@@ -119,6 +119,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)"
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-chat_completion
+  automatic_shard: true
   timeout_in_minutes: 83
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -231,6 +232,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)"
   device: h200_35gb
   key: entrypoints-integration-pooling
+  automatic_shard: true
   timeout_in_minutes: 75
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:

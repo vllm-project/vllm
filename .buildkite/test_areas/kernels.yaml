@@ -503,6 +503,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
+  automatic_shard: true
   timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/mamba/
