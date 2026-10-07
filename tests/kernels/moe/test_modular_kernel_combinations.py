@@ -1066,6 +1066,15 @@ def _aiter_token_padding_worker(
         "through AiterExperts."
     )
 
+    # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
+    # mk_out would still pass the checks below -- guard against that.
+    ref_scale = ref_out[real_rows].abs().mean()
+    mk_scale = mk_out[real_rows].abs().mean()
+    assert mk_scale > 0.5 * ref_scale, (
+        f"AiterExperts output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
+    )
+
     if config.quant_config is not None:
         check_accuracy(
             ref_out[real_rows], mk_out[real_rows], atol=3e-2, rtol=3e-2, percent=0.9
