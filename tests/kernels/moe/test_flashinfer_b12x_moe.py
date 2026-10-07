@@ -30,6 +30,7 @@ from flashinfer.fp4_quantization import fp4_quantize
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.kernels.quantization.nvfp4_utils import dequantize_nvfp4_to_dtype
 from tests.kernels.utils import torch_moe
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
@@ -379,6 +380,24 @@ def _quantize_per_expert_nvfp4(
     return torch.stack(q_list), torch.stack(sf_list), w_gs
 
 
+def _dequantize_per_expert_nvfp4(
+    w_q: torch.Tensor,
+    w_blockscale: torch.Tensor,
+    w_gs: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Round-trip packed NVFP4 weights back to ``dtype`` so the torch
+    reference sees exactly what the kernel dequantizes internally."""
+    return torch.stack(
+        [
+            dequantize_nvfp4_to_dtype(
+                w_q[i], w_blockscale[i], w_gs[i], dtype=dtype, device=w_q.device
+            )
+            for i in range(w_q.shape[0])
+        ]
+    )
+
+
 @pytest.mark.parametrize(
     "num_tokens,max_num_tokens,expected",
     [
@@ -423,8 +442,9 @@ def test_flashinfer_b12x_moe_w4a16(
     Uses ``nvfp4_w4a16_moe_quant_config`` (no activation quantization) with a
     realistic per-expert weight global scale, and checks that the experts
     select FlashInfer's ``quant_mode="w4a16"`` path rather than quantizing
-    the activations to FP4.  Since only the weights are quantized the
-    tolerance is tighter than the W4A4 tests.
+    the activations to FP4.  The torch reference runs on the dequantized
+    NVFP4 weights (as in the Marlin MoE tests) so quantization error cancels
+    and the tolerance only covers kernel numerics.
     """
     if not has_flashinfer_b12x_w4a16_moe():
         pytest.skip("Installed FlashInfer lacks B12xMoEWrapper(quant_mode=...)")
@@ -511,9 +531,13 @@ def test_flashinfer_b12x_moe_w4a16(
         assert experts._wrapper.quant_mode == "w4a16"
         assert experts._wrapper.activation_precision == "bf16"
 
-        torch_output = torch_moe(a, w1_bf16, w2_bf16, score, topk)
+        w1_ref = _dequantize_per_expert_nvfp4(w1_q, w1_blockscale, w1_gs, dtype)
+        # Undo the [up, gate] reorder; torch_moe expects [gate, up].
+        w1_ref = torch.cat([w1_ref[:, n:], w1_ref[:, :n]], dim=1)
+        w2_ref = _dequantize_per_expert_nvfp4(w2_q, w2_blockscale, w2_gs, dtype)
+        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk)
 
-        torch.testing.assert_close(b12x_output, torch_output, atol=1e-1, rtol=1e-1)
+        torch.testing.assert_close(b12x_output, torch_output, atol=4e-2, rtol=0)
 
 
 if __name__ == "__main__":
