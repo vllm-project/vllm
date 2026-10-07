@@ -151,8 +151,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             other=0.0,
         )
         if IS_FP8:
-            # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8 QK
-            # measured slower here and less accurate).
+            # e4m3/e5m2 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8
+            # QK measured slower here and less accurate, and an fp8 dot is not
+            # available below SM89).
             keys = keys.to(query.dtype)
         scores = tl.dot(query, keys)
         # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
@@ -169,6 +170,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             # Dequant V to fp16 (not bf16) for the PV dot: P <= 1 (online
             # softmax) so fp16 has the range, its wider mantissa is more
             # accurate, and the fp8->fp16 upcast with an fp16 PV dot is faster.
+            # e5m2 -> fp16 is exact as well (e5m2 is the high byte of fp16).
             values = values.to(tl.float16)
         accumulator = tl.dot(
             probabilities.to(values.dtype),
@@ -605,7 +607,11 @@ def qsa_sparse_paged_attention(
     *,
     output_gate: torch.Tensor,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
+    """Run sparse GQA directly over paged BF16 or FP8 (e4m3/e5m2) K/V caches.
+
+    fp8 caches are passed as float8_e4m3fn or float8_e5m2 views. e5m2 is the
+    fp8 format usable below SM89: the kernel only loads it and upcasts before
+    each dot, which Triton lowers on SM80+, while fp8e4nv needs SM89+.
 
     With fp8 caches, k_scale/v_scale are the layer's per-tensor dequant scales
     as host floats (e.g. layer._k_scale_float/_v_scale_float): k_scale is
@@ -636,7 +642,7 @@ def qsa_sparse_paged_attention(
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
     assert q.dtype == torch.bfloat16
     assert k_cache.dtype == v_cache.dtype
-    is_fp8 = k_cache.dtype == torch.float8_e4m3fn
+    is_fp8 = k_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
     if is_fp8:
         assert k_scale is not None and v_scale is not None
         # Host pre-multiply: fold the K dequant scale into the attention scale
@@ -764,13 +770,26 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
+    kv_cache_dtype: str | None = None,
 ) -> tuple[tuple[int, int, int], ...]:
-    """Compile every production-reachable split-K/merge specialization."""
+    """Compile every production-reachable split-K/merge specialization.
+
+    kv_cache_dtype is the layer's cache dtype string; fp8_e4m3 and fp8_e5m2
+    share the uint8 storage dtype, so it is needed to tell them apart. None
+    keeps the legacy inference (uint8 means fp8-e4m3).
+    """
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
-    # An fp8 cache is allocated as uint8 and viewed as e4m3 at attention time.
+    # An fp8 cache is allocated as uint8 and viewed as e4m3 (or e5m2 for
+    # fp8_e5m2) at attention time. Warming the wrong one would also fail
+    # outright below SM89, where fp8e4nv does not compile.
     is_fp8 = kv_cache.dtype == torch.uint8
-    cache_dtype = torch.float8_e4m3fn if is_fp8 else key_cache.dtype
+    if not is_fp8:
+        cache_dtype = key_cache.dtype
+    elif kv_cache_dtype == "fp8_e5m2":
+        cache_dtype = torch.float8_e5m2
+    else:
+        cache_dtype = torch.float8_e4m3fn
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)

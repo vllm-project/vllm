@@ -305,8 +305,9 @@ class QSAIndexer(nn.Module):
                 dtype=self.indexer_dtype,
             )
             main_kv_cache = attn.kv_cache.transpose(1, 2)
-            if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)
+            if attn.fp8_kv_view_dtype is not None:
+                # uint8 storage; the kernel stores e4m3 or e5m2 by pointer type.
+                main_kv_cache = main_kv_cache.view(attn.fp8_kv_view_dtype)
             main_outputs = qsa_prepare(
                 projected_q,
                 raw_keys,

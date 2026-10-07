@@ -82,10 +82,13 @@ def _norm_rope(
 
 @triton.jit
 def _to_dst_dtype(x, dst, scale):
-    """Round to BF16 like the unfused path, then scale for an FP8 destination."""
+    """Round to BF16 like the unfused path, then scale for an FP8 destination.
+
+    The FP8 destination is e4m3 (fp8e4nv, SM89+) or e5m2 (fp8e5, SM80+).
+    """
     out_ty = dst.dtype.element_ty
     x = x.to(tl.bfloat16)
-    if out_ty == tl.float8e4nv:
+    if out_ty.is_fp8():
         x = x.to(tl.float32) / scale
     return x.to(out_ty)
 
