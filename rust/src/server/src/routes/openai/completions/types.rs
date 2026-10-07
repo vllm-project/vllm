@@ -151,6 +151,11 @@ pub struct CompletionRequest {
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
+    /// Specific vocab token IDs to return logprobs for at each generated
+    /// position, in addition to the sampled token. Takes precedence over
+    /// the top-k selected by `logprobs`. Requires `logprobs` to be set.
+    pub logprob_token_ids: Option<Vec<u32>>,
+
     // -------- Extra vLLM Parameters --------
     /// Whether to add special tokens (e.g. BOS) to the prompt
     #[serde(default = "default_true")]

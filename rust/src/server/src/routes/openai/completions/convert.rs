@@ -100,6 +100,12 @@ pub(super) fn prepare_completion_request(
         request.max_tokens
     };
     let echo = completion_echo_text(&request, tokenizer)?;
+    let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
+    let logprobs = if logprob_token_ids.is_some() {
+        None
+    } else {
+        logprobs
+    };
 
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
@@ -136,7 +142,7 @@ pub(super) fn prepare_completion_request(
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
             bad_words: None,
-            logprob_token_ids: None,
+            logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
@@ -642,6 +648,28 @@ mod tests {
             prepared.text_request.prompt,
             Prompt::TokenIds(vec![104, 101, 108, 108, 111])
         );
+    }
+
+    #[test]
+    fn selected_logprobs_override_completion_top_k_unless_empty() {
+        for ids in [vec![10, 20], vec![]] {
+            let request = serde_json::from_value(json!({
+                "prompt": "hello", "logprobs": 0, "logprob_token_ids": ids,
+            }))
+            .unwrap();
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                &test_tokenizer(),
+            )
+            .unwrap();
+            let params = prepared.text_request.sampling_params;
+            let selected = !ids.is_empty();
+            assert_eq!(params.logprob_token_ids, selected.then_some(ids));
+            assert_eq!(params.logprobs, (!selected).then_some(0));
+            assert_eq!(prepared.options.requested_logprobs, Some(0));
+        }
     }
 
     #[test]

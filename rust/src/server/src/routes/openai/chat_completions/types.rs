@@ -170,6 +170,11 @@ pub struct ChatCompletionRequest {
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
+    /// Specific vocab token IDs to return logprobs for at each generated
+    /// position, in addition to the sampled token. Takes precedence over
+    /// `top_logprobs`. Requires `logprobs=true`.
+    pub logprob_token_ids: Option<Vec<u32>>,
+
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
@@ -301,6 +306,7 @@ impl Default for ChatCompletionRequest {
             truncate_prompt_tokens: None,
             truncation_side: None,
             prompt_logprobs: None,
+            logprob_token_ids: None,
             allowed_token_ids: None,
             bad_words: None,
             echo: false,
