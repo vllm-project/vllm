@@ -5,12 +5,29 @@ from argparse import ArgumentError
 from unittest.mock import patch
 
 import pytest
+from vllm.usage.usage_lib import UsageContext
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.hashing import _xxhash
+
+
+@pytest.mark.parametrize("family", ["gdn", "kda"])
+@pytest.mark.parametrize("backend", ["auto", "cudnn"])
+def test_flashinfer_prefill_backend_from_cli(family, backend):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            f"--{family}-prefill-backend",
+            "flashinfer",
+            f"--flashinfer-{family}-backend",
+            backend,
+        ]
+    )
+    config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert config.additional_config[f"{family}_prefill_backend"] == "flashinfer"
+    assert config.additional_config[f"flashinfer_{family}_backend"] == backend
 
 
 def test_prefix_caching_from_cli():

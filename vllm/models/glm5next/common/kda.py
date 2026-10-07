@@ -34,6 +34,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.flashinfer_kda import (
+    flashinfer_kda_prefill,
+    validate_flashinfer_kda_prefill,
+)
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
@@ -135,12 +139,18 @@ def _cast_sigmoid(x: torch.Tensor) -> torch.Tensor:
 
 
 def _resolve_kda_prefill_backend(
-    backend: str, head_dim: int, dtype: torch.dtype, lower_bound: float | None
+    backend: str,
+    head_dim: int,
+    dtype: torch.dtype,
+    lower_bound: float | None,
+    state_dtype: torch.dtype = torch.float32,
+    flashinfer_backend: str = "auto",
 ) -> str:
-    """Pick the chunked-prefill kernel: FlashKDA (fused CUDA, ~2-4x faster on
-    SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate) or the Triton
-    ``chunk_kda_with_fused_gate`` path. ``backend`` comes from
-    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
+    if backend == "flashinfer":
+        validate_flashinfer_kda_prefill(
+            head_dim, dtype, state_dtype, lower_bound, backend=flashinfer_backend
+        )
+        return backend
     if backend not in ("auto", "triton", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
     capability = current_platform.get_device_capability()
@@ -341,6 +351,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
         additional_config = vllm_config.additional_config
+        self.flashinfer_kda_backend = (
+            additional_config.get("flashinfer_kda_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto"
+        )
         self.kda_prefill_backend = _resolve_kda_prefill_backend(
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
@@ -348,6 +363,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             vllm_config.model_config.dtype,
             self.kda_lower_bound,
+            self.get_state_dtype()[1],
+            self.flashinfer_kda_backend,
         )
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
@@ -689,11 +706,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 lower_bound=lower_bound,
             )
 
-        # --- core attention: non-spec path (prefill or plain decode) ---
         core_attn_out_non_spec = None
-        # Only the plain-decode recurrent kernel can write straight into the
-        # layer output buffer; the chunked prefill kernel cannot, so this
-        # stays None there and the merge copy below runs as before.
+        # Backends that write directly into the output set ns_out below.
         ns_out = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert q_ns is not None
@@ -703,9 +717,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 recurrent_state, non_spec_state_indices_tensor, has_initial_state
             )
             if self.kda_prefill_backend == "flashkda":
-                # Non-spec step: write straight into the layer output buffer
-                # (dense token order, no merge copy). Step with spec-decode
-                # tokens: write to the workspace buffer and scatter below.
+                # Speculative steps need a separate buffer before scattering.
                 ns_out = None if use_spec else core_attn_out[:, :num_actual_tokens]
                 core_attn_out_non_spec, last_recurrent_state = self._flashkda_prefill(
                     q=_rearr(q_ns),
@@ -721,6 +733,29 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     conv_state=conv_state,
                     recurrent_state=recurrent_state,
                 )
+            elif self.kda_prefill_backend == "flashinfer":
+                if attn_metadata_narrowed.checkpoint is not None:
+                    raise NotImplementedError(
+                        "FlashInfer KDA prefill does not support "
+                        "state checkpoints. Use kda_prefill_backend=flashkda."
+                    )
+                assert non_spec_query_start_loc is not None
+                ns_out = None if use_spec else core_attn_out[:, :num_actual_tokens]
+                core_attn_out_non_spec, last_recurrent_state = flashinfer_kda_prefill(
+                    q=_rearr(q_ns),
+                    k=_rearr(k_ns),
+                    v=_rearr(v_ns),
+                    raw_g=g1_ns,
+                    raw_beta=beta_ns,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    lower_bound=lower_bound,
+                    initial_state=initial_state,
+                    cu_seqlens=non_spec_query_start_loc,
+                    out=ns_out,
+                    backend=self.flashinfer_kda_backend,
+                    inplace_state=True,
+                )
             else:
                 (
                     core_attn_out_non_spec,
@@ -730,8 +765,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     k=_rearr(k_ns),
                     v=_rearr(v_ns),
                     raw_g=g1_ns,
-                    # Chunk path wants the pre-sigmoided fp32 beta (its
-                    # kernels don't sigmoid); beta_ns is raw bf16 from forward.
+                    # Triton prefill expects beta after sigmoid.
                     beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
                     A_log=self.A_log,
                     g_bias=self.dt_bias,
@@ -742,7 +776,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     safe_gate=safe_gate,
                     lower_bound=lower_bound,
                 )
-            # Init cache
             scatter_states(
                 recurrent_state,
                 last_recurrent_state,

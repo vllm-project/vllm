@@ -261,7 +261,6 @@ class KDARecoverSSMCommitMetadata:
 class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     spec_token_start: int | None = None
     non_spec_token_start: int | None = None
-    flashinfer_prefill_query_start_loc: torch.Tensor | None = None
     flashinfer_prefill_seq_order: torch.Tensor | None = None
     recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
@@ -314,11 +313,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        additional_config = vllm_config.additional_config
-        self.use_flashinfer_prefill = (
-            isinstance(additional_config, dict)
-            and additional_config.get("kda_prefill_backend") == "flashinfer"
-        )
         self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
@@ -681,13 +675,14 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 align=align,
             )
 
-        flashinfer_prefill_query_start_loc = None
-        flashinfer_prefill_seq_order = None
-        if self.use_flashinfer_prefill and num_prefills > 0:
-            assert non_spec_query_start_loc is not None
-            flashinfer_prefill_query_start_loc = non_spec_query_start_loc.to(
-                torch.int64
+        flashinfer_prefill_query_start_loc = (
+            self._build_flashinfer_prefill_query_start_loc(
+                non_spec_query_start_loc, num_prefills
             )
+        )
+        flashinfer_prefill_seq_order = None
+        if flashinfer_prefill_query_start_loc is not None:
+            assert non_spec_query_start_loc is not None
             num_non_spec_requests = non_spec_query_start_loc.shape[0] - 1
             num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
             if num_non_spec_tokens > num_non_spec_requests:

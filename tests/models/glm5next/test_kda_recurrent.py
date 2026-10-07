@@ -26,6 +26,29 @@ H, D = 16, 128
 LOWER_BOUND = -5.0
 
 
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [("auto", torch.float32), ("float32", torch.float32), ("bfloat16", torch.bfloat16)],
+)
+def test_prefill_state_dtype_matches_model_cache(setting, expected):
+    from types import SimpleNamespace
+
+    from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
+    from vllm.models.glm5next.common.model import Glm5NextForCausalLM
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        cache_config=SimpleNamespace(
+            mamba_cache_dtype="auto", mamba_ssm_cache_dtype=setting
+        ),
+    )
+    assert (
+        Glm5NextLinearAttention.get_state_dtype(config)
+        == (Glm5NextForCausalLM.get_mamba_state_dtype_from_config(config))
+        == (torch.bfloat16, expected)
+    )
+
+
 def naive_recurrent_kda(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -273,6 +296,8 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     """Restoring both cached states must reproduce an uninterrupted prefill."""
     from types import SimpleNamespace
 
+    from vllm.v1.worker.workspace import WorkspaceManager
+
     from vllm.model_executor.layers.mamba.checkpoint import (
         MambaPrefillCheckpointMetadata,
     )
@@ -282,7 +307,6 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     from vllm.models.glm5next.common import kda
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
     from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
-    from vllm.v1.worker.workspace import WorkspaceManager
 
     if kda._resolve_kda_prefill_backend("auto", D, torch.bfloat16, -5) != "flashkda":
         pytest.skip("requires FlashKDA")
