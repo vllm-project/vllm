@@ -2210,19 +2210,16 @@ def test_mixed_memory_read_failure_does_not_notify_producer(recv_worker):
 
 
 @pytest.mark.parametrize(
-    "enabled,tp_rank,shared,expected",
+    "tp_rank,shared,expected",
     [
-        (True, 1, True, True),
-        (True, 0, True, False),
-        (True, 1, False, False),
-        (False, 1, True, False),
+        (1, True, True),
+        (0, True, False),
+        (1, False, False),
+        (0, False, False),
     ],
 )
-def test_hisparse_dram_rank0_only_decision(
-    monkeypatch, enabled, tp_rank, shared, expected
-):
-    """Only non-zero TP ranks sharing the host pool skip DRAM, and only opt-in."""
-    monkeypatch.setenv("VLLM_NIXL_HISPARSE_DRAM_RANK0_ONLY", str(int(enabled)))
+def test_hisparse_dram_rank0_only_decision(monkeypatch, tp_rank, shared, expected):
+    """Only non-zero TP ranks sharing the host pool skip DRAM."""
     monkeypatch.setattr(
         "vllm.v1.hisparse.runtime.use_shared_hisparse_host_pool",
         lambda vllm_config: shared,
@@ -2256,9 +2253,7 @@ def test_hisparse_dram_rank0_only_skips_local_dram_dlist():
     worker._dram_src_handles_by_block_size = {}
     worker.nixl_memory_type = "VRAM"
     worker._build_fa_local = MagicMock(  # type: ignore[method-assign]
-        return_value=np.array(
-            [[100, 10, 3], [110, 10, 3], [200, 10, 3], [210, 10, 3]]
-        )
+        return_value=np.array([[100, 10, 3], [110, 10, 3], [200, 10, 3], [210, 10, 3]])
     )
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.get_xfer_descs.side_effect = lambda blocks, memory_type: (
