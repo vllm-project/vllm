@@ -24,8 +24,9 @@ instance in the Instances table focuses the drill-down on it.
 
 - Grafana 10.4 or newer for the `vllm_*` dashboards (tested with 10.4, 11.6 and
   13.2)
-- A Prometheus data source (Prometheus 2.x or 3.x, or a compatible backend such
-  as Thanos or Mimir) that scrapes the `/metrics` endpoint of every vLLM server
+- A Prometheus data source (Prometheus 2.26 or newer, including 3.x, or a
+  compatible backend such as Thanos or Mimir) that scrapes the `/metrics`
+  endpoint of every vLLM server
 - vLLM metrics enabled, which is the default (do not pass `--disable-log-stats`)
 
 Set the **Scrape interval** of the Grafana data source to the Prometheus scrape
@@ -72,6 +73,10 @@ Things to keep in mind:
   the panels using them follow the Job and Instance filters only.
 - Process metrics (CPU, memory, file descriptors, uptime) are not exported with
   `--api-server-count` > 1.
+- Histogram panels combine the buckets of all selected servers, so pass the same
+  `--custom-histogram-buckets` to every server. The prompt and output length
+  buckets scale with `--max-model-len`; their panels only use the bucket
+  boundaries that all selected servers share.
 - Rows for optional features are collapsed and show no data unless the feature
   is enabled: `--kv-cache-metrics`, `--enable-mfu-metrics`, sleep mode, LoRA,
   speculative decoding, and `--kv-transfer-config` with the `NixlConnector`,

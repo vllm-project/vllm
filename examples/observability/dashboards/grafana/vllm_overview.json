@@ -3346,24 +3346,24 @@
     {
       "type": "timeseries",
       "title": "Prompt length",
-      "description": "Prompt tokens per finished request. Percentiles are interpolated within 1-2-5 buckets.\n\nMetric: `vllm:request_prompt_tokens`",
+      "description": "Prompt tokens per finished request. Percentiles are interpolated within 1-2-5 buckets. The buckets scale with `--max-model-len`; across models, only the bucket boundaries they share are used.\n\nMetric: `vllm:request_prompt_tokens`",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) and on (le) (count by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) == on () group_left () count(rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", le=\"+Inf\"}[$__rate_interval]))))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) and on (le) (count by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) == on () group_left () count(rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", le=\"+Inf\"}[$__rate_interval]))))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) and on (le) (count by (le) (rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) == on () group_left () count(rate(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", le=\"+Inf\"}[$__rate_interval]))))",
           "legendFormat": "p99",
           "refId": "C"
         },
@@ -3472,24 +3472,24 @@
     {
       "type": "timeseries",
       "title": "Output length",
-      "description": "Generated tokens per finished request. Percentiles are interpolated within 1-2-5 buckets.\n\nMetric: `vllm:request_generation_tokens`",
+      "description": "Generated tokens per finished request. Percentiles are interpolated within 1-2-5 buckets. The buckets scale with `--max-model-len`; across models, only the bucket boundaries they share are used.\n\nMetric: `vllm:request_generation_tokens`",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) and on (le) (count by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) == on () group_left () count(rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", le=\"+Inf\"}[$__rate_interval]))))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) and on (le) (count by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) == on () group_left () count(rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", le=\"+Inf\"}[$__rate_interval]))))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) and on (le) (count by (le) (rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__rate_interval])) == on () group_left () count(rate(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", le=\"+Inf\"}[$__rate_interval]))))",
           "legendFormat": "p99",
           "refId": "C"
         },
@@ -3729,14 +3729,14 @@
     {
       "type": "bargauge",
       "title": "Prompt length distribution",
-      "description": "Share of requests finished in the selected time range, per length bucket. Bars are labelled by the bucket's upper bound in tokens; *+Inf* holds requests above the largest bucket.\n\nMetric: `vllm:request_prompt_tokens`",
+      "description": "Share of requests finished in the selected time range, per length bucket. Bars are labelled by the bucket's upper bound in tokens; *+Inf* holds requests above the largest bucket. The buckets scale with `--max-model-len`; across models, only the bucket boundaries they share are shown.\n\nMetric: `vllm:request_prompt_tokens`",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "targets": [
         {
-          "expr": "sum by (le) (increase(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) / on () group_left () (sum(increase(vllm:request_prompt_tokens_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) > 0)",
+          "expr": "(sum by (le) (increase(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) and on (le) (count by (le) (increase(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) == on () group_left () count(increase(vllm:request_prompt_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", le=\"+Inf\"}[$__range])))) / on () group_left () (sum(increase(vllm:request_prompt_tokens_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) > 0)",
           "legendFormat": "{{le}}",
           "format": "heatmap",
           "instant": true,
@@ -3791,14 +3791,14 @@
     {
       "type": "bargauge",
       "title": "Output length distribution",
-      "description": "Share of requests finished in the selected time range, per length bucket. Bars are labelled by the bucket's upper bound in tokens; *+Inf* holds requests above the largest bucket.\n\nMetric: `vllm:request_generation_tokens`",
+      "description": "Share of requests finished in the selected time range, per length bucket. Bars are labelled by the bucket's upper bound in tokens; *+Inf* holds requests above the largest bucket. The buckets scale with `--max-model-len`; across models, only the bucket boundaries they share are shown.\n\nMetric: `vllm:request_generation_tokens`",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "targets": [
         {
-          "expr": "sum by (le) (increase(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) / on () group_left () (sum(increase(vllm:request_generation_tokens_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) > 0)",
+          "expr": "(sum by (le) (increase(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) and on (le) (count by (le) (increase(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) == on () group_left () count(increase(vllm:request_generation_tokens_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", le=\"+Inf\"}[$__range])))) / on () group_left () (sum(increase(vllm:request_generation_tokens_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[$__range])) > 0)",
           "legendFormat": "{{le}}",
           "format": "heatmap",
           "instant": true,
@@ -4091,7 +4091,11 @@
   "templating": {
     "list": [
       {
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "default",
+          "value": "default"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Data source",
