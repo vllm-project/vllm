@@ -3140,9 +3140,6 @@ class VllmConfig:
 
         if speculative_config is not None:
             if speculative_config.method in (
-                # https://github.com/vllm-project/vllm/pull/40704
-                "ngram",
-                "ngram_gpu",
                 "suffix",
                 "medusa",
                 "mlp_speculator",
@@ -3157,6 +3154,11 @@ class VllmConfig:
                 speculative_config.method not in ("dflash", "dspark", "pard2")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
+
+            # The V2 draft-model speculator has no token mapping between the
+            # draft and target vocabularies (TLI is TBD in #47172).
+            if getattr(speculative_config, "use_heterogeneous_vocab", False):
+                unsupported.append("heterogeneous-vocabulary draft models")
 
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
