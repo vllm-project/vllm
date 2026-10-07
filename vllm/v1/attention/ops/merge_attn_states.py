@@ -139,15 +139,15 @@ def merge_attn_states(
             return headdim % 4 == 0
         return headdim % 8 == 0
 
-    # On ROCm the native kernel is enabled only where it has been
-    # validated against Triton (gfx942, gfx950).
+    # CDNA3 and newer (gfx942, gfx950, gfx1250). gfx90a is CDNA2 and
+    # stays on the Triton merge.
     def supported_platform() -> bool:
         if current_platform.is_cuda():
             return True
         if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_mi3xx
+            from vllm.platforms.rocm import get_cdna_version
 
-            return on_mi3xx()
+            return get_cdna_version() >= 3
         return False
 
     if (
