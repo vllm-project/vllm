@@ -160,6 +160,7 @@ class EncoderRunner:
                 if cg_manager is not None
                 and cg_manager.is_captured()
                 and cg_manager.supports_modality(modality)
+                and "image_embeds" not in mm_kwargs_batch
                 else None
             )
             batch_outputs = (
