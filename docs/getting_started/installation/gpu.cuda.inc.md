@@ -439,6 +439,11 @@ BuildKit does not automatically invalidate cached layers when a mutable Git
 ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
 
+Set `BUILD_NIXL=true` to build NIXL from source. NIXL's release wheels do not
+include the NIXL EP extension for the PyTorch nightly used by the Rubin build.
+The build uses the NIXL version pinned in `requirements/kv_connectors.txt` and
+replaces the NIXL packages installed from the KV-connector requirements.
+
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
 newer, the first NCCL release with Rubin (SM107) support.

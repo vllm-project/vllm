@@ -355,6 +355,10 @@ steps:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          # TODO(arpera):
+          # Remove BUILD_NIXL=true once NIXL has a wheel built against torch 2.15
+          # For details: https://github.com/vllm-project/vllm/pull/60090
+          # Tracking issue report: https://github.com/ai-dynamo/nixl/issues/2297
           - |
             DOCKER_BUILDKIT=1 docker buildx build --load \
               $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134) \
@@ -366,6 +370,7 @@ steps:
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
               --build-arg INSTALL_RUBIN_PRERELEASE=true \
+              --build-arg BUILD_NIXL=true \
               --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
               --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
               --build-arg RUN_WHEEL_CHECK=false \
