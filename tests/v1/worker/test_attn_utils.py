@@ -797,6 +797,16 @@ def test_packed_compressed_group_gets_kernel_block_table():
     assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
 
 
+@pytest.mark.parametrize("kernel_block_size", [None, 1024])
+def test_split_group_rebuilds_draft_metadata(kernel_block_size):
+    """A mapped block table is only refreshed by a build(), so a split group
+    does not update draft decode metadata in place."""
+    group = _packed_group(4, 132, [128, 256])
+    group.create_metadata_builders(SimpleNamespace(), "cpu", kernel_block_size)
+    group.get_metadata_builder().supports_draft_decode_metadata_update = True
+    assert group.supports_draft_decode_metadata_update == (kernel_block_size is None)
+
+
 def test_split_group_maps_manager_block_table():
     """Groups split in a dense layout keep manager block tables; builders get
     b * blocks_per_kv_block + j against the view allocated in kernel blocks."""

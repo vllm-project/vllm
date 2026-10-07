@@ -428,7 +428,11 @@ class AttentionGroup:
 
     @property
     def supports_draft_decode_metadata_update(self) -> bool:
-        return self.get_metadata_builder().supports_draft_decode_metadata_update
+        # A mapped block table is only refreshed by a build().
+        return (
+            self.kernel_block_size is None
+            and self.get_metadata_builder().supports_draft_decode_metadata_update
+        )
 
     def update_draft_decode_metadata(
         self,
