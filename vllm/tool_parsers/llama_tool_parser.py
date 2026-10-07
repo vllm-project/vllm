@@ -3,7 +3,11 @@
 
 from typing import Any
 
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import (
+    ResponseFormatTextJSONSchemaConfig,
+    ResponseTextConfig,
+    ToolChoiceFunction,
+)
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -11,6 +15,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.engine.registered_adapters import LlamaJsonParserToolAdapter
+from vllm.sampling_params import StructuredOutputsParams
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 
 def _empty_object_schema() -> dict[str, Any]:
@@ -83,4 +89,51 @@ class Llama3JsonToolParser(LlamaJsonParserToolAdapter):  # type: ignore[valid-ty
                     and getattr(function, "parameters", None) is None
                 ):
                     function.parameters = _empty_object_schema()
-        return super().adjust_request(request)
+        return self._install_tool_schema(request)
+
+    def _install_tool_schema(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Install the tool-choice schema directly, bypassing the base
+        class's ``supports_required_and_named`` gate.
+
+        The shared ``ToolParser.adjust_request`` only installs a
+        structured-outputs schema when ``supports_required_and_named`` is
+        True, since parsers that *don't* support it are expected to read
+        required/named choice from their own native format instead. This
+        parser is a special case: it sets ``supports_required_and_named =
+        False`` for a different reason (streaming gets one delta at a time,
+        so the generic cumulative-document helpers for required/named
+        choice don't apply), but it still needs the schema installed so
+        guided decoding constrains generation to bare parameters. Inlined
+        here rather than relying on the base method's gate.
+        """
+        if not request.tools:
+            return request
+        structured_outputs = getattr(request, "structured_outputs", None)
+        if (
+            structured_outputs is not None
+            and structured_outputs.structural_tag is not None
+        ):
+            return request
+        json_schema_from_tool = get_json_schema_from_tools(
+            tool_choice=request.tool_choice,
+            tools=request.tools,
+            parallel_tool_calls=request.parallel_tool_calls,
+        )
+        if json_schema_from_tool is not None:
+            if isinstance(request, ChatCompletionRequest):
+                request.structured_outputs = StructuredOutputsParams(
+                    json=json_schema_from_tool  # type: ignore[call-arg]
+                )
+                request.response_format = None
+            if isinstance(request, ResponsesRequest):
+                request.text = ResponseTextConfig(
+                    format=ResponseFormatTextJSONSchemaConfig(
+                        type="json_schema",
+                        name="tool_calling_response",
+                        schema=json_schema_from_tool,
+                        strict=True,
+                    )
+                )
+        return request

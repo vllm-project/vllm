@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Iterable, Sequence
 
 from openai.types.responses import ResponseFunctionToolCall
@@ -10,6 +11,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.parser.json_scan import JsonWalker, array_items, object_members
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 
@@ -73,29 +75,18 @@ def scan_json_object_end(raw: str, start: int) -> int | None:
     ``raw[start]`` (which must be ``{``), or ``None`` when it is still
     unterminated. String- and escape-aware so braces inside strings do not
     mislead the depth count."""
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(raw)):
-        ch = raw[i]
-        if escape:
-            escape = False
-            continue
-        if in_string:
-            if ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return None
+    end: list[int] = []
+
+    def on_outside(i: int, ch: str, depth: int) -> bool:
+        if ch == "}" and depth == 0:
+            end.append(i + 1)
+            return False
+        return True
+
+    JsonWalker(start=start, brackets="object", key_depth=None).advance(
+        raw, on_outside_char=on_outside
+    )
+    return end[0] if end else None
 
 
 def extract_json_member_object(raw: str, key: str) -> str | None:
@@ -111,40 +102,107 @@ def extract_json_member_object(raw: str, key: str) -> str | None:
     the previous one; the scanner is string/escape-aware so a matching literal
     inside another value cannot mislead it, and it recovers a partial span when
     the wrapper is truncated (where ``json.loads`` would fail)."""
-    depth = 0
-    in_string = False
-    escape = False
-    string_start = -1
-    last_string: str | None = None
-    for i, ch in enumerate(raw):
-        if escape:
-            escape = False
-            continue
-        if in_string:
-            if ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-                if depth == 1:
-                    last_string = raw[string_start + 1 : i]
-            continue
-        if ch == '"':
-            in_string = True
-            string_start = i
-        elif ch == ":" and depth == 1 and last_string == key:
-            value_start = i + 1
-            while value_start < len(raw) and raw[value_start] in _JSON_WS:
-                value_start += 1
-            if value_start >= len(raw):
-                return None
-            if raw[value_start] != "{":
-                raise ValueError(f"member {key!r} must be a JSON object")
-            value_end = scan_json_object_end(raw, value_start)
-            if value_end is None:
-                return raw[value_start:]
-            return raw[value_start:value_end]
-        elif ch in "{[":
-            depth += 1
-        elif ch in "}]":
-            depth -= 1
-    return None
+    result: list[str | None] = []
+
+    def on_outside(i: int, ch: str, depth: int) -> bool:
+        if ch != ":" or depth != 1 or walker.last_key != key:
+            return True
+        value_start = i + 1
+        while value_start < len(raw) and raw[value_start] in _JSON_WS:
+            value_start += 1
+        if value_start >= len(raw):
+            result.append(None)
+            return False
+        if raw[value_start] != "{":
+            raise ValueError(f"member {key!r} must be a JSON object")
+        value_end = scan_json_object_end(raw, value_start)
+        if value_end is None:
+            result.append(raw[value_start:])
+        else:
+            result.append(raw[value_start:value_end])
+        return False
+
+    walker = JsonWalker(brackets="any", key_depth=1)
+    walker.advance(raw, on_outside_char=on_outside)
+    return result[0] if result else None
+
+
+def _collect_type_edits(
+    raw: str,
+    start: int,
+    end: int,
+    schema: dict,
+    edits: list[tuple[int, int, str]],
+) -> None:
+    """Record ``(start, end, replacement)`` for every scalar span in
+    ``raw[start:end]`` whose literal type disagrees with *schema*.
+
+    Mirrors ``ParserEngine._coerce_dict``/``_coerce_value`` but works on
+    text spans (objects recurse through ``properties``, arrays ``items``),
+    and is stricter: a value already valid for one of several declared
+    types (e.g. a string under ``{"type": ["string", "null"]}``) is left
+    exactly as the model wrote it, where ``_coerce_value``'s best-effort
+    priority order (null > integer > ... > string) would still prefer
+    reinterpreting it. Splicing a verbatim model span demands that
+    stricter guarantee; re-serialising callers don't need it.
+    """
+    # Deferred import: vllm.parser.engine.parser_engine imports
+    # vllm.parser.abstract_parser, which imports this module.
+    from vllm.parser.engine.parser_engine import ParserEngine
+    from vllm.tool_parsers.utils import is_valid_for_schema_type
+
+    if raw[start] == "{":
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for key, value_start, value_end in object_members(raw, start, end):
+                sub_schema = properties.get(key)
+                if isinstance(sub_schema, dict):
+                    _collect_type_edits(raw, value_start, value_end, sub_schema, edits)
+        return
+    if raw[start] == "[":
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for value_start, value_end in array_items(raw, start, end):
+                _collect_type_edits(raw, value_start, value_end, items, edits)
+        return
+    try:
+        value = json.loads(raw[start:end])
+    except (json.JSONDecodeError, ValueError):
+        return
+    if is_valid_for_schema_type(value, schema):
+        return
+    try:
+        coerced, changed = ParserEngine._coerce_value(value, schema)
+    except RecursionError:
+        # json.loads above only covers this span; _coerce_value re-enters
+        # json.loads on the decoded string via coerce_to_schema_type, whose
+        # deep nesting can raise RecursionError too -- left uncoerced, as legacy did.
+        return
+    if changed:
+        edits.append((start, end, json.dumps(coerced, ensure_ascii=False)))
+
+
+def splice_types(raw: str, start: int, end: int, schema: dict) -> str:
+    """``raw[start:end]`` with schema-coerced scalars substituted in place,
+    every other byte kept verbatim.
+
+    Re-serialising the decoded object (what ``ParserEngine._fix_arg_types``
+    does by default) rewrites the model's separators, so a parser whose
+    argument stream is append-only (verbatim, prefix-stable) would have its
+    correction dropped. Splicing only rewrites values that actually change,
+    keeping the result prefix-compatible.
+    """
+    edits: list[tuple[int, int, str]] = []
+    _collect_type_edits(raw, start, end, schema, edits)
+    if not edits:
+        return raw[start:end]
+    # Edits arrive in document order and never overlap, so the result is
+    # assembled in one pass instead of copying the whole string per edit.
+    out: list[str] = []
+    cursor = start
+    for edit_start, edit_end, text in edits:
+        out.append(raw[cursor:edit_start])
+        out.append(text)
+        cursor = edit_end
+    out.append(raw[cursor:end])
+    return "".join(out)

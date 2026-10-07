@@ -15,6 +15,9 @@ serving layer calls `parse` / `parse_delta` and `is_reasoning_end` on it.
   non-streaming and streaming paths; `token_id_scanner.py` pre-lexes
   special-token ids and `incremental_lexer.py` lexes text; `adapters.py`
   exposes an engine through the legacy reasoning/tool parser interfaces.
+- `json_scan.py` — resumable structural walk over incomplete JSON
+  (`JsonWalker`); prefer it for escape/string/depth scanning shared across
+  model parsers.
 - `<model>.py` — one file per model family. Most subclass `ParserEngine`
   (`deepseek_v4.py`, `qwen3.py`, ...); a few are `DelegatingParser` wrappers
   over legacy parsers (`harmony.py`, `kimi_k3.py`).
