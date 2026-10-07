@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
@@ -15,6 +16,7 @@ from vllm.model_executor.models.startlux_decision import (
 )
 
 
+@pytest.mark.skip_global_cleanup
 class TestStartLuxDecisionPooler(unittest.TestCase):
     def test_last_positions_keep_raw_candidate_logits(self):
         # Nonconsecutive vocabulary rows catch TP-local/vocabulary index confusion.

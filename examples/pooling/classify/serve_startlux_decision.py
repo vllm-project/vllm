@@ -3,7 +3,7 @@
 """Serve StartLux's text decision protocol using native vLLM pooling.
 
 Put the pinned StartLux-Decision source on PYTHONPATH for its prompt renderer
-and answer protocol. No CUDA model or graph is constructed by this adapter.
+and answer protocol. This example uses eager execution; graph validation is separate.
 """
 
 import argparse
@@ -91,9 +91,8 @@ def main():
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--max-model-len", type=int, default=8192)
     parser.add_argument("--port", type=int, default=18190)
-    parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument("--enforce-eager", action="store_true", default=True)
     parser.add_argument("--additional-config", type=json.loads)
-    parser.add_argument("--compilation-config", type=json.loads)
     args = parser.parse_args()
     engine = VLLMStartLuxDecision(
         args.model,
@@ -104,15 +103,6 @@ def main():
         gpu_memory_utilization=0.75,
         enforce_eager=args.enforce_eager,
         additional_config=args.additional_config or {},
-        compilation_config=args.compilation_config
-        or (
-            None
-            if args.enforce_eager
-            else {
-                "cudagraph_mode": "PIECEWISE",
-                "cudagraph_capture_sizes": [256, 384, 512, 768, 1024, 2048, 4096],
-            }
-        ),
     )
     app = FastAPI()
     lock = threading.Lock()
