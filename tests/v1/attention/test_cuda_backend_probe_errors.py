@@ -89,46 +89,54 @@ def test_get_valid_backends_keeps_probing_after_failure():
     assert valid
 
 
-def test_sm90_nope_mla_prefers_flashinfer_without_changing_rope_order():
-    backend_cls = MagicMock()
-    backend_cls.validate_configuration.return_value = []
+@pytest.mark.parametrize("head_size", [512, 576], ids=["nope", "rope"])
+@pytest.mark.parametrize("fallback", [False, True], ids=["preferred", "fallback"])
+def test_sm90_sparse_backend_selection(head_size, fallback):
+    config = SELECTOR_CONFIG._replace(
+        head_size=head_size,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=64,
+        use_mla=True,
+        use_sparse=True,
+    )
     sparse_backends = {
         AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
         AttentionBackendEnum.FLASHMLA_SPARSE,
         AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90,
     }
+    backends = {}
+    for backend in sparse_backends:
+        backend_cls = MagicMock()
+        backend_cls.full_cls_name.return_value = ("test_backends", backend.name)
+        backend_cls.validate_configuration.return_value = []
+        backends[backend] = backend_cls
 
-    def sparse_order(head_size: int) -> list[AttentionBackendEnum]:
-        config = SELECTOR_CONFIG._replace(
-            head_size=head_size,
-            use_mla=True,
-            use_sparse=True,
+    def load_backend(backend):
+        if backend not in sparse_backends:
+            unsupported = MagicMock()
+            unsupported.validate_configuration.return_value = ["requires sparse MLA"]
+            return unsupported
+        if fallback and backend != AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90:
+            raise ImportError(f"{backend.name} unavailable")
+        return backends[backend]
+
+    with (
+        patch("vllm.platforms.cuda._get_attn_backend_class", side_effect=load_backend),
+        patch.object(CudaPlatform, "get_device_capability", return_value=SM90),
+    ):
+        selected = CudaPlatform.get_attn_backend_cls(
+            selected_backend=None,
+            attn_selector_config=config,
+            num_heads=32,
         )
-        with patch(
-            "vllm.platforms.cuda._get_attn_backend_class",
-            return_value=backend_cls,
-        ):
-            valid, _ = CudaPlatform.get_valid_backends(
-                device_capability=SM90,
-                attn_selector_config=config,
-                num_heads=32,
-            )
-        return [
-            candidate.backend
-            for candidate in valid
-            if candidate.backend in sparse_backends
-        ]
 
-    assert sparse_order(512) == [
-        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90,
-        AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
-        AttentionBackendEnum.FLASHMLA_SPARSE,
-    ]
-    assert sparse_order(576) == [
-        AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
-        AttentionBackendEnum.FLASHMLA_SPARSE,
-        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90,
-    ]
+    expected = (
+        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90
+        if fallback
+        else AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE
+    )
+    assert selected == f"test_backends.{expected.name}"
 
 
 def test_selected_backend_probe_failure_raises_value_error_with_cause():

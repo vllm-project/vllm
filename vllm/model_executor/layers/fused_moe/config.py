@@ -6,6 +6,7 @@ from typing import Union
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.config.kernel import MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
@@ -118,7 +119,7 @@ class RoutingMethodType(IntEnum):
     # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
     SigmoidRenorm = (6,)
     # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
-    # (routeScale=1.0, epsilon=1e-20)
+    # (routeScale=routed_scaling_factor, epsilon=1e-20)
     MiniMax2 = (7,)
     # Sigmoid: Sigmoid -> TopK (no renormalization)
     Sigmoid = (8,)
@@ -137,7 +138,6 @@ def get_routing_method_type(
     renormalize: bool,
     num_expert_group: int | None,
     has_e_score_bias: bool,
-    routed_scaling_factor: float | None = 1.0,
 ) -> RoutingMethodType:
     if scoring_func == "sqrtsoftplus":
         # DeepSeek V4 uses sqrtsoftplus routing with optional routing bias
@@ -153,9 +153,7 @@ def get_routing_method_type(
                 return RoutingMethodType.Unspecified
             if (num_expert_group or 0) > 0:
                 return RoutingMethodType.DeepSeekV3
-            if routed_scaling_factor in (None, 1.0):
-                return RoutingMethodType.MiniMax2
-            return RoutingMethodType.Unspecified
+            return RoutingMethodType.MiniMax2
         else:
             return RoutingMethodType.Unspecified
 
@@ -1071,6 +1069,12 @@ class FusedMoEParallelConfig:
         )
 
     @property
+    def use_passthrough_all2all(self):
+        # Not gated on use_all2all_kernels: the experts dispatch and combine
+        # internally in every EP topology, including TP-only.
+        return self.all2all_backend == "passthrough"
+
+    @property
     def use_mori_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend in (
             "mori_high_throughput",
@@ -1250,6 +1254,12 @@ class FusedMoEParallelConfig:
         )
 
 
+# Model types validated for VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1. This flag
+# also changes the MXFP4 weight shuffle layout, so using it on other models
+# can produce garbled output.
+_AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES = ("deepseek_v41", "deepseek_v41_text")
+
+
 # Adapted from pplx-kernels tests/all_to_all_utils.py
 @dataclass
 class FusedMoEConfig:
@@ -1317,6 +1327,11 @@ class FusedMoEConfig:
     tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
+    # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on
+    # ROCm/AITER. Opt-in via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1; rejected
+    # for any other model type. Resolved here, not in the forward path,
+    # because get_current_vllm_config() isn't set there.
+    use_mxfp4_w4a4_dsv4: bool = False
 
     def __post_init__(self):
         from vllm._aiter_ops import rocm_aiter_ops
@@ -1347,6 +1362,29 @@ class FusedMoEConfig:
             self.aiter_fmoe_shared_expert_enabled = (
                 rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
             )
+
+        if self.rocm_aiter_fmoe_enabled and envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4:
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+            model_type = (
+                getattr(vllm_config.model_config.hf_config, "model_type", None)
+                if vllm_config is not None
+                else None
+            )
+            if model_type not in _AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES:
+                raise ValueError(
+                    f"VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 only supports "
+                    f"model_type in {_AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES}, "
+                    f"got {model_type!r}. Unset this env var for this model."
+                )
+            if not rocm_aiter_ops.fused_moe_supports_quant_dtype_a():
+                raise ValueError(
+                    "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 needs an AITER build "
+                    "with fused_moe(quant_dtype_a=...) support "
+                    "(ROCm/aiter#5439+). Upgrade AITER or unset this env var."
+                )
+            self.use_mxfp4_w4a4_dsv4 = True
 
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -1497,6 +1535,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_passthrough_all2all(self):
+        return self.moe_parallel_config.use_passthrough_all2all
 
     @property
     def use_mori_kernels(self):

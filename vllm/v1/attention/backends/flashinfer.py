@@ -700,6 +700,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
+        self._num_speculative_tokens = vllm_config.num_speculative_tokens
         self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
@@ -858,6 +859,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.use_trtllm_gen_varlen_decode = self._uses_trtllm_gen_varlen_decode(
             vllm_config, self.flashinfer_trtllm_api_decode_kernel, self.use_dcp
+        )
+        # Fused draft steps advance seq_lens in place and keep block tables fixed,
+        # so one trtllm-gen decode build serves every step (not DCP-local seq_lens).
+        self.supports_draft_decode_metadata_update = (
+            self.flashinfer_trtllm_api_decode_kernel
+            == FlashInferDecodeKernel.TRTLLM_GEN
+            and not self.use_dcp
         )
         self._init_reorder_batch_threshold(
             1,
@@ -1446,8 +1454,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         if needs_seq_lens_cpu:
-            with gpu_sync_allowed():
-                seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            if (
+                self._num_speculative_tokens == 0
+                and common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            ):
+                # No speculative token accounting, so the upper bound is exact.
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            else:
+                with gpu_sync_allowed():
+                    seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
         else:
             seq_lens_cpu = None
 
@@ -1828,6 +1843,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
+
+    def update_draft_decode_metadata(self, _metadata: FlashInferMetadata) -> None:
+        pass
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:

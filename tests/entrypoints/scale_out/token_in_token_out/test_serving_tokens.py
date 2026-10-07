@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import json
 
 import httpx
+import numpy as np
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 from transformers import AutoTokenizer
@@ -16,6 +19,7 @@ from vllm.v1.engine.detokenizer import check_stop_strings
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 GEN_ENDPOINT = "/inference/v1/generate"
+ABORT_ENDPOINT = "/inference/v1/abort_requests"
 
 
 def get_vocab_size(model_name):
@@ -179,7 +183,7 @@ async def test_generate_sampling_mask(client):
         assert token_id in support
         # processed_logprobs: exactly the support carries finite probability.
         for top in entry["top_logprobs"]:
-            in_support = int(top["token"].removeprefix("token_id:")) in support
+            in_support = top["token_id"] in support
             assert in_support == (top["logprob"] > -9999.0)
 
 
@@ -309,6 +313,48 @@ async def test_generate_logprobs(client, logprobs_value):
         assert "logprob" in entry
         assert len(entry["top_logprobs"]) >= 1
         assert len(entry["top_logprobs"]) == max(logprobs_value, 1)
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_token_id_logprobs(client):
+    token_ids = [11, 22, 33, 44, 55]
+    rows = [[33], [44, 100], [55]]
+    sampling_params = {
+        "max_tokens": 1,
+        "prompt_logprobs": 0,
+        "prompt_logprob_token_ids": rows,
+        "prompt_logprob_start": 1,
+    }
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": token_ids,
+        "sampling_params": sampling_params,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+
+    scores = np.load(io.BytesIO(base64.b64decode(data["prompt_token_id_logprobs"])))
+    assert scores.shape == (3, 2)
+    for row, target in enumerate(token_ids[2:]):
+        expected = data["prompt_logprobs"][row + 2][str(target)]["logprob"]
+        assert scores[row, 0] == pytest.approx(expected, abs=1e-3)
+    assert np.isneginf(scores[[0, 2], 1]).all()
+
+    stream_only_ids = {"prompt_logprob_token_ids": rows}
+    resp = await client.post(
+        GEN_ENDPOINT,
+        json={**payload, "sampling_params": stream_only_ids, "stream": True},
+    )
+    assert resp.status_code == 400
+    assert "prompt_logprob_token_ids" in resp.text
+
+    too_few_rows = {**sampling_params, "prompt_logprob_token_ids": rows[:2]}
+    resp = await client.post(
+        GEN_ENDPOINT, json={**payload, "sampling_params": too_few_rows}
+    )
+    assert resp.status_code == 400
+    assert "scored rows" in resp.text
 
 
 @pytest.mark.asyncio
@@ -541,3 +587,266 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     completions_res = completions_data["choices"][0]["message"]["content"]
 
     assert generate_res == completions_res
+
+
+def _structured_chat_body(messages, **overrides) -> dict:
+    return {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": True},
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                },
+            },
+        },
+        **overrides,
+    }
+
+
+async def _render_then_generate(client, body) -> tuple[dict, list[int]]:
+    render_resp = await client.post("/v1/chat/completions/render", json=body)
+    render_resp.raise_for_status()
+    generate_request = render_resp.json()
+    generate_resp = await client.post(GEN_ENDPOINT, json=generate_request)
+    generate_resp.raise_for_status()
+    return generate_request, generate_resp.json()["choices"][0]["token_ids"]
+
+
+# deepseek_v3 reads `enable_thinking` from the template kwargs and uses Qwen3's
+# <think> tokens, so the engine gates structured outputs differently when
+# either reasoning field is dropped between render and generate.
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not forward reasoning fields to the engine",
+)
+@pytest.mark.parametrize(
+    "server", [["--reasoning-parser", "deepseek_v3"]], indirect=True
+)
+async def test_render_then_generate_forwards_reasoning_parser_kwargs(client, messages):
+    """With thinking on, structured outputs must wait for the reasoning to
+    end on generate, the same as on chat."""
+    body = _structured_chat_body(messages, return_token_ids=True)
+    chat_resp = await client.post("/v1/chat/completions", json=body)
+    chat_resp.raise_for_status()
+
+    generate_request, token_ids = await _render_then_generate(client, body)
+
+    assert generate_request["reasoning_ended"] is False
+    assert token_ids == chat_resp.json()["choices"][0]["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not forward reasoning fields to the engine",
+)
+@pytest.mark.parametrize(
+    "server", [["--reasoning-parser", "deepseek_v3"]], indirect=True
+)
+async def test_render_then_generate_forwards_reasoning_ended(
+    client, tokenizer, messages
+):
+    """`include_reasoning=false` constrains from the first token on chat, so
+    generate must too, even though the engine's parser expects thinking."""
+    body = _structured_chat_body(messages, include_reasoning=False)
+
+    generate_request, token_ids = await _render_then_generate(client, body)
+
+    assert generate_request["reasoning_ended"] is True
+    output = json.loads(tokenizer.decode(token_ids, skip_special_tokens=True))
+    assert isinstance(output["count"], int)
+
+
+def _chat_prompt_token_ids(tokenizer, messages) -> list[int]:
+    return tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        enable_thinking=False,  # default with Qwen3
+        return_dict=True,  # default with Transformers v5
+    ).input_ids
+
+
+def _text_mode_payload(token_ids, **sampling_params) -> dict:
+    return {
+        "model": MODEL_NAME,
+        "token_ids": token_ids,
+        "sampling_params": {"max_tokens": 24, "temperature": 0.0, **sampling_params},
+        "output_mode": "text",
+        "stream": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+async def test_text_mode_matches_chat_completions(client, tokenizer, messages):
+    token_ids = _chat_prompt_token_ids(tokenizer, messages)
+
+    resp = await client.post(GEN_ENDPOINT, json=_text_mode_payload(token_ids))
+    resp.raise_for_status()
+    data = resp.json()
+    assert data["output_mode"] == "text"
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 24,
+        "temperature": 0.0,
+        "stream": False,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    chat_resp = await client.post("/v1/chat/completions", json=payload)
+    chat_content = chat_resp.json()["choices"][0]["message"]["content"]
+
+    assert data["choices"][0]["text"] == chat_content
+    assert data["choices"][0]["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+async def test_text_mode_stream_matches_non_stream(client, tokenizer, messages):
+    token_ids = _chat_prompt_token_ids(tokenizer, messages)
+    payload = _text_mode_payload(token_ids)
+
+    non_stream = await client.post(GEN_ENDPOINT, json=payload)
+    non_stream.raise_for_status()
+
+    chunks = []
+    async with client.stream(
+        "POST", GEN_ENDPOINT, json={**payload, "stream": True}
+    ) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunks.append(json.loads(line[len("data: ") :]))
+
+    assert {chunk["output_mode"] for chunk in chunks} == {"text"}
+    assert chunks[-1]["choices"][0]["finish_reason"] is not None
+    streamed_text = "".join(chunk["choices"][0]["text"] for chunk in chunks)
+    assert streamed_text == non_stream.json()["choices"][0]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        pytest.param(
+            {"sampling_params": {"detokenize": False}}, "detokenize", id="no-detok"
+        ),
+        pytest.param({"output_mode": "derender"}, "output_mode", id="unsupported"),
+    ],
+)
+async def test_text_mode_invalid_requests_return_400(client, overrides, expected):
+    payload = {
+        **_text_mode_payload([1, 2, 3], max_tokens=5),
+        **overrides,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+
+    assert resp.status_code == 400
+    assert expected in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="--tokens-only is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
+async def test_text_mode_rejected_when_tokens_only(client):
+    """Without a tokenizer the detokenizer returns "", so the request must
+    fail instead of answering 200 with empty text."""
+    resp = await client.post(GEN_ENDPOINT, json=_text_mode_payload([1, 2, 3]))
+    assert resp.status_code == 400
+    assert "requires a tokenizer" in resp.json()["error"]["message"]
+
+    payload = {**_text_mode_payload([1, 2, 3]), "output_mode": "tokens"}
+    payload["sampling_params"]["detokenize"] = False
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not serve /inference/v1/abort_requests",
+)
+@pytest.mark.parametrize("output_mode", ["tokens", "text"])
+async def test_stream_delivers_abort_finish_chunk(
+    client, tokenizer, messages, output_mode
+):
+    """The final output after an abort has no new token IDs, but the
+    stream must still deliver its finish reason."""
+    payload = {
+        **_text_mode_payload(
+            _chat_prompt_token_ids(tokenizer, messages),
+            max_tokens=900,
+            ignore_eos=True,
+        ),
+        "output_mode": output_mode,
+        "stream": True,
+        "request_id": f"{output_mode}-abort-e2e",
+    }
+
+    chunks = []
+    aborted = False
+    async with client.stream("POST", GEN_ENDPOINT, json=payload) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            chunk = json.loads(line[len("data: ") :])
+            chunks.append(chunk)
+            if not aborted and chunk["choices"] and chunk["choices"][0]["token_ids"]:
+                abort = await client.post(
+                    ABORT_ENDPOINT,
+                    json={"request_ids": [chunk["request_id"]]},
+                )
+                assert abort.status_code == 200
+                aborted = True
+
+    assert aborted
+    assert {chunk["output_mode"] for chunk in chunks} == {output_mode}
+    final_choice = chunks[-1]["choices"][0]
+    assert final_choice["finish_reason"] == "abort"
+    generated = sum(len(chunk["choices"][0]["token_ids"] or []) for chunk in chunks)
+    assert generated < 900
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not serve /inference/v1/abort_requests",
+)
+async def test_abort_requests_is_served_without_tokens_only(client):
+    resp = await client.post(
+        ABORT_ENDPOINT, json={"request_ids": ["generate-tokens-unknown"]}
+    )
+    assert resp.status_code == 200
+
+    resp = await client.post(ABORT_ENDPOINT, json={})
+    assert resp.status_code == 400
+
+    # The unauthenticated path is only served with --tokens-only.
+    resp = await client.post(
+        "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
+    )
+    assert resp.status_code == 404

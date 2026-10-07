@@ -840,6 +840,12 @@ class GPUModelRunner(
         self.num_accepted_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
+        # The count includes the bonus token, so one is the minimum, and the
+        # recurrent kernels pick their state slot as `accepted - 1`. Dummy runs
+        # skip `_prepare_inputs`, so the zeros from the allocation would reach
+        # those kernels as index -1 and fault on the out-of-bounds read.
+        self.num_accepted_tokens.np.fill(1)
+        self.num_accepted_tokens.copy_to_gpu()
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -967,11 +973,6 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
-        self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
-        if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
-            self.mamba_prev_last_scheduled_idx = self._make_buffer(
-                self.max_num_reqs, dtype=torch.int32
-            )
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -997,6 +998,9 @@ class GPUModelRunner(
         """
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
+
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        self.late_interaction_runner.release_queries(query_keys)
 
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
@@ -1608,17 +1612,6 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
 
-            if self.cache_config.mamba_cache_mode == "all":
-                mamba_utils.postprocess_mamba_all(
-                    scheduler_output,
-                    self.kv_cache_config,
-                    self.input_batch,
-                    self.requests,
-                    self.mamba_state_idx,
-                    self.num_spec_tokens,
-                    num_reqs,
-                )
-
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
     ) -> CachedRequestState:
@@ -2127,15 +2120,6 @@ class GPUModelRunner(
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
 
-        if self.mamba_prev_last_scheduled_idx is not None:
-            mamba_utils.preprocess_mamba_all_specdec(
-                scheduler_output,
-                self.input_batch,
-                self.mamba_state_idx,
-                num_reqs,
-                self.mamba_prev_last_scheduled_idx,
-            )
-
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
@@ -2221,7 +2205,7 @@ class GPUModelRunner(
             )
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens] += drift
 
-        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+        use_spec_decode = self.speculative_config is not None
         if not use_spec_decode:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
@@ -2248,6 +2232,18 @@ class GPUModelRunner(
                 num_draft_tokens[req_idx] = draft_len
                 if num_scheduled_tokens[req_idx] == draft_len + 1:
                     num_decode_draft_tokens[req_idx] = draft_len
+            # Some recurrent backends may read the previous step's state at an
+            # offset that only the speculative path applies. So a decode step
+            # that got no drafts must still count as a speculative row with
+            # zero drafts, not as a plain decode. Prompt chunks are left out:
+            # their tokens are prompt tokens and carry no such offset.
+            zero_draft_decode_mask = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                >= self.input_batch.num_prompt_tokens[:num_reqs]
+            ) & (num_scheduled_tokens[:num_reqs] == 1)
+            num_decode_draft_tokens[
+                (num_decode_draft_tokens < 0) & zero_draft_decode_mask
+            ] = 0
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens
             )
@@ -2511,13 +2507,6 @@ class GPUModelRunner(
                         :num_reqs_padded
                     ],
                 )
-                if (
-                    isinstance(builder, Mamba2AttentionMetadataBuilder)
-                    and self.mamba_prev_last_scheduled_idx is not None
-                ):
-                    extra_attn_metadata_args["prev_last_scheduled_idx"] = (
-                        self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
-                    )
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(
@@ -3051,10 +3040,8 @@ class GPUModelRunner(
             )
             self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
 
-            # Only set connector mapping if the model actually has a connector.
-            # Some multimodal models inherit a stub `get_num_mm_connector_tokens`
-            # from `SupportsMultiModal`, which returns None and should not be
-            # treated as a signal that connector LoRA is supported.
+            # Only set connector mapping if the model actually has a connector
+            # and reports connector token counts.
             mm_mapping = (
                 self.model.get_mm_mapping()  # type: ignore[attr-defined]
                 if hasattr(self.model, "get_mm_mapping")
@@ -4343,7 +4330,7 @@ class GPUModelRunner(
                         self.mamba_state_idx,
                     )
 
-            use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+            use_spec_decode = self.speculative_config is not None
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
             slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
@@ -4832,6 +4819,23 @@ class GPUModelRunner(
             self.input_batch.is_token_ids[i, pos] = True
             self.input_batch.num_tokens_no_spec[i] = pos + 1
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+
+    @contextmanager
+    def preserve_serving_state(self):
+        multi_block_table = self.input_batch.block_table
+        saved = [
+            (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
+            for bt in multi_block_table.block_tables
+        ]
+        multi_block_table.clear()
+        try:
+            yield
+        finally:
+            for bt, (saved_gpu, saved_cpu) in zip(
+                multi_block_table.block_tables, saved
+            ):
+                bt.block_table.gpu.copy_(saved_gpu)
+                bt.block_table.cpu.copy_(saved_cpu)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
@@ -5530,9 +5534,11 @@ class GPUModelRunner(
                 )
 
             if weights_path is not None:
-                # The revision belongs to the model we are reloading away from,
-                # so it must not be carried over to the new path.
+                # The revision and any object-storage `model_weights` source
+                # belong to the model we are reloading away from, so they must
+                # not be carried over to the new path.
                 self.model_config.model = weights_path
+                self.model_config.model_weights = ""
                 self.model_config.revision = None
             weights_iterator = model_loader.get_all_weights(self.model_config, model)
             weights_iterator = cast(
@@ -5718,6 +5724,9 @@ class GPUModelRunner(
          - during profile_run
          - during DP rank dummy run
         """
+        # The worker also resolves this flag and passes randomize_inputs, but
+        # V1 has internal dummy runs (e.g. CUDA graph capture) that don't go
+        # through the worker, so keep the check here too.
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         randomize_inputs = randomize_inputs or (
             envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
@@ -6403,7 +6412,7 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
-    def profile_run(self) -> None:
+    def profile_run(self, randomize_inputs: bool = False) -> None:
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             mm_config = self.model_config.multimodal_config
@@ -6464,7 +6473,7 @@ class GPUModelRunner(
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
+            self.max_num_tokens, is_profile=True, randomize_inputs=randomize_inputs
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
@@ -6543,6 +6552,9 @@ class GPUModelRunner(
         if hasattr(self, "kv_cache_config"):
             delattr(self, "kv_cache_config")
         self.cache_config.num_gpu_blocks = None
+        # Profiling may have rebuilt the InputBatch outside the worker's
+        # "runtime" pool; the real initialize_kv_cache rebuilds it.
+        self._init_block_sizes = []
 
         for layer in self.compilation_config.static_forward_context.values():
             if hasattr(layer, "kv_cache"):
