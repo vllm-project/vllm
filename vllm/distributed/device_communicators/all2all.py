@@ -1008,6 +1008,11 @@ class MoriAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
+        if get_current_vllm_config().kernel_config.moe_backend == "aiter_mega_moe":
+            # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
+            # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
+            heap_size = os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "8G")
+            logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
         mori.shmem.shmem_torch_process_group_init("mori")
 
     def _make_all2all_kwargs(

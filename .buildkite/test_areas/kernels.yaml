@@ -155,6 +155,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/models/test_deepseek_v4_vl_rocm.py
+      - tests/models/test_deepseek_v4_aiter_mega_moe.py
       - vllm/models/deepseek_v4/amd/
       - vllm/models/deepseek_v4/common/
       - vllm/model_executor/layers/fused_moe/
@@ -170,6 +171,7 @@ steps:
       # Common qnorm/RoPE/cache kernels already run in the H100 AMD mirror.
       # Pin the tested BF16 Triton routing and shared-expert path before imports.
       - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
+      - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
 
 # Own job so mHC never shares a process with FlashInfer's import-time
 # ptxas override.

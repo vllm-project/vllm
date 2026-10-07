@@ -5858,6 +5858,7 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/models/test_deepseek_v4_vl_rocm.py
+  - tests/models/test_deepseek_v4_aiter_mega_moe.py
   - vllm/models/deepseek_v4/amd/
   - vllm/models/deepseek_v4/common/
   - vllm/model_executor/layers/fused_moe/
@@ -5871,6 +5872,7 @@ steps:
   - vllm/envs.py
   commands:
   - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
+  - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
   dind: false
   working_dir: /vllm-workspace/tests
   agent_pool: mi355_1
