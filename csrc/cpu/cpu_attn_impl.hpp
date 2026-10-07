@@ -911,7 +911,7 @@ struct AttentionInput {
       const int32_t left_window_size, const int32_t right_window_size,      \
       float scale, const float softcap_scale,                               \
       const float *__restrict__ alibi_slopes, const bool is_first_iter,     \
-      const bool use_sink, const bool debug_info
+      const bool use_sink, const bool causal, const bool debug_info
 
 #define CPU_ATTENTION_PARAMS                                                  \
   q_heads_buffer, k_head_cache_ptr, v_head_cache_ptr, logits_buffer,          \
@@ -919,7 +919,7 @@ struct AttentionInput {
       kv_tile_start_pos, kv_tile_end_pos, kv_tile_token_num,                  \
       kv_cache_num_blocks_stride, q_head_num, q_token_num, q_tile_start_pos,  \
       q_heads_per_kv, block_size, left_window_size, right_window_size, scale, \
-      softcap_scale, alibi_slopes, is_first_iter, use_sink, debug_info
+      softcap_scale, alibi_slopes, is_first_iter, use_sink, causal, debug_info
 
 enum class AttentionGemmPhase { QK, PV };
 
@@ -1136,7 +1136,7 @@ class AttentionMainLoop {
         if (alibi_slopes != nullptr) {
           apply_alibi_slopes(logits_buffer, alibi_slopes, kv_tile_token_num,
                              q_tile_start_pos, kv_tile_start_pos, q_token_num,
-                             kv_tile_token_num, q_heads_per_kv);
+                             kv_tile_token_num, q_heads_per_kv, causal);
 
           // print_logits("alibi raw logits", logits_buffer, q_head_num,
           // kv_tile_token_num, kv_tile_token_num);
@@ -1480,7 +1480,7 @@ class AttentionMainLoop {
                             const int32_t kv_tile_start_pos,
                             const int32_t q_token_num,
                             const int32_t kv_tile_token_num,
-                            const int32_t q_heads_per_kv) {
+                            const int32_t q_heads_per_kv, const bool causal) {
       alignas(64) constexpr float initial_arange_vals[16] = {
           0.0f, 1.0f, 2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,
           8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f};
@@ -1499,8 +1499,12 @@ class AttentionMainLoop {
           logits_buffer_t* __restrict__ curr_logits_buffer_iter =
               curr_logits_buffer;
           for (int32_t k = 0; k < vec_num; ++k) {
-            vec_op::FP32Vec16 alibi_bias_vec =
-                alibi_scale_vec * (curr_kv_pos_vec - curr_q_pos_vec);
+            vec_op::FP32Vec16 distance = curr_kv_pos_vec - curr_q_pos_vec;
+            if (!causal) {
+              // Bidirectional ALiBi penalizes distance on both sides.
+              distance = distance.min(vec_op::FP32Vec16(0.0f) - distance);
+            }
+            vec_op::FP32Vec16 alibi_bias_vec = alibi_scale_vec * distance;
             vec_op::FP32Vec16 vec(curr_logits_buffer_iter);
             vec = vec + alibi_bias_vec;
 
@@ -1929,7 +1933,8 @@ class AttentionMainLoop {
                       q_tile_token_num, q_tile_pos_left, curr_q_heads_per_kv,
                       block_size, sliding_window_left, sliding_window_right,
                       scale, softcap_scale, curr_alibi_slopes,
-                      first_iter_flag[q_iter_idx], use_sink, debug_info);
+                      first_iter_flag[q_iter_idx], use_sink,
+                      current_group_causal, debug_info);
                   first_iter_flag[q_iter_idx] = false;
                 }
               }
