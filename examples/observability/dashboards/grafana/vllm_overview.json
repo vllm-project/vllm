@@ -1294,8 +1294,7 @@
             "align": "auto",
             "cellOptions": {
               "type": "auto"
-            },
-            "minWidth": 80
+            }
           },
           "mappings": [
             {
@@ -1332,6 +1331,10 @@
               {
                 "id": "unit",
                 "value": "none"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -1344,6 +1347,10 @@
               {
                 "id": "unit",
                 "value": "reqps"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -1356,6 +1363,10 @@
               {
                 "id": "unit",
                 "value": "count:tok/s"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -1368,6 +1379,10 @@
               {
                 "id": "unit",
                 "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -1380,6 +1395,10 @@
               {
                 "id": "unit",
                 "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -1392,6 +1411,10 @@
               {
                 "id": "unit",
                 "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -1404,6 +1427,10 @@
               {
                 "id": "unit",
                 "value": "percentunit"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -1416,6 +1443,10 @@
               {
                 "id": "unit",
                 "value": "percentunit"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -1428,6 +1459,10 @@
               {
                 "id": "unit",
                 "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
