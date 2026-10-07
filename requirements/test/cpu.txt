@@ -1228,7 +1228,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.18.0
+transformers==5.19.0
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
