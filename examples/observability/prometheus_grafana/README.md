@@ -16,14 +16,11 @@ vllm serve mistralai/Mistral-7B-v0.1 \
     --max-model-len 2048
 ```
 
-Launch Prometheus and Grafana servers with `docker compose` from this example's directory:
+Launch Prometheus and Grafana servers with `docker compose`:
 
 ```bash
-cd examples/observability/prometheus_grafana
 docker compose up
 ```
-
-Prometheus scrapes the vLLM server on port 8000 of the host every 5 seconds (see `prometheus.yaml`). Grafana is provisioned with a Prometheus data source and the [vLLM dashboards](../dashboards/grafana/README.md).
 
 Submit some sample requests to the server:
 
@@ -41,15 +38,20 @@ vllm bench serve \
 
 Navigating to [`http://localhost:8000/metrics`](http://localhost:8000/metrics) will show the raw Prometheus metrics being exposed by vLLM.
 
-## Grafana Dashboards
+## Grafana Dashboard
 
-Navigate to [`http://localhost:3000`](http://localhost:3000) and log in with the default username (`admin`) and password (`admin`).
+Navigate to [`http://localhost:3000`](http://localhost:3000). Log in with the default username (`admin`) and password (`admin`).
 
-The dashboards are in the **vLLM** folder under [Dashboards](http://localhost:3000/dashboards). Start with **vLLM / Overview** and follow the *vLLM dashboards* links in the top-right corner to the other dashboards:
+### Add Prometheus Data Source
 
-- **vLLM / Overview**: traffic, errors, latency SLOs, throughput and saturation
-- **vLLM / Instances**: per-instance and per-engine drill-down
-- **vLLM / KV Cache**: KV cache pressure, prefix caching, KV transfer and offloading
-- **vLLM / Speculative Decoding**: draft acceptance and token flow
+Navigate to [`http://localhost:3000/connections/datasources/new`](http://localhost:3000/connections/datasources/new) and select Prometheus.
 
-The files in `grafana/provisioning` configure the data source and load the dashboards from [`../dashboards/grafana`](../dashboards/grafana/README.md). To monitor a different deployment, edit the scrape targets in `prometheus.yaml`; to use the dashboards with your own Grafana instance, import them as described in [their README](../dashboards/grafana/README.md).
+On Prometheus configuration page, we need to add the `Prometheus Server URL` in `Connection`. For this setup, Grafana and Prometheus are running in separate containers, but Docker creates DNS name for each container. You can just use `http://prometheus:9090`.
+
+Click `Save & Test`. You should get a green check saying "Successfully queried the Prometheus API.".
+
+### Import Dashboard
+
+Navigate to [`http://localhost:3000/dashboard/import`](http://localhost:3000/dashboard/import), upload `grafana.json`, and select the `prometheus` datasource. You should see a screen that looks like the following:
+
+![Grafana Dashboard Image](https://i.imgur.com/R2vH9VW.png)
