@@ -35,6 +35,7 @@ deployment methods:
 
 | Dashboard | Description |
 | --------- | ----------- |
+| **vLLM / Service Status** | Simple status board for end users: availability, response time, output speed, success rate and load per model, readable from a distance |
 | **vLLM / Overview** | Service health and latency SLOs: traffic, errors, latency, throughput, saturation and caching |
 | **vLLM / Instances** | Per-instance and per-engine drill-down: load balance, latency outliers, scheduler, process and configuration |
 | **vLLM / KV Cache** | KV cache pressure, prefix caching, KV block residency, and KV transfer and offloading |

@@ -7,6 +7,7 @@ exported by vLLM's `/metrics` endpoint.
 
 | Dashboard | File | Use it to |
 | --------- | ---- | --------- |
+| **vLLM / Service Status** | `vllm_service_status.json` | Show the users of a service, at a glance and from across the room, whether each model is up, how fast it answers and how busy it is. One strip of large color-coded numbers per model, with their history underneath. |
 | **vLLM / Overview** | `vllm_overview.json` | Check service health and latency SLOs: traffic, errors, TTFT, inter-token latency, TPOT and end-to-end latency, throughput, saturation (scheduler queue, KV cache, preemptions), caching, workload shape and the HTTP API. Includes a per-model summary. |
 | **vLLM / Instances** | `vllm_instances.json` | Find the instance or data-parallel engine that misbehaves: per-instance table with drill-down, load balance, latency by instance, scheduler activity, API server process, cache configuration, LoRA adapters, sleep mode and model FLOPs utilization. |
 | **vLLM / KV Cache** | `vllm_kv_cache.json` | Tell whether the KV cache is the bottleneck and whether caching pays off: KV cache usage, preemptions, prefix caching by cache tier, KV block residency, KV connector transfers (NIXL) and CPU/disk offloading. |
@@ -34,9 +35,28 @@ derives from it.
 The dashboards query vLLM's native Prometheus metrics. Metrics exported through
 Ray (`RayPrometheusStatLogger`) use different names and are not covered.
 
+## Service Status Dashboard
+
+**vLLM / Service Status** is meant for the people who use a vLLM service rather
+than the team running it, for example on a wall display. Add the `kiosk`
+parameter to its URL (for example `/d/vllm-status?kiosk`) to hide the Grafana
+menus.
+
+| Tile | Meaning | Green | Orange | Red |
+| ---- | ------- | ----- | ------ | --- |
+| Status | *Online*, *Sleeping* (blue: all engines put to sleep) or *Down* (no server reporting) | Online | | Down |
+| Response time | Median time until the first token arrives | < 1 s | 1-3 s | > 3 s |
+| Output speed | Tokens generated per second for each request being answered | ≥ 20 tok/s | 10-20 tok/s | < 10 tok/s |
+| Success rate | Share of requests finished without a server error | ≥ 99% | 95-99% | < 95% |
+| Requests / min | Requests finished per minute | | | |
+
+The numbers are averaged over the last 5 minutes. Adjust the color thresholds
+in the panel settings to match the expectations of your users.
+
 ## Variables
 
-The `vllm_*` dashboards share these variables:
+The `vllm_*` dashboards share these variables (the Service Status dashboard
+only shows Data source and Model):
 
 | Variable | Description |
 | -------- | ----------- |
