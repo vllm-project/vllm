@@ -3,6 +3,9 @@
 import pytest
 import torch
 
+from vllm.models.deepseek_v4.common.ops.cache_utils import combine_topk_swa_indices
+from vllm.platforms import current_platform
+
 
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
@@ -760,6 +763,84 @@ def test_flashinfer_rope_quant_matches_unfused_o_proj():
         attn, q, cache, metadata, positions, num_tokens
     )
     _assert_projects_alike(z_unfused, z_fused)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize(
+    "compress_ratio,top_k", [(4, 0), (4, 128), (4, 512), (128, 128)]
+)
+@torch.inference_mode()
+def test_fused_decode_indices_match_existing_pipeline(
+    compress_ratio: int, top_k: int
+) -> None:
+    rows = 12
+    window_size = 128
+    compressed_width = 4096 if compress_ratio == 4 else 126
+    row_stride = compressed_width + window_size
+    output_width = ((top_k + window_size + 127) // 128) * 128
+    seq_lens = torch.tensor(
+        [0, 1, 3, 4, 127, 128, 129, 511, 512, 2048, 2049, 16048],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    gather_lens = seq_lens.clamp_max(window_size)
+    query_start_loc = torch.arange(rows + 1, dtype=torch.int32, device="cuda")
+    is_valid = torch.arange(rows, device="cuda") % 7 != 0
+    topk_indices = torch.full((rows, top_k), -1, dtype=torch.int32, device="cuda")
+    for row, seq_len in enumerate(seq_lens.cpu().tolist()):
+        length = min(seq_len // compress_ratio, top_k)
+        topk_indices[row, :length] = torch.arange(
+            length - 1, -1, -1, dtype=torch.int32, device="cuda"
+        )
+
+    expected_indices = torch.empty(
+        (rows, output_width), dtype=torch.int32, device="cuda"
+    )
+    expected_lens = torch.empty(rows, dtype=torch.int32, device="cuda")
+    combine_topk_swa_indices(
+        topk_indices,
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        window_size,
+        compress_ratio,
+        top_k,
+        row_stride,
+        compressed_width,
+        out=(expected_indices, expected_lens),
+    )
+    expected_lens.masked_fill_(~is_valid, 0)
+
+    actual_indices = torch.empty_like(expected_indices)
+    actual_lens = torch.empty_like(expected_lens)
+    if compress_ratio == 4:
+        torch.ops._C.combine_topk_swa_decode(
+            actual_indices,
+            actual_lens,
+            topk_indices,
+            seq_lens,
+            is_valid,
+            row_stride,
+            compressed_width,
+            top_k,
+            compress_ratio,
+            window_size,
+        )
+    else:
+        torch.ops._C.combine_c128_swa_decode(
+            actual_indices,
+            actual_lens,
+            seq_lens,
+            is_valid,
+            row_stride,
+            compressed_width,
+            top_k,
+            compress_ratio,
+            window_size,
+        )
+
+    torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lens, expected_lens, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("context_len", [0, 20, 127, 900])

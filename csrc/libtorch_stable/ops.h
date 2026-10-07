@@ -10,6 +10,25 @@
 
 #include <torch/csrc/stable/ops.h>
 
+namespace vllm::batch_invariant {
+
+void combine_topk_swa_decode(torch::stable::Tensor& combined_indices,
+                             torch::stable::Tensor& combined_lens,
+                             const torch::stable::Tensor& topk_indices,
+                             const torch::stable::Tensor& seq_lens,
+                             const torch::stable::Tensor& is_valid, int64_t M,
+                             int64_t N, int64_t top_k, int64_t compress_ratio,
+                             int64_t window_size);
+
+void combine_c128_swa_decode(torch::stable::Tensor& combined_indices,
+                             torch::stable::Tensor& combined_lens,
+                             const torch::stable::Tensor& seq_lens,
+                             const torch::stable::Tensor& is_valid, int64_t M,
+                             int64_t N, int64_t top_k, int64_t compress_ratio,
+                             int64_t window_size);
+
+}  // namespace vllm::batch_invariant
+
 inline torch::stable::Tensor weak_ref_tensor(torch::stable::Tensor& tensor) {
   // Ensure tensor is on CUDA
   STD_TORCH_CHECK(tensor.device().is_cuda(), "Tensor must be on CUDA device");
