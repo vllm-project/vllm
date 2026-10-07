@@ -1112,16 +1112,8 @@ class KimiLinearForCausalLM(
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        kda_config = vllm_config.model_config.hf_config.linear_attn_config or {}
-        ssm_dtype = (
-            "auto"
-            if kda_config.get("use_full_rank_gate", False)
-            else vllm_config.cache_config.mamba_ssm_cache_dtype
-        )
         return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
-            ssm_dtype,
+            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
 
     @classmethod
