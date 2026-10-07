@@ -471,15 +471,10 @@ class AttentionScheduler {
              original_q_head_per_kv > 1 && supported_amx_geometry &&
              input.enable_kv_split;
     };
-    bool has_decode_request = false;
     bool has_multi_token_request = false;
     for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-      has_decode_request |= request_q_token_num(req_id) == 1;
       has_multi_token_request |= request_adaptive_eligible(req_id);
     }
-    // Mixed batches with decodes keep main's token tiling for MHA items.
-    const int32_t legacy_tile_group =
-        supports_gqa && has_decode_request ? original_q_head_per_kv : 1;
 
     struct PartitionItem {
       int32_t req_id;
@@ -522,11 +517,6 @@ class AttentionScheduler {
         }
         return request_adaptive_eligible(req_id) ? adaptive_group : 1;
       };
-      const auto tile_group_for_request = [&](const int32_t req_id) {
-        return request_adaptive_eligible(req_id) && adaptive_group > 1
-                   ? adaptive_group
-                   : legacy_tile_group;
-      };
       const int32_t split_kv_q_token_num_threshold =
           input.enable_kv_split ? 1 : 0;
       Partitions result;
@@ -538,7 +528,7 @@ class AttentionScheduler {
         result.head_stride =
             std::gcd(result.head_stride, group_for_request(req_id));
         const int32_t max_num_q_token_per_iter =
-            max_num_q_per_iter / tile_group_for_request(req_id);
+            max_num_q_per_iter / group_for_request(req_id);
         const int32_t seq_len = input.seq_lens[req_id];
         const int32_t q_token_num = request_q_token_num(req_id);
         const bool req_causal = request_causal(req_id);
@@ -578,10 +568,8 @@ class AttentionScheduler {
       int32_t cum_split_num = 0;
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
         const int32_t group = group_for_request(req_id);
-        const int32_t tile_group = tile_group_for_request(req_id);
-        const int32_t max_num_q_token_per_iter =
-            max_num_q_per_iter / tile_group;
-        const int32_t default_tile_token_num = default_tile_size / tile_group;
+        const int32_t max_num_q_token_per_iter = max_num_q_per_iter / group;
+        const int32_t default_tile_token_num = default_tile_size / group;
         const int32_t seq_len = input.seq_lens[req_id];
         const int32_t q_token_num = request_q_token_num(req_id);
         const bool req_causal = request_causal(req_id);
