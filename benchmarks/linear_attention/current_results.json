@@ -1094,9 +1094,170 @@
                   "lyris0174.lyris.clusters.nvidia.com",
                   "lyris0175.lyris.clusters.nvidia.com"
                 ]
+              },
+              {
+                "name": "03-candidate-flashinfer_cudnn",
+                "choice": "flashinfer_cudnn",
+                "gsm64_correct": 64,
+                "gsm1319": {
+                  "accuracy": 0.9514783927217589,
+                  "invalid_rate": 0.000758150113722517,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 299.08218095079064,
+                    "mean_tpot_ms": 8.038989285483705,
+                    "output_throughput": 120.12694846517105,
+                    "duration": 8.524315426999237,
+                    "sha256": "514074b8a9e5a88b1e2138f6565ee98b9edf29269d5fbe0086388030e7df0c8a",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 297.3636480164714,
+                    "mean_tpot_ms": 8.03954796773406,
+                    "output_throughput": 120.15478542715405,
+                    "duration": 8.522340548981447,
+                    "sha256": "65b55a6ad869398e8eab569ff7b96451dc0a624d083a28e62dcca46b9237d188",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 297.3100590170361,
+                    "mean_tpot_ms": 8.041511270771112,
+                    "output_throughput": 120.12679795992602,
+                    "duration": 8.52432610699907,
+                    "sha256": "c256513baee723b36d7aa77fe82aaa38dd43203f2f57333c06151e63506db0a4",
+                    "prompts_sha256": "2f1a20058eb8584039b37597fbb8da151e4da7b3a80b8c3b179bf5f538598144"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1531.3400998711586,
+                    "mean_tpot_ms": 12.90999709566986,
+                    "output_throughput": 554.3630464889613,
+                    "duration": 14.777319758024532,
+                    "sha256": "528731ef3a71988b58082b0a8ea07a2259387957ed4ac4cf4c768c6a25699df3",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1499.173755881202,
+                    "mean_tpot_ms": 12.748623984234094,
+                    "output_throughput": 561.869355379029,
+                    "duration": 14.579901753982995,
+                    "sha256": "ec365752055f1487da242485632a5834c88c0f6e7a2207e25725e1b69cb4b97a",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1535.9060856280848,
+                    "mean_tpot_ms": 12.835741703680915,
+                    "output_throughput": 557.0560955311138,
+                    "duration": 14.705879830988124,
+                    "sha256": "5a49ff3442f3a9899d2505e3dd121aae9c1e6cb443956516a9253fdeaa7e7485",
+                    "prompts_sha256": "4745da918df5f761eef3893921d919c1af0d3b9576d9f2c8a08b1dc59ea8bc5e"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 5085.071894871362,
+                    "mean_tpot_ms": 21.334312716551246,
+                    "output_throughput": 1208.2665273782377,
+                    "duration": 27.119844221044332,
+                    "sha256": "a7aa64ddfce4094eae4c8dba58d89b50928cd3aaf1301c77f16c68baea5b139c",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 5083.169772129622,
+                    "mean_tpot_ms": 21.425954443082034,
+                    "output_throughput": 1204.2519664499246,
+                    "duration": 27.210252432967536,
+                    "sha256": "9366b8548bdf5dad571a09c507d7d6594e77cdc452d615f70e11264575b1c29d",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 5072.079925279468,
+                    "mean_tpot_ms": 21.196434989157332,
+                    "output_throughput": 1215.282847843767,
+                    "duration": 26.9632703679963,
+                    "sha256": "4697bb113e0411b06794781e2315f8ddf155a31a8ffc224ae7131a5e4397e8f8",
+                    "prompts_sha256": "1d42ca411255a7943fe469dfff3dee81d5413c67212622e488d41549176c37e0"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 19329.74028999115,
+                    "mean_tpot_ms": 54.44519823736109,
+                    "output_throughput": 1575.5912996907887,
+                    "duration": 83.18908591696527,
+                    "sha256": "8e5fec194463e7b61150f85bf5bdaccb1303617bc5b1c5fc0111ef8172acbb88",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 19403.46793271192,
+                    "mean_tpot_ms": 54.514914190899255,
+                    "output_throughput": 1572.1212196861388,
+                    "duration": 83.37270584399812,
+                    "sha256": "4dfe562740cda87830ac242cdb769c388ec2d9a74c4774ad9a225dbcd4053df0",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 19306.172450740178,
+                    "mean_tpot_ms": 54.78499134778003,
+                    "output_throughput": 1568.2962688335765,
+                    "duration": 83.57604529499076,
+                    "sha256": "369762e6385814e83ff933d891dec321b62324bc3c7d6829109d836de9a566ab",
+                    "prompts_sha256": "e15ba99c42ed2e854885a869e337d707e546427b819793183368dc2283a0ba9c"
+                  }
+                ],
+                "hosts": [
+                  "lyris0171.lyris.clusters.nvidia.com",
+                  "lyris0173.lyris.clusters.nvidia.com",
+                  "lyris0174.lyris.clusters.nvidia.com",
+                  "lyris0175.lyris.clusters.nvidia.com"
+                ]
               }
             ],
-            "means": {},
+            "means": {
+              "flashinfer_cudnn": {
+                "1": {
+                  "mean_ttft_ms": 300.70844348908093,
+                  "mean_tpot_ms": 8.063651242593616,
+                  "output_throughput": 119.75966754910964
+                },
+                "8": {
+                  "mean_ttft_ms": 1725.9538537279393,
+                  "mean_tpot_ms": 12.945351502952413,
+                  "output_throughput": 546.1053823939002
+                },
+                "32": {
+                  "mean_ttft_ms": 5366.799364282694,
+                  "mean_tpot_ms": 21.569380107244594,
+                  "output_throughput": 1186.1165317200703
+                },
+                "128": {
+                  "mean_ttft_ms": 19398.389683127865,
+                  "mean_tpot_ms": 54.628537115736734,
+                  "output_throughput": 1570.0129743950579
+                }
+              }
+            },
             "failures": []
           },
           {
@@ -2436,13 +2597,31 @@
         ],
         "results": [
           {
-            "status": "partial",
+            "status": "model_validation_failed",
             "model": "glm",
             "gpu": "GB200",
             "job": "3258192",
             "arms": [],
             "means": {},
-            "failures": []
+            "failures": [
+              {
+                "arm": "00-candidate-vllm_auto",
+                "reason": "GSM64 fails the declared minimum or protocol; timing stopped",
+                "details": {
+                  "accuracy": 0.84375,
+                  "invalid_rate": 0.0,
+                  "latency": 28.823633463005535,
+                  "questions_per_second": 2.2204001477517576,
+                  "total_output_tokens": 5912,
+                  "tokens_per_second": 205.10946364856864,
+                  "num_questions": 64,
+                  "num_shots": 5,
+                  "max_tokens": 256,
+                  "timestamp": 1791358426.9125998
+                },
+                "excluded_from_performance": true
+              }
+            ]
           }
         ],
         "reviewer_sha256": "4944f7019eb7a8a3c033ffc94ae6de7e9c2ed8fb305bb1cab188ceba9c57bdf7",
@@ -2465,7 +2644,143 @@
             "model": "qwen35",
             "gpu": "GB200",
             "job": "3258435",
-            "arms": [],
+            "arms": [
+              {
+                "name": "00-candidate-vllm_auto",
+                "choice": "vllm_auto",
+                "gsm64_correct": 56,
+                "gsm1319": {
+                  "accuracy": 0.8589840788476119,
+                  "invalid_rate": 0.0,
+                  "num_questions": 1319
+                },
+                "measurements": [
+                  {
+                    "concurrency": 1,
+                    "repeat": 1,
+                    "mean_ttft_ms": 116.31513899192214,
+                    "mean_tpot_ms": 3.308581253185956,
+                    "output_throughput": 292.4477404738602,
+                    "duration": 3.501480292994529,
+                    "sha256": "ee8e7ac70c9186e632da81d0f990f81cd0b72f60a16d176accd8a22ae8925848",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 2,
+                    "mean_ttft_ms": 116.3899550010683,
+                    "mean_tpot_ms": 3.309226252191189,
+                    "output_throughput": 292.3893547121758,
+                    "duration": 3.5021794860076625,
+                    "sha256": "4418b07966e8ff91aee6d9f4cee1b1de9c4d6e0e36b83fd879c4c22d96f09be3",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 1,
+                    "repeat": 3,
+                    "mean_ttft_ms": 115.68467000324745,
+                    "mean_tpot_ms": 3.3076188641215447,
+                    "output_throughput": 292.5773814339658,
+                    "duration": 3.499928788005491,
+                    "sha256": "9ccdaceb0fc9581b6af9db33978f5bb34baaa8c87ec90b679cd1fe2576677eaf",
+                    "prompts_sha256": "2233506225923e8d30f1dea5fccaf1deede9a054758caf79d4504c33aa14507c"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 1,
+                    "mean_ttft_ms": 542.8128391286009,
+                    "mean_tpot_ms": 5.679839092741159,
+                    "output_throughput": 1285.8907977491197,
+                    "duration": 6.37068094300048,
+                    "sha256": "7c5aa1fb6373f4703c816e58d88344b75bc6576ad1ab714b717d9ce71271a242",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 2,
+                    "mean_ttft_ms": 542.1636342507554,
+                    "mean_tpot_ms": 5.668321146875284,
+                    "output_throughput": 1288.3947163501298,
+                    "duration": 6.358299903004081,
+                    "sha256": "020198ddfc3e4f9488e769ed23b4748c0ac0239c184826a419e6a17950088479",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 8,
+                    "repeat": 3,
+                    "mean_ttft_ms": 545.2457128776587,
+                    "mean_tpot_ms": 5.750126881351776,
+                    "output_throughput": 1271.093843843108,
+                    "duration": 6.4448427940078545,
+                    "sha256": "2f78cf26d3b29d550b795e46a5e8de238f65ee95d9e54dd478301fce58b5351f",
+                    "prompts_sha256": "8fc6708cc736e915c0fe69bccc10706ebc698a06ec8d5dce8f20205b62fd3996"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 1,
+                    "mean_ttft_ms": 1698.0697873136705,
+                    "mean_tpot_ms": 10.331609320715321,
+                    "output_throughput": 2649.345521620558,
+                    "duration": 12.368337663996499,
+                    "sha256": "e5074f90e6296f51b4fd906f4192f05cac1fa1a4f7aad7915f34dbe9153ef04c",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 2,
+                    "mean_ttft_ms": 1692.0943839991196,
+                    "mean_tpot_ms": 10.430091945106506,
+                    "output_throughput": 2629.0282652377496,
+                    "duration": 12.46392076999473,
+                    "sha256": "29580ab5133ec4d3882b993d22c191039c961490fbe467373631140169e14007",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 32,
+                    "repeat": 3,
+                    "mean_ttft_ms": 1703.8320937185745,
+                    "mean_tpot_ms": 10.602810134286544,
+                    "output_throughput": 2589.5152020216606,
+                    "duration": 12.654106055997545,
+                    "sha256": "478603556de5ec50c9a3517324f145fe382f2afca784fd088c65e566da200ff9",
+                    "prompts_sha256": "21575892808e048355a25fa68bc55bcbf69f5d04df6daa342e2637e40b1265ec"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 1,
+                    "mean_ttft_ms": 6357.790135703226,
+                    "mean_tpot_ms": 21.316385319502928,
+                    "output_throughput": 4549.113595490303,
+                    "duration": 28.812646078993566,
+                    "sha256": "b1d67cf43928601a2b91ccb114ac164e8af71c825028fcd0d1eafa51f9fc1295",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 2,
+                    "mean_ttft_ms": 6345.613456640763,
+                    "mean_tpot_ms": 21.535430118126783,
+                    "output_throughput": 4514.298160134182,
+                    "duration": 29.034856660000514,
+                    "sha256": "e8f7d13f9f3a6c527843136fe0096cdbee477e1929b839bb065f197504838130",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  },
+                  {
+                    "concurrency": 128,
+                    "repeat": 3,
+                    "mean_ttft_ms": 6402.194810531682,
+                    "mean_tpot_ms": 21.41426326124851,
+                    "output_throughput": 4527.842479244145,
+                    "duration": 28.948003514000447,
+                    "sha256": "a6c46c79c4222e0ea2fcf78aa2604bfdc52874f42c7fc203233f91234a0fd02a",
+                    "prompts_sha256": "bea6adf65706d2cb870753748eab63d931367d77c836bccb7f4b67d6f0e26da1"
+                  }
+                ],
+                "hosts": [
+                  "lyris0126.lyris.clusters.nvidia.com"
+                ]
+              }
+            ],
             "means": {},
             "failures": []
           }

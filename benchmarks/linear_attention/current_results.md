@@ -10,7 +10,7 @@ TP: QwenNext 2, Qwen3.5 1, GLM 4; full Kimi 16/four nodes on GB200 and 8/two nod
 
 | Model / GPU | Job | State | Audited launches |
 | --- | --- | --- | ---: |
-| Kimi-K3 / GB200 | 3257663 | partial | 3/6 |
+| Kimi-K3 / GB200 | 3257663 | partial | 4/6 |
 | Kimi-K3 / GB300 | 3257664 | PENDING | 0/6 |
 | GLM-5.3-Flash / GB200 | 3257665 | model_validation_failed | 0/6 |
 | GLM-5.3-Flash / GB300 | 3257666 | PENDING | 0/6 |
@@ -18,10 +18,12 @@ TP: QwenNext 2, Qwen3.5 1, GLM 4; full Kimi 16/four nodes on GB200 and 8/two nod
 | Qwen3-Next-80B-A3B-Instruct / GB300 | 3257668 | PENDING | 0/6 |
 | Qwen3.5-35B-A3B / GB200 | 3257669 | model_validation_failed | 3/6 |
 | Qwen3.5-35B-A3B / GB300 | 3257670 | PENDING | 0/6 |
-| GLM-5.3-Flash / GB200 | 3258192 | partial | 0/6 |
-| Qwen3.5-35B-A3B / GB200 | 3258435 | partial | 0/6 |
+| GLM-5.3-Flash / GB200 | 3258192 | model_validation_failed | 0/6 |
+| Qwen3.5-35B-A3B / GB200 | 3258435 | partial | 1/6 |
 
 Original GLM GB200 job3257665 stopped at FlashKDA GSM64 54/64 (floor55) before any timing. Qwen3.5 job3257669 stopped at reverse FI cuDNN 55/64 (floor56); its three forward launches are incomplete controls. Both failures remain excluded from balanced comparisons. Fixed-count diagnostics found GLM scores54–58/64 and Qwen3.5 scores55–58/64 on unchanged code; causes remain unknown. Each has one fresh comparison with unchanged gates (GLM3258192, Qwen3.5 3258435). No old partial timings are combined with these runs, and another gate failure stops the comparison.
+
+The bounded GLM GB200 retry (job 3258192) also stopped at its first FlashKDA GSM64 gate: 54/64, below the unchanged 55/64 floor, with zero invalid answers and normal finite generation. Exact runtime, checkpoint and server arguments match the original failed run apart from launcher paths. Neither FI arm, full GSM1319 nor timing ran. All 29 files / 391,949 bytes are retained. The cause remains unresolved. The gate remains unchanged, and no further retry is scheduled.
 
 ### Qwen3-Next-80B-A3B-Instruct / GB200 — job 3257667
 
