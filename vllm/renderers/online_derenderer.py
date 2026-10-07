@@ -113,9 +113,6 @@ class OnlineDerenderer:
         self._detokenize_delta_async = make_async(
             self._detokenize_delta, executor=renderer._executor
         )
-        self._resolve_prompt_logprobs_async = make_async(
-            _resolve_prompt_logprobs, executor=renderer._executor
-        )
         # Replay is O(n) per chunk, so it must not run on the event loop.
         self._derender_chat_stream_parsed_async = make_async(
             self._derender_chat_stream_parsed, executor=renderer._executor
@@ -126,16 +123,9 @@ class OnlineDerenderer:
         generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
-    ) -> list[ChatCompletionResponseChoice]:
+    ) -> tuple[list[ChatCompletionResponseChoice], PromptLogprobs | None]:
         return await self._derender_chat_async(
             generate_response, chat_request, prompt_token_ids
-        )
-
-    async def resolve_prompt_logprobs(
-        self, prompt_logprobs: PromptLogprobs | None
-    ) -> PromptLogprobs | None:
-        return await self._resolve_prompt_logprobs_async(
-            prompt_logprobs, self.renderer.get_tokenizer()
         )
 
     def _derender_chat(
@@ -143,7 +133,7 @@ class OnlineDerenderer:
         generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
-    ) -> list[ChatCompletionResponseChoice]:
+    ) -> tuple[list[ChatCompletionResponseChoice], PromptLogprobs | None]:
         tokenizer = self.renderer.get_tokenizer()
         choices: list[ChatCompletionResponseChoice] = []
 
@@ -261,7 +251,10 @@ class OnlineDerenderer:
                 )
             )
 
-        return choices
+        prompt_logprobs = _resolve_prompt_logprobs(
+            generate_response.prompt_logprobs, tokenizer
+        )
+        return choices, prompt_logprobs
 
     def _detokenize_delta(
         self,
