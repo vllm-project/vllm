@@ -10,6 +10,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -30,6 +33,8 @@ from .model import (
     Glm5NextDecoderLayer,
     Glm5NextMLAAttention,
     Glm5NextMoE,
+    _fused_shared_expert_name,
+    _num_fused_shared_experts,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
@@ -217,6 +222,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.model.layers.values(), Glm5NextMoE, "mtp_block.mlp"
+        )
 
     def set_moe_parameters(self):
         self.num_moe_layers = self.config.num_nextn_predict_layers
@@ -298,12 +306,15 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        num_fused_shared = _num_fused_shared_experts(
+            self.config.n_shared_experts, self.is_fused_shared_expert_enabled
+        )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -328,6 +339,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
+            if self.is_fused_shared_expert_enabled:
+                name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             if _try_load_fp8_indexer_wk(
                 name,

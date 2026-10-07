@@ -14,7 +14,7 @@ import torch
 from torch import nn
 
 import vllm.config as vllm_config_module
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -143,6 +143,12 @@ def get_deepseek_v4_quark_config(exclude: list[str]) -> dict[str, Any]:
 
 def _stub_quant_config() -> QuantizationConfig:
     return cast(QuantizationConfig, object())
+
+
+class _StubGlm5NextAttention(nn.Module):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self.o_proj = SimpleNamespace(reduce_results=True)
 
 
 def get_fse_test_model_config(
@@ -279,6 +285,33 @@ def get_fse_test_model_config(
             quantization_config=quantization_config,
         )
         return config, Glm4MoeModel
+    if model_type == "glm5_next":
+        from transformers import Glm5NextTextConfig
+
+        from vllm.models.glm5next.common.model import Glm5NextModel
+
+        config = Glm5NextTextConfig(
+            vocab_size=256,
+            hidden_size=128,
+            intermediate_size=32,
+            moe_intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            n_routed_experts=2,
+            n_shared_experts=1,
+            num_experts_per_tok=1,
+            layer_types=["linear_attention"],
+            mlp_layer_types=["sparse"],
+            index_topk=1,
+            index_kpool=1,
+            pad_token_id=None,
+            scoring_func="sigmoid",
+            topk_method="noaux_tc",
+            mhc=False,
+            quantization_config=quantization_config,
+        )
+        return config, Glm5NextModel
     raise ValueError(f"Unsupported FSE test model: {model_type}")
 
 
@@ -796,7 +829,7 @@ def test_is_model_fused_shared_expert_compatible() -> None:
 
 @pytest.mark.parametrize(
     "model_type",
-    ["minimax_m3", "deepseek_v4", "qwen3_5", "glm4_moe", "deepseek_v2"],
+    ["minimax_m3", "deepseek_v4", "qwen3_5", "glm4_moe", "deepseek_v2", "glm5_next"],
 )
 @pytest.mark.parametrize(
     ("use_fse", "exclude"),
@@ -850,6 +883,16 @@ def test_models_fse_init(
         )
     else:
         vllm_config.quant_config = QuarkConfig(quantization_config)
+    if model_type == "glm5_next":
+        from vllm.models.glm5next.common import model as glm5_next_model
+
+        for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
+            monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
+        # The gate allows fusion only at TP4/TP8 on gfx950, and this test
+        # runs at TP1; the gate has its own test.
+        monkeypatch.setattr(
+            glm5_next_model, "_fused_shared_experts_tuned", lambda _: True
+        )
 
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
@@ -902,6 +945,10 @@ def test_models_fse_init(
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
+        if model_type == "glm5_next":
+            assert (model.layers[0].mlp.shared_experts is None) is (
+                fse_enabled and not exclude
+            )
 
         # The dummy quant config here uses mixed mxfp4/fp8 for experts/shared_expert
         # so should just raise a warning.
@@ -924,6 +971,74 @@ def test_models_fse_init(
 
     importlib.reload(envs)
     rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "reason"),
+    [
+        ("tensor_parallel_size", 4, None),
+        ("tensor_parallel_size", 8, None),
+        ("tensor_parallel_size", 2, "tensor_parallel_size is 2"),
+        ("data_parallel_size", 2, "data_parallel_size is 2"),
+        ("prefill_context_parallel_size", 2, "prefill_context_parallel_size is 2"),
+        ("enable_expert_parallel", True, "expert parallelism is enabled"),
+        ("on_gfx950", False, "the GPU is not gfx950"),
+    ],
+)
+def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: object,
+    reason: str | None,
+) -> None:
+    from vllm.models.glm5next.common import model as glm5_next_model
+
+    parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        data_parallel_size=1,
+        prefill_context_parallel_size=1,
+        enable_expert_parallel=False,
+    )
+    on_gfx950 = value if setting == "on_gfx950" else True
+    if setting != "on_gfx950":
+        setattr(parallel_config, setting, value)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: on_gfx950)
+
+    with patch.object(glm5_next_model.logger, "warning_once") as warning:
+        tuned = glm5_next_model._fused_shared_experts_tuned(
+            cast(ParallelConfig, parallel_config)
+        )
+
+    assert tuned is (reason is None)
+    if reason is None:
+        warning.assert_not_called()
+    else:
+        warning.assert_called_once()
+        assert warning.call_args.args[1] == reason
+
+
+def test_glm5_next_fused_shared_expert_loads_into_the_shared_slot() -> None:
+    from vllm.models.glm5next.common import model as glm5_next_model
+
+    assert glm5_next_model._num_fused_shared_experts(1, True) == 1
+    assert glm5_next_model._num_fused_shared_experts(1, False) == 0
+    assert glm5_next_model._num_fused_shared_experts(None, True) == 0
+    with pytest.raises(NotImplementedError, match="only 1 shared expert"):
+        glm5_next_model._num_fused_shared_experts(2, True)
+
+    for shared, fused in [
+        (
+            "model.layers.3.mlp.shared_experts.gate_proj.weight_scale_inv",
+            "model.layers.3.mlp.experts.288.gate_proj.weight_scale_inv",
+        ),
+        (
+            "model.layers.45.mtp_block.mlp.shared_experts.down_proj.weight",
+            "model.layers.45.mtp_block.mlp.experts.288.down_proj.weight",
+        ),
+    ]:
+        assert glm5_next_model._fused_shared_expert_name(shared, 288) == fused
+    routed = "model.layers.3.mlp.experts.7.down_proj.weight"
+    assert glm5_next_model._fused_shared_expert_name(routed, 288) == routed
 
 
 @pytest.mark.parametrize(
