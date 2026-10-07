@@ -6,8 +6,11 @@ from typing import cast
 
 import torch
 
+import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -16,6 +19,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 
 _OPT_KV_LORA_RANK = 512
 _OPT_ROT_DIM = 64
@@ -33,6 +37,10 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self._identity_rope: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def _fused_qk_prep_supported(self) -> bool:
+        # Identity-RoPE fusion is the NoPE target path. DSpark has a real
+        # embedding and applies RoPE in the decode epilogue instead.
+        if self.rotary_emb is not None:
+            return False
         attn = self.mla_attn
         if not (
             rocm_aiter_ops.is_mla_enabled()
@@ -252,7 +260,10 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             heads *= q_proj_layer.group_size
         q = q.view(-1, heads, self.qk_head_dim)
 
-        if self.rotary_emb is not None:
+        fuse_qk_rope = bool(
+            getattr(self.mla_attn, "fuse_qk_rope_with_cache", lambda: False)()
+        )
+        if self.rotary_emb is not None and not fuse_qk_rope:
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
@@ -312,9 +323,173 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 k_pe,
                 output_shape=output_shape,
                 q_dcp_replicated=q_dcp_replicated,
+                positions=positions if fuse_qk_rope else None,
             )
 
         if self.g_proj is not None:
             attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
 
         return self.o_proj(attn_out)[0]
+
+
+class KimiK3DSparkMLAAttention(MLAAttention):
+    """DSpark decode epilogue: Q/K RoPE fused with the MLA cache write.
+
+    Prefill still uses ``ops.rotary_embedding`` on the fp32 table. The
+    wrapper RoPE is skipped only when ``fuse_qk_rope_with_cache`` is true.
+    """
+
+    def fuse_qk_rope_with_cache(self) -> bool:
+        return (
+            self.non_causal_multi_token_decode
+            and self._epilogue_rotary_emb is not None
+            and bool(rocm_aiter_ops.is_fused_qk_rope_concat_and_cache_mla_enabled())
+        )
+
+    def _epilogue_applies_rope(self) -> bool:
+        return self.fuse_qk_rope_with_cache() and self._rope_positions is not None
+
+    def _apply_fp32_rope(self, positions: torch.Tensor, query: torch.Tensor) -> None:
+        rotary_emb = self._epilogue_rotary_emb
+        assert rotary_emb is not None
+        # Do not call RotaryEmbedding.forward: it casts the table to the
+        # query dtype, and the fused kernel reads that same storage.
+        ops.rotary_embedding(
+            positions,
+            query,
+            None,
+            rotary_emb.head_size,
+            rotary_emb.cos_sin_cache,
+            rotary_emb.is_neox_style,
+        )
+
+    def _num_decode_tokens(self, attn_metadata: MLACommonMetadata | None) -> int:
+        if attn_metadata is not None:
+            return attn_metadata.num_decode_tokens or 0
+        raw = get_forward_context().attn_metadata
+        if isinstance(raw, dict):
+            attn_metadata = raw.get(self.layer_name)
+        elif isinstance(raw, list):
+            attn_metadata = raw[0].get(self.layer_name)
+        else:
+            attn_metadata = raw
+        if attn_metadata is None:
+            return 0
+        return attn_metadata.num_decode_tokens or 0
+
+    def _prepare_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        attn_metadata: MLACommonMetadata | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self._epilogue_applies_rope():
+            return super()._prepare_kv_cache_update(
+                kv_c_normed, k_pe, slot_mapping, attn_metadata
+            )
+        positions = self._rope_positions
+        assert positions is not None
+        num_decode = self._num_decode_tokens(attn_metadata)
+        num_tokens = kv_c_normed.shape[0]
+        if num_decode >= num_tokens:
+            return kv_c_normed[:0], k_pe[:0], slot_mapping.reshape(-1)[:0]
+        k_pe_pf = k_pe[num_decode:]
+        self._apply_fp32_rope(positions[num_decode:num_tokens], k_pe_pf)
+        if slot_mapping.dim() > 0:
+            slot_mapping = slot_mapping[num_decode:]
+        return kv_c_normed[num_decode:], k_pe_pf, slot_mapping
+
+    def _prepare_mha_inputs(
+        self,
+        q: torch.Tensor,
+        k_pe: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._epilogue_applies_rope():
+            return super()._prepare_mha_inputs(q, k_pe)
+        positions = self._rope_positions
+        assert positions is not None
+        # ``q`` is already the prefill slice. Prefill ``k_pe`` was rotated
+        # in ``_prepare_kv_cache_update``.
+        num_decode = self._num_decode_tokens(None)
+        q = q.clone()
+        self._apply_fp32_rope(
+            positions[num_decode : num_decode + q.shape[0]],
+            q[..., self.qk_nope_head_dim :],
+        )
+        return q, k_pe
+
+    def _form_decode_q(
+        self,
+        mqa_ql_nope: torch.Tensor,
+        mqa_q_pe: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+        num_mqa_tokens: int,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if not self._epilogue_applies_rope():
+            return super()._form_decode_q(
+                mqa_ql_nope,
+                mqa_q_pe,
+                k_c_normed,
+                k_pe,
+                kv_cache,
+                attn_metadata,
+                num_mqa_tokens,
+            )
+        rotary_emb = self._epilogue_rotary_emb
+        positions = self._rope_positions
+        assert rotary_emb is not None and positions is not None
+        forward_context = get_forward_context()
+        slot_mapping = forward_context.slot_mapping
+        assert isinstance(slot_mapping, dict)
+        layer_slot_mapping = slot_mapping.get(self.layer_name)
+        assert layer_slot_mapping is not None
+        decode_slots = layer_slot_mapping[:num_mqa_tokens]
+        if k_pe.dim() == 3:
+            k_pe = k_pe.squeeze(1)
+        num_tokens, num_heads, kv_lora_rank = mqa_ql_nope.shape
+        q_out = torch.empty(
+            (num_tokens, num_heads, kv_lora_rank + mqa_q_pe.shape[-1]),
+            dtype=mqa_ql_nope.dtype,
+            device=mqa_ql_nope.device,
+        )
+        if kv_cache.numel() == 0:
+            return q_out
+        kv_view = kv_cache.view(
+            kv_cache.shape[0],
+            -1,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+        )
+        cos_cache, sin_cache = rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+        rocm_aiter_ops.fused_qk_rope_concat_and_cache_mla(
+            mqa_ql_nope,
+            mqa_q_pe,
+            k_c_normed[:num_mqa_tokens],
+            k_pe[:num_mqa_tokens],
+            kv_view,
+            q_out,
+            decode_slots.flatten(),
+            self._k_scale,
+            self._q_scale,
+            positions[:num_mqa_tokens],
+            cos_cache,
+            sin_cache,
+            is_neox=rotary_emb.is_neox_style,
+            is_nope_first=True,
+            compute_all_q_rope=self.impl.dcp_world_size > 1,
+        )
+        return q_out
+
+
+class KimiK3DSparkMLAWrapper(KimiK3MultiHeadLatentAttentionWrapper):
+    """Target-K3 wrapper with the DSpark RoPE epilogue on ``mla_attn``."""
+
+    mla_attn_cls = KimiK3DSparkMLAAttention
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        if self.rotary_emb is not None and self.mla_attn.non_causal_multi_token_decode:
+            self.mla_attn._epilogue_rotary_emb = self.rotary_emb

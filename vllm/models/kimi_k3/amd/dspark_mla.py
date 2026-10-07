@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm binding for the Kimi-K3 DSpark MLA draft.
 
-The factory builds ``KimiK3MultiHeadLatentAttentionWrapper`` so absorb BMM
-goes through generic ``MLAAttention``. Do not reuse ``KimiMLAAttention``:
-that class is NoPE-only.
+The factory builds ``KimiK3DSparkMLAWrapper`` so absorb BMM goes through
+generic ``MLAAttention``. Decode can fuse Q/K RoPE with the cache write.
+Do not reuse ``KimiMLAAttention``: that class is NoPE-only.
 """
 
 import math
@@ -35,7 +35,7 @@ from vllm.models.kimi_k3.common.dspark_mla import (
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from .linear import KimiMLP
-from .mla import KimiK3MultiHeadLatentAttentionWrapper
+from .mla import KimiK3DSparkMLAWrapper
 
 __all__ = [
     "K3DSparkDecoderLayer",
@@ -50,7 +50,7 @@ def _make_dspark_mla_attention(
     cache_config,
     quant_config,
     prefix: str,
-) -> KimiK3MultiHeadLatentAttentionWrapper:
+) -> KimiK3DSparkMLAWrapper:
     """Build DSpark MLA with RoPE and a non-causal decode KV-cache spec.
 
     The projection and YaRN-mscale setup below is duplicated from
@@ -170,7 +170,7 @@ def _make_dspark_mla_attention(
         is_sparse=False,
         topk_indices_buffer=None,
     )
-    return KimiK3MultiHeadLatentAttentionWrapper(
+    return KimiK3DSparkMLAWrapper(
         hidden_size,
         num_local_heads,
         scaling,

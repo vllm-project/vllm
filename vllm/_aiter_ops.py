@@ -2377,6 +2377,19 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    @functools.cache
+    def is_fused_qk_rope_concat_and_cache_mla_enabled(cls) -> bool:
+        """AITER fused QK RoPE + MLA cache insert (decode, after absorb BMM)."""
+        if not cls._AITER_ENABLED:
+            return False
+        try:
+            from aiter import fused_qk_rope_concat_and_cache_mla  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    @classmethod
+    @if_aiter_supported
     def is_fp8bmm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
 
@@ -3584,6 +3597,53 @@ class rocm_aiter_ops:
 
         gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
         return y
+
+    @staticmethod
+    def fused_qk_rope_concat_and_cache_mla(
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        q_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        q_scale: torch.Tensor,
+        positions: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
+        is_neox: bool,
+        is_nope_first: bool = True,
+        compute_all_q_rope: bool = False,
+    ) -> None:
+        """Fused Q/K RoPE, concat absorbed Q, and MLA latent cache write.
+
+        The kernel reads ``cos_cache`` / ``sin_cache`` in place (no per-call
+        dtype cast), so they must stay fp32.
+        """
+        assert cos_cache.dtype == torch.float32 and sin_cache.dtype == torch.float32, (
+            "fused_qk_rope_concat_and_cache_mla reads cos/sin in fp32; got "
+            f"{cos_cache.dtype}/{sin_cache.dtype}."
+        )
+        from aiter import fused_qk_rope_concat_and_cache_mla as fused_op
+
+        fused_op(
+            q_nope,
+            q_pe,
+            kv_c,
+            k_pe,
+            kv_cache,
+            q_out,
+            slot_mapping,
+            k_scale,
+            q_scale,
+            positions,
+            cos_cache,
+            sin_cache,
+            is_neox,
+            is_nope_first,
+            compute_all_q_rope,
+        )
 
     @staticmethod
     def fused_qk_norm_rope_and_cache(

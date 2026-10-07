@@ -803,6 +803,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed, k_pe, slot_mapping = self._prepare_kv_cache_update(
             kv_c_normed, k_pe, slot_mapping, attn_metadata
         )
+        # An epilogue may drop every row and write those slots itself.
+        if slot_mapping.numel() == 0:
+            return
         self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,

@@ -166,9 +166,7 @@ def test_k3_dspark_decoder_uses_mla_wrapper(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(amd_dspark_mla, "RMSNorm", DummyLinear)
     monkeypatch.setattr(amd_dspark_mla, "KimiMLP", DummyLinear)
     monkeypatch.setattr(amd_dspark_mla, "get_rope", lambda *args, **kwargs: DummyRope())
-    monkeypatch.setattr(
-        amd_dspark_mla, "KimiK3MultiHeadLatentAttentionWrapper", DummyWrapper
-    )
+    monkeypatch.setattr(amd_dspark_mla, "KimiK3DSparkMLAWrapper", DummyWrapper)
 
     config = SimpleNamespace(
         hidden_size=8,
@@ -670,3 +668,29 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
     groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
     assert len(groups) == 1
     assert len(groups[0].layer_names) == 29
+
+
+def test_fused_qk_rope_concat_requires_fp32_cos_sin():
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not bool(rocm_aiter_ops.is_fused_qk_rope_concat_and_cache_mla_enabled()):
+        pytest.skip("AITER fused_qk_rope_concat_and_cache_mla is not available")
+
+    dummy = torch.zeros(1, 1, 8)
+    bf16_table = torch.zeros(4, 32, dtype=torch.bfloat16)
+    with pytest.raises(AssertionError, match="fp32"):
+        rocm_aiter_ops.fused_qk_rope_concat_and_cache_mla(
+            dummy,
+            dummy,
+            dummy.view(1, 8),
+            dummy.view(1, 8),
+            dummy,
+            dummy,
+            torch.zeros(1, dtype=torch.int64),
+            torch.ones(1),
+            torch.ones(1),
+            torch.zeros(1, dtype=torch.int64),
+            bf16_table,
+            bf16_table,
+            is_neox=False,
+        )
