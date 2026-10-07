@@ -399,13 +399,9 @@ class GenerateChoiceBase(BaseModel):
     index: int
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
-    stop_reason: int | str | None = Field(
-        default=None,
-        description=(
-            "The stop string or token id that caused generation to stop; "
-            "None when generation ended for another reason, including EOS."
-        ),
-    )
+    # Stop string or token id that ended generation; None for any other
+    # finish, including EOS.
+    stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     # Per-token expert routing decisions, base64-encoded `.npy` bytes
     # (numpy serialization). Shape after decode:
@@ -447,13 +443,9 @@ class GenerateStreamChoiceBase(BaseModel):
 
     index: int
     finish_reason: str | None = None
-    stop_reason: int | str | None = Field(
-        default=None,
-        description=(
-            "The stop string or token id that caused generation to stop; "
-            "None when generation ended for another reason, including EOS."
-        ),
-    )
+    # Stop string or token id that ended generation; None for any other
+    # finish, including EOS.
+    stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
