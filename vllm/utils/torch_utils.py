@@ -53,6 +53,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
+    # MXFP4 MLA: 272-byte rows (256 packed E2M1 + 16 inline E8M0 scales) for a
+    # 512-wide latent. The row is a byte pitch, not head_size elements.
+    "mxfp4_mla": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {

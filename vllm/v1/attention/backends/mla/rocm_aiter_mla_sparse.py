@@ -337,6 +337,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "mxfp4_mla",
     ]
 
     @staticmethod
@@ -904,9 +905,23 @@ class ROCMAiterMLASparseImpl(
                     self.sinks.reshape(1, self.num_heads, 1),
                     q.shape[1],
                 ).reshape(-1)
+            # The packed MXFP4 row is a byte pitch, not head_dim elements, so
+            # flattening to q.shape[-1] both regroups bytes across row
+            # boundaries and hides the layout from the op, which then fails to
+            # recognise the cache and falls through to the fp8 branch --
+            # "Both operands must be same dtype. Got bf16 and uint8".
+            from vllm.v1.attention.ops.mxfp4_mla import (
+                row_bytes as mxfp4_row_bytes,
+            )
+
+            row_width = (
+                mxfp4_row_bytes(self.kv_lora_rank)
+                if self.kv_cache_dtype == "mxfp4_mla"
+                else q.shape[-1]
+            )
             rocm_sparse_attn_prefill(
                 q=q,
-                kv=kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1]),
+                kv=kv_c_and_k_pe_cache.view(-1, 1, row_width),
                 indices=None,
                 topk_length=None,
                 scale=self.scale,
