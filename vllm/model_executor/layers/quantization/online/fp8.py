@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
 )
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
@@ -125,6 +126,13 @@ class OnlineLinearBase(LinearMethodBase):
     def __init__(self):
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
+        self.requantization_source: QuantizeMethodBase | None = None
+        self.requantization_source_parameters: dict[str, torch.nn.Parameter] = {}
+
+    def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
+        """Configure serialized-weight conversion before online quantization."""
+        self.requantization_source = source_method
+        self.uses_meta_device = False
 
     def create_weights(
         self,
@@ -136,6 +144,24 @@ class OnlineLinearBase(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        if self.requantization_source is not None:
+            existing_parameter_names = set(layer._parameters)
+            self.requantization_source.create_weights(
+                layer,
+                input_size_per_partition,
+                output_partition_sizes,
+                input_size,
+                output_size,
+                params_dtype,
+                **extra_weight_attrs,
+            )
+            self.requantization_source_parameters = {
+                name: parameter
+                for name, parameter in layer._parameters.items()
+                if name not in existing_parameter_names and parameter is not None
+            }
+            return
+
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
@@ -158,6 +184,19 @@ class OnlineLinearBase(LinearMethodBase):
         layer.register_parameter("weight", weight)
 
         initialize_online_processing(layer)
+
+    def release_requantization_source_weights(self, layer: torch.nn.Module) -> None:
+        """Release checkpoint parameters after successful requantization."""
+        for name, source_parameter in self.requantization_source_parameters.items():
+            if layer._parameters.get(name) is source_parameter:
+                delattr(layer, name)
+        self.requantization_source_parameters.clear()
+
+    def get_weight_for_quantization(self, layer: Module) -> torch.Tensor:
+        """Return checkpoint weights materialized for online quantization."""
+        if self.requantization_source is None:
+            return layer.weight
+        return self.requantization_source.dequantize_weight(layer)
 
 
 class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
@@ -213,10 +252,11 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
             return
 
         layer.input_scale = None
-        amax = weight_amax(layer.weight).reshape(1)
+        weight = self.get_weight_for_quantization(layer)
+        amax = weight_amax(weight).reshape(1)
         amax = amax_for_tp_weight_quant(amax, _is_tp_sharded(layer))
         weight_scale = _fp8_scale(amax)
-        qweight, _ = ops.scaled_fp8_quant(layer.weight, scale=weight_scale)
+        qweight, _ = ops.scaled_fp8_quant(weight, scale=weight_scale)
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)
@@ -312,13 +352,17 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
 
         layer.input_scale = None
         block_size = self.weight_block_size
+        weight = self.get_weight_for_quantization(layer)
 
         qweight, weight_scale_inv = per_block_cast_to_fp8(
-            layer.weight, block_size=block_size, use_ue8m0=False
+            weight, block_size=block_size, use_ue8m0=False
         )
 
         replace_parameter(layer, "weight", qweight.data)
         replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
+
+        if self.requantization_source is not None and hasattr(layer, "weight_scale"):
+            del layer.weight_scale
 
         self.fp8_linear.process_weights_after_loading(layer)
 
@@ -395,18 +439,20 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             return
 
         layer.input_scale = None
-        amax = weight_amax(layer.weight, dim=-1, keepdim=True)
+        weight = self.get_weight_for_quantization(layer)
+        amax = weight_amax(weight, dim=-1, keepdim=True)
         amax = amax_for_tp_weight_quant(
             amax, _is_tp_sharded(layer, reduces_output_dim=False)
         )
         weight_scale = _fp8_channel_scale(amax)
-        qweight = _fp8_quant_per_channel(layer.weight, weight_scale)
+        qweight = _fp8_quant_per_channel(weight, weight_scale)
 
         replace_parameter(layer, "weight", qweight.t())
         replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)
         expose_input_quant_key(layer, self.fp8_linear)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 

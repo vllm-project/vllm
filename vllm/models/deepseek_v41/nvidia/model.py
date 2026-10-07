@@ -766,6 +766,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):
             self.decoder_replay_start = cut + 1
+            # The attention metadata keys the replay layers read.
+            metadata_prefixes = set()
+            for layer in islice(self.layers, cut + 1, self.end_layer):
+                attn = typing.cast(DeepseekV4DecoderLayer, layer).attn
+                metadata_prefixes.add(attn.swa_cache_layer.prefix)
+                if attn.compressed_cache_prefix is not None:
+                    metadata_prefixes.add(attn.compressed_cache_prefix)
+                if attn.indexer is not None:
+                    metadata_prefixes.add(attn.indexer.k_cache.prefix)
             self.decoder_replay_layers = DecoderReplayLayers(
                 config.sliding_window,
                 self._run_replay_layers,
@@ -774,6 +783,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     for buf in (self.topk_indices_buffer, self.candidate_block_buffer)
                     if buf is not None
                 ],
+                metadata_prefixes,
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layers "
@@ -1354,17 +1364,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
 
-    def finalize_mega_attn_weights(self) -> None:
-        """Permute wq_b / wo_a into FlashMLA's mega-attention layouts.
-
-        A no-op for every other attention layer, and idempotent, so a second
-        post-load pass cannot permute twice.
-        """
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
-            if finalize is not None:
-                finalize()
-
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
             return
@@ -1637,7 +1636,6 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
-        self.model.finalize_mega_attn_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

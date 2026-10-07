@@ -27,6 +27,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
@@ -132,8 +133,18 @@ class FlashAttnMLASparseMetadataBuilder(
         self._init_reorder_batch_threshold(threshold, supports_spec_as_decode=True)
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
 
-    def update_draft_decode_metadata(self, _metadata: SparseMLACommonMetadata) -> None:
-        pass
+    def update_draft_decode_metadata(self, metadata: SparseMLACommonMetadata) -> None:
+        num_tokens = metadata.num_decode_tokens
+        if num_tokens == 0:
+            return
+        # Everything else is a view of runner buffers; the per-token request
+        # map is a builder buffer that build() filled for the captured batch.
+        compute_token_to_req_indices(
+            metadata.query_start_loc,
+            metadata.req_id_per_token,
+            num_tokens,
+            num_tokens,
+        )
 
 
 class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
