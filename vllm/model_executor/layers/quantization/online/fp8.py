@@ -623,27 +623,29 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+
         # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
         moe_tp_size = self.moe.tp_size
-        w13_amax = weight_amax(layer.w13_weight.flatten(1), dim=-1)
+        w13_amax = weight_amax(w13_weight.flatten(1), dim=-1)
         w13_amax = amax_for_moe_weight_quant(w13_amax, moe_tp_size)
         w13_scale = _fp8_scale(w13_amax)
-        w2_amax = weight_amax(layer.w2_weight.flatten(1), dim=-1)
+        w2_amax = weight_amax(w2_weight.flatten(1), dim=-1)
         w2_amax = amax_for_moe_weight_quant(w2_amax, moe_tp_size)
         w2_scale = _fp8_scale(w2_amax)
 
         for expert in range(layer.local_num_experts):
             w13[expert, :, :], _ = ops.scaled_fp8_quant(
-                layer.w13_weight[expert, :, :], scale=w13_scale[expert]
+                w13_weight[expert, :, :], scale=w13_scale[expert]
             )
             w2[expert, :, :], _ = ops.scaled_fp8_quant(
-                layer.w2_weight[expert, :, :], scale=w2_scale[expert]
+                w2_weight[expert, :, :], scale=w2_scale[expert]
             )
 
         # Shuffle weights to runtime format and setup kernel.
@@ -656,6 +658,8 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
             w13_input_scale=layer.w13_input_scale,
             w2_input_scale=layer.w2_input_scale,
         )
+
+        self.release_requantization_source_weights(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -699,11 +703,12 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        self._zero_padding(layer)
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+        self._zero_padding(layer, w13_weight, w2_weight)
 
         fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
 
         block_size = self.weight_block_size
         assert block_size is not None
@@ -712,8 +717,8 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         # Create block-shaped scales (computed here rather than in
         # create_weights because online quant doesn't need them until now).
         num_experts = layer.local_num_experts
-        _, w13_out, w13_in = layer.w13_weight.shape
-        _, w2_out, w2_in = layer.w2_weight.shape
+        _, w13_out, w13_in = w13_weight.shape
+        _, w2_out, w2_in = w2_weight.shape
 
         w13_scale = torch.ones(
             num_experts,
@@ -732,12 +737,12 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
 
         for expert in range(num_experts):
             w13[expert], w13_scale[expert] = per_block_cast_to_fp8(
-                layer.w13_weight[expert],
+                w13_weight[expert],
                 block_size=block_size,
                 use_ue8m0=False,
             )
             w2[expert], w2_scale[expert] = per_block_cast_to_fp8(
-                layer.w2_weight[expert],
+                w2_weight[expert],
                 block_size=block_size,
                 use_ue8m0=False,
             )
@@ -754,6 +759,8 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             layer.w13_input_scale,
             layer.w2_input_scale,
         )
+
+        self.release_requantization_source_weights(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -805,32 +812,32 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+
         fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
         # Scale's leading dim is taken from the fp8 weight tensor by
         # construction, so it cannot drift from the weight's expert count
         # under EP / padded MoE.
-        n_w13 = layer.w13_weight.shape[1]
+        n_w13 = w13_weight.shape[1]
         w13_scale = torch.ones(
             w13.shape[0], n_w13, 1, device=w13.device, dtype=torch.float32
         )
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w2_amax = weight_amax(layer.w2_weight, dim=-1, keepdim=True)
+        w2_amax = weight_amax(w2_weight, dim=-1, keepdim=True)
         w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
         w2_scale = _fp8_channel_scale(w2_amax)
 
         for expert in range(layer.local_num_experts):
             w13[expert], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert],
+                w13_weight[expert],
                 scale=None,
                 use_per_token_if_dynamic=True,
             )
-            w2[expert] = _fp8_quant_per_channel(
-                layer.w2_weight[expert], w2_scale[expert]
-            )
+            w2[expert] = _fp8_quant_per_channel(w2_weight[expert], w2_scale[expert])
 
         self._setup_kernel(
             layer,
@@ -841,5 +848,7 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
             w13_input_scale=None,
             w2_input_scale=None,
         )
+
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True

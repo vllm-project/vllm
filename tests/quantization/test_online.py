@@ -490,35 +490,29 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
     assert isinstance(layer.quant_method, QuarkLinearMethod)
 
 
-def test_online_quantization_rejects_prequantized_moe(
-    default_vllm_config, dist_init, monkeypatch
+def test_online_quantization_configures_prequantized_moe(
+    default_vllm_config, dist_init
 ) -> None:
-    """Reject pre-quantized MoE before constructing an online target backend."""
+    """Configure the checkpoint method as the online MoE's weight source."""
     default_vllm_config.model_config = ModelConfig()
     prefix = "model.layers.0.mlp.experts"
     quant_config = _fully_quantized_quark_config()
     quant_config.online_quantization_config = OnlineQuantizationConfig(
         quant_config_args(linear="mxfp4", moe="mxfp4")
     )
-    monkeypatch.setattr(
-        quant_config.online_quantization_config,
-        "get_quant_method",
-        lambda *args: pytest.fail("unsupported online backend must not be constructed"),
+
+    layer = FusedMoEFactory(
+        num_experts=4,
+        top_k=2,
+        hidden_size=32,
+        intermediate_size=64,
+        params_dtype=torch.bfloat16,
+        quant_config=quant_config,
+        prefix=prefix,
     )
 
-    with pytest.raises(
-        NotImplementedError,
-        match="Requantizing checkpoint-quantized MoE layers is not supported",
-    ):
-        FusedMoEFactory(
-            num_experts=4,
-            top_k=2,
-            hidden_size=32,
-            intermediate_size=64,
-            params_dtype=torch.bfloat16,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
+    assert isinstance(layer._quant_method, Mxfp4OnlineMoEMethod)
+    assert layer._quant_method.requantization_source is not None
 
 
 def test_activation_only_override_applies_to_checkpoint_method(
@@ -931,6 +925,15 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             {},
             id="requantization_nvfp4_mxfp4_moe",
         ),
+        pytest.param(
+            NVFP4_MOE_MODEL_NAME,
+            None,
+            {"targets": {"*mlp.experts*": "fp8_per_tensor"}},
+            CompressedTensorsLinearMethod,
+            Fp8PerTensorOnlineMoEMethod,
+            {},
+            id="requantization_nvfp4_fp8_moe",
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -986,28 +989,24 @@ def test_online_quantization(
         ),
     }
     if model_name == NVFP4_MOE_MODEL_NAME:
-        original_process = Mxfp4OnlineMoEMethod.process_weights_after_loading
-        source_parameter_names = (
-            "w13_weight_packed",
-            "w13_weight_global_scale",
-            "w13_input_global_scale",
-            "w2_weight_packed",
-            "w2_weight_global_scale",
-            "w2_input_global_scale",
-        )
+        original_process = expected_moe_cls.process_weights_after_loading
 
         def assert_source_weights_released(method, layer) -> None:
+            source_parameters = dict(method.requantization_source_parameters)
             original_process(method, layer)
-            for name in source_parameter_names:
-                assert not hasattr(layer, name), (
-                    "Serialized NVFP4 source weights must be released after "
-                    "requantization"
-                )
-            assert layer.w13_weight_scale.dtype == torch.uint8
-            assert layer.w2_weight_scale.dtype == torch.uint8
+            assert not method.requantization_source_parameters
+            for name, parameter in source_parameters.items():
+                assert getattr(layer, name, None) is not parameter
+
+            if expected_moe_cls is Mxfp4OnlineMoEMethod:
+                assert layer.w13_weight_scale.dtype == torch.uint8
+                assert layer.w2_weight_scale.dtype == torch.uint8
+            else:
+                assert layer.w13_weight.dtype == current_platform.fp8_dtype()
+                assert layer.w2_weight.dtype == current_platform.fp8_dtype()
 
         monkeypatch.setattr(
-            Mxfp4OnlineMoEMethod,
+            expected_moe_cls,
             "process_weights_after_loading",
             assert_source_weights_released,
         )
