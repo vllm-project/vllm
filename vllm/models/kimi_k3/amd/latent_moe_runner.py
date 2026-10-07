@@ -100,9 +100,9 @@ class ROCmLatentMoERunner(MoERunner):
         up_proj_shard = transform.up_proj.weight.narrow(0, shard_start, shard_size)
         hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
 
-        # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
-        # beta-add epilogue so folding in the shared partial costs no kernel.
-        hidden_shard.addmm_(latent, up_proj_shard.t())
+        # Not addmm_: hipBLASLt's C-accumulating bf16 GEMM faults at some row
+        # counts for this shape (e.g. 23393-23405 rows at 896x3584).
+        hidden_shard += latent @ up_proj_shard.t()
 
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
@@ -122,7 +122,9 @@ class ROCmLatentMoERunner(MoERunner):
         if transform.norm is not None:
             latent = transform.norm(latent)
         out = tensor_model_parallel_reduce_scatter(shared_output, dim=0)
-        out.addmm_(latent.to(out.dtype), transform.up_proj.weight.t())
+        # Not addmm_: hipBLASLt's C-accumulating bf16 GEMM faults at some row
+        # counts for this shape (e.g. 2914-2925 rows at 7168x3584).
+        out += latent.to(out.dtype) @ transform.up_proj.weight.t()
         return out[..., :trunc_size] if trunc_size is not None else out
 
     def forward(
