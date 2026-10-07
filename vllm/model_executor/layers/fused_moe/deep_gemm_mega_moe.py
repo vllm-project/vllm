@@ -3,6 +3,7 @@
 """DeepGEMM MegaMoE backends: fused EP dispatch, expert GEMMs and combine."""
 
 from inspect import signature
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -165,10 +166,11 @@ class DeepGemmSm100MegaMoEBackend(DeepGemmMegaMoEBackend):
             (1, 32),
             num_local_experts,
         )
+        kwargs = {} if activation is None else {"activation": activation}
         return deep_gemm.transform_weights_for_mega_moe(
             (w13_weight.view(torch.int8).contiguous(), w13_scale),
             (w2_weight.view(torch.int8).contiguous(), w2_scale),
-            activation=activation,
+            **kwargs,
         )
 
     def supports_shared_experts(self, deep_gemm) -> bool:
@@ -373,32 +375,27 @@ class DeepGemmSm100MegaMoEBackend(DeepGemmMegaMoEBackend):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
+        kwargs: dict[str, Any] = {
+            name: value
+            for name, value in (
+                ("activation", activation),
+                ("activation_alpha", activation_alpha),
+                ("activation_beta", activation_beta),
+            )
+            if value is not None
+        }
         if shared_l1_weights is not None and shared_l2_weights is not None:
-            deep_gemm.fp8_fp4_mega_moe(
-                y,
-                l1_weights,
-                l2_weights,
-                symm_buffer,
-                shared_l1_weights=shared_l1_weights,
-                shared_l2_weights=shared_l2_weights,
-                activation_clamp=activation_clamp,
-                fast_math=fast_math,
-                activation=activation,
-                activation_alpha=activation_alpha,
-                activation_beta=activation_beta,
-            )
-        else:
-            deep_gemm.fp8_fp4_mega_moe(
-                y,
-                l1_weights,
-                l2_weights,
-                symm_buffer,
-                activation_clamp=activation_clamp,
-                fast_math=fast_math,
-                activation=activation,
-                activation_alpha=activation_alpha,
-                activation_beta=activation_beta,
-            )
+            kwargs["shared_l1_weights"] = shared_l1_weights
+            kwargs["shared_l2_weights"] = shared_l2_weights
+        deep_gemm.fp8_fp4_mega_moe(
+            y,
+            l1_weights,
+            l2_weights,
+            symm_buffer,
+            activation_clamp=activation_clamp,
+            fast_math=fast_math,
+            **kwargs,
+        )
 
     def supports_bf16_mega_gate(self) -> bool:
         """SM100 deep_gemm build is expected to provide the bf16 gate kernel."""
@@ -455,6 +452,7 @@ def get_deep_gemm_mega_moe_backend(
     Raises:
         NotImplementedError: If the device architecture is unsupported.
         ValueError: If the shapes are unsupported.
+
     """
     if not current_platform.is_device_capability_family(
         100, device_id=device.index or 0

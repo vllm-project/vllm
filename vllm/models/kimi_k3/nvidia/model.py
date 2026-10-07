@@ -441,7 +441,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 f"but its symmetric buffer supports {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
         is_padding = None
         if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
@@ -473,6 +472,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             )
 
         backend = self._ensure_backend()
+        symm_buffer = self.get_symm_buffer()
         prepare_megamoe_inputs(
             hidden_states,
             topk_weights,

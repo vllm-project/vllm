@@ -99,7 +99,7 @@ def _prepare_megamoe_inputs_kernel(
 
     if USE_UE8M0:
         scale_offsets = tl.arange(0, num_groups)
-        packed_scale = tl.sum(scale_exp << (scale_offsets[None, :] * 8), axis=0).to(
+        packed_scale = tl.sum(scale_exp << (scale_offsets[None, :] * 8), axis=1).to(
             tl.int32
         )
         tl.store(
@@ -219,8 +219,20 @@ def prepare_megamoe_inputs(
     """Quantize hidden states and repack top-k routing for DeepGEMM MegaMoE.
 
     Args:
+        hidden_states: Input activations of shape ``[num_tokens, hidden]``.
+        topk_weights: Router top-k weights of shape ``[num_tokens, top_k]``.
+        topk_ids: Router top-k expert ids of shape ``[num_tokens, top_k]``.
+        x_fp8: Output buffer for the fp8-quantized hidden states.
+        x_sf: Output buffer for the hidden-state scale factors.
+        topk_idx_out: Output buffer for the repacked top-k expert ids.
+        topk_weights_out: Output buffer for the repacked top-k weights.
+        is_padding: Optional per-token mask; padded tokens are not routed.
+        shared_x_sf: Optional output buffer for shared-expert scale factors.
+            Must be given together with ``shared_block_m``.
+        shared_block_m: Block M used to lay out ``shared_x_sf``.
         hidden_quant: Hidden-state quantization scheme. E8M0 scales are packed
             four per int32 into ``x_sf``; fp32 scales are stored directly.
+
     """
     num_tokens, hidden_size = hidden_states.shape
     if num_tokens == 0:

@@ -569,9 +569,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         deep_gemm = _import_deep_gemm()
 
-        backend = self._ensure_backend()
-
-        symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
         is_padding = None
         if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
@@ -603,6 +600,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 else None,
             )
 
+        backend = self._ensure_backend()
+        symm_buffer = self.get_symm_buffer()
         shared_x_sf = None
         shared_block_m = None
         if self.has_fused_shared_experts:
