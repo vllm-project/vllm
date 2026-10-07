@@ -267,6 +267,7 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
     worker.region_num_blocks = [4, 4]
     worker.block_len_per_layer = [8, 8]
     worker.block_stride_per_layer = [24, 24]
+    worker._skip_dram_xfer = False
     worker._recving_metadata = {
         "request": ReqMeta(
             local_block_ids=[[1, 2], [0, 1]],
