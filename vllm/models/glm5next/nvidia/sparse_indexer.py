@@ -718,12 +718,7 @@ class SparseAttnIndexerKpool(CustomOp):
                 )
             self.dcp_world_size = _parallel.decode_context_parallel_size
             self.dcp_rank = get_dcp_group().rank_in_group
-            if (
-                _cfg is not None
-                and _cfg.kernel_config.enable_jit_warmup
-                and current_platform.is_cuda()
-                and has_cutedsl()
-            ):
+            if current_platform.is_cuda() and has_cutedsl():
                 from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (  # noqa: E501
                     _PACK_DCP_TOPK_CANDIDATES_KERNEL,
                     _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL,
