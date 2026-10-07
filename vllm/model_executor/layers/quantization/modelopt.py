@@ -76,6 +76,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
+    dequant_mxfp8_to_bf16,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -680,6 +681,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(
@@ -690,7 +692,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1092,6 +1094,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(
@@ -1102,7 +1105,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1461,6 +1464,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(
@@ -1471,7 +1475,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -2314,13 +2318,14 @@ def select_linear_kernel(
     w = spec.weight
     assert isinstance(w, QuantKey), f"resolve() must supply a weight key, got {w!r}"
     if w.dtype == FP4_DTYPE:
-        # W4A16 (activation is None) → use_a16=True defaults to Marlin *and*
-        # honors --linear-backend (matches upstream ModelOptNvFp4W4A16LinearMethod
-        # after #50273); W4A4 → use_a16=False.
+        # W4A16 (activation is None) → use_a16=True, auto prefers FlashInfer
+        # CuTe-DSL backend on SM100/103 when available and Marlin otherwise,
+        # and honors --linear-backend (#50273); W4A4 → use_a16=False.
         return init_nvfp4_linear_kernel(use_a16=spec.activation is None)
     if w.scale.dtype == MXFP8_SCALE_DTYPE:
         return init_mxfp8_linear_kernel(
-            bmm_batch_size=getattr(layer, "bmm_batch_size", None)
+            weight_shape=weight_shape or layer.weight.shape,
+            bmm_batch_size=getattr(layer, "bmm_batch_size", None),
         )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.
@@ -2508,12 +2513,6 @@ class ModelOptLinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = sum(output_partition_sizes)
-        # Humming reads both off the layer in
-        # prepare_humming_linear_layer_config. LinearBase sets them itself;
-        # ParallelLMHead does not, so supply them here.
-        layer.output_partition_sizes = output_partition_sizes
-        if not hasattr(layer, "has_bias"):
-            layer.has_bias = getattr(layer, "bias", None) is not None
         shapes = Shapes(output_partition_sizes, input_size_per_partition, params_dtype)
 
         self.wkey.create_weights(layer, WEIGHT, self.ctx, shapes, weight_loader)
@@ -2532,7 +2531,10 @@ class ModelOptLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer) -> None:
         if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
-            self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
+            self.kernel = init_mxfp8_linear_kernel(
+                weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
+                bmm_batch_size=layer.bmm_batch_size,
+            )
         if is_weights_pre_processed():
             if not self.supports_pre_processed_weights:
                 raise RuntimeError(
@@ -2570,6 +2572,17 @@ class ModelOptLinearMethod(LinearMethodBase):
             )
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
         self.kernel.process_weights_after_loading(layer)
+
+    def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        """Reconstruct serialized weights for online requantization."""
+        if self.wkey.key is kMxfp8Static:
+            return dequant_mxfp8_to_bf16(
+                layer.weight.contiguous(), layer.weight_scale.contiguous()
+            )
+        else:
+            raise NotImplementedError(
+                "ModelOpt weight dequantization is only supported for MXFP8."
+            )
 
     def apply(self, layer, x, bias=None):
         return self.fmt.apply(

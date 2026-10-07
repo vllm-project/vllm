@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
     from vllm.config.cache import MambaDType
@@ -43,6 +43,18 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if cache_config.cache_dtype == "auto":
+            if current_platform.is_xpu():
+                cache_config.cache_dtype = "bfloat16"
+            elif current_platform.is_cuda_alike():
+                capability = current_platform.get_device_capability()
+                cache_config.cache_dtype = (
+                    "fp8_e4m3" if capability and capability.major >= 10 else "bfloat16"
+                )
+
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
         vllm_config.parallel_config.set_dcp_defaults(
@@ -212,12 +224,15 @@ class Gemma4Config(VerifyAndUpdateConfig):
         """Configure attention for heterogeneous head dimensions.
 
         Gemma4 uses different head dimensions for sliding window vs full attention
-        layers. The default FA3 on Hopper cannot handle head_dim > 256, which causes
-        mixed backend selection and numerical divergence.
+        layers. The default FA3 on Hopper cannot handle head_dim > 256.
 
-        When FA4 is available we force it for ALL layers, giving a uniform kernel path
-        and avoiding the mixed FA3+FA4 penalty. When FA4 is not available we fall back
-        to Triton.
+        On SM90 with FP8 KV cache, use FA3 for supported layers and let the generic
+        FlashAttention selector upgrade larger head dimensions to FA4.
+        The multimodal-prefix composite routes image masks to Triton and causal
+        requests to this per-layer FA3/FA4 selection. For other configurations,
+        force FA4 for all layers to avoid the mixed
+        FA3+FA4 penalty.
+        When FA4 is not available, fall back to Triton.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -230,6 +245,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if len(set(head_dims.values())) <= 1:
             return
 
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -241,18 +257,133 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 and vllm_config.attention_config.backend
                 in (None, AttentionBackendEnum.FLASH_ATTN)
             ):
-                vllm_config.attention_config.flash_attn_version = 4
-                logger.info(
-                    "Gemma4 model has heterogeneous head dimensions %s. Using FA4 for "
-                    "all layers to avoid mixed FA3/FA4 penalty.",
-                    head_dims,
-                )
+                use_per_layer_fa = current_platform.is_device_capability_family(
+                    90
+                ) and vllm_config.cache_config.cache_dtype.startswith("fp8")
+                if use_per_layer_fa:
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using "
+                        "per-layer FA3/FA4 selection for FP8 KV cache on SM90.",
+                        head_dims,
+                    )
+                else:
+                    vllm_config.attention_config.flash_attn_version = 4
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using FA4 "
+                        "for all layers to avoid mixed FA3/FA4 penalty.",
+                        head_dims,
+                    )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
                 "%s. FA4 not available, forcing TRITON_ATTN backend.",
                 head_dims,
+            )
+
+
+class EmbeddingGemma2ModelConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Gemma4Config.verify_and_update_config(vllm_config)
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attn_config = vllm_config.attention_config
+        if attn_config.backend is None:
+            attn_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "EmbeddingGemma2: attention backend not specified; defaulting to "
+                "TRITON_ATTN (validated backend for heterogeneous head dimensions)."
+            )
+        else:
+            logger.info(
+                "EmbeddingGemma2: using attention backend %s", attn_config.backend
+            )
+
+        model_config = vllm_config.model_config
+        orig_len = getattr(model_config, "original_max_model_len", None)
+        if orig_len in (None, -1):
+            default_len = 8192
+            # Check sentence_bert_config.json if available
+            try:
+                import json
+                from pathlib import Path
+
+                cfg_path = Path(model_config.model) / "sentence_bert_config.json"
+                if cfg_path.exists():
+                    data = json.loads(cfg_path.read_text())
+                    if "max_seq_length" in data and isinstance(
+                        data["max_seq_length"], int
+                    ):
+                        default_len = data["max_seq_length"]
+            except Exception:
+                pass
+
+            if model_config.max_model_len > default_len:
+                uncapped_len = model_config.max_model_len
+                logger.info(
+                    "EmbeddingGemma2: max_model_len not explicitly set; capping from "
+                    "%d to %d.",
+                    model_config.max_model_len,
+                    default_len,
+                )
+                model_config.max_model_len = default_len
+                scheduler_config = vllm_config.scheduler_config
+                if scheduler_config is not None:
+                    new_batched_tokens = max(
+                        model_config.max_model_len, scheduler_config.max_num_seqs
+                    )
+                    if scheduler_config.max_num_batched_tokens >= uncapped_len:
+                        if scheduler_config.max_num_batched_tokens > uncapped_len:
+                            logger.warning(
+                                "EmbeddingGemma2: lowering explicitly set "
+                                "scheduler_config.max_num_batched_tokens from %d to %d "
+                                "to match capped max_model_len.",
+                                scheduler_config.max_num_batched_tokens,
+                                new_batched_tokens,
+                            )
+                        else:
+                            logger.info(
+                                "EmbeddingGemma2: lowering "
+                                "scheduler_config.max_num_batched_tokens from %d to %d "
+                                "to match capped max_model_len.",
+                                scheduler_config.max_num_batched_tokens,
+                                new_batched_tokens,
+                            )
+                        scheduler_config.max_num_batched_tokens = new_batched_tokens
+                        if hasattr(vllm_config, "_set_compile_ranges"):
+                            vllm_config._set_compile_ranges()
+                    if scheduler_config.max_num_encoder_input_tokens >= uncapped_len:
+                        if scheduler_config.max_num_encoder_input_tokens > uncapped_len:
+                            logger.warning(
+                                "EmbeddingGemma2: lowering explicitly set "
+                                "scheduler_config.max_num_encoder_input_tokens "
+                                "from %d to %d to match capped max_model_len.",
+                                scheduler_config.max_num_encoder_input_tokens,
+                                new_batched_tokens,
+                            )
+                        scheduler_config.max_num_encoder_input_tokens = (
+                            new_batched_tokens
+                        )
+                    if scheduler_config.encoder_cache_size >= uncapped_len:
+                        if scheduler_config.encoder_cache_size > uncapped_len:
+                            logger.warning(
+                                "EmbeddingGemma2: lowering explicitly set "
+                                "scheduler_config.encoder_cache_size from %d to %d "
+                                "to match capped max_model_len.",
+                                scheduler_config.encoder_cache_size,
+                                new_batched_tokens,
+                            )
+                        scheduler_config.encoder_cache_size = new_batched_tokens
+                    if hasattr(scheduler_config, "verify_max_model_len"):
+                        scheduler_config.verify_max_model_len(
+                            model_config.max_model_len
+                        )
+        elif model_config.max_model_len > 32768:
+            logger.warning(
+                "EmbeddingGemma2: max_model_len=%d is large; "
+                "consider --max-model-len 8192 to bound encoder memory.",
+                model_config.max_model_len,
             )
 
 
@@ -532,6 +663,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
         config.num_labels = 1
+        config.get_text_config().num_labels = 1
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
         if pooler_config.logit_mean is None:
@@ -631,20 +763,9 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
-            if (
-                cache_config.mamba_cache_mode == "all"
-                and not model_config.supports_mamba_prefix_caching
-            ):
-                cache_config.mamba_cache_mode = "align"
-                logger.warning(
-                    "Hybrid or mamba-based model detected without support "
-                    "for prefix caching with Mamba cache 'all' mode: "
-                    "falling back to 'align' mode."
-                )
-            if cache_config.mamba_cache_mode == "align":
-                assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                    "Chunked prefill is required for mamba cache mode 'align'."
-                )
+            assert vllm_config.scheduler_config.enable_chunked_prefill, (
+                "Chunked prefill is required for mamba cache mode 'align'."
+            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -666,7 +787,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 
     @classmethod
     def update_mamba_ssm_cache_dtype(
-        cls, *, cache_config: "CacheConfig", hf_config: "PretrainedConfig"
+        cls, *, cache_config: "CacheConfig", hf_config: "PreTrainedConfig"
     ) -> None:
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
@@ -1009,6 +1130,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
+    "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
