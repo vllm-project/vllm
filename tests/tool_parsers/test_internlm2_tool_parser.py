@@ -162,3 +162,61 @@ def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -
                 streamed += arguments
 
     assert json.loads(streamed) == {"city": "Dallas", "state": "TX"}
+
+
+@pytest.mark.parametrize(
+    "chunk_size",
+    [1, 3, 6, 12],
+    ids=["1_char_deltas", "3_char_deltas", "6_char_deltas", "12_char_deltas"],
+)
+def test_streaming_arguments_survive_every_chunk_boundary(
+    default_tokenizer: TokenizerLike, chunk_size: int
+) -> None:
+    """Streamed argument deltas must concatenate to the completed arguments.
+
+    Deltas rebuilt from the re-serialized partial parse used to drop characters:
+    partial_json_parser closes the object optimistically, so the quote it invents
+    for one parse is gone from the next and the stream stops being a prefix of the
+    finished arguments. The body is cut at several sizes because the loss depends
+    on where the boundary falls.
+    """
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    parser = Internlm2ToolParser(default_tokenizer)
+
+    body = '{"name": "get_weather", "parameters": {"city": "Beijing", "days": 3}}'
+    deltas = (
+        ["<|action_start|><|plugin|>"]
+        + [body[i : i + chunk_size] for i in range(0, len(body), chunk_size)]
+        + ["<|action_end|>"]
+    )
+
+    streamed = ""
+    current_text = ""
+    for delta_text in deltas:
+        previous_text = current_text
+        current_text += delta_text
+        delta_message = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        if delta_message and delta_message.tool_calls:
+            arguments = delta_message.tool_calls[0].function.arguments
+            if arguments:
+                streamed += arguments
+
+    assert json.loads(streamed) == {"city": "Beijing", "days": 3}
+    assert streamed == '{"city": "Beijing", "days": 3}'

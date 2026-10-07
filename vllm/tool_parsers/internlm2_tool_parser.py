@@ -5,6 +5,7 @@ import json
 from collections.abc import Sequence
 
 import partial_json_parser
+import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -26,7 +27,6 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import extract_intermediate_diff, is_complete_json
 
 logger = init_logger(__name__)
 
@@ -46,6 +46,40 @@ class Internlm2ToolParser(ToolParser):
             # information.
             request.skip_special_tokens = False
         return request
+
+    def get_raw_arguments(self, action: str) -> str | None:
+        """Raw text of the arguments object in ``action``, as far as it has arrived.
+
+        The scan tracks string literals and escapes, so a brace inside a string
+        value is not read as the end of the object. It runs left to right and
+        stops at the matching close brace, so what it returns for a prefix of
+        ``action`` is always a prefix of what it returns for the whole of it,
+        which is what makes streaming by character count safe.
+        """
+        match = re.search(r'"(?:parameters|arguments)"\s*:\s*(?=\{)', action)
+        if match is None:
+            return None
+        text = action[match.end() :]
+        depth = 0
+        in_string = False
+        escaped = False
+        for index, char in enumerate(text):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[: index + 1]
+        return text
 
     def get_arguments(self, obj):
         if "parameters" in obj:
@@ -128,55 +162,22 @@ class Internlm2ToolParser(ToolParser):
             # now we know we're on the same tool call and we're streaming
             # arguments
             else:
-                prev_arguments = self.get_arguments(
-                    self.prev_tool_call_arr[self.current_tool_id]
+                # Stream slices of the raw argument text, tracking how much of it
+                # has already been sent. Deltas rebuilt from the re-serialized
+                # partial parse cannot be trusted: partial_json_parser closes the
+                # object optimistically, so a quote or brace it invented for one
+                # parse is absent from the next, and once a delta containing one
+                # has gone out the stream is no longer a prefix of the finished
+                # arguments and the missing characters can never be sent.
+                raw_arguments = self.get_raw_arguments(action)
+                streamed = self.streamed_args_for_tool[self.current_tool_id]
+
+                argument_diff = (
+                    raw_arguments[len(streamed) :] if raw_arguments is not None else ""
                 )
-                cur_arguments = self.get_arguments(tool_call_arr)
-
-                # not arguments generated
-                if not cur_arguments and not prev_arguments:
+                if not argument_diff:
                     delta = None
-                # will never happen
-                elif not cur_arguments and prev_arguments:
-                    logger.error(
-                        "INVARIANT - impossible to have arguments reset mid-arguments"
-                    )
-                    delta = None
-                # first time to get parameters
-                elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
-
-                    match_start = cur_arguments_json.find(delta_text)
-                    if match_start != -1:
-                        arguments_delta = cur_arguments_json[
-                            : match_start + len(delta_text)
-                        ]
-                    elif is_complete_json(parsable_arr):
-                        # Complete in this delta: send whole, don't drop.
-                        arguments_delta = cur_arguments_json
-                    else:
-                        # Still partial: wait for more text.
-                        return None
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    arguments=arguments_delta
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
-                # both prev and cur parameters, send the increase parameters
-                elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
-                    prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
-
-                    argument_diff = extract_intermediate_diff(
-                        cur_args_json, prev_args_json
-                    )
-
+                else:
                     delta = DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
@@ -187,7 +188,7 @@ class Internlm2ToolParser(ToolParser):
                             )
                         ]
                     )
-                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
+                    self.streamed_args_for_tool[self.current_tool_id] = raw_arguments
 
             # check to see if the name is defined and has been sent. if so,
             # stream the name - otherwise keep waiting
