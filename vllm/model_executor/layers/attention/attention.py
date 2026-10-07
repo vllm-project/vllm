@@ -104,6 +104,7 @@ def _largest_kernel_block_within(
     page_budget: int,
     fallback: int,
     kv_cache_spec: KVCacheSpec | None = None,
+    divisor_of: int | None = None,
 ) -> int:
     """Largest supported kernel block size whose page fits in ``page_budget``.
 
@@ -112,6 +113,9 @@ def _largest_kernel_block_within(
     block whose natural page still fits under ``page_budget`` minimizes that waste.
     ``MultipleOf`` declarations are expanded to the largest aligned block that fits.
     Falls back to the smallest supported block when nothing fits.
+
+    With ``divisor_of``, prefer the largest fitting block that divides it, so the
+    page can be scaled to ``divisor_of`` by an integer ratio instead of padded.
     """
     from vllm.v1.attention.backend import MultipleOf
 
@@ -127,6 +131,17 @@ def _largest_kernel_block_within(
         return fallback
     smallest = min(candidates)
     fitting = [b for b in candidates if b * per_token_bytes <= page_budget]
+    if divisor_of is not None:
+        dividing = [b for b in fitting if divisor_of % b == 0]
+        dividing.extend(
+            b
+            for s in sizes
+            if isinstance(s, MultipleOf)
+            for b in range(s.base, max_block_size + 1, s.base)
+            if divisor_of % b == 0
+        )
+        if dividing:
+            return max(dividing)
     return max(fitting) if fitting else smallest
 
 
@@ -649,12 +664,16 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             sw_per_token = kv_cache_spec.real_page_size_bytes
             page_budget = shared_page or sw_per_token * block_size
+            # Without a shared page, prefer a block that divides the primary
+            # block: ``unify`` pads any other block's page, and a padded page
+            # disables fine-grained prefix-cache hits on this group.
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend,
                 sw_per_token,
                 page_budget,
                 block_size,
                 kv_cache_spec,
+                divisor_of=None if shared_page else block_size,
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
