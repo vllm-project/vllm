@@ -7,11 +7,18 @@ import types
 
 import pytest
 import torch
+
+from tests.kernels.quant_utils import (
+    native_per_token_group_quant_fp8,
+    native_w8a8_block_matmul,
+)
+from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
     _run_b12x_fp8_block_scaled_mm,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
@@ -29,13 +36,6 @@ from vllm.utils.flashinfer import (
     has_flashinfer_fp8_blockscale_gemm,
 )
 from vllm.utils.import_utils import has_deep_gemm
-
-from tests.kernels.quant_utils import (
-    native_per_token_group_quant_fp8,
-    native_w8a8_block_matmul,
-)
-from tests.kernels.utils import fp8_ulp_distance
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 
 capability = current_platform.get_device_capability()
 if capability is None or capability < (9, 0):
@@ -424,7 +424,7 @@ def test_w8a8_block_fp8_b12x_matmul(M, N, K):
 
 
 @pytest.mark.skipif(capability != (12, 0), reason="qualified SM120 n64 route")
-@pytest.mark.parametrize("M", [16, 32, 64, 128])
+@pytest.mark.parametrize("M", [16, 32, 40, 64, 72, 128])
 @pytest.mark.parametrize("K", [4096, 9216])
 @torch.inference_mode()
 def test_cutlass_sm120_n64_preserves_block_fp8_bytes(M, K):
