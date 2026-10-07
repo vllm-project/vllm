@@ -110,16 +110,15 @@ def test_h12_query_is_tile_padded_to_h16():
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
-def test_dcp_gathered_query_is_tile_padded_to_cprr_heads(dtype):
+def test_h96_query_is_tile_padded_to_h128(dtype):
     # DCP8 at TP8 gathers 96 heads; the cprr asm decode runs at 128.
     q = torch.randn(5, 96, QK_HEAD_DIM).to(dtype)
 
     padded_q = AiterMLAHelper.get_mla_padded_q(96, q, target_heads=128)
 
-    assert padded_q.shape == (5, 128, QK_HEAD_DIM)
+    expected = torch.cat([q, q[:, :32]], dim=1)
     assert padded_q.is_contiguous()
-    expected = _expected_tile_pad(q.view(torch.uint8), 96, 128)
-    assert torch.equal(padded_q.view(torch.uint8), expected)
+    assert torch.equal(padded_q.view(torch.uint8), expected.view(torch.uint8))
 
 
 def test_h6_tp16_query_is_padded_to_h16():

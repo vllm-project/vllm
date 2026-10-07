@@ -1025,33 +1025,16 @@ def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
     )
 
 
-def _wide_view(t: torch.Tensor) -> torch.Tensor | None:
-    """Reinterpret ``t`` as int64 along its last dim, or None if not aligned."""
-    size = t.element_size()
-    if size >= 8 or t.dim() == 0 or t.stride(-1) != 1:
-        return None
-    ratio = 8 // size
-    if t.shape[-1] % ratio or t.storage_offset() % ratio:
-        return None
-    if any(s % ratio for s in t.stride()[:-1]):
-        return None
-    return t.view(torch.int64)
-
-
-def copy_rows_(dst: torch.Tensor, src: torch.Tensor) -> None:
-    """``dst.copy_(src)`` for same-dtype tensors with contiguous rows.
-
-    Copies through an 8-byte view when the rows allow it. A strided copy of a
-    byte-sized dtype (an FP8 query) otherwise takes PyTorch's one-element-per-
-    lane path, which moves a few hundred GB/s on MI355X.
-    """
-    assert dst.dtype == src.dtype
-    wide_dst = _wide_view(dst)
-    wide_src = _wide_view(src)
-    if wide_dst is not None and wide_src is not None:
-        wide_dst.copy_(wide_src)
-    else:
-        dst.copy_(src)
+def reserve_query_head_storage(
+    query: torch.Tensor, padded_num_heads: int
+) -> torch.Tensor:
+    """Reserve backing storage for fixed-head decode kernels."""
+    assert query.ndim == 3
+    assert query.shape[1] <= padded_num_heads
+    padded = query.new_empty((query.shape[0], padded_num_heads, query.shape[2]))
+    padded.resize_(query.shape)
+    padded.copy_(query)
+    return padded
 
 
 # Symmetric-memory A2A implementation
@@ -1607,23 +1590,10 @@ class MLADCPManager:
         return self._gather_query
 
     def _gather_query(self, query: torch.Tensor) -> torch.Tensor:
-        # Gather rank-major along dim 0 (no relayout), then write the
-        # token-major [B, W * H, D] result once, straight into the padded
-        # storage when the backend asks for it. all_gather(dim=1) would make
-        # a strided byte-wise clone, and padding would then copy it again.
-        world_size = self.group.world_size
-        num_tokens, num_heads, head_dim = query.shape
-        gathered = self.group.all_gather(query, dim=0)
-        out_heads = world_size * num_heads
-        out = query.new_empty(
-            (num_tokens, self.padded_num_heads or out_heads, head_dim)
-        )
-        out.resize_((num_tokens, out_heads, head_dim))
-        copy_rows_(
-            out.view(num_tokens, world_size, num_heads * head_dim),
-            gathered.view(world_size, num_tokens, num_heads * head_dim).transpose(0, 1),
-        )
-        return out
+        query = self.group.all_gather(query, dim=1)
+        if self.padded_num_heads is not None:
+            query = reserve_query_head_storage(query, self.padded_num_heads)
+        return query
 
     def _direct_workspace_query_gather(
         self,

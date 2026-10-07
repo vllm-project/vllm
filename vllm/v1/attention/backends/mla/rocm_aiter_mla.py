@@ -35,7 +35,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
-from vllm.v1.attention.ops.dcp import copy_rows_
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
@@ -262,6 +261,34 @@ def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> 
 # causality on local indices, which is wrong over a round-robin shard.
 _NATIVE_CPRR_HEADS: Final = (16, 32, 64, 128)
 _MIN_CPRR_QLEN: Final = 3
+
+
+def _int64_rows(t: torch.Tensor) -> torch.Tensor | None:
+    """Reinterpret ``t`` as int64 along its last dim, or None if not aligned."""
+    size = t.element_size()
+    if size >= 8 or t.dim() == 0 or t.stride(-1) != 1:
+        return None
+    ratio = 8 // size
+    if t.shape[-1] % ratio or t.storage_offset() % ratio:
+        return None
+    if any(s % ratio for s in t.stride()[:-1]):
+        return None
+    return t.view(torch.int64)
+
+
+def _copy_rows(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """``dst.copy_(src)`` through int64 rows when the layout allows it.
+
+    A strided copy of a byte-sized dtype (an FP8 query) otherwise moves one
+    element per lane, which is slow on MI355X.
+    """
+    assert dst.dtype == src.dtype
+    wide_dst = _int64_rows(dst)
+    wide_src = _int64_rows(src)
+    if wide_dst is not None and wide_src is not None:
+        wide_dst.copy_(wide_src)
+    else:
+        dst.copy_(src)
 
 
 class _DCPDecodeRoute(Enum):
@@ -1768,11 +1795,11 @@ class AiterMLAHelper:
         # packed [tokens, m, head_dim] buffer directly avoids materializing
         # ceil(m / num_heads) full copies and then a second contiguous copy.
         padded = q.new_empty((q.shape[0], m, q.shape[2]))
-        copy_rows_(padded[:, :num_heads], q)
+        _copy_rows(padded[:, :num_heads], q)
         filled = num_heads
         while filled < m:
             n = min(filled, m - filled)
-            copy_rows_(padded[:, filled : filled + n], padded[:, :n])
+            _copy_rows(padded[:, filled : filled + n], padded[:, :n])
             filled += n
         return padded
 
