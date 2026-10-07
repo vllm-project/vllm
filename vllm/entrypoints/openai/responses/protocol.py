@@ -42,9 +42,6 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
@@ -64,6 +61,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     StopParam,
+    TopLogprobsParam,
     validate_cache_salt,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
@@ -213,7 +211,7 @@ class ResponsesRequest(OpenAIBaseModel):
     text: ResponseTextConfig | None = None
     tool_choice: ToolChoice = "auto"
     tools: list[Tool] = Field(default_factory=list)
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
     top_k: int | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
@@ -248,7 +246,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
-    watermarking: bool = True
+    watermarking: bool | None = None
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(
@@ -845,50 +843,6 @@ class ResponsesResponse(OpenAIBaseModel):
         )
 
 
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.done"]
-    """The type of the event. Always `response.reasoning_part.done`."""
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.added"]
-    """The type of the event. Always `response.reasoning_part.added`."""
-
-
 # vLLM Streaming Events
 # Note: we override the response type with the vLLM ResponsesResponse type
 class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
@@ -913,8 +867,6 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseContentPartDoneEvent
     | ResponseReasoningTextDeltaEvent
     | ResponseReasoningTextDoneEvent
-    | ResponseReasoningPartAddedEvent
-    | ResponseReasoningPartDoneEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent
