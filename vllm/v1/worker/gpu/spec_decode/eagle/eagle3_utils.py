@@ -23,7 +23,7 @@ def set_eagle3_aux_hidden_state_layers(
     eagle3_model = cast(SupportsEagle3, model)
 
     aux_layers = get_eagle3_aux_layers_from_config(spec_config)
-    aux_layers = remap_cosmos3_edge_aux_layers(
+    aux_layers = apply_eagle3_aux_layer_scale(
         aux_layers, getattr(model, "config", None)
     )
     if aux_layers:
@@ -100,33 +100,27 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
     model.make_empty_intermediate_tensors = make_empty_with_aux
 
 
-def _is_cosmos3_edge_config(config: object | None) -> bool:
-    if config is None:
-        return False
-    model_type = getattr(config, "model_type", "") or ""
-    architectures = getattr(config, "architectures", None) or []
-    return model_type == "cosmos3_edge" or any(
-        "Cosmos3Edge" in str(architecture) for architecture in architectures
-    )
-
-
-def remap_cosmos3_edge_aux_layers(
+def apply_eagle3_aux_layer_scale(
     layer_ids: tuple[int, ...] | list[int] | None,
     hf_config: object | None,
 ) -> tuple[int, ...] | None:
-    """Map DFlash aux ids onto Cosmos3-Edge's split vLLM layers.
+    """Scale capture ids declared by the target model config.
 
     Draft configs store Hugging Face block ids. The shared conversion adds 1,
-    which is correct when one HF block is one vLLM layer. Edge loads each HF
-    block as attention then MLP, so the verified capture is ``2 * (i + 1)``.
+    which is correct when one HF block is one vLLM layer. A target whose config
+    sets ``eagle_aux_hidden_state_layer_scale`` uses a different capture index.
+    Cosmos3-Edge sets this to 2 because each HF block is attention then MLP, so
+    the verified capture is ``2 * (i + 1)``.
     """
     if not layer_ids:
         return None
-    if not _is_cosmos3_edge_config(hf_config):
+    scale = getattr(hf_config, "eagle_aux_hidden_state_layer_scale", 1)
+    if scale == 1:
         return tuple(layer_ids)
-    remapped = tuple(2 * int(layer_id) for layer_id in layer_ids)
+    remapped = tuple(int(scale) * int(layer_id) for layer_id in layer_ids)
     logger.info(
-        "Cosmos3-Edge DFlash aux layers: %s -> %s",
+        "Eagle3 aux layers scaled by %s: %s -> %s",
+        scale,
         tuple(layer_ids),
         remapped,
     )
