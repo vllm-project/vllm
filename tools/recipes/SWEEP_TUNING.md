@@ -245,17 +245,42 @@ preserved.
 
 ### Stage 2: Tune Concurrency
 
-The concurrency stage keeps the selected TP/DP layout fixed and uses vLLM
-Workload Explorer:
+The concurrency stage keeps the selected TP/DP layout and scheduler baseline
+fixed while finding the largest useful client concurrency.
+
+When TTFT and/or TPOT objectives are supplied, Recipes uses an **adaptive SLA
+boundary search** instead of uniformly sampling the entire workload range.
+
+The supplied `--concurrency` is the seed. The controller grows upward until it
+finds the first SLA failure (or shrinks downward when the seed fails), then
+binary-searches the integer PASS/FAIL bracket. One vLLM server remains running
+throughout this refinement, so midpoint probes do not reload the model.
+
+For example:
+
+```text
+32 PASS, 64 FAIL
+        -> 48
+        -> 40 or 56
+        -> ...
+        -> adjacent PASS / FAIL boundary
+```
+
+A point is SLA-feasible only when every measured run completes without failed
+requests, median P99 TTFT/TPOT satisfy the supplied objectives, and
+duration-weighted combined compliance meets the minimum ratio (`0.99` by
+default).
+
+The default growth factor is `2` and the default hard cap is `1000`.
+Generated runners accept `--growth-factor VALUE` and
+`--max-concurrency-cap VALUE`.
+
+Without TTFT/TPOT objectives there is no SLA boundary. In that mode the
+generated runner keeps vLLM Workload Explorer:
 
 ```text
 vllm bench sweep serve_workload --workload-var max_concurrency
 ```
-
-This stage explores client load rather than changing vLLM server configuration.
-With TTFT/TPOT objectives, `recommend_concurrency.py` selects the highest
-SLA-feasible `max_concurrency` that satisfies the P99 latency and combined
-compliance policy.
 
 The stage writes:
 

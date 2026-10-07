@@ -1014,7 +1014,7 @@ concurrency and scheduler tuning should follow automatically.
 
 
 def build_concurrency_bench_params(workload: WorkloadHints) -> list[dict[str, Any]]:
-    """Build one workload shape while leaving max_concurrency to Workload Explorer."""
+    """Build the fixed workload shape for concurrency tuning."""
     validate_sweep_workload(workload)
     assert workload.input_tokens is not None
     assert workload.output_tokens is not None
@@ -1027,6 +1027,12 @@ def build_concurrency_bench_params(workload: WorkloadHints) -> list[dict[str, An
             "num_prompts": _num_prompts_for_concurrency(workload.concurrency),
         }
     ]
+
+
+def _write_adaptive_concurrency_script(path: Path) -> None:
+    template_path = Path(__file__).with_name("adaptive_concurrency.py")
+    path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
 
 
 def _write_concurrency_run_script(
@@ -1059,6 +1065,20 @@ def _write_concurrency_run_script(
         )
 
     bench_cmd = " ".join(bench_parts)
+    use_adaptive_sla_search = bool(
+        workload.ttft_sla_ms is not None or workload.tpot_sla_ms is not None
+    )
+    adaptive_args = [
+        f"--seed-concurrency {workload.concurrency}",
+        f"--input-tokens {workload.input_tokens}",
+        f"--output-tokens {workload.output_tokens}",
+    ]
+    if workload.ttft_sla_ms is not None:
+        adaptive_args.append(f"--ttft-sla-ms {workload.ttft_sla_ms:g}")
+    if workload.tpot_sla_ms is not None:
+        adaptive_args.append(f"--tpot-sla-ms {workload.tpot_sla_ms:g}")
+    adaptive_args_text = " \\\n      ".join(adaptive_args)
+
     script = f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -1079,7 +1099,8 @@ fi
 # recipe tools may be newer than the installed vLLM package. Only pass the
 # resilience flag when this vLLM CLI actually supports it.
 CONTINUE_ON_ERROR_ARG=""
-if vllm bench sweep serve_workload --help 2>&1 | grep -q -- "--continue-on-error"; then
+if [[ "{int(use_adaptive_sla_search)}" == "1" ]] || \
+   vllm bench sweep serve_workload --help 2>&1 | grep -q -- "--continue-on-error"; then
   CONTINUE_ON_ERROR_ARG="--continue-on-error"
 fi
 
@@ -1089,17 +1110,31 @@ fi
 SWEEP_RETRY_COUNT="${{VLLM_RECIPE_SWEEP_RETRY_COUNT:-0}}"
 MAX_SWEEP_RETRIES="${{VLLM_RECIPE_SWEEP_RETRIES:-2}}"
 
-vllm bench sweep serve_workload \
-  --serve-cmd "vllm serve --config '${{CONFIG_PATH}}'" \
-  --bench-cmd "{bench_cmd}" \
-  --bench-params "${{SCRIPT_DIR}}/concurrency_bench_params.json" \
-  --output-dir "${{SCRIPT_DIR}}/results" \
-  --experiment-name concurrency-tuning \
-  --workload-var max_concurrency \
-  --workload-iters 10 \
-  --warmup-num-prompts {workload.concurrency} \
-  ${{CONTINUE_ON_ERROR_ARG}} \
-  "$@" || {{
+run_concurrency_sweep() {{
+  if [[ "{int(use_adaptive_sla_search)}" == "1" ]]; then
+    python3 "${{SCRIPT_DIR}}/adaptive_concurrency.py" \
+      --serve-cmd "vllm serve --config '${{CONFIG_PATH}}'" \
+      --bench-cmd "{bench_cmd}" \
+      --results-dir "${{SCRIPT_DIR}}/results/concurrency-tuning" \
+      {adaptive_args_text} \
+      ${{CONTINUE_ON_ERROR_ARG}} \
+      "$@"
+  else
+    vllm bench sweep serve_workload \
+      --serve-cmd "vllm serve --config '${{CONFIG_PATH}}'" \
+      --bench-cmd "{bench_cmd}" \
+      --bench-params "${{SCRIPT_DIR}}/concurrency_bench_params.json" \
+      --output-dir "${{SCRIPT_DIR}}/results" \
+      --experiment-name concurrency-tuning \
+      --workload-var max_concurrency \
+      --workload-iters 10 \
+      --warmup-num-prompts {workload.concurrency} \
+      ${{CONTINUE_ON_ERROR_ARG}} \
+      "$@"
+  fi
+}}
+
+run_concurrency_sweep || {{
     if [[ "${{SWEEP_RETRY_COUNT}}" -ge "${{MAX_SWEEP_RETRIES}}" ]]; then
       echo "Sweep failed after ${{MAX_SWEEP_RETRIES}} automatic retries." >&2
       exit 1
@@ -1336,12 +1371,13 @@ def write_concurrency_sweep_files(
     config: dict[str, Any],
     workload: WorkloadHints,
 ) -> list[Path]:
-    """Write a standalone max_concurrency Workload Explorer package."""
+    """Write a standalone max_concurrency tuning package."""
     validate_sweep_workload(workload)
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
     bench_params = directory / "concurrency_bench_params.json"
+    adaptive_script = directory / "adaptive_concurrency.py"
     run_script = directory / "run_concurrency_sweep.sh"
     recommend_script = directory / "recommend_concurrency.py"
 
@@ -1350,6 +1386,7 @@ def write_concurrency_sweep_files(
     request_model, tokenizer = _benchmark_models(config)
 
     _write_json(bench_params, build_concurrency_bench_params(workload))
+    _write_adaptive_concurrency_script(adaptive_script)
     _write_concurrency_run_script(
         run_script,
         config_rel=config_rel,
@@ -1360,7 +1397,13 @@ def write_concurrency_sweep_files(
     )
     _write_concurrency_recommend_script(recommend_script, workload=workload)
     analysis_files = _write_post_benchmark_analysis_files(directory, workload=workload)
-    return [bench_params, run_script, recommend_script, *analysis_files]
+    return [
+        bench_params,
+        adaptive_script,
+        run_script,
+        recommend_script,
+        *analysis_files,
+    ]
 
 
 def write_full_sweep_files(
@@ -1384,6 +1427,7 @@ def write_full_sweep_files(
 
     directory = Path(output_dir)
     concurrency_bench = directory / "concurrency_bench_params.json"
+    adaptive_concurrency = directory / "adaptive_concurrency.py"
     run_concurrency = directory / "run_concurrency_sweep.sh"
     recommend_concurrency = directory / "recommend_concurrency.py"
     prepare_scheduler = directory / "prepare_scheduler.py"
@@ -1397,6 +1441,7 @@ def write_full_sweep_files(
     request_model, tokenizer = _benchmark_models(config)
 
     _write_json(concurrency_bench, build_concurrency_bench_params(workload))
+    _write_adaptive_concurrency_script(adaptive_concurrency)
     _write_concurrency_run_script(
         run_concurrency,
         config_rel="parallel-layout-config.yml",
@@ -1434,6 +1479,7 @@ def write_full_sweep_files(
     return [
         *files,
         concurrency_bench,
+        adaptive_concurrency,
         run_concurrency,
         recommend_concurrency,
         prepare_scheduler,
