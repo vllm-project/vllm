@@ -67,6 +67,20 @@ class TPMapping:
 # ======================================================================
 
 
+def compute_head_offset(
+    tp_rank: int, tp_size: int, remote_tp_size: int, total_num_kv_heads: int
+) -> int:
+    """Return the offset in local head slices within the remote KV block."""
+    if tp_size <= remote_tp_size:
+        return 0
+    if tp_size > total_num_kv_heads:
+        remote_rank = tp_rank * remote_tp_size // tp_size
+        local_head = tp_rank * total_num_kv_heads // tp_size
+        remote_head = remote_rank * total_num_kv_heads // remote_tp_size
+        return local_head - remote_head
+    return tp_rank % (tp_size // remote_tp_size)
+
+
 def compute_tp_mapping(
     transfer_topology: TransferTopology,
     remote_tp_size: int,
@@ -137,16 +151,11 @@ def compute_tp_mapping(
     }
 
     # --- Rank offset factor ---
-    if transfer_topology.is_mla or tp_size <= remote_tp_size:
-        # We don't index into remote for reading, no offset needed.
-        rank_offset_factor = 0
-    elif tp_size > total_num_kv_heads:
-        local_head = tp_rank * total_num_kv_heads // tp_size
-        p_start = attn_ranks[0] * total_num_kv_heads // remote_tp_size
-        rank_offset_factor = local_head - p_start
-    else:
-        # D TP > P TP: we index into remote to read different heads depending on rank.
-        rank_offset_factor = tp_rank % (tp_size // remote_tp_size)
+    rank_offset_factor = (
+        0
+        if transfer_topology.is_mla
+        else compute_head_offset(tp_rank, tp_size, remote_tp_size, total_num_kv_heads)
+    )
 
     local_consumers = transfer_topology.dcp_consumer_count(
         remote_tp_size, remote_dcp_size
