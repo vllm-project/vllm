@@ -575,6 +575,22 @@ def qsa_select_paged_decode(
     )
 
 
+def reserve_qsa_select_prefill_workspace(device: torch.device) -> None:
+    """Touch the peak scratch memory of :func:`qsa_select_paged_prefill`.
+
+    The profiling dummy run carries no attention metadata, so the QSA layers
+    return before the indexer runs and the prefill logits workspace (always
+    ``VLLM_SPARSE_INDEXER_MAX_LOGITS_MB``) plus the top-k workspace are never
+    seen by the memory profiler. At long ``max_model_len`` and high
+    ``gpu_memory_utilization`` the first real long prefill then runs out of
+    memory. Allocating (and freeing) the same peak here makes the profiler
+    account for it, mirroring ``sparse_attn_indexer``'s profiling reservation.
+    """
+    max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    _ = torch.empty(max_logits_bytes, dtype=torch.uint8, device=device)
+    _ = torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=device)
+
+
 def qsa_select_paged_prefill(
     q: torch.Tensor,
     k_cache: torch.Tensor,
