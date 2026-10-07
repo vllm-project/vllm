@@ -863,9 +863,15 @@ class SlidingWindowSpec(AttentionSpec):
         # computed tokens plus the in-flight tokens (frees happen on the
         # processed-token basis); never more than `max_model_len`. An additional
         # `extra_retained_tokens` trailing tokens are kept alive below the
-        # window for multi-module spec decoding, and must be accounted here too.
+        # window for multi-module spec decoding. Bounded replay retains one
+        # more token so the block containing the replay start remains live.
+        replay_retained_tokens = int(self.prefix_replay_tokens > 0)
         num_tokens = min(
-            self.sliding_window - 1 + self.extra_retained_tokens + max_in_flight_tokens,
+            self.sliding_window
+            - 1
+            + self.extra_retained_tokens
+            + replay_retained_tokens
+            + max_in_flight_tokens,
             max_model_len,
         )
         # +1 because the sliding window may not start from the beginning of

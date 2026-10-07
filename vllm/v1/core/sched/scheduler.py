@@ -290,10 +290,19 @@ class Scheduler(SchedulerInterface):
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
         # for all such groups, so the rewind matches every group's allocation.
-        replay_windows = {
-            group.kv_cache_spec.prefix_replay_tokens
-            for group in kv_cache_config.kv_cache_groups
+        self.prefix_replay_group_ids = tuple(
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
             if group.kv_cache_spec.prefix_replay_tokens > 0
+        )
+        self.prefix_replay_transfer_group_ids = tuple(
+            group_id
+            for group_id in self.prefix_replay_group_ids
+            if kv_cache_config.kv_cache_groups[group_id].enable_kv_transfer
+        )
+        replay_windows = {
+            kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.prefix_replay_tokens
+            for group_id in self.prefix_replay_group_ids
         }
         assert len(replay_windows) <= 1, (
             f"Prefix replay windows should agree: {sorted(replay_windows)}"
@@ -938,6 +947,8 @@ class Scheduler(SchedulerInterface):
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 did_prefix_cache_lookup = False
+                # SWA bounded replay: whether the KV load carries the window.
+                window_loaded = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -973,7 +984,31 @@ class Scheduler(SchedulerInterface):
                             skip_request(request_queue)
                             continue
 
-                        if self.prefix_replay_tokens:
+                        loaded_group_ids = (
+                            set(self.connector.get_loaded_kv_cache_group_ids(request))
+                            if ext_tokens
+                            else set()
+                        )
+                        # Preserve an exact P/D endpoint when every transferable
+                        # replay group is loaded. Local-only groups are rebuilt
+                        # by replay and must not force the endpoint down.
+                        loads_transfer_window = bool(
+                            self.prefix_replay_transfer_group_ids
+                            and ext_tokens
+                            and set(self.prefix_replay_transfer_group_ids).issubset(
+                                loaded_group_ids
+                            )
+                        )
+                        # Replay can be skipped only when every replay group,
+                        # including local-only groups, was restored.
+                        loads_all_windows = bool(
+                            self.prefix_replay_group_ids
+                            and ext_tokens
+                            and set(self.prefix_replay_group_ids).issubset(
+                                loaded_group_ids
+                            )
+                        )
+                        if self.prefix_replay_tokens and not loads_transfer_window:
                             # SWA bounded replay recomputes the hit's last
                             # window, from the block holding its first
                             # token; the sliding-window groups retire
@@ -1005,6 +1040,9 @@ class Scheduler(SchedulerInterface):
                             load_kv_async = False
                         else:
                             num_external_computed_tokens = ext_tokens
+                        window_loaded = (
+                            loads_all_windows and num_external_computed_tokens > 0
+                        )
 
                         if hit_diverged and num_external_computed_tokens == 0:
                             # No external tokens back the deeper local hit, so its
@@ -1026,7 +1064,10 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
-                    if 0 < num_computed_tokens <= self.prefix_replay_tokens:
+                    if (
+                        not window_loaded
+                        and 0 < num_computed_tokens <= self.prefix_replay_tokens
+                    ):
                         # SWA bounded replay: a hit no longer than the replayed
                         # window would be recomputed in full and save nothing.
                         new_computed_blocks = (
@@ -1082,6 +1123,10 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
+                    # Record the replay, applied once the KV has arrived.
+                    self._mark_prefix_replay(
+                        request, num_computed_tokens, window_loaded
+                    )
                 elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
@@ -1091,7 +1136,7 @@ class Scheduler(SchedulerInterface):
                     if did_prefix_cache_lookup:
                         # Fresh admission: local and/or sync external hit.
                         num_replay_tokens = self._mark_prefix_replay(
-                            request, num_computed_tokens
+                            request, num_computed_tokens, window_loaded
                         )
                         num_computed_tokens -= num_replay_tokens
                     # Number of tokens to be scheduled.
@@ -3083,15 +3128,21 @@ class Scheduler(SchedulerInterface):
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
 
-    def _mark_prefix_replay(self, request: Request, num_hit_tokens: int) -> int:
+    def _mark_prefix_replay(
+        self, request: Request, num_hit_tokens: int, window_loaded: bool = False
+    ) -> int:
         """Record where a prefix hit's replay starts and return the number of
         hit tokens to recompute; the caller rewinds the computed count by it.
 
         The replayed tokens are the hit's last window (see
         ``Request.replay_start``): the worker rebuilds their sliding-window KV
-        and leaves their cached KV alone.
+        and leaves their cached KV alone. A hit whose KV load carries the
+        window replays nothing.
         """
         if not self.prefix_replay_tokens:
+            return 0
+        if window_loaded:
+            request.replay_start = 0
             return 0
         num_replay_tokens = min(self.prefix_replay_tokens, num_hit_tokens)
         request.replay_start = num_hit_tokens - num_replay_tokens
@@ -3106,7 +3157,8 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
-        if request.request_id in self.failed_recving_kv_req_ids:
+        load_failed = request.request_id in self.failed_recving_kv_req_ids
+        if load_failed:
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
@@ -3132,12 +3184,15 @@ class Scheduler(SchedulerInterface):
             # This will cache the blocks iff caching is enabled.
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
-        # SWA bounded replay recomputes the tail of the hit, which covers the
-        # last token; otherwise a full prompt hit re-computes that token so the
-        # next one can be sampled.
-        num_replay_tokens = self._mark_prefix_replay(
-            request, request.num_computed_tokens
-        )
+        # SWA bounded replay recomputes the tail of a hit loaded without its
+        # window (recorded at admission), or of a failed load, which may have
+        # lost it; the replay covers the last token. Otherwise a full prompt
+        # hit re-computes that token so the next one can be sampled.
+        num_replay_tokens = 0
+        if load_failed or request.replay_start:
+            num_replay_tokens = self._mark_prefix_replay(
+                request, request.num_computed_tokens
+            )
         if num_replay_tokens > 0:
             request.num_computed_tokens -= num_replay_tokens
         elif request.num_computed_tokens == request.num_tokens:
