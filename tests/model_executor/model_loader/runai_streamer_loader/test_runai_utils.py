@@ -15,6 +15,8 @@ from vllm.transformers_utils.runai_utils import (
     list_safetensors,
 )
 
+from .conftest import requires_runai
+
 
 def test_is_runai_obj_uri():
     assert is_runai_obj_uri("gs://some-gcs-bucket/path")
@@ -23,6 +25,7 @@ def test_is_runai_obj_uri():
     assert not is_runai_obj_uri("nfs://some-nfs-path")
 
 
+@requires_runai
 def test_runai_list_safetensors_local():
     with tempfile.TemporaryDirectory() as tmpdir:
         huggingface_hub.constants.HF_HUB_OFFLINE = False
@@ -38,6 +41,7 @@ def test_runai_list_safetensors_local():
         assert len(safetensors) == len(files)
 
 
+@requires_runai
 def test_runai_pull_files_gcs(monkeypatch):
     monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
     # Bypass default project lookup by setting GOOGLE_CLOUD_PROJECT
