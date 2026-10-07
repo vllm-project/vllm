@@ -48,17 +48,6 @@ tests/kernels/test_shuffle_rows.py  # explicitly --ignore'd in kernels.yaml with
 tests/lora/test_deepseekv2_tp.py  # --ignore'd from sharded LoRA run; no dedicated *_tp job
 tests/lora/test_qwen3moe_tp.py  # --ignore'd from sharded LoRA run; no dedicated *_tp job
 
-# tests/models/ - the models_*.yaml jobs run specific paths, not all of models/.
-tests/models/deepseek_v32/test_sequence_parallel.py  # no models_*.yaml job collects this path
-tests/models/test_deepseek_v4_dspark_rocm.py  # added by #52362 (2026-09-21), no models_*.yaml job collects this path
-tests/models/test_deepseek_v4_fi_moe_ep.py  # no models_*.yaml job collects this path
-tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py  # no models_*.yaml job collects this path
-tests/models/test_deepseek_v4_rocm_wo_a.py  # added by #54894 (2026-09-20), no models_*.yaml job collects this path
-tests/models/test_deepseek_v41_replay_start.py  # added by #56227 (2026-09-18), no models_*.yaml job collects this path
-tests/models/test_dspark_mla.py  # no models_*.yaml job collects this path
-tests/models/test_language_model_cache_is_weak.py  # no models_*.yaml job collects this path
-tests/models/transformers/test_layer_registry.py  # no models_*.yaml job collects this path
-
 # tests/v1/ - the v1 subtree is otherwise covered by many `pytest v1/...` jobs.
 tests/v1/ec_connector/integration/test_epd_correctness.py  # run_epd_correctness_test.sh exists but no Buildkite job invokes it
 tests/v1/ec_connector/integration/test_nixl_failure.py  # 2-GPU + NIXL E/PD integration test (#55290); no Buildkite job collects ec_connector/integration/
