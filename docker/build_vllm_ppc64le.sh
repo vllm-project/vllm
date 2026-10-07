@@ -457,7 +457,6 @@ try_install_from_devpi "numba${NUMBA_REQUIREMENT}"
 ########################################
 uv pip install setuptools_scm maturin setuptools-rust ninja scikit-build-core pybind11 nanobind \
     --no-build-isolation
-uv pip install "${WHEEL_DIR}"/*.whl
 
 ########################################
 # install remaining deps
