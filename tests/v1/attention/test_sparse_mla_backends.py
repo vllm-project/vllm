@@ -1208,6 +1208,47 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
     torch.testing.assert_close(captured["indices"], reference, rtol=0, atol=0)
 
 
+def test_flashmla_hisparse_resident_mixed_batch_skips_host_staging():
+    """A resident prefill batched with decodes reads resident KV in one kernel
+    instead of staging its whole history from host."""
+    num_tokens = 6
+    q = torch.zeros(num_tokens, 4, 576, dtype=torch.bfloat16, device=DEVICE_TYPE)
+    topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=DEVICE_TYPE)
+    counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=DEVICE_TYPE)
+    kernel_rows: list[int] = []
+
+    def kernel(q, kv, indices, lengths, actual_num_heads):  # noqa: ARG001
+        kernel_rows.append(q.shape[0])
+        return q[..., :512], None
+
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.caches = [SimpleNamespace(all_context_pages_resident=True)]
+    index_group.convert_logical_to_physical_topk = MagicMock(
+        return_value=(topk, counts)
+    )
+    index_group.physical_kv_cache = MagicMock(
+        return_value=torch.empty(1, device=DEVICE_TYPE)
+    )
+    index_group.stage_prefill_rows = MagicMock(side_effect=AssertionError)
+    impl = SimpleNamespace(
+        _bf16_flash_mla_kernel=kernel,
+        index_group=index_group,
+        index_group_index=0,
+    )
+    metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32),
+        block_table=torch.zeros((2, 1), dtype=torch.int32),
+        num_decode_tokens=2,
+    )
+
+    out, _ = FlashMLASparseImpl._forward_bf16_kv(
+        impl, q, torch.empty(1, device=DEVICE_TYPE), topk, metadata, q.shape[1]
+    )
+
+    assert kernel_rows == [num_tokens]
+    assert out.shape == (num_tokens, 4, 512)
+
+
 @pytest.mark.parametrize(
     "seq_lens,max_buf,expected",
     [
@@ -3106,6 +3147,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     kv_pool = kv_cache.squeeze(1).cpu().pin_memory()
     cache_handle.runtime.bind_source_cache(kv_pool)
     cache_handle.source_block_table = metadata.block_table
+    cache_handle.all_context_pages_resident = False
 
     staging_calls = []
     original_gather = cache_handle.runtime.gather_prefill_cache
