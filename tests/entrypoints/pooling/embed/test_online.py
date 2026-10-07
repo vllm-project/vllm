@@ -12,9 +12,13 @@ import requests
 import torch
 import torch.nn.functional as F
 
-from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
+from tests.models.language.pooling.embed_utils import (
+    float_embeddings,
+    run_embedding_correctness_test,
+)
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.utils import (
@@ -49,14 +53,6 @@ input_tokens = [
     115774,
     2,
 ]
-
-if current_platform.is_rocm():
-    # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
 
 # On ROCm, floating-point reductions in attention and GEMM kernels are
 # non-associative and sensitive to batch geometry. Force LLM instances
@@ -95,6 +91,17 @@ async def client(server):
 def hf_model(hf_runner):
     with hf_runner(MODEL_NAME, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
         yield hf_model
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_negative_token_ids(client: openai.AsyncOpenAI, model_name: str):
+    # A negative token id is out of vocabulary just like an over-large one, but
+    # is not caught by the upper-bound check. Unlike the OpenAI completion
+    # schema, the pooling schema does not constrain token ids to be
+    # non-negative, so the request reaches the shared engine-level validation.
+    with pytest.raises(openai.BadRequestError, match=".*out of vocabulary.*"):
+        await client.embeddings.create(model=model_name, input=[-1])
 
 
 @pytest.mark.asyncio
@@ -142,7 +149,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
     # test input: list[int]
@@ -162,7 +169,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
 
@@ -191,7 +198,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test list[list[int]]
@@ -211,7 +218,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
 
@@ -294,10 +301,41 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_padding(client: openai.AsyncOpenAI, model_name: str):
+    input_texts = ["Hello"]
+
+    async def prompt_tokens(**extra_body):
+        response = await client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+            extra_body=extra_body,
+        )
+        embeddings = EmbeddingResponse.model_validate(response.model_dump(mode="json"))
+        assert len(embeddings.data) == 1
+        return embeddings.usage.prompt_tokens
+
+    unpadded = await prompt_tokens()
+    padded = await prompt_tokens(padding="max_length")
+
+    # Models trained with a fixed sequence length and no attention mask need
+    # this; without it their embeddings are not comparable.
+    assert padded > unpadded
+    assert await prompt_tokens(padding="do_not_pad") == unpadded
+
+    with pytest.raises(openai.BadRequestError):
+        await client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+            extra_body={"padding": "longest"},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_request(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",
@@ -348,8 +386,8 @@ async def test_chat_request(
     assert chat_embeddings.created <= completion_embeddings.created
     # Use tolerance-based comparison for embeddings
     check_embeddings_close(
-        embeddings_0_lst=[d.embedding for d in chat_embeddings.data],
-        embeddings_1_lst=[d.embedding for d in completion_embeddings.data],
+        embeddings_0_lst=float_embeddings(chat_embeddings),
+        embeddings_1_lst=float_embeddings(completion_embeddings),
         name_0="chat",
         name_1="completion",
     )
@@ -454,7 +492,7 @@ async def test_invocations_completion_request(
 
 @pytest.mark.asyncio
 async def test_invocations_chat_request(server: RemoteOpenAIServer):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",
@@ -507,11 +545,17 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
         "The best thing about vLLM is that it supports many different models",
     ]
 
+    def check_outputs(outputs: list[list[float]]) -> None:
+        # The embeddings endpoint executes list elements as separate scheduler
+        # requests, so use the same per-request geometry for the HF reference.
+        for input_text, output in zip(input_texts, outputs, strict=True):
+            run_embedding_correctness_test(hf_model, [input_text], [output])
+
     responses_float = await client.embeddings.create(
         input=input_texts, model=model_name, encoding_format="float"
     )
     float_data = [d.embedding for d in responses_float.data]
-    run_embedding_correctness_test(hf_model, input_texts, float_data)
+    check_outputs(float_data)
 
     responses_base64 = await client.embeddings.create(
         input=input_texts, model=model_name, encoding_format="base64"
@@ -522,14 +566,14 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
             np.frombuffer(base64.b64decode(data.embedding), dtype="float32").tolist()
         )
 
-    run_embedding_correctness_test(hf_model, input_texts, base64_data)
+    check_outputs(base64_data)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(
         input=input_texts, model=model_name
     )
     default_data = [d.embedding for d in responses_default.data]
-    run_embedding_correctness_test(hf_model, input_texts, default_data)
+    check_outputs(default_data)
 
 
 @pytest.mark.asyncio

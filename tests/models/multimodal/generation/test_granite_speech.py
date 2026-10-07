@@ -45,9 +45,10 @@ models: dict[str, str | None] = {
 def granite_speech_attention_config():
     """Return attention config for Granite Speech tests on ROCm."""
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import get_cdna_version
 
-        if on_mi3xx():
+        # -1 (unknown arch) is truthy; gate on CDNA3+ like other call sites.
+        if get_cdna_version() > 2:
             return {"backend": "ROCM_AITER_FA"}
         return {"backend": "TRITON_ATTN"}
     return None

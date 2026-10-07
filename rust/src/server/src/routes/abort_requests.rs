@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use axum::Json;
@@ -19,7 +22,7 @@ pub async fn abort_requests(
     State(state): State<Arc<AppState>>,
     body: Result<Json<AbortRequestsRequest>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
-    let Json(body) = body.map_err(|error| ApiError::json_parse_error(error.body_text()))?;
+    let Json(body) = body?;
     // Empty/missing `request_ids` aborts all in-flight requests.
     let request_ids = body.request_ids.unwrap_or_default();
 

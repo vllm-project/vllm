@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 
@@ -103,6 +106,7 @@ impl Llm {
             prompt_len,
             max_tokens_param,
             1,
+            self.client.engine_stats_enabled(),
         );
         let guard = self.inflight.track(external_request_id, internal_request_id);
 

@@ -4,6 +4,7 @@
 import copy
 from collections.abc import Iterable
 from functools import partial
+from typing import TYPE_CHECKING
 
 import regex
 import torch
@@ -22,10 +23,19 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsMultiModalEmbeddings
 from .utils import WeightsMapper, make_empty_intermediate_tensors_factory, maybe_prefix
 
 logger = init_logger(__name__)
+
+
+if TYPE_CHECKING:
+
+    class _EagleMistralLarge3ForCausalLMBase(nn.Module):
+        pass
+
+else:
+    _EagleMistralLarge3ForCausalLMBase = MistralLarge3ForCausalLM
 
 
 @support_torch_compile
@@ -107,7 +117,9 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         return output
 
 
-class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
+class EagleMistralLarge3ForCausalLM(
+    _EagleMistralLarge3ForCausalLMBase, SupportsMultiModalEmbeddings
+):
     hf_to_vllm_mapper = MistralLarge3ForCausalLM.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_regex={
             regex.compile(r"\Aeagle_linear\.weight\Z"): r"model.fc.weight",
@@ -117,13 +129,15 @@ class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
-        vllm_config.model_config = vllm_config.speculative_config.draft_model_config
+        vllm_config.model_config = speculative_config.draft_model_config
         # draft model quantization config may differ from target model
         self.quant_config = VllmConfig.get_quantization_config(
-            vllm_config.speculative_config.draft_model_config, vllm_config.load_config
+            speculative_config.draft_model_config, vllm_config.load_config
         )
         vllm_config.quant_config = self.quant_config
         self.model_cls = partial(

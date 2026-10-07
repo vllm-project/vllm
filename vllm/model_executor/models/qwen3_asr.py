@@ -32,13 +32,14 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     StreamingTranscriptionPostProcessor,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -46,9 +47,12 @@ from vllm.model_executor.models.interfaces import (
     SupportsTranscription,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.qwen2_5_omni_thinker import (
+    Qwen2_5OmniAudioFeatureInputs,
+    unpad_and_flat_audio_features,
+)
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
-    Qwen2_5OmniAudioFeatureInputs,
     Qwen3OmniMoeAudioEncoder,
     Qwen3OmniMoeThinkerMultiModalProcessor,
 )
@@ -64,6 +68,7 @@ from vllm.multimodal.inputs import (
     AudioItem,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -78,6 +83,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -89,6 +95,8 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.qwen3_asr import (
     Qwen3ASRProcessor,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
@@ -182,7 +190,6 @@ class Qwen3ASRProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Qwen3ASRProcessor:
         processor = self.ctx.get_hf_processor(
             Qwen3ASRProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
         if not hasattr(processor, "audio_token"):
@@ -219,10 +226,8 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
-
         feature_extractor = self.info.get_feature_extractor()
 
         target_audio_length = (
@@ -233,13 +238,11 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
             * feature_extractor.sampling_rate
         )
 
-        audio_overrides = mm_options.get("audio")
-
         return {
             "audio": self._get_dummy_audios(
                 length=target_audio_length,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             ),
         }
 
@@ -250,8 +253,8 @@ def _qwen3asr_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         input_audio_features=MultiModalFieldConfig.flat_from_sizes(
             "audio", audio_feature_lengths, dim=1
         ),
-        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-        audio_feature_lengths=MultiModalFieldConfig.batched("audio"),
+        feature_attention_mask=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
+        audio_feature_lengths=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
     )
 
 
@@ -272,7 +275,7 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen3ASRMultiModalProcessor(
-    Qwen3OmniMoeThinkerMultiModalProcessor,
+    Qwen3OmniMoeThinkerMultiModalProcessor[Qwen3ASRProcessingInfo]
 ):
     def _get_mm_fields_config(
         self,
@@ -314,6 +317,7 @@ class Qwen3ASRMultiModalProcessor(
             if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
+                assert audio is not None
                 raise ValueError(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model"
@@ -324,7 +328,7 @@ class Qwen3ASRMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_qwen2_audio,
             ),
         ]
@@ -342,6 +346,7 @@ class Qwen3ASRForConditionalGeneration(
     SupportsMRoPE,
     SupportsTranscription,
     SupportsLoRA,
+    SupportsEagle3,
 ):
     # LoRA support
     packed_modules_mapping = {
@@ -357,12 +362,20 @@ class Qwen3ASRForConditionalGeneration(
     }
 
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    supports_tower_connector_lora = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            # HF format mapper
+            "model.audio_tower.": "audio_tower.",
+            "model.language_model.": "language_model.model.",
+            "model.multi_modal_projector.linear_1.": "audio_tower.proj1.",
+            "model.multi_modal_projector.linear_2.": "audio_tower.proj2.",
+            "talker.": None,
+            "code2wav.": None,
         }
     )
 
@@ -412,6 +425,17 @@ class Qwen3ASRForConditionalGeneration(
         if input_audio_features is None:
             return None
 
+        # inputs features from rust frontend is batched and padded
+        # with shape [batch_size, n_mels, padded_seq_len], different
+        # from python's shape [n_mels, batch_size * seq_len]
+        if (
+            isinstance(input_audio_features, torch.Tensor)
+            and input_audio_features.dim() == 3
+        ):
+            input_audio_features = unpad_and_flat_audio_features(
+                input_audio_features, audio_feature_lengths
+            )
+
         return Qwen2_5OmniAudioFeatureInputs(
             type="audio_features",
             input_features=input_audio_features,
@@ -439,7 +463,11 @@ class Qwen3ASRForConditionalGeneration(
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        audio_feature_lengths = audio_input["audio_feature_lengths"]
+        # audio_feature_lengths is keep_on_cpu; the audio tower derives
+        # device placement from feature_lens, so move it explicitly.
+        audio_feature_lengths = async_tensor_h2d(
+            audio_input["audio_feature_lengths"], input_features.device
+        )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
@@ -448,7 +476,9 @@ class Qwen3ASRForConditionalGeneration(
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_output_lengths,
         )
-        return audio_features.split(audio_output_lengths.tolist())
+        with gpu_sync_allowed():
+            split_sizes = audio_output_lengths.tolist()
+        return audio_features.split(split_sizes)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -519,10 +549,7 @@ class Qwen3ASRForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
+        loader = AutoWeightsLoader(self)
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         return loaded_weights
@@ -547,13 +574,10 @@ class Qwen3ASRForConditionalGeneration(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
 
-            # Get audio feature length from mm_feature data
-            audio_feature_length = mm_feature.data["audio_feature_lengths"].data
-            if isinstance(audio_feature_length, torch.Tensor):
-                audio_feature_length = audio_feature_length.item()
-            audio_len = _get_feat_extract_output_lengths(
-                torch.tensor(audio_feature_length)
-            ).item()
+            # The placeholder already contains one token per audio embedding.
+            # Use its length so M-RoPE can be reconstructed even when a covered
+            # prefix no longer carries the audio processor tensors.
+            audio_len = mm_feature.mm_position.length
 
             # Text segment before audio (includes audio_start token)
             text_len = offset - st
@@ -592,24 +616,25 @@ class Qwen3ASRForConditionalGeneration(
         return llm_positions, mrope_position_delta
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             tower_model=["audio_tower."],
         )
 
-    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
-        """Return the number of tokens processed by the audio tower encoder.
-
-        Required for LoRA support on the tower module.
-        """
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         # For Qwen3-ASR, the audio tower produces one embedding per audio
         # placeholder token inserted into the prompt (no additional
         # merge/downsample step like vision towers). Therefore, the encoder
         # token budget is identity.
-        return num_audio_tokens
+        return num_mm_embeds, None
 
     @classmethod
     def get_speech_to_text_config(
@@ -665,7 +690,7 @@ class Qwen3ASRForConditionalGeneration(
             full_lang_name = cls.supported_languages.get(lang_code, lang_code)
             prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
 
-        prompt_token_ids = tokenizer.encode(prompt)
+        prompt_token_ids = cached_encode(tokenizer, prompt)
 
         return TokensPrompt(
             prompt_token_ids=prompt_token_ids,
@@ -674,8 +699,7 @@ class Qwen3ASRForConditionalGeneration(
 
     @classmethod
     def post_process_output(cls, text: str) -> str:
-        """
-        Post-process Qwen3-ASR raw output to extract clean transcription.
+        """Post-process Qwen3-ASR raw output to extract clean transcription.
 
         The model outputs in format: "language {lang}<asr_text>{transcription}"
         This method strips the language prefix and asr_text tags.

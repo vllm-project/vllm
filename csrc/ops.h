@@ -43,6 +43,8 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
+void relu_squared(torch::Tensor& out, torch::Tensor& input);
+
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
                               std::optional<torch::Tensor> const& azp);

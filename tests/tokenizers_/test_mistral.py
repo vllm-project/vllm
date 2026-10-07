@@ -8,17 +8,23 @@ import llguidance
 import pytest
 from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.guidance.grammar_factory import GrammarFactory
-from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _validate_apply_chat_template_args,
+    validate_request_params,
 )
 
 
 def test_validate_apply_chat_template_args():
     # add_generation_prompt with assistant last message → error
-    messages = [{"role": "assistant", "content": "Hello"}]
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "assistant", "content": "Hello"}
+    ]
     with pytest.raises(ValueError):
         _validate_apply_chat_template_args(messages, add_generation_prompt=True)
 
@@ -29,7 +35,9 @@ def test_validate_apply_chat_template_args():
     # both add_generation_prompt and continue_final_message → error
     with pytest.raises(ValueError):
         _validate_apply_chat_template_args(
-            messages, add_generation_prompt=True, continue_final_message=True
+            messages,
+            add_generation_prompt=True,
+            continue_final_message=True,
         )
 
     # continue_final_message with assistant last message → ok
@@ -832,7 +840,9 @@ class TestMistralTokenizer:
         )
 
     def test_apply_chat_template_error(self, mistral_tokenizer: MistralTokenizer):
-        messages = [{"role": "user", "content": "Hello world !"}]
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "user", "content": "Hello world !"}
+        ]
 
         with pytest.raises(ValueError):
             mistral_tokenizer.apply_chat_template(
@@ -1247,7 +1257,9 @@ class TestMistralTokenizer:
 
         expected_strings = (
             '[{"type": "function", "function": {"name": "get_weather", "description": "Gets the current weather in a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city name"}}, "required": ["city"]}}}] I am an AI\n\nHello world ![TOOL_CALLS][{"name": "get_weather", "arguments": {"city": "Paris"}, "id": "123456789"}] {"content": {"temperature": 20, "unit": "celsius"}, "call_id": "123456789"}',  # noqa: E501
-            'I am an AI[{"type": "function", "function": {"name": "get_weather", "description": "Gets the current weather in a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city name"}}, "required": ["city"]}}}]Hello world ![TOOL_CALLS]get_weather{"city": "Paris"}{"temperature": 20, "unit": "celsius"}',  # noqa: E501
+            # v11+ tool-call decode emits the explicit [ARGS] separator between
+            # the function name and its JSON arguments (get_weather[ARGS]{...}).
+            'I am an AI[{"type": "function", "function": {"name": "get_weather", "description": "Gets the current weather in a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city name"}}, "required": ["city"]}}}]Hello world ![TOOL_CALLS]get_weather[ARGS]{"city": "Paris"}{"temperature": 20, "unit": "celsius"}',  # noqa: E501
         )
 
         assert (
@@ -1498,6 +1510,7 @@ class TestMistralTokenizer:
                         "get",
                         "_",
                         "weather",
+                        "[ARGS]",
                         '{"',
                         "city",
                         '":',
@@ -2161,13 +2174,15 @@ class TestMistralTokenizer:
     def test_apply_chat_template_tool_optional_fields(
         self,
         mistral_tokenizer: MistralTokenizer,
-        messages: list[dict[str, Any]],
+        messages: list[ChatCompletionMessageParam],
         tools: list[dict[str, Any]],
         tekken_expected_substrings: list[str],
         spm_expected_substrings: list[str],
     ) -> None:
         output = mistral_tokenizer.apply_chat_template(
-            messages, tools=tools, add_generation_prompt=True
+            messages,
+            tools=tools,
+            add_generation_prompt=True,
         )
         decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
 
@@ -2182,7 +2197,7 @@ class TestMistralTokenizer:
     def test_apply_chat_template_tools_not_mutated(
         self, mistral_tokenizer: MistralTokenizer
     ) -> None:
-        messages: list[dict[str, Any]] = [
+        messages: list[ChatCompletionMessageParam] = [
             {"role": "user", "content": "Hello"},
         ]
         tools: list[dict[str, Any]] = [
@@ -2203,7 +2218,9 @@ class TestMistralTokenizer:
         original_tools = copy.deepcopy(tools)
 
         mistral_tokenizer.apply_chat_template(
-            messages, tools=tools, add_generation_prompt=True
+            messages,
+            tools=tools,
+            add_generation_prompt=True,
         )
 
         assert tools == original_tools
@@ -2229,8 +2246,160 @@ class TestMistralTokenizer:
         ]
 
         output = mistral_tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True
+            messages,
+            add_generation_prompt=True,
         )
         decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
 
         assert "[THINK]2+2 equals 4[/THINK]" in decoded
+
+
+def test_convert_ids_to_tokens_pre_args_tekken():
+    """convert_ids_to_tokens must not raise on pre-[ARGS] Tekken tokenizers.
+
+    Tekken tokenizers before v11 (e.g. Ministral-8B-Instruct-2410) have no
+    [ARGS] special token. This guards the is_special([ARGS]) gate in
+    MistralTokenizer.convert_ids_to_tokens, which must skip [ARGS] rather than
+    call get_special_token(args) unconditionally (which raises on Tekken).
+    """
+    tokenizer = MistralTokenizer.from_pretrained("mistralai/Ministral-8B-Instruct-2410")
+    assert tokenizer.is_tekken
+    assert not tokenizer.tokenizer.is_special(SpecialTokens.args)
+
+    ids = tokenizer.encode("Hello world !", add_special_tokens=False)
+    tokens = tokenizer.convert_ids_to_tokens(ids, skip_special_tokens=True)
+    assert len(tokens) > 0
+
+
+# ---------------------------------------------------------------------------
+# validate_request_params – reasoning_effort validation (no tokenizer needed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reasoning_effort", [None, "none", "high"])
+def test_validate_request_params_valid_effort(reasoning_effort: str | None) -> None:
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        reasoning_effort=reasoning_effort,
+    )
+    assert validate_request_params(request) is None
+
+
+def test_validate_request_params_rejects_unsupported_effort() -> None:
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        reasoning_effort="medium",
+    )
+    with pytest.raises(VLLMValidationError, match="reasoning_effort") as exc_info:
+        validate_request_params(request)
+    assert exc_info.value.parameter == "reasoning_effort"
+
+
+def test_validate_request_params_rejects_chat_template() -> None:
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        chat_template="{{ messages }}",
+    )
+    with pytest.raises(VLLMValidationError, match="chat_template") as exc_info:
+        validate_request_params(request)
+    assert exc_info.value.parameter == "chat_template"
+
+
+# ---------------------------------------------------------------------------
+# apply_chat_template reasoning_effort passthrough (v15 tokenizer)
+# ---------------------------------------------------------------------------
+
+_PASSTHROUGH_MESSAGES = [{"role": "user", "content": "Hello"}]
+
+
+@pytest.fixture(scope="module")
+def v15_mistral_tokenizer() -> MistralTokenizer:
+    """Load the v15 Mistral tokenizer; skip if unavailable."""
+    try:
+        return MistralTokenizer.from_pretrained("mistralai/Mistral-Small-4-119B-2603")
+    except Exception:
+        pytest.skip("v15 tokenizer unavailable")
+    raise AssertionError("unreachable")
+
+
+@pytest.fixture(scope="module")
+def v13_mistral_tokenizer() -> MistralTokenizer:
+    """Load the v13 Mistral tokenizer; skip if unavailable."""
+    try:
+        return MistralTokenizer.from_pretrained("mistralai/Magistral-Small-2509")
+    except Exception:
+        pytest.skip("v13 tokenizer unavailable")
+    raise AssertionError("unreachable")
+
+
+def test_v15_apply_chat_template_passes_reasoning_effort_high(
+    monkeypatch: pytest.MonkeyPatch,
+    v15_mistral_tokenizer: MistralTokenizer,
+) -> None:
+    captured_kwargs: list[dict] = []
+
+    def fake_apply_chat_template(**kwargs):
+        captured_kwargs.append(kwargs)
+        return [0]
+
+    monkeypatch.setattr(
+        v15_mistral_tokenizer.transformers_tokenizer,
+        "apply_chat_template",
+        fake_apply_chat_template,
+    )
+
+    v15_mistral_tokenizer.apply_chat_template(
+        messages=_PASSTHROUGH_MESSAGES,
+        reasoning_effort="high",
+    )
+
+    assert captured_kwargs[-1]["reasoning_effort"] == "high"
+
+
+def test_v15_apply_chat_template_passes_reasoning_effort_none_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    v15_mistral_tokenizer: MistralTokenizer,
+) -> None:
+    captured_kwargs: list[dict] = []
+
+    def fake_apply_chat_template(**kwargs):
+        captured_kwargs.append(kwargs)
+        return [0]
+
+    monkeypatch.setattr(
+        v15_mistral_tokenizer.transformers_tokenizer,
+        "apply_chat_template",
+        fake_apply_chat_template,
+    )
+
+    v15_mistral_tokenizer.apply_chat_template(messages=_PASSTHROUGH_MESSAGES)
+
+    assert "reasoning_effort" in captured_kwargs[-1]
+    assert captured_kwargs[-1]["reasoning_effort"] is None
+
+
+def test_pre_v15_apply_chat_template_omits_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    v13_mistral_tokenizer: MistralTokenizer,
+) -> None:
+    captured_kwargs: list[dict] = []
+
+    def fake_apply_chat_template(**kwargs):
+        captured_kwargs.append(kwargs)
+        return [0]
+
+    monkeypatch.setattr(
+        v13_mistral_tokenizer.transformers_tokenizer,
+        "apply_chat_template",
+        fake_apply_chat_template,
+    )
+
+    v13_mistral_tokenizer.apply_chat_template(
+        messages=_PASSTHROUGH_MESSAGES,
+        reasoning_effort="high",
+    )
+
+    assert "reasoning_effort" not in captured_kwargs[-1]
