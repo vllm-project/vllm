@@ -191,7 +191,7 @@ def test_batched_deepgemm_needle_batch_invariance(workspace_init):
     import vllm.envs as envs
 
     assert BatchedDeepGemmExperts._supports_batch_invariance()
-    E, K, N, topk = 8, 128, 256, 2
+    E, K, N, topk = 8, 128, 2048, 2
     max_num_tokens = 256
     w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(E, N, K, BLOCK_SIZE)
     generator = torch.Generator(device="cuda").manual_seed(17)
