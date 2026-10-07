@@ -207,6 +207,11 @@ if _SDK_AVAILABLE:
         if isinstance(result, ErrorResponse):
             return _error_response(result, raw_request)
 
+        if (kwargs := result.reasoning_parser_kwargs) is not None:
+            kwargs.chat_template_kwargs = handler._engine_chat_template_kwargs(
+                kwargs.chat_template_kwargs
+            )
+
         return JSONResponse(content=result.model_dump())
 
     class CohereErrorEnvelopeMiddleware(BaseHTTPMiddleware):
