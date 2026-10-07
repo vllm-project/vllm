@@ -3833,13 +3833,13 @@ class NixlBaseConnectorWorker:
             for handles in self.src_xfer_handles_by_tp_ratio.values():
                 for handle in handles:
                     self.nixl_wrapper.release_dlist_handle(handle)
-            for handles in self._dram_src_handles_by_tp_ratio.values():
-                for handle in handles:
-                    if handle is not None:
-                        self.nixl_wrapper.release_dlist_handle(handle)
-            for handle in self._dram_src_handles_by_block_size.values():
-                if handle is not None:
-                    self.nixl_wrapper.release_dlist_handle(handle)
+            for dram_handles in self._dram_src_handles_by_tp_ratio.values():
+                for dram_handle in dram_handles:
+                    if dram_handle is not None:
+                        self.nixl_wrapper.release_dlist_handle(dram_handle)
+            for dram_handle in self._dram_src_handles_by_block_size.values():
+                if dram_handle is not None:
+                    self.nixl_wrapper.release_dlist_handle(dram_handle)
         except Exception:
             logger.exception("NIXL dlist-handle release failed at shutdown.")
         self.src_xfer_handles_by_block_size.clear()
