@@ -225,8 +225,6 @@ def init_attn_backend(
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
-            # The selector checks the backends it picks; this also covers
-            # backends that a model selects itself.
             if (
                 envs.VLLM_BATCH_INVARIANT
                 and not attn_backend.supports_batch_invariance()
