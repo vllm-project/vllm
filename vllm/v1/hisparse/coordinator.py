@@ -368,9 +368,34 @@ class HiSparseCoordinator:
         return True
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
-        # Tail first, so a prefix loses its tail pages before its head.
+        if not state.pinned_clean:
+            return
+        unpinned: dict[BlockPool, list[KVCacheBlock]] = {
+            manager.block_pool: [] for manager in self.resident_managers
+        }
+        group_blocks = [
+            unpinned[manager.block_pool] for manager in self.resident_managers
+        ]
+        # Preserve tail-first page/group order when batching each pool's release.
         for page_idx in sorted(state.pinned_clean, reverse=True):
-            self._unpin_page(request_id, state, page_idx)
+            if page_idx in state.pending_pages or page_idx not in state.valid_pages:
+                continue
+            blocks = self._resident_page_blocks(request_id, page_idx)
+            if blocks is None:
+                continue
+            owner = (request_id, page_idx)
+            for block, released in zip(blocks, group_blocks):
+                owners = self._owners.get(block.block_id)
+                if owners is None:
+                    self._owners[block.block_id] = {owner}
+                else:
+                    owners.add(owner)
+                released.append(block)
+            state.pinned_clean.discard(page_idx)
+            state.unpinned_pages.add(page_idx)
+        for pool, blocks in unpinned.items():
+            if blocks:
+                pool.unpin_blocks(blocks, self._on_block_reused)
 
     def _page_became_clean(
         self, request_id: str, state: _HiSparseRequestState, page_idx: int

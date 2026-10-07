@@ -27,7 +27,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
-  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+  ops.def(
+      "get_cuda_view_from_cpu_tensor(Tensor cpu_tensor, bool "
+      "is_registered=False) -> Tensor");
 
 #ifndef USE_ROCM
 
@@ -985,7 +987,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                             Tensor? kv_scales=None,"
       "                             str kv_cache_dtype='auto') -> ()");
 
-#ifndef USE_ROCM
   ops.def(
       "hisparse_resolve_residency(Tensor host_cache,"
       "                 Tensor! hot_cache,"
@@ -1011,7 +1012,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor(h!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0) -> ()");
+      "                 int resident_null_block=0,"
+      "                 Tensor(i!)? hash_values_scratch=None) -> ()");
 
   ops.def(
       "hisparse_invalidate_written_slots(Tensor! device_global_indices,"
@@ -1035,8 +1037,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                        Tensor miss_global_indices,"
       "                        Tensor miss_hot_indices,"
       "                        Tensor miss_counts) -> ()");
-
-#endif  // !USE_ROCM
 
   // Rotate Q and K, then write to kv cache for MLA
   ops.def(
@@ -1144,14 +1144,12 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("concat_and_cache_mla_grouped",
            TORCH_BOX(&concat_and_cache_mla_grouped));
 
-#ifndef USE_ROCM
   ops.impl("hisparse_resolve_residency",
            TORCH_BOX(&hisparse_resolve_residency));
   ops.impl("hisparse_invalidate_written_slots",
            TORCH_BOX(&hisparse_invalidate_written_slots));
   ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
   ops.impl("hisparse_gather_compact", TORCH_BOX(&hisparse_gather_compact));
-#endif  // !USE_ROCM
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));
   ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));

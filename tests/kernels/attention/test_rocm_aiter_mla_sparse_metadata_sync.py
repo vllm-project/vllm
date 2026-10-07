@@ -39,6 +39,9 @@ def _make_builder():
     topk_tokens = 4
 
     builder.device = torch.device("cpu")
+    builder.vllm_config = SimpleNamespace(  # type: ignore[assignment]
+        attention_config=SimpleNamespace(hisparse_config=None)
+    )
     builder.kv_cache_spec = SimpleNamespace(block_size=1)
     builder.model_dtype = torch.bfloat16
     builder.kv_cache_dtype = "fp8"
@@ -223,3 +226,24 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
 
     assert events == []
     assert fake_get_mla_metadata_v1_mock.call_count == 1
+
+
+@pytest.mark.parametrize("group_kind", ["absent", "ordinary", "hisparse"])
+def test_rocm_topk_ready_event_is_only_recorded_for_hisparse(group_kind, monkeypatch):
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.index_group_index = 2
+    calls: list[int] = []
+    if group_kind == "absent":
+        impl.index_group = None
+    else:
+        group_type = (
+            sparse_mod.HiSparseMLAIndexGroup
+            if group_kind == "hisparse"
+            else sparse_mod.SparseMLAIndexGroup
+        )
+        impl.index_group = object.__new__(group_type)
+        monkeypatch.setattr(impl.index_group, "set_logical_topk_ready", calls.append)
+
+    impl.record_logical_topk_ready()
+
+    assert calls == ([2] if group_kind == "hisparse" else [])

@@ -503,8 +503,10 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
         )
 
 
-def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+@pytest.mark.parametrize("platform", ["cuda", "rocm"])
+def test_hisparse_rejects_full_cudagraph_mode(monkeypatch, platform):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: platform == "cuda")
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: platform == "rocm")
     monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
@@ -541,8 +543,9 @@ def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
         )
 
 
-def test_hisparse_rejects_non_cuda(monkeypatch):
+def test_hisparse_rejects_unsupported_platform(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
         VllmConfig(attention_config=AttentionConfig(hisparse_config=HiSparseConfig()))
 
@@ -590,8 +593,12 @@ def test_hisparse_rejects_non_cuda(monkeypatch):
     ],
     ids=["standalone", "multi-connector", "pd-decode"],
 )
-def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_config):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+@pytest.mark.parametrize("platform", ["cuda", "rocm"])
+def test_hisparse_connector_implies_attention_config(
+    monkeypatch, kv_transfer_config, platform
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: platform == "cuda")
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: platform == "rocm")
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         kv_transfer_config=kv_transfer_config,
@@ -627,8 +634,9 @@ def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
     assert config.attention_config.hisparse_config.device_buffer_size == 512
 
 
-def test_hisparse_connector_without_cuda_still_rejected(monkeypatch):
+def test_hisparse_connector_on_unsupported_platform_is_rejected(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
         VllmConfig(
             kv_transfer_config=KVTransferConfig(

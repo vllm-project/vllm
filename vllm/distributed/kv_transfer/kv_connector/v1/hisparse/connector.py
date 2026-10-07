@@ -31,7 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata, max_decode_query_len
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -55,6 +55,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     host_block_copies: tuple[KVCacheBlockCopy, ...]
     source_block_ids: tuple[int, ...]
     row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
+    # A conservative hint for prefill; decode resolves residency on the GPU.
     all_context_pages_resident: bool
 
 
@@ -93,10 +94,12 @@ class HiSparseConnectorScheduler:
         *,
         async_speculative: bool,
         draft_kv_lookahead: int = 0,
+        max_decode_query_len: int = 1,
     ) -> None:
         self.coordinator: HiSparseCoordinator | None = None
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
+        self.max_decode_query_len = max_decode_query_len
         self.requests: dict[str, Request] = {}
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
@@ -189,7 +192,11 @@ class HiSparseConnectorScheduler:
             host_block_copies,
             tuple(source_block_ids),
             row_mirrors,
-            self.coordinator.all_context_pages_resident(scheduled_requests),
+            # The resident-prefill shortcut is not used by batches with decodes.
+            # Scanning every context page here otherwise makes each decode step
+            # scale with context length and the number of resident cache groups.
+            all(count > self.max_decode_query_len for _, _, count in scheduled_requests)
+            and self.coordinator.all_context_pages_resident(scheduled_requests),
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -237,6 +244,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                     and speculative_config is not None
                 ),
                 draft_kv_lookahead=vllm_config.num_lookahead_tokens,
+                max_decode_query_len=max_decode_query_len(vllm_config),
             )
             max_model_len = vllm_config.model_config.max_model_len
             steady_concurrency = get_hisparse_steady_state_concurrency(

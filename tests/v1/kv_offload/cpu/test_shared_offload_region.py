@@ -10,6 +10,7 @@ import os
 import threading
 import time
 import uuid
+import weakref
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -1180,3 +1181,59 @@ def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
         _make_region(iid, barrier=MagicMock(side_effect=TimeoutError("barrier")))
 
     assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+@pytest.mark.parametrize("allow_deferred_unmap", [False, True])
+def test_cleanup_exported_view_lifetime(iid, caplog, allow_deferred_unmap):
+    """Deferral changes diagnostics, not the lifetime of an exported mapping."""
+    region = _make_region(iid)
+    exported = region.base_tensor.view(-1)
+    exported[0] = 17
+    mapped = weakref.ref(region.mmap_obj)
+    fd = region.fd
+    try:
+        region.cleanup(allow_deferred_unmap=allow_deferred_unmap)
+        assert ("Failed to close mmap_obj" in caplog.text) != allow_deferred_unmap
+        assert mapped() is not None
+        assert exported[0].item() == 17
+        with pytest.raises(OSError):
+            os.fstat(fd)
+        del exported
+        assert mapped() is None
+        region.cleanup()
+    finally:
+        region.cleanup()
+
+
+@pytest.mark.parametrize("allow_deferred_unmap", [False, True])
+def test_cleanup_other_failures_remain_visible(
+    iid, monkeypatch, caplog, allow_deferred_unmap
+):
+    """Opting into exported-view deferral must not hide unrelated failures."""
+    region = _make_region(iid)
+    mapped, fd = region.mmap_obj, region.fd
+    failed_mapping = MagicMock()
+    failed_mapping.close.side_effect = OSError("mmap close failed")
+    region.mmap_obj = failed_mapping
+    region.is_pinned = True
+    region.pinned_addresses = [region.base_tensor.data_ptr()]
+    cudart = MagicMock()
+    cudart.cudaHostUnregister.return_value = MagicMock(value=1)
+    monkeypatch.setattr(region_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(region_module.torch.cuda, "cudart", lambda: cudart)
+    real_close = os.close
+
+    def fail_close(target):
+        if target == fd:
+            raise OSError("fd close failed")
+        return real_close(target)
+
+    monkeypatch.setattr(region_module.os, "close", fail_close)
+    try:
+        region.cleanup(allow_deferred_unmap=allow_deferred_unmap)
+        assert "cudaHostUnregister failed" in caplog.text
+        assert "Failed to close mmap_obj" in caplog.text
+        assert "Failed to close fd" in caplog.text
+    finally:
+        mapped.close()
+        real_close(fd)

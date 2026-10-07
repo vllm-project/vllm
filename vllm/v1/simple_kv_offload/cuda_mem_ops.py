@@ -30,7 +30,9 @@ def pin_tensor(tensor: torch.Tensor) -> None:
     """
     err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
     if err.value != 0:
-        raise RuntimeError(f"cudaHostRegister failed: {err}")
+        raise RuntimeError(
+            f"cudaHostRegister failed: {err} (code={err.value}, bytes={tensor.nbytes})"
+        )
 
 
 class _CUmemLocation(ctypes.Structure):

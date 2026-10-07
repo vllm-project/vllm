@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mmap
+import uuid
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -311,7 +312,12 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
-    registration_ranges.assert_called_once_with([24, 40], 4, page)
+    registration_ranges.assert_called_once_with(
+        [24, 40],
+        4,
+        page,
+        require_whole_tensors=hisparse_runtime_module.current_platform.is_rocm(),
+    )
     assert [
         (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes)
         for tensor in pinned
@@ -334,7 +340,7 @@ def test_shared_host_pool_tracks_successful_registrations(
     monkeypatch.setattr(
         hisparse_runtime_module,
         "_hisparse_registration_ranges",
-        lambda *args: ((0, page), (page, 3 * page)),
+        lambda *args, **kwargs: ((0, page), (page, 3 * page)),
     )
     cudart = MagicMock()
     cudart.cudaHostRegister.side_effect = [
@@ -817,6 +823,12 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
     worker._layer_ready_events = tuple(MagicMock() for _ in handles)
     worker._enqueue_row_dma = MagicMock()
 
+    worker._step_in_flight = False
+    worker._enqueue_layer_mirror(0)
+    worker._enqueue_row_dma.assert_not_called()
+    assert not worker._per_layer_mirrored
+
+    worker._step_in_flight = True
     for layer_index in range(5):
         worker._enqueue_layer_mirror(layer_index)
 
@@ -1217,11 +1229,14 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shared_host_region = object()
     released = False
 
-    def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
+    def release_pinned_state(
+        runtimes, pinned_host_pools, shared_host_region, *, allow_deferred_unmap=False
+    ):
         nonlocal released
         assert runtimes == []
         assert pinned_host_pools == []
         assert shared_host_region is worker.shared_host_region
+        assert allow_deferred_unmap
         released = True
 
     monkeypatch.setattr(
@@ -1409,3 +1424,277 @@ def test_request_memory_charges_external_weights():
         request_memory(
             _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
         )
+
+
+@pytest.mark.skipif(
+    not hisparse_runtime_module.current_platform.is_rocm(),
+    reason="ROCm host registration limit",
+)
+def test_hisparse_blog_pool_uses_bounded_whole_block_registrations():
+    """The 384 GiB GLM pool needs smaller registrations, not a smaller budget."""
+    # Actual full-model layout: 79 FP8 MLA layers and padded shared block rows.
+    num_blocks, block_bytes, stride = 565524, 9216, 729088
+    layer_bytes = num_blocks * block_bytes
+    ranges = hisparse_runtime_module._hisparse_registration_ranges(
+        [layer_bytes] * 79, num_blocks, stride, require_whole_tensors=True
+    )
+    assert ranges[0][0] == 0
+    assert ranges[-1][1] == num_blocks * stride
+    previous = 0
+    for start, end in ranges:
+        assert start == previous
+        assert 0 < end - start <= 64 * 2**30
+        assert start % mmap.PAGESIZE == end % mmap.PAGESIZE == 0
+        if end < 79 * layer_bytes:
+            assert end % layer_bytes == 0
+        previous = end
+
+
+def test_hisparse_whole_tensor_registrations_reject_unsafe_layer_split():
+    page = mmap.PAGESIZE
+    # A legal whole-block seam would still split the device alias of a layer.
+    with pytest.raises(ValueError, match="host layer tensors must fit entirely"):
+        hisparse_runtime_module._hisparse_registration_ranges(
+            [8 * page], 8, page, 4 * page, require_whole_tensors=True
+        )
+
+
+def test_hisparse_whole_tensor_registrations_group_unaligned_layers():
+    page = mmap.PAGESIZE
+    ranges = hisparse_runtime_module._hisparse_registration_ranges(
+        [3 * page // 2] * 4,
+        2,
+        3 * page,
+        4 * page,
+        require_whole_tensors=True,
+    )
+    assert ranges == ((0, 3 * page), (3 * page, 6 * page))
+
+
+@pytest.mark.skipif(
+    not hisparse_runtime_module.current_platform.is_rocm(),
+    reason="ROCm registered host aliases",
+)
+def test_hisparse_gather_from_multiple_whole_layer_registrations(monkeypatch):
+    """Each layer can gather its first/last rows from a separate HIP alias."""
+    page = mmap.PAGESIZE
+    planner = hisparse_runtime_module._hisparse_registration_ranges
+
+    def bounded_ranges(*args, **kwargs):
+        return planner(*args, max_chunk_bytes=8 * page, **kwargs)
+
+    monkeypatch.setattr(
+        hisparse_runtime_module, "_hisparse_registration_ranges", bounded_ranges
+    )
+    monkeypatch.setattr(
+        hisparse_runtime_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(barrier=lambda: None),
+    )
+    config = SimpleNamespace(
+        instance_id=f"test_alias_{uuid.uuid4().hex}",
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+    )
+    pools, private, region = hisparse_runtime_module.allocate_hisparse_host_pools(
+        config, [6 * page] * 3, 2, 9 * page, use_shared_host_pool=True
+    )
+    assert region is not None
+    assert not private
+
+    def check_layer(pool, layer):
+        host = pool.view(-1, 16)
+        host.copy_(
+            torch.arange(host.numel(), dtype=torch.int64).reshape_as(host) % 113 + layer
+        )
+        indices = torch.tensor(
+            [[0, host.shape[0] // 2, host.shape[0] - 1]],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        destinations = torch.tensor([[0, 1, 2]], dtype=torch.int32, device="cuda")
+        count = torch.tensor([3], dtype=torch.int32, device="cuda")
+        hot = torch.zeros((1, 4, 16), dtype=host.dtype, device="cuda")
+        torch.ops._C_cache_ops.hisparse_gather_compact(
+            host, hot, indices, destinations, count
+        )
+        expected = host[[0, host.shape[0] // 2, host.shape[0] - 1]]
+        torch.testing.assert_close(hot[0, :3].cpu(), expected)
+        assert not hot[0, 3].count_nonzero().item()
+
+    try:
+        assert len(region.pinned_addresses) == 3
+        for layer in range(len(pools)):
+            check_layer(pools[layer], layer)
+    finally:
+        torch.accelerator.synchronize()
+        pools.clear()
+        region.cleanup()
+    assert not region.pinned_addresses
+
+
+@pytest.mark.skipif(
+    not hisparse_runtime_module.current_platform.is_rocm(),
+    reason="ROCm mapped-host mirror copy",
+)
+@pytest.mark.parametrize("num_mirrors", [2, 2050])
+@pytest.mark.parametrize("drop_first_copy", [False, True])
+def test_hisparse_rocm_fused_mirror_preserves_registered_storage(
+    monkeypatch, num_mirrors, drop_first_copy
+):
+    """Real strided copies cover the 8200-descriptor HSA queue regression.
+
+    Four separately registered layers share interleaved GPU storage. Two
+    asynchronous generations exercise producer ordering and descriptor lifetime;
+    partial rows and untouched blocks must retain their original bytes.
+    """
+    layers, block_size, row_bytes, num_blocks = 4, 16, 576, 2052
+    host_blocks = 2 * num_blocks
+    layer_bytes = host_blocks * block_size * row_bytes
+    planner = hisparse_runtime_module._hisparse_registration_ranges
+
+    def bounded_ranges(*args, **kwargs):
+        return planner(*args, max_chunk_bytes=layer_bytes, **kwargs)
+
+    monkeypatch.setattr(
+        hisparse_runtime_module, "_hisparse_registration_ranges", bounded_ranges
+    )
+    monkeypatch.setattr(
+        hisparse_runtime_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(barrier=lambda: None),
+    )
+
+    def forbid_per_descriptor_dma(*args, **kwargs):
+        # Fail immediately on the old route instead of hanging a CI GPU queue.
+        raise AssertionError("ROCm row mirrors must use the fused copy path")
+
+    monkeypatch.setattr(
+        hisparse_worker_module.ops, "swap_blocks_batch", forbid_per_descriptor_dma
+    )
+    if drop_first_copy:
+        copy_kernel = hisparse_worker_module.swap_blocks_kernel
+        calls = 0
+
+        def omit_first_copy(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                return copy_kernel(*args, **kwargs)
+
+        monkeypatch.setattr(
+            hisparse_worker_module, "swap_blocks_kernel", omit_first_copy
+        )
+
+    config = SimpleNamespace(
+        instance_id=f"test_mirror_{uuid.uuid4().hex}",
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+    )
+    pools, private, region = hisparse_runtime_module.allocate_hisparse_host_pools(
+        config,
+        [layer_bytes] * layers,
+        host_blocks,
+        layers * block_size * row_bytes,
+        use_shared_host_pool=True,
+    )
+    assert region is not None and not private
+    worker = _make_hisparse_worker()
+    worker.is_host_writer = True
+    worker.kernel_block_size = block_size
+    worker.dma_stream = torch.cuda.Stream()
+    worker.host_write_event = torch.Event()
+    worker._dma_submitted = False
+    backing = torch.empty(
+        (num_blocks, layers, block_size, row_bytes), dtype=torch.uint8, device="cuda"
+    )
+    worker.cache_handles = [
+        SimpleNamespace(
+            runtime=SimpleNamespace(
+                host_cache=pool.view(-1, row_bytes), resident_source_index=0
+            ),
+            view=SimpleNamespace(cache=backing[:, layer]),
+            slot_mapping=torch.empty(0, dtype=torch.int64, device="cuda"),
+        )
+        for layer, pool in enumerate(pools)
+    ]
+    producer = torch.cuda.Stream()
+    mirrors = tuple(
+        SparseKVRowMirror(
+            (((index * 37) % num_blocks) * block_size,),
+            index * block_size,
+            4 if index < 2 else block_size,
+        )
+        for index in range(num_mirrors)
+    )
+    try:
+        assert len(region.pinned_addresses) == layers
+        for pool in pools:
+            pool.fill_(127)
+        del pool
+        worker._init_dma()
+        assert len(worker._host_mirror_views) == layers
+        pattern = (
+            torch.arange(backing.numel(), dtype=torch.int32, device="cuda")
+            .remainder_(251)
+            .to(torch.uint8)
+            .view_as(backing)
+        )
+        producer.wait_stream(torch.cuda.current_stream())
+        for generation in range(2):
+            # The second generation must not overwrite the first destination:
+            # otherwise a dropped first copy could pass a last-state check.
+            worker._set_row_mirrors(
+                tuple(
+                    SparseKVRowMirror(
+                        mirror.source_starts,
+                        mirror.destination_start + generation * num_blocks * block_size,
+                        mirror.num_rows,
+                    )
+                    for mirror in mirrors
+                )
+            )
+            with torch.cuda.stream(producer):
+                if generation:
+                    producer.wait_event(worker.host_write_event)
+                backing.copy_(pattern + generation)
+                ready = torch.Event()
+                ready.record(producer)
+            worker._enqueue_row_dma(range(layers), ready_event=ready)
+        assert len(worker._pending_dma_descriptors) == 2
+        descriptors = [entry[1] for entry in worker._pending_dma_descriptors]
+        assert descriptors[0].src.data_ptr() != descriptors[1].src.data_ptr()
+        assert all(d.src.is_pinned() and d.dst.is_pinned() for d in descriptors)
+        worker.dma_stream.synchronize()
+        for layer, host in enumerate(worker.host_caches):
+            expected = torch.full_like(host, 127)
+            for generation in range(2):
+                source = (pattern[:, layer] + generation).cpu().reshape(-1, row_bytes)
+                for mirror in mirrors:
+                    start = (
+                        mirror.destination_start + generation * num_blocks * block_size
+                    )
+                    count = mirror.num_rows
+                    src = mirror.source_starts[0]
+                    expected[start : start + count] = source[src : src + count]
+            first_region = num_blocks * block_size
+            # The negative control still executes and checks generation two.
+            torch.testing.assert_close(
+                host[first_region:], expected[first_region:], rtol=0, atol=0
+            )
+            if drop_first_copy:
+                assert torch.all(host[:first_region] == 127)
+                with pytest.raises(AssertionError):
+                    torch.testing.assert_close(host, expected, rtol=0, atol=0)
+            else:
+                torch.testing.assert_close(host, expected, rtol=0, atol=0)
+        del host
+        worker._release_completed_dma_descriptors()
+        assert not worker._pending_dma_descriptors
+        assert len(worker._dma_free_descriptors) == 2
+    finally:
+        torch.accelerator.synchronize()
+        worker._host_mirror_views = ()
+        worker.host_caches = ()
+        worker.cache_handles = []
+        pools.clear()
+        region.cleanup()
+    assert not region.pinned_addresses

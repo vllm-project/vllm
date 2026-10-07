@@ -1117,6 +1117,11 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
 ) -> torch.Tensor:
+    if candidate_blocks is not None:
+        raise NotImplementedError(
+            "Two-level candidate block selection is not implemented for the "
+            "ROCm sparse attention indexer."
+        )
     from vllm._aiter_ops import rocm_aiter_ops
 
     # careful! this will be None in dummy run
@@ -2100,6 +2105,8 @@ def _sparse_attn_prefill_ragged_kernel(
     kv_indptr_ptr,
     attn_sink_ptr,
     out_ptr,
+    q_scale_ptr,
+    kv_scale_ptr,
     q_stride_t,
     q_stride_h,
     q_stride_d,
@@ -2113,6 +2120,7 @@ def _sparse_attn_prefill_ragged_kernel(
     num_kv,
     scale,
     HAS_ATTN_SINK: tl.constexpr,
+    HAS_FP8_SCALES: tl.constexpr,
     OUT_DV: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -2134,6 +2142,10 @@ def _sparse_attn_prefill_ragged_kernel(
         mask=head_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
+
+    if HAS_FP8_SCALES:
+        q = (q.to(tl.float32) * tl.load(q_scale_ptr)).to(tl.bfloat16)
+        kv_scale = tl.load(kv_scale_ptr)
 
     neg_large = -3.4028234663852886e38
     m_i = tl.full((BLOCK_H,), neg_large, dtype=tl.float32)
@@ -2161,6 +2173,9 @@ def _sparse_attn_prefill_ragged_kernel(
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
         )
+
+        if HAS_FP8_SCALES:
+            kv = (kv.to(tl.float32) * kv_scale).to(tl.bfloat16)
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -3367,6 +3382,8 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     out: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+    kv_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
@@ -3413,6 +3430,8 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         indptr,
         attn_sink,
         out,
+        q_scale,
+        kv_scale,
         q.stride(0),
         q.stride(1),
         q.stride(2),
@@ -3426,6 +3445,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         kv.shape[0],
         float(scale),
         HAS_ATTN_SINK=has_attn_sink,
+        HAS_FP8_SCALES=q_scale is not None,
         OUT_DV=out.shape[-1],
         BLOCK_H=block_h,
         BLOCK_D=block_d,
@@ -4078,6 +4098,9 @@ def rocm_sparse_attn_prefill(
     output: torch.Tensor,
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
+    allow_aiter_opus: bool = True,
+    q_scale: torch.Tensor | None = None,
+    kv_scale: torch.Tensor | None = None,
 ) -> None:
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
@@ -4088,9 +4111,16 @@ def rocm_sparse_attn_prefill(
         rope_head_dim,
         "rocm_sparse_attn_prefill",
     )
+    assert (q_scale is None) == (kv_scale is None)
+    if q_scale is not None:
+        assert ragged_indices is not None and ragged_indptr is not None
+    # OPUS is an AITER ASM kernel whose KV addressing width has not been
+    # verified, so callers that require int64 row offsets opt out of it.
     opus_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
     if (
-        _can_use_aiter_sparse_prefill_opus(q, kv.squeeze(1), opus_attn_sink, output)
+        allow_aiter_opus
+        and q_scale is None
+        and _can_use_aiter_sparse_prefill_opus(q, kv.squeeze(1), opus_attn_sink, output)
         and _get_aiter_sparse_prefill_opus() is not None
     ):
         if ragged_indices is None or ragged_indptr is None:
@@ -4126,6 +4156,8 @@ def rocm_sparse_attn_prefill(
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             out=output,
+            q_scale=q_scale,
+            kv_scale=kv_scale,
         )
     else:
         assert indices is not None

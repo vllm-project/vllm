@@ -341,7 +341,7 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
-    def cleanup(self) -> None:
+    def cleanup(self, *, allow_deferred_unmap: bool = False) -> None:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
                 base_ptr = self._base.data_ptr()
@@ -368,6 +368,13 @@ class SharedOffloadRegion:
         if self.mmap_obj:
             try:
                 self.mmap_obj.close()
+            except BufferError:
+                if allow_deferred_unmap:
+                    logger.debug(
+                        "Deferring mmap close until exported views are released"
+                    )
+                else:
+                    logger.warning("Failed to close mmap_obj", exc_info=True)
             except Exception:
                 logger.warning("Failed to close mmap_obj", exc_info=True)
             self.mmap_obj = None

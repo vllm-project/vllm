@@ -18,6 +18,7 @@
 #include "torch_utils.h"
 #include "ops.h"
 #include "../cuda_utils.h"
+#include "../cuda_compat.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -29,9 +30,25 @@
 
 namespace {
 
-constexpr int kWarpSize = 32;
+// CUDA vs ROCm distinction: 32 lanes on NVIDIA, 64 on CDNA.
+#define kWarpSize WARP_SIZE
 // Empty key in the shared open-addressing table of host rows.
 constexpr int32_t kHashEmpty = -1;
+
+__host__ __device__ constexpr uintptr_t align_residency_ballot(
+    uintptr_t address) {
+  constexpr uintptr_t alignment = alignof(VLLM_BALLOT_MASK_T);
+  return (address + alignment - 1) & ~(alignment - 1);
+}
+
+// The int32 tables can end at either residue modulo a ROCm ballot's alignment.
+// Both shared and scratch hash-value layouts must preserve typed alignment.
+static_assert(align_residency_ballot(0) == 0);
+static_assert(align_residency_ballot(sizeof(int32_t)) %
+                  alignof(VLLM_BALLOT_MASK_T) ==
+              0);
+static_assert(align_residency_ballot(sizeof(int32_t)) - sizeof(int32_t) <=
+              sizeof(VLLM_BALLOT_MASK_T) - sizeof(int32_t));
 
 bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
   cudaPointerAttributes attributes{};
@@ -42,6 +59,30 @@ bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
     return false;
   }
   return attributes.type == cudaMemoryTypeHost;
+}
+
+#ifdef USE_ROCM
+typedef unsigned int vec16_t __attribute__((ext_vector_type(4)));
+  #define VLLM_LOAD_STREAM(ptr) __builtin_nontemporal_load(ptr)
+  #define VLLM_STORE_STREAM(ptr, val) __builtin_nontemporal_store(val, ptr)
+#else
+typedef uint4 vec16_t;
+  #define VLLM_LOAD_STREAM(ptr) __ldcg(ptr)
+  #define VLLM_STORE_STREAM(ptr, val) __stcg(ptr, val)
+#endif
+static_assert(sizeof(vec16_t) == 16, "vec16_t must be a 16-byte vector");
+
+const char* host_device_pointer(const torch::stable::Tensor& tensor) {
+#ifdef USE_ROCM
+  void* device_ptr = nullptr;
+  const auto status = cudaHostGetDevicePointer(
+      &device_ptr, const_cast<void*>(tensor.const_data_ptr()), 0);
+  STD_TORCH_CHECK(status == cudaSuccess, "Failed to map HiSparse host cache: ",
+                  cudaGetErrorString(status));
+  return static_cast<const char*>(device_ptr);
+#else
+  return static_cast<const char*>(tensor.const_data_ptr());
+#endif
 }
 
 __device__ __forceinline__ int32_t hash_slot(int32_t key, int size) {
@@ -64,10 +105,10 @@ __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
                          static_cast<uintptr_t>(row_bytes);
   if ((alignment & 15) == 0) {
     const int64_t num_vec = row_bytes / 16;
-    const uint4* src4 = reinterpret_cast<const uint4*>(src);
-    uint4* dst4 = reinterpret_cast<uint4*>(dst);
+    const vec16_t* src4 = reinterpret_cast<const vec16_t*>(src);
+    vec16_t* dst4 = reinterpret_cast<vec16_t*>(dst);
     for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-      __stcg(dst4 + j, __ldcg(src4 + j));
+      VLLM_STORE_STREAM(dst4 + j, VLLM_LOAD_STREAM(src4 + j));
     }
     return;
   }
@@ -77,13 +118,13 @@ __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
     const unsigned int* src_words = reinterpret_cast<const unsigned int*>(src);
     unsigned int* dst_words = reinterpret_cast<unsigned int*>(dst);
     for (int64_t j = lane_id; j < num_words; j += kWarpSize) {
-      __stcg(dst_words + j, __ldcg(src_words + j));
+      VLLM_STORE_STREAM(dst_words + j, VLLM_LOAD_STREAM(src_words + j));
     }
     return;
   }
 
   for (int64_t j = lane_id; j < row_bytes; j += kWarpSize) {
-    __stcg(dst + j, __ldcg(src + j));
+    VLLM_STORE_STREAM(dst + j, VLLM_LOAD_STREAM(src + j));
   }
 }
 
@@ -95,12 +136,10 @@ __device__ __forceinline__ void zero_row_warp(int lane_id, char* dst,
       reinterpret_cast<uintptr_t>(dst) | static_cast<uintptr_t>(row_bytes);
   if ((alignment & 15) == 0) {
     const int64_t num_vec = row_bytes / 16;
-    uint64_t* dst8 = reinterpret_cast<uint64_t*>(dst);
+    vec16_t* dst4 = reinterpret_cast<vec16_t*>(dst);
+    const vec16_t zero = {0u, 0u, 0u, 0u};
     for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-      uint64_t* d = dst8 + j * 2;
-      asm volatile("st.global.cg.v2.b64 [%0],{%1,%2};" ::"l"(d), "l"(0ULL),
-                   "l"(0ULL)
-                   : "memory");
+      VLLM_STORE_STREAM(dst4 + j, zero);
     }
     return;
   }
@@ -109,13 +148,13 @@ __device__ __forceinline__ void zero_row_warp(int lane_id, char* dst,
     const int64_t num_words = row_bytes / 4;
     unsigned int* dst_words = reinterpret_cast<unsigned int*>(dst);
     for (int64_t j = lane_id; j < num_words; j += kWarpSize) {
-      __stcg(dst_words + j, 0u);
+      VLLM_STORE_STREAM(dst_words + j, 0u);
     }
     return;
   }
 
   for (int64_t j = lane_id; j < row_bytes; j += kWarpSize) {
-    __stcg(dst + j, static_cast<char>(0));
+    VLLM_STORE_STREAM(dst + j, static_cast<char>(0));
   }
 }
 
@@ -137,23 +176,23 @@ __device__ __forceinline__ void zero_cache_row_warp(int lane_id, char* cache,
                 row_bytes);
 }
 
-// In-place inclusive scan over s_data[offset, count) performed by warp 0,
-// carrying `accumulator` across calls. Returns the running total.
+// In-place inclusive scan performed by warp 0 over num chunk counters produced
 __device__ __forceinline__ int warp_inclusive_scan(int32_t* s_data, int lane_id,
                                                    int offset, int count,
-                                                   int accumulator) {
-  int idx = lane_id + offset;
-  int val = (idx < count) ? s_data[idx] : 0;
+                                                   int width, int accumulator) {
+  const int idx = lane_id + offset;
+  const bool active = lane_id < width && idx < count;
+  int val = active ? s_data[idx] : 0;
 #pragma unroll
-  for (int i = 1; i < 32; i *= 2) {
-    int n = __shfl_up_sync(0xffffffff, val, i);
+  for (int i = 1; i < kWarpSize; i *= 2) {
+    int n = VLLM_SHFL_UP_SYNC(val, i);
     if (lane_id >= i) val += n;
   }
   val += accumulator;
-  if (idx < count) {
+  if (active) {
     s_data[idx] = val;
   }
-  return __shfl_sync(0xffffffff, val, 31);
+  return VLLM_SHFL_SYNC(val, kWarpSize - 1);
 }
 
 __device__ __forceinline__ int64_t
@@ -319,7 +358,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const int64_t resident_bt_stride, const int32_t resident_num_reqs,
     const int32_t resident_num_blocks, const int32_t resident_block_size,
     const int32_t resident_null_block, const int64_t input_row_stride,
-    const int64_t attention_row_stride, const int64_t valid_count_stride) {
+    const int64_t attention_row_stride, const int64_t valid_count_stride,
+    int32_t* __restrict__ hash_values_scratch) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
 
@@ -372,7 +412,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   const int tid = threadIdx.x;
   const int warp_id = tid / kWarpSize;
   const int lane_id = tid % kWarpSize;
-  const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
+  const VLLM_BALLOT_MASK_T lanes_before =
+      ((VLLM_BALLOT_MASK_T)1 << lane_id) - 1;
 
   int32_t* row_dgi =
       device_global_indices + static_cast<int64_t>(state_row) * region_stride;
@@ -386,12 +427,19 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 
   extern __shared__ char smem_raw[];
   int32_t* s_hash_keys = reinterpret_cast<int32_t*>(smem_raw);
-  int32_t* s_hash_vals = s_hash_keys + hash_size;
-  int32_t* s_chunk_off = s_hash_vals + hash_size;
+  // A padded run can have the same request id as a live run. Isolate scratch
+  // by launch row, not request/state id, including before the empty-run exit.
+  int32_t* s_hash_vals =
+      hash_values_scratch != nullptr
+          ? hash_values_scratch + static_cast<int64_t>(first_row) * hash_size
+          : s_hash_keys + hash_size;
+  int32_t* s_chunk_off =
+      s_hash_keys + hash_size * (hash_values_scratch != nullptr ? 1 : 2);
   int32_t* s_evict_off = s_chunk_off + (num_buffer_chunks + 1);
   int32_t* s_counters = s_evict_off + (num_buffer_chunks + 1);
-  unsigned int* s_done =
-      reinterpret_cast<unsigned int*>(s_counters + kResidencyCounters);
+  VLLM_BALLOT_MASK_T* s_done =
+      reinterpret_cast<VLLM_BALLOT_MASK_T*>(align_residency_ballot(
+          reinterpret_cast<uintptr_t>(s_counters + kResidencyCounters)));
   int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_done + num_buffer_chunks);
 
   for (int i = tid; i < table_size; i += blockDim.x) {
@@ -484,7 +532,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
           "configured bound of %d\n",
           request_row, s_counters[1], hash_size - 1);
     }
-    __trap();
+    VLLM_TRAP();
   }
   // Fully resident rows need only request-relative page translation. Avoid
   // scanning or rewriting the hot LRU when no selected row can consult it.
@@ -535,24 +583,24 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     int local_hit_off = 0;
     int local_evict_off = 0;
     if (has_valid_chunk) {
-      const unsigned int hit_mask = __ballot_sync(0xFFFFFFFF, is_hit);
-      const unsigned int evict_mask = __ballot_sync(0xFFFFFFFF, is_evictable);
-      local_hit_off = __popc(hit_mask & lanes_before);
-      local_evict_off = __popc(evict_mask & lanes_before);
+      const VLLM_BALLOT_MASK_T hit_mask = VLLM_BALLOT(is_hit);
+      const VLLM_BALLOT_MASK_T evict_mask = VLLM_BALLOT(is_evictable);
+      local_hit_off = VLLM_POPC(hit_mask & lanes_before);
+      local_evict_off = VLLM_POPC(evict_mask & lanes_before);
       if (lane_id == 0) {
-        s_chunk_off[chunk_idx + 1] = __popc(hit_mask);
-        s_evict_off[chunk_idx + 1] = __popc(evict_mask);
+        s_chunk_off[chunk_idx + 1] = VLLM_POPC(hit_mask);
+        s_evict_off[chunk_idx + 1] = VLLM_POPC(evict_mask);
       }
     }
     __syncthreads();
 
     if (warp_id == 0) {
-      total_hit_count =
-          warp_inclusive_scan(s_chunk_off, lane_id, chunk_idx + 1,
-                              num_buffer_chunks + 1, total_hit_count);
-      total_evict_count =
-          warp_inclusive_scan(s_evict_off, lane_id, chunk_idx + 1,
-                              num_buffer_chunks + 1, total_evict_count);
+      total_hit_count = warp_inclusive_scan(s_chunk_off, lane_id, chunk_idx + 1,
+                                            num_buffer_chunks + 1, NUM_WARPS,
+                                            total_hit_count);
+      total_evict_count = warp_inclusive_scan(
+          s_evict_off, lane_id, chunk_idx + 1, num_buffer_chunks + 1, NUM_WARPS,
+          total_evict_count);
       if (tid == 0) {
         s_counters[0] = total_hit_count;
       }
@@ -619,18 +667,18 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 
     int local_miss_off = 0;
     if (has_valid_chunk) {
-      const unsigned int miss_mask_bits = __ballot_sync(0xFFFFFFFF, is_miss);
-      local_miss_off = __popc(miss_mask_bits & lanes_before);
+      const VLLM_BALLOT_MASK_T miss_mask = VLLM_BALLOT(is_miss);
+      local_miss_off = VLLM_POPC(miss_mask & lanes_before);
       if (lane_id == 0) {
-        s_chunk_off[chunk_idx + 1] = __popc(miss_mask_bits);
+        s_chunk_off[chunk_idx + 1] = VLLM_POPC(miss_mask);
       }
     }
     __syncthreads();
 
     if (warp_id == 0) {
-      miss_running_total =
-          warp_inclusive_scan(s_chunk_off, lane_id, chunk_idx + 1,
-                              num_position_chunks + 1, miss_running_total);
+      miss_running_total = warp_inclusive_scan(
+          s_chunk_off, lane_id, chunk_idx + 1, num_position_chunks + 1,
+          NUM_WARPS, miss_running_total);
       if (tid == 0) {
         s_counters[3] = miss_running_total;
       }
@@ -678,7 +726,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
           attention_block_stride, is_miss, entry_hits, entry_misses);
     }
     if (has_valid_chunk) {
-      const unsigned int done_bits = __ballot_sync(0xFFFFFFFF, resolved);
+      const VLLM_BALLOT_MASK_T done_bits = VLLM_BALLOT(resolved);
       if (lane_id == 0) {
         s_done[chunk_idx] = done_bits;
       }
@@ -700,7 +748,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   // Single-row requests resolve everything in phase 3.
   if (end_row - first_row > 1) {
     for (int position = tid; position < num_positions; position += blockDim.x) {
-      if (s_done[position / kWarpSize] & (1u << (position % kWarpSize))) {
+      if (s_done[position / kWarpSize] &
+          ((VLLM_BALLOT_MASK_T)1 << (position % kWarpSize))) {
         continue;
       }
       const int row = first_row + position / top_k;
@@ -974,7 +1023,8 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block) {
+    int64_t resident_block_size, int64_t resident_null_block,
+    std::optional<torch::stable::Tensor> const& hash_values_scratch) {
   STD_TORCH_CHECK(
       host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
       "host_cache must be pinned CPU memory");
@@ -1022,8 +1072,6 @@ void hisparse_resolve_residency(
                   "hot-cache rows must be contiguous");
   const int64_t hot_block_size = hot_cache.size(1);
   const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
-  const int64_t hot_block_stride =
-      hot_cache.stride(0) * hot_cache.element_size();
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
   const auto launch_rows = static_cast<int32_t>(num_rows);
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
@@ -1216,10 +1264,26 @@ void hisparse_resolve_residency(
                   max_union_rows);
   // One spare entry above the union bound keeps every probe sequence finite.
   const int hash_size = static_cast<int>(max_union_rows) + 1;
+  int32_t* hash_values_ptr = nullptr;
+  if (hash_values_scratch.has_value()) {
+    auto const& scratch = hash_values_scratch.value();
+    STD_TORCH_CHECK(
+        scratch.is_cuda() &&
+            scratch.get_device_index() == hot_cache.get_device_index() &&
+            scratch.scalar_type() == torch::headeronly::ScalarType::Int &&
+            scratch.dim() == 2 && scratch.size(0) >= launch_rows &&
+            scratch.size(1) == hash_size && scratch.is_contiguous(),
+        "hash_values_scratch must be contiguous int32 on the hot-cache device, "
+        "with at least launch_rows rows and max_union_rows + 1 columns");
+    hash_values_ptr = scratch.mutable_data_ptr<int32_t>();
+  }
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
+  // Reserve the worst-case alignment padding; scratch can need zero padding.
   const size_t smem_bytes =
-      sizeof(int32_t) * (2 * hash_size + 2 * (num_buffer_chunks + 1) +
-                         kResidencyCounters + num_buffer_chunks) +
+      sizeof(int32_t) * ((hash_values_ptr != nullptr ? 1 : 2) * hash_size +
+                         2 * (num_buffer_chunks + 1) + kResidencyCounters) +
+      sizeof(VLLM_BALLOT_MASK_T) * num_buffer_chunks +
+      (sizeof(VLLM_BALLOT_MASK_T) - sizeof(int32_t)) +
       sizeof(int16_t) * hot_size;
 
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -1243,6 +1307,12 @@ void hisparse_resolve_residency(
   const int64_t valid_count_stride =
       valid_counts.has_value() ? valid_counts.value().stride(0) : 0;
   auto kernel = hisparse_resolve_residency_kernel;
+#ifdef USE_ROCM
+  constexpr size_t kMaxLdsBytes = 64 * 1024;
+  STD_TORCH_CHECK(smem_bytes <= kMaxLdsBytes, "HiSparse residency needs ",
+                  smem_bytes, " bytes of LDS but CDNA allows at most ",
+                  kMaxLdsBytes, "; reduce top_k or the hot-buffer size");
+#else
   if (smem_bytes > 48 * 1024) {
     const cudaError_t attribute_error = cudaFuncSetAttribute(
         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
@@ -1250,6 +1320,7 @@ void hisparse_resolve_residency(
                     "failed to configure HiSparse swap-in shared memory: ",
                     cudaGetErrorString(attribute_error));
   }
+#endif
   kernel<<<launch_rows, kBlockSize, smem_bytes, stream>>>(
       hot_block_table.const_data_ptr<int32_t>(),
       global_indices.const_data_ptr<int32_t>(), request_ids_ptr,
@@ -1267,7 +1338,7 @@ void hisparse_resolve_residency(
       resident_num_reqs, resident_num_blocks,
       static_cast<int32_t>(resident_block_size),
       static_cast<int32_t>(resident_null_block), global_indices.stride(0),
-      attention_row_stride, valid_count_stride);
+      attention_row_stride, valid_count_stride, hash_values_ptr);
   const cudaError_t launch_error = cudaGetLastError();
   STD_TORCH_CHECK(launch_error == cudaSuccess,
                   "HiSparse residency kernel launch failed: ",
@@ -1350,7 +1421,8 @@ void hisparse_gather_plan(
   // layers' misses (index-sharing replay), so per-row copy parallelism is
   // the throughput limiter on cold rows.
   constexpr int kBlockSize = 1024;
-  constexpr int kNumWarps = kBlockSize / kWarpSize;
+  // Not constexpr: on ROCm the host-side WARP_SIZE is a runtime device query.
+  const int kNumWarps = kBlockSize / kWarpSize;
   // Interleave columns over enough blocks per row to cover the device even
   // for few-row launches (local-prefill staging's single-row layout, small
   // decode batches), keeping >= 1 column per warp.
@@ -1372,7 +1444,7 @@ void hisparse_gather_plan(
       hot_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   hisparse_gather_plan_kernel<<<grid, kBlockSize, 0, stream>>>(
-      static_cast<const char*>(host_cache.const_data_ptr()),
+      host_device_pointer(host_cache),
       static_cast<char*>(hot_cache.mutable_data_ptr()),
       global_indices.const_data_ptr<int32_t>(),
       hot_indices.const_data_ptr<int32_t>(),
@@ -1430,7 +1502,7 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
       hot_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   hisparse_gather_compact_kernel<<<grid, kBlockSize, 0, stream>>>(
-      static_cast<const char*>(host_cache.const_data_ptr()),
+      host_device_pointer(host_cache),
       static_cast<char*>(hot_cache.mutable_data_ptr()),
       miss_global_indices.const_data_ptr<int32_t>(),
       miss_hot_indices.const_data_ptr<int32_t>(),

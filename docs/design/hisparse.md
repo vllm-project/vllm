@@ -221,9 +221,28 @@ hot row? ──────── yes ──► existing hot physical row + upda
 choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 ```
 
-ROCm is not currently supported because the fused HiSparse cache operations are
-implemented only by CUDA kernels. A future platform-specific worker may provide
-the same command, output, and cache-resolution boundaries.
+ROCm uses the HIP cache operations and the ROCm AITER sparse-MLA backend.
+The attention calculation uses the Triton ragged kernel because physical row
+offsets in the shared multi-layer KV allocation can exceed the signed 32-bit
+addressing range of the AITER assembly path. The packed `fp8_ds_mla` KV format
+is not supported on ROCm; use `auto`, `bfloat16`, or `fp8`.
+
+On CDNA, the residency resolver moves per-token scratch to reusable device-global
+storage when it would exceed the 64 KiB LDS budget. The remaining shared-memory
+state must still fit that budget; configurations exceeding it are rejected.
+Kernel tests cover `index_topk=2048` with three speculative tokens, but this
+coverage alone does not establish full-model support for every configuration.
+
+Local tensor-parallel workers share the host pool. ROCm orders host writes with
+a writer event synchronization and a TP barrier, rather than reusing imported
+HIP IPC events. This adds a per-step synchronization cost. Registered host
+memory is accessed through its HIP device alias, which can differ from its CPU
+address.
+
+When using a ROCm AITER version affected by the FP8 MoE scale overread reported
+in [ROCm/aiter#5764](https://github.com/ROCm/aiter/pull/5764), select
+`--kernel-config '{"moe_backend":"triton"}'`. This workaround is independent
+of the sparse cache operations.
 
 ## Main classes
 
@@ -260,6 +279,6 @@ the same command, output, and cache-resolution boundaries.
 The command/result and attention-layer boundaries can be shared. The host
 allocator, copy implementation, hot layout, and replacement policy should stay
 platform-specific. NVIDIA uses the current accelerator LRU and fused host/hot
-kernel. ROCm is not currently supported; AMD or other accelerator backends can
-implement their own worker without forcing NVIDIA's policy into the shared
-boundary.
+kernel. ROCm uses HIP host registration, device aliases, and a shared host-pool
+worker with explicit TP synchronization. Other accelerator backends can implement
+their own worker without forcing NVIDIA's policy into the shared boundary.

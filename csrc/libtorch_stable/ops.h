@@ -179,7 +179,7 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 
 // CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
-    torch::stable::Tensor& cpu_tensor);
+    torch::stable::Tensor& cpu_tensor, bool is_registered);
 
 // Attention kernels (shared CUDA/ROCm)
 void merge_attn_states(
@@ -672,8 +672,6 @@ void concat_and_cache_mla_grouped(
     std::optional<torch::stable::Tensor> kv_scales,
     const std::string& kv_cache_dtype);
 
-#ifndef USE_ROCM
-// HiSparse kernels use raw PTX in the row copy; CUDA-only.
 void hisparse_resolve_residency(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& hot_block_table,
@@ -696,7 +694,8 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block);
+    int64_t resident_block_size, int64_t resident_null_block,
+    std::optional<torch::stable::Tensor> const& hash_values_scratch);
 
 void hisparse_invalidate_written_slots(
     torch::stable::Tensor& device_global_indices,
@@ -718,8 +717,6 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
                              torch::stable::Tensor const& miss_global_indices,
                              torch::stable::Tensor const& miss_hot_indices,
                              torch::stable::Tensor const& miss_counts);
-
-#endif  // !USE_ROCM
 
 // NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
 void concat_and_cache_mla_rope_fused(

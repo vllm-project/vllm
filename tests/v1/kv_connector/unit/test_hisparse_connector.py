@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import ctypes
+import mmap
+import os
+import uuid
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -33,6 +37,7 @@ from vllm.v1.hisparse.types import (
     SparseKVPageTransfer,
     SparseKVRowMirror,
 )
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -206,6 +211,11 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     compute_stream = MagicMock()
     monkeypatch.setattr(worker_module, "current_stream", lambda: compute_stream)
     monkeypatch.setattr(worker_module.ops, "swap_blocks_batch", swap_blocks_batch)
+    # This ordering test uses CPU tensors and the copy shim above. Registered
+    # ROCm aliases and fused copies are exercised by the GPU worker tests.
+    monkeypatch.setattr(
+        worker_module, "current_platform", SimpleNamespace(is_rocm=lambda: False)
+    )
     monkeypatch.setattr(
         runtime_module,
         "get_forward_context",
@@ -405,3 +415,245 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
 
     resident_ids = scheduler_output.block_table_updates[resumed.request_id][2]
     assert resident_ids[:3] == copy_ids[:3]
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [None, 3])
+@pytest.mark.parametrize("parallel_drafting", [False, True])
+@pytest.mark.parametrize("batch_kind", ["decode", "mixed", "prefill"])
+def test_hisparse_decode_metadata_skips_context_scan(
+    monkeypatch, num_speculative_tokens, parallel_drafting, batch_kind
+):
+    """Decode keeps row mirrors while avoiding a context-length CPU scan."""
+    from tests.v1.core.test_prefix_caching import (
+        HISPARSE_BLOCK_SIZE,
+        _allocate_scheduled,
+        _publish_hisparse_pages,
+        make_hisparse_kv_cache_config,
+        make_hisparse_kv_cache_manager,
+        make_request,
+        sha256,
+    )
+    from vllm.v1.core.kv_cache_utils import init_none_hash
+
+    init_none_hash(sha256)
+    manager = make_hisparse_kv_cache_manager(64, 32)
+    coordinator = get_hisparse_coordinator(manager)
+    config = SimpleNamespace(
+        speculative_config=(
+            None
+            if num_speculative_tokens is None
+            else SimpleNamespace(
+                num_speculative_tokens=num_speculative_tokens,
+                parallel_drafting=parallel_drafting,
+            )
+        ),
+        model_config=SimpleNamespace(max_model_len=128),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=128,
+        use_v2_model_runner=True,
+        num_lookahead_tokens=num_speculative_tokens or 0,
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        kv_transfer_config=SimpleNamespace(),
+    )
+    connector = HiSparseConnector(
+        config,
+        KVConnectorRole.SCHEDULER,
+        make_hisparse_kv_cache_config(64, 32),
+    )
+    scheduler = connector.connector_scheduler
+    assert scheduler is not None
+    max_decode_query_len = 1 + (num_speculative_tokens or 0)
+    assert scheduler.max_decode_query_len == max_decode_query_len
+    scheduler.bind_coordinator(coordinator)
+    counts = [
+        max_decode_query_len + int(batch_kind == "prefill"),
+        max_decode_query_len + int(batch_kind != "decode"),
+    ]
+    starts = []
+    for index, count in enumerate(counts):
+        request = make_request(
+            str(index),
+            list(range(4 * HISPARSE_BLOCK_SIZE)),
+            HISPARSE_BLOCK_SIZE,
+            sha256,
+        )
+        assert _allocate_scheduled(manager, request, num_new_tokens=request.num_tokens)
+        _publish_hisparse_pages(manager)
+        scheduler.requests[request.request_id] = request
+        starts.append(request.num_tokens - count)
+    checked = []
+    original = coordinator.all_context_pages_resident
+
+    def record_scan(requests):
+        checked.append(tuple(requests))
+        return original(requests)
+
+    monkeypatch.setattr(coordinator, "all_context_pages_resident", record_scan)
+    output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["0", "1"], num_computed_tokens=starts, new_block_ids=[None, None]
+        ),
+        num_scheduled_tokens=dict(zip(["0", "1"], counts)),
+    )
+    metadata = scheduler.build_connector_meta(output)
+
+    assert len(checked) == int(batch_kind == "prefill")
+    assert metadata.all_context_pages_resident == (batch_kind == "prefill")
+    assert output.has_sync_kv_loads
+    assert set(metadata.row_mirrors) == {"0", "1"}
+    for request_id, count in zip(["0", "1"], counts):
+        assert sum(row.num_rows for row in metadata.row_mirrors[request_id]) == count
+
+
+@pytest.mark.parametrize("retain_model_cache", [False, True])
+def test_hisparse_shutdown_releases_shared_mmap(
+    monkeypatch, retain_model_cache, caplog
+):
+    """DMA aliases must not retain a mapping after its last model view dies."""
+    # No GPU work or registration is needed to test Python buffer ownership.
+    # Use a real mmap and tensor views so an outstanding export prevents close.
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_chunks=2,
+        rank=0,
+        kv_bytes_per_chunk=2 * mmap.PAGESIZE,
+        cpu_page_size=2 * mmap.PAGESIZE,
+    )
+    mapped = region.mmap_obj
+    fd = region.fd
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker._initialized = True
+    worker._slot_mapping_staging = None
+    worker.dma_stream = None
+    worker._host_mirror_views = ()
+    worker.shared_host_region = region
+    worker.pinned_host_pools = []
+    worker.cache_handles = [
+        SimpleNamespace(
+            runtime=SimpleNamespace(
+                _host_cache=region.create_next_canonical_view(mmap.PAGESIZE),
+                registered_host_pool=region.base_tensor,
+                hot_backing=torch.empty(0),
+            )
+        )
+        for _ in range(2)
+    ]
+    # _init_dma retains these aliases independently of the runtime.
+    worker.host_caches = tuple(
+        handle.runtime._host_cache for handle in worker.cache_handles
+    )
+    refs = [weakref.ref(cache) for cache in worker.host_caches]
+    # Serving layers own distinct views until model-runner teardown, which
+    # follows connector shutdown. Do not retain the mmap object in that case:
+    # its destructor closes the mapping when the final exported view dies.
+    model_caches = (
+        [cache.view_as(cache) for cache in worker.host_caches]
+        if retain_model_cache
+        else []
+    )
+    mapped_ref = weakref.ref(mapped)
+    if retain_model_cache:
+        model_caches[0][0, 0] = 17
+        mapped = None
+    try:
+        worker.shutdown()
+        assert "Failed to close mmap_obj" not in caplog.text
+        if retain_model_cache:
+            assert mapped_ref() is not None
+            assert model_caches[0][0, 0].item() == 17
+            model_caches.clear()
+            assert mapped_ref() is None, "Connector outlived the last model view"
+        else:
+            assert mapped.closed, "Connector retained an exported shared-pool view"
+        assert all(ref() is None for ref in refs)
+        with pytest.raises(OSError):
+            os.fstat(fd)
+        assert not worker._initialized
+        # A second shutdown must not access already released runtime fields.
+        worker.shutdown()
+    finally:
+        # Also close the real mapping when testing the unfixed implementation.
+        worker.host_caches = ()
+        model_caches.clear()
+        for handle in worker.cache_handles:
+            for name in ("_host_cache", "registered_host_pool", "hot_backing"):
+                if hasattr(handle.runtime, name):
+                    delattr(handle.runtime, name)
+        region.cleanup()
+        if mapped is not None and not mapped.closed:
+            mapped.close()
+
+
+@pytest.mark.parametrize("cleanup_path", ["release", "profiling", "initialization"])
+def test_hisparse_non_shutdown_cleanup_keeps_strict_unmap_diagnostic(
+    monkeypatch, caplog, cleanup_path
+):
+    from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
+    from vllm.v1.hisparse.runtime import release_pinned_state
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_chunks=1,
+        rank=0,
+        kv_bytes_per_chunk=mmap.PAGESIZE,
+        cpu_page_size=mmap.PAGESIZE,
+    )
+    runtime = SimpleNamespace(
+        _host_cache=region.base_tensor.view(-1),
+        registered_host_pool=region.base_tensor,
+        hot_backing=torch.empty(0),
+        shared_host_region=region,
+    )
+    exported = runtime._host_cache.view_as(runtime._host_cache)
+    mapped = weakref.ref(region.mmap_obj)
+    try:
+        if cleanup_path == "profiling":
+            cache = SimpleNamespace(runtime=runtime)
+            release_hisparse_profiling_cache(
+                {"layer": SimpleNamespace(hisparse_cache=cache)}
+            )
+        elif cleanup_path == "initialization":
+            cache = SimpleNamespace(runtime=runtime, view=torch.empty(1))
+            worker = HiSparseConnectorWorker(
+                SimpleNamespace(
+                    compilation_config=SimpleNamespace(
+                        static_forward_context={
+                            "layer": SimpleNamespace(hisparse_cache=cache)
+                        }
+                    ),
+                    scheduler_config=SimpleNamespace(max_num_seqs=1),
+                ),
+                SimpleNamespace(
+                    hisparse_host_num_blocks=1,
+                    kv_cache_groups=[
+                        SimpleNamespace(
+                            kv_cache_spec=worker_module.HiSparseHotSpec(
+                                block_size=1, page_size=1, blocks_per_request=1
+                            ),
+                            layer_names=["layer" + worker_module.HISPARSE_HOT_SUFFIX],
+                        )
+                    ],
+                ),
+            )
+            monkeypatch.setattr(
+                worker_module, "get_tensor_model_parallel_rank", lambda: 0
+            )
+
+            def fail_initialize(*args, **kwargs):
+                raise RuntimeError("initialization failed")
+
+            monkeypatch.setattr(worker, "initialize", fail_initialize)
+            with pytest.raises(RuntimeError, match="initialization failed"):
+                worker.register_kv_caches({})
+        else:
+            release_pinned_state([runtime], [], region)
+        assert "Failed to close mmap_obj" in caplog.text
+        assert mapped() is not None
+        del exported
+        # Captured initialization tracebacks can retain caller-local views.
+        # Final-view lifetime is covered separately without exception owners.
+    finally:
+        region.cleanup()

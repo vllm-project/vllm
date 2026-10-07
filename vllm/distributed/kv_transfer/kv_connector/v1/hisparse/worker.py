@@ -22,6 +22,8 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -32,6 +34,9 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     KVCacheConfig,
 )
+from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
+    swap_blocks_batch as swap_blocks_kernel,
+)
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
@@ -39,6 +44,8 @@ if TYPE_CHECKING:
         HiSparseConnectorMetadata,
     )
     from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+logger = init_logger(__name__)
 
 
 class _DMADescriptors(NamedTuple):
@@ -60,8 +67,12 @@ class _SlotMappingStaging:
     source_index: int = 0
 
 
-def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
-    src, dst, sizes = (torch.empty(size, dtype=torch.int64) for _ in range(3))
+def _allocate_dma_descriptors(
+    size: int, *, pin_memory: bool = False
+) -> _DMADescriptors:
+    src, dst, sizes = (
+        torch.empty(size, dtype=torch.int64, pin_memory=pin_memory) for _ in range(3)
+    )
     return _DMADescriptors(
         src,
         dst,
@@ -154,12 +165,16 @@ def _is_hisparse_host_writer(
     return shared_host_region is None or get_tensor_model_parallel_rank() == 0
 
 
+def _use_ipc_host_events() -> bool:
+    return not current_platform.is_rocm()
+
+
 def _create_hisparse_host_events(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,
     device: torch.device,
 ) -> tuple[torch.Event, torch.Event]:
-    if shared_host_region is None:
+    if shared_host_region is None or not _use_ipc_host_events():
         return torch.Event(), torch.Event()
 
     events: tuple[torch.Event, torch.Event] | None = None
@@ -297,6 +312,7 @@ class HiSparseConnectorWorker:
             deque()
         )
         self._dma_submitted = False
+        self._step_in_flight = False
         self._per_layer_mirrored: set[int] = set()
         self._submitted_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
@@ -312,6 +328,7 @@ class HiSparseConnectorWorker:
             for layer_name, cache in zip(cache_layer_names, cache_handles, strict=True)
             if cache.runtime.is_group_leader
         )
+        self._ipc_host_events = _use_ipc_host_events()
         self.host_write_events = _create_hisparse_host_events(
             shared_host_region, is_host_writer, device
         )
@@ -395,6 +412,18 @@ class HiSparseConnectorWorker:
             ):
                 raise RuntimeError("HiSparse DMA requires contiguous host rows.")
 
+        self._host_mirror_views: tuple[torch.Tensor, ...] = ()
+        if current_platform.is_rocm() and self.is_host_writer:
+            if any(cache.shape[1] * cache.element_size() % 8 for cache in host_caches):
+                raise ValueError("ROCm HiSparse mirror rows must be 8-byte aligned")
+            # The whole-layer registration planner guarantees each layer has
+            # one device alias. Do not copy these externally registered pools:
+            # every TP rank must continue observing the same shared storage.
+            self._host_mirror_views = tuple(
+                torch.ops._C.get_cuda_view_from_cpu_tensor(cache, True)
+                for cache in host_caches
+            )
+
     def start_step(
         self,
         metadata: HiSparseConnectorMetadata,
@@ -408,6 +437,7 @@ class HiSparseConnectorWorker:
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
+        self.sync_host_writes(previous_host_write_event)
         self._release_completed_dma_descriptors()
         self._dma_submitted = False
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
@@ -415,6 +445,7 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
         self._clear_forward_mirror_state()
+        self._step_in_flight = True
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
             handle.mirror_from_resident = True
@@ -439,7 +470,15 @@ class HiSparseConnectorWorker:
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
 
+    def sync_host_writes(self, event: torch.Event) -> None:
+        if self.shared_host_region is None or self._ipc_host_events:
+            return
+        if self.is_host_writer:
+            event.synchronize()
+        get_tp_group().barrier()
+
     def _clear_forward_mirror_state(self) -> None:
+        self._step_in_flight = False
         self._per_layer_mirrored.clear()
         self._submitted_mirror_layers.clear()
         for handle in self.cache_handles:
@@ -580,7 +619,9 @@ class HiSparseConnectorWorker:
         for index, descriptors in enumerate(self._dma_free_descriptors):
             if descriptors.src.numel() >= size:
                 return self._dma_free_descriptors.pop(index)
-        return _allocate_dma_descriptors(size)
+        return _allocate_dma_descriptors(
+            size, pin_memory=bool(getattr(self, "_host_mirror_views", ()))
+        )
 
     def _submit_dma_descriptors(
         self,
@@ -588,6 +629,8 @@ class HiSparseConnectorWorker:
         descriptor_count: int,
         transfer_ids: tuple[int, ...] = (),
         ready_event: torch.Event | None = None,
+        *,
+        use_kernel: bool = False,
     ) -> None:
         stream = self.dma_stream
         assert stream is not None
@@ -597,11 +640,18 @@ class HiSparseConnectorWorker:
             stream.wait_event(ready_event)
         completion_event = torch.Event()
         with torch.cuda.stream(stream):
-            ops.swap_blocks_batch(
+            copy_args = (
                 descriptors.src[:descriptor_count],
                 descriptors.dst[:descriptor_count],
                 descriptors.sizes[:descriptor_count],
             )
+            if use_kernel:
+                # HIP 7.2 lowers a batch to individual copies. A large mirror
+                # can fill its HSA queue before the host can enqueue the rest
+                # of the forward. Reuse the core fused copy kernel instead.
+                swap_blocks_kernel(*copy_args, bytes_per_chunk=8192, force_kernel=True)
+            else:
+                ops.swap_blocks_batch(*copy_args)
             self.host_write_event.record(stream)
             completion_event.record(stream)
         self._pending_dma_descriptors.append((completion_event, descriptors))
@@ -645,6 +695,7 @@ class HiSparseConnectorWorker:
         num_layers = len(layer_indices)
         descriptor_count = len(mirrors) * num_layers
         descriptors = self._acquire_dma_descriptors(descriptor_count)
+        mapped_hosts = getattr(self, "_host_mirror_views", ())
         destination_starts = self._row_mirror_destination_starts
         row_counts = self._row_mirror_counts
         for descriptor_offset, layer_index in enumerate(layer_indices):
@@ -654,7 +705,11 @@ class HiSparseConnectorWorker:
                 raise RuntimeError("HiSparse row DMA source index is out of range.")
             source_rows = self._row_mirror_source_starts[:, source_index]
             source = self.resident_caches[layer_index]
-            destination = self.host_caches[layer_index]
+            destination = (
+                mapped_hosts[layer_index]
+                if mapped_hosts
+                else self.host_caches[layer_index]
+            )
             row_bytes = source.shape[-1] * source.element_size()
             if (
                 source.stride(1) * source.element_size() != row_bytes
@@ -687,12 +742,18 @@ class HiSparseConnectorWorker:
             descriptors.sizes_np[descriptor_slice] = row_counts * row_bytes
 
         self._submit_dma_descriptors(
-            descriptors, descriptor_count, ready_event=ready_event
+            descriptors,
+            descriptor_count,
+            ready_event=ready_event,
+            use_kernel=bool(mapped_hosts),
         )
 
     def _enqueue_layer_mirror(self, layer_index: int) -> None:
         handle = self.cache_handles[layer_index]
         if not handle.host_mirror_required:
+            return
+        if not self._step_in_flight:
+            # Don't mirror on warmup/dummy; connector disabled
             return
         if layer_index in self._per_layer_mirrored:
             raise RuntimeError(f"HiSparse layer {layer_index} mirrored twice.")
@@ -947,9 +1008,15 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.stream.synchronize()
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
+        self._host_mirror_views = ()
+        # DMA aliases must not keep the shared mmap alive after model-owned
+        # views are released. Drop them only after the DMA stream drains.
+        self.host_caches = ()
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles],
             self.pinned_host_pools,
             self.shared_host_region,
+            # Serving layers release their views during model-runner shutdown.
+            allow_deferred_unmap=True,
         )
         self._initialized = False
