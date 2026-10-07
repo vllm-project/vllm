@@ -87,6 +87,8 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.stop_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.stop_buffer_length = 0
+        # TODO(wengang.cwg): hardcode stop_buffer_length to 0 for now and need a more perfect solution
+        self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
 
         # Generation data
