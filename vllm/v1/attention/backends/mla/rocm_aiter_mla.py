@@ -708,7 +708,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 max_decode_query_len(vllm_config),
             )
             self._varlen_decode_qlen = self._mtp_decode_qlen
-            self.query_len_support = QueryLenSupport.VARLEN
+            self.query_len_support = QueryLenSupport.VARLEN  # type: ignore[misc]
             max_rows = vllm_config.scheduler_config.max_num_seqs * (
                 self._varlen_decode_qlen
             )
@@ -2359,7 +2359,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             return self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
         assert decode.varlen_o_rows is not None
         q_rows = decode.varlen_q_rows
-        if type(q) is tuple:
+        if isinstance(q, tuple):
             num_tokens = q[0].shape[0]
             q = (_gather_rows(q[0], q_rows), _gather_rows(q[1], q_rows))
         else:

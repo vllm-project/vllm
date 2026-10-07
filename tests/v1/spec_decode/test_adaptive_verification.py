@@ -84,6 +84,7 @@ def test_tp_budget_uses_leader_despite_confidence_drift(
         )
         total = manager.get_num_tokens({"low": 2, "high": 2}, {"low": [1], "high": [2]})
         assert total == 2 + expected_budget
+        assert manager._batch_budget is not None
         assert manager._batch_budget[2] == expected_budget
 
 
