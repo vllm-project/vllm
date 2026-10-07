@@ -1716,8 +1716,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert self.dcp_world_size == 1
 
         # One query token per request, so the per-token decode block table is
-        # the request block table (already in the indexer kernel's blocks).
-        # build() may copy it into a builder buffer, so re-derive it here.
+        # the request block table (at the indexer kernel's page size). build()
+        # may copy it into a builder buffer, so re-derive it for this batch.
         decode.block_table.copy_(metadata.block_table[: metadata.num_decode_tokens])
         if decode.indices is not None:
             decode.indices.copy_(self.arange_buffer[: metadata.num_decode_tokens])

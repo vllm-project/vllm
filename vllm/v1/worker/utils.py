@@ -364,12 +364,12 @@ class AttentionGroup:
             return common_attn_metadata
         return replace(
             common_attn_metadata,
-            block_table_tensor=self.map_block_table(
+            block_table_tensor=self.map_to_kernel_block_table(
                 common_attn_metadata.block_table_tensor, ubatch_idx
             ),
         )
 
-    def map_block_table(
+    def map_to_kernel_block_table(
         self, block_table: torch.Tensor, ubatch_idx: int = 0
     ) -> torch.Tensor:
         if self.kernel_block_size is None:
@@ -395,7 +395,7 @@ class AttentionGroup:
         )
         return out
 
-    def map_kv_cache(self, kv_cache: torch.Tensor) -> torch.Tensor:
+    def map_kv_cache_to_kernel_blocks(self, kv_cache: torch.Tensor) -> torch.Tensor:
         """Views a packed cache, allocated in manager blocks, in kernel blocks."""
         assert self.kernel_block_size is not None
         spec = self.kv_cache_spec
@@ -416,11 +416,18 @@ class AttentionGroup:
                 f"{self.kernel_block_size} or set VLLM_KV_CACHE_LAYOUT to a "
                 "layer-compact layout (e.g. LBNHC)."
             )
-        mapped = map_kv_cache_to_kernel_blocks(
-            kv_cache, spec.block_size // self.kernel_block_size
+        # Kernel block j of block b is b * kernel_block_stride + j. The view
+        # spans the other layers' pages between blocks (never addressing them),
+        # which ``view`` cannot express.
+        page_stride = kernel_rows * kv_cache.stride(-2)
+        self.kernel_block_stride = kv_cache.stride(0) // page_stride
+        num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
+            kv_cache.shape[-2] // kernel_rows
         )
-        self.kernel_block_stride = kv_cache.stride(0) // mapped.stride(0)
-        return mapped
+        return kv_cache.as_strided(
+            (num_pages, *kv_cache.shape[1:-2], kernel_rows, kv_cache.shape[-1]),
+            (page_stride, *kv_cache.stride()[1:]),
+        )
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
@@ -442,27 +449,6 @@ class AttentionGroup:
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
-def map_kv_cache_to_kernel_blocks(
-    kv_cache: torch.Tensor, blocks_per_kv_block: int
-) -> torch.Tensor:
-    """View a ``[blocks, ..., rows, C]`` cache as kernel blocks of
-    ``rows / blocks_per_kv_block`` rows each, one kernel block apart.
-
-    When the blocks are packed with other layers' pages between them, block ``b``
-    starts ``S = stride(0) / kernel block stride`` kernel blocks after block
-    ``b - 1``, so its kernel block ``j`` is ``b * S + j``. The view spans those
-    other pages (never addressing them), which ``view`` cannot express.
-    """
-    rows = kv_cache.shape[-2] // blocks_per_kv_block
-    stride = rows * kv_cache.stride(-2)
-    last_block_start = (kv_cache.shape[0] - 1) * kv_cache.stride(0) // stride
-    return kv_cache.as_strided(
-        (last_block_start + blocks_per_kv_block, *kv_cache.shape[1:-2], rows)
-        + kv_cache.shape[-1:],
-        (stride, *kv_cache.stride()[1:]),
-    )
-
-
 def map_kv_caches_to_kernel_blocks(
     kv_caches: dict[str, torch.Tensor], attn_groups: Iterable[AttentionGroup]
 ) -> dict[str, torch.Tensor]:
@@ -472,7 +458,7 @@ def map_kv_caches_to_kernel_blocks(
     for group in attn_groups:
         if group.kernel_block_size is not None:
             mapped.update(
-                (name, group.map_kv_cache(kv_caches[name]))
+                (name, group.map_kv_cache_to_kernel_blocks(kv_caches[name]))
                 for name in group.layer_names
                 if name in kv_caches
             )

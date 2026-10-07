@@ -33,7 +33,6 @@ from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
     copy_kv_cache_blocks_inplace,
-    map_kv_cache_to_kernel_blocks,
     request_memory,
 )
 
@@ -458,7 +457,8 @@ def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
     # split into two 2-row kernel blocks.
     mla = storage.as_strided((num_blocks, 8, 4), (row, 4, 1))
     indexer = storage.as_strided((num_blocks, 1, 4, 2), (row, 8, 2, 1), 40)
-    mapped = map_kv_cache_to_kernel_blocks(indexer, 2)
+    # The indexer in 2-row kernel blocks: block b's kernel block j is b * 16 + j.
+    mapped = indexer.as_strided((50, 1, 2, 2), (4, 8, 2, 1))
     kv_caches = {"layers.0.attn": mla, "layers.1.indexer": indexer}
     ctx = {name: _Layer() for name in kv_caches}
     runner_kv_caches: list[torch.Tensor] = []
