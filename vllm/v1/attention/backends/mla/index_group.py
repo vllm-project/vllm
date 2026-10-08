@@ -268,7 +268,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             num_valid_rows=attn_metadata.query_start_loc[-1:],
         )
 
-    def stage_prefill_rows(
+    def _stage_prefill_rows(
         self,
         layer_index: int,
         kv_cache: torch.Tensor,
@@ -311,8 +311,9 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         staging: torch.Tensor | None = None,
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Stage each prefill group in turn, yielding its batch query-token slice,
-        staged cache, block table, and plan-relative request ids. ``staging``
-        defaults to the shared workspace."""
+        staged cache, block table, and plan-relative request ids. Every group
+        reuses ``staging`` (default: the shared workspace), so consume each item
+        before advancing."""
         if staging is None:
             (staging,) = current_workspace_manager().get_simultaneous(
                 self.prefill_staging_spec(layer_index)
@@ -321,7 +322,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert prefill is not None and prefill.host_staging_plans is not None
         num_decode_tokens = attn_metadata.num_decode_tokens
         for plan in prefill.host_staging_plans:
-            staged_cache, block_table, req_ids = self.stage_prefill_rows(
+            staged_cache, block_table, req_ids = self._stage_prefill_rows(
                 layer_index, kv_cache, attn_metadata, plan, staging
             )
             tokens = slice(
