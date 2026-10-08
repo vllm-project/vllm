@@ -553,9 +553,9 @@ class SingleTypeKVCacheManager(ABC):
         return
 
     def finalize_decode_checkpoints(
-        self, request: Request, materialized_tokens: int, keep: bool
+        self, request: Request, boundary: int | None
     ) -> None:
-        """Publish or discard private decode checkpoints for this group."""
+        """Publish the candidate at ``boundary`` and release the others."""
         return
 
     @classmethod
@@ -1520,8 +1520,9 @@ class MambaManager(SingleTypeKVCacheManager):
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
             self._decode_checkpoint_candidates: dict[
-                str, DecodeCheckpointCandidate
+                str, list[DecodeCheckpointCandidate]
             ] = {}
+            self.max_decode_checkpoints = 1
 
     @classmethod
     def find_longest_cache_hit(
@@ -2089,26 +2090,27 @@ class MambaManager(SingleTypeKVCacheManager):
     def update_decode_checkpoint_candidate(
         self, request: Request, materialized_tokens: int
     ) -> None:
-        """Privately pin the latest materialized aligned decode state."""
+        """Privately pin the latest materialized aligned decode states."""
         if self.mamba_cache_mode != "align":
             return
 
-        # Non-spec decode advances one token at a time, leaving the completed
-        # aligned state in its position-indexed block when the running state
-        # rotates. Hidden-state speculative decoding is guarded at setup.
+        # Decode leaves the completed aligned state in its position-indexed
+        # block when the running state rotates; a speculative step copies the
+        # accepted state at the crossed boundary there (postprocess_mamba).
         boundary = (
             materialized_tokens // self.scheduler_block_size * self.scheduler_block_size
         )
         if boundary <= request.num_prompt_tokens:
             return
 
-        previous = self._decode_checkpoint_candidates.get(request.request_id)
-        if previous is not None and previous.num_tokens == boundary:
+        candidates = self._decode_checkpoint_candidates.get(request.request_id, [])
+        if candidates and candidates[-1].num_tokens >= boundary:
             return
 
         block_idx = boundary // self.block_size - 1
         blocks = self.req_to_blocks.get(request.request_id)
-        if blocks is None or block_idx >= len(blocks):
+        # Speculative scratch blocks are relocated in place, so never pin one.
+        if blocks is None or block_idx >= len(blocks) - self.num_speculative_blocks:
             return
         block = blocks[block_idx]
         if block.is_null:
@@ -2127,40 +2129,42 @@ class MambaManager(SingleTypeKVCacheManager):
         block_hash = make_block_hash_with_group_id(
             block_hashes[block_idx], self.kv_cache_group_id
         )
-        candidate = DecodeCheckpointCandidate(boundary, block, block_hash)
-
         self.block_pool.touch((block,))
-        self._decode_checkpoint_candidates[request.request_id] = candidate
-        if previous is not None:
-            self.block_pool.free_blocks((previous.block,))
+        candidates.append(DecodeCheckpointCandidate(boundary, block, block_hash))
+        self._decode_checkpoint_candidates[request.request_id] = candidates
+        if len(candidates) > self.max_decode_checkpoints:
+            self.block_pool.free_blocks((candidates.pop(0).block,))
+
+    def decode_checkpoint_boundaries(self, request_id: str) -> list[int]:
+        return [
+            candidate.num_tokens
+            for candidate in self._decode_checkpoint_candidates.get(request_id, [])
+        ]
 
     def finalize_decode_checkpoints(
-        self, request: Request, materialized_tokens: int, keep: bool
+        self, request: Request, boundary: int | None
     ) -> None:
-        """Publish the private candidate only after a stopped completion."""
+        """Publish the candidate at ``boundary`` and release the others."""
         if self.mamba_cache_mode != "align":
             return
-        candidate = self._decode_checkpoint_candidates.pop(request.request_id, None)
-        if candidate is None:
-            return
-
+        candidates = self._decode_checkpoint_candidates.pop(request.request_id, [])
         try:
-            if keep and candidate.num_tokens <= materialized_tokens:
-                self.block_pool.cache_decode_checkpoint(
-                    request=request,
-                    block=candidate.block,
-                    block_hash_with_group_id=candidate.block_hash,
-                    num_tokens=candidate.num_tokens,
-                    block_size=self.block_size,
-                    kv_cache_group_id=self.kv_cache_group_id,
-                )
+            for candidate in candidates:
+                if candidate.num_tokens == boundary:
+                    self.block_pool.cache_decode_checkpoint(
+                        request=request,
+                        block=candidate.block,
+                        block_hash_with_group_id=candidate.block_hash,
+                        num_tokens=candidate.num_tokens,
+                        block_size=self.block_size,
+                        kv_cache_group_id=self.kv_cache_group_id,
+                    )
         finally:
-            self.block_pool.free_blocks((candidate.block,))
+            self.block_pool.free_blocks(candidate.block for candidate in candidates)
 
     def _discard_decode_checkpoint_candidates(self, request_id: str) -> None:
-        candidate = self._decode_checkpoint_candidates.pop(request_id, None)
-        if candidate is not None:
-            self.block_pool.free_blocks((candidate.block,))
+        candidates = self._decode_checkpoint_candidates.pop(request_id, [])
+        self.block_pool.free_blocks(candidate.block for candidate in candidates)
 
     def _cache_partial_tail_block(
         self,
