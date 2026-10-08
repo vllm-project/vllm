@@ -225,11 +225,16 @@ def _random_moe(moe, gd, gr) -> None:
 
 @ray.remote(num_gpus=1, max_calls=1)
 def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.worker.workspace import init_workspace_manager
 
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        # the checkpoint's MXFP4 experts run on AITER's MoE; its flags are read
+        # at import, so refresh them
         m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        rocm_aiter_ops.refresh_env_variables()
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
