@@ -11,6 +11,7 @@ import pytest
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.observability import ObservabilityConfig
+from vllm.config.watermarking import WatermarkConfig
 from vllm.v1.metrics.buckets import (
     BUCKET_FAMILY_KEYS,
     build_1_2_5_buckets,
@@ -315,5 +316,18 @@ def test_prometheus_logger_applies_overrides():
         assert set(found) == set(METRIC_FAMILIES)
         for metric_name, family in METRIC_FAMILIES.items():
             assert found[metric_name] == overridden[family], metric_name
+    finally:
+        unregister_vllm_metrics()
+
+
+@pytest.mark.parametrize("with_config", [True, False])
+def test_watermark_requests_counter_registration(with_config: bool):
+    """The watermark counter must exist only with watermark_config."""
+    config = build_logger_config(ObservabilityConfig())
+    config.watermark_config = WatermarkConfig(key=42) if with_config else None
+    try:
+        PrometheusStatLogger(config)
+        names = {m.name for m in prometheus_client.REGISTRY.collect()}
+        assert ("vllm:watermark_requests" in names) == with_config
     finally:
         unregister_vllm_metrics()

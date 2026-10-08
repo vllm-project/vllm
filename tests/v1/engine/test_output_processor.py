@@ -6,6 +6,7 @@ import time
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
+import prometheus_client
 import pytest
 import torch
 
@@ -17,6 +18,7 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
+from vllm.config.watermarking import WatermarkConfig
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -40,6 +42,9 @@ from vllm.v1.engine.output_processor import (
     RequestOutputCollector,
     RequestState,
 )
+from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.v1.metrics.loggers import PrometheusStatLogger
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
 
@@ -1165,6 +1170,95 @@ def test_iteration_stats(dummy_test_vectors):
 
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active
+
+
+def test_watermark_status_partitions_finished_requests(dummy_test_vectors):
+    """Each finished request gets exactly one watermark status."""
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    prompt_token_ids = dummy_test_vectors.prompt_tokens[0]
+
+    def make_request(
+        request_id: str,
+        sampling_params: SamplingParams | None = None,
+        pooling_params: PoolingParams | None = None,
+    ) -> EngineCoreRequest:
+        return EngineCoreRequest(
+            request_id=request_id,
+            external_req_id=f"{request_id}-ext",
+            prompt_token_ids=prompt_token_ids,
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=sampling_params,
+            pooling_params=pooling_params,
+        )
+
+    # The frontend resolves the flags before the request reaches the
+    # OutputProcessor; set them as it does.
+    def resolved(watermarking: bool, skipped: bool, n: int = 1) -> SamplingParams:
+        params = SamplingParams(n=n, watermarking=watermarking)
+        params._watermarking_skipped = skipped
+        return params
+
+    finish_reasons = {
+        "wm": FinishReason.ABORT,
+        "skip": FinishReason.STOP,
+        # A re-resolved request can carry both flags; it is watermarked.
+        "sticky": FinishReason.STOP,
+        "off": FinishReason.ERROR,
+        "pool": FinishReason.STOP,
+    }
+    output_processor.add_request(make_request("wm", resolved(True, False)), None)
+    output_processor.add_request(make_request("skip", resolved(False, True)), None)
+    output_processor.add_request(make_request("sticky", resolved(True, True)), None)
+    output_processor.add_request(make_request("off", resolved(False, False)), None)
+    output_processor.add_request(
+        make_request("pool", pooling_params=PoolingParams(task="embed")), None
+    )
+    parent_req = ParentRequest(make_request("parent", resolved(True, False, n=2)))
+    for idx in range(2):
+        child_id, child_params = parent_req.get_child_info(idx)
+        output_processor.add_request(
+            make_request(child_id, child_params), None, parent_req, idx
+        )
+        finish_reasons[child_id] = FinishReason.LENGTH
+
+    outputs = [
+        EngineCoreOutput(
+            request_id=request_id,
+            new_token_ids=[] if request_id == "pool" else [prompt_token_ids[0]],
+            pooling_output=torch.tensor([1.0]) if request_id == "pool" else None,
+            finish_reason=finish_reason,
+        )
+        for request_id, finish_reason in finish_reasons.items()
+    ]
+    iteration_stats = IterationStats()
+    output_processor.process_outputs(outputs, time.monotonic(), iteration_stats)
+
+    vllm_config = dummy_test_vectors.vllm_config
+    vllm_config.watermark_config = WatermarkConfig(key=42)
+    try:
+        PrometheusStatLogger(vllm_config).record(
+            scheduler_stats=None, iteration_stats=iteration_stats
+        )
+        totals: dict[str, dict[str, float]] = {}
+        for metric in prometheus_client.REGISTRY.collect():
+            for sample in metric.samples:
+                if sample.name in (
+                    "vllm:watermark_requests_total",
+                    "vllm:request_success_total",
+                ):
+                    label = sample.labels.get("status", "all")
+                    by_label = totals.setdefault(sample.name, {})
+                    by_label[label] = by_label.get(label, 0) + sample.value
+    finally:
+        unregister_vllm_metrics()
+
+    status = totals["vllm:watermark_requests_total"]
+    assert status == {"watermarked": 4, "skipped": 1, "not_watermarked": 2}
+    assert sum(status.values()) == totals["vllm:request_success_total"]["all"]
 
 
 @pytest.mark.parametrize("log_stats", [True, False])

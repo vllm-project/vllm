@@ -273,7 +273,7 @@ class RequestState:
             output_kind = request.pooling_params.output_kind
 
         assert request.external_req_id is not None
-        return cls(
+        state = cls(
             request_id=request.request_id,
             external_req_id=request.external_req_id,
             parent_req=parent_req,
@@ -296,6 +296,10 @@ class RequestState:
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
         )
+        if state.stats is not None and sampling_params is not None:
+            state.stats.is_watermarked = bool(sampling_params.watermarking)
+            state.stats.is_watermark_skipped = sampling_params._watermarking_skipped
+        return state
 
     def make_request_output(
         self,
