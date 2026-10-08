@@ -157,6 +157,13 @@ class DSparkSpeculator(DFlashSpeculator):
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
             return
+        # On gfx942 with VLLM_ROCM_MONO_DECODE=1, each Markov step is one
+        # launch (fused_markov.py). A step that the fused launches do not
+        # take returns False there and runs the loop below.
+        from vllm.v1.worker.gpu.spec_decode.dspark import fused_markov
+
+        if fused_markov.sample_sequential(self, num_reqs, head_hidden):
+            return
 
         # Sequential Markov sampling over the backbone's output hidden states.
         n_spec = self.num_speculative_steps
