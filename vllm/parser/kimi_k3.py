@@ -25,6 +25,34 @@ class KimiK3Parser(DelegatingParser):
 
     # TODO: Switch Kimi K3 to the parser engine once its XTML reasoning/tool
     # path is covered there.
+    def parse(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        reasoning_parser = self._reasoning_parser
+        if isinstance(reasoning_parser, KimiK3ReasoningParser):
+            response_open_ids = reasoning_parser._response_open_ids
+            if (
+                list(model_output_token_ids[: len(response_open_ids)])
+                == response_open_ids
+            ):
+                # A response control prefix wins over quoted think markers in
+                # its body. The same prefix as ordinary text is not a transition.
+                self._initialize_history_tool_call_cnt(request)
+                content = reasoning_parser._content_after_reasoning(
+                    model_output, request
+                )
+                tool_calls, content = self._extract_tool_calls(
+                    content, request, enable_auto_tools
+                )
+                return None, content, tool_calls
+        return super().parse(
+            model_output, request, enable_auto_tools, model_output_token_ids
+        )
+
     def _extract_tool_calls(
         self,
         content: str | None,

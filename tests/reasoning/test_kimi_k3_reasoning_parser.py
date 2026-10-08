@@ -24,7 +24,7 @@ THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
 OPEN_IDS = [1, 2, 3]
 CLOSE_IDS = [4, 2, 3]
-RESPONSE_OPEN_IDS = [ord(ch) for ch in RESPONSE_OPEN]
+RESPONSE_OPEN_IDS = [1, 5, 3]
 
 
 class DummyTokenizer:
@@ -39,6 +39,8 @@ class DummyTokenizer:
             return [1, 2, 3]
         if text == THINK_CLOSE:
             return [4, 2, 3]
+        if text == RESPONSE_OPEN:
+            return RESPONSE_OPEN_IDS
         return [ord(ch) for ch in text]
 
 
@@ -105,6 +107,44 @@ def test_delegating_parser_strips_response_wrapper_without_tool_parser():
     assert reasoning == "step"
     assert content == "answer"
     assert tool_calls == []
+
+
+@pytest.mark.parametrize("marker", [THINK_OPEN, THINK_CLOSE])
+def test_response_only_json_preserves_quoted_think_marker(marker):
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    body = f'{{"marker":"{marker}"}}'
+
+    reasoning, content, tool_calls = parser.parse(
+        RESPONSE_OPEN + body,
+        request,
+        model_output_token_ids=[*RESPONSE_OPEN_IDS, *map(ord, body)],
+    )
+
+    assert reasoning is None
+    assert content == body
+    assert tool_calls == []
+
+
+def test_consumed_think_prefix_preserves_literal_response_marker():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    reasoning = RESPONSE_OPEN + " is the response opener."
+    body = '{"ok":true}'
+    # The prompt already opened thinking. The generated opener below is ordinary
+    # text; only the later response opener is made of control tokens.
+    token_ids = [
+        *map(ord, reasoning),
+        *CLOSE_IDS,
+        *RESPONSE_OPEN_IDS,
+        *map(ord, body),
+    ]
+
+    assert parser.parse(
+        reasoning + THINK_CLOSE + RESPONSE_OPEN + body,
+        request,
+        model_output_token_ids=token_ids,
+    ) == (reasoning, body, [])
 
 
 def test_is_reasoning_end_uses_full_input_ids():

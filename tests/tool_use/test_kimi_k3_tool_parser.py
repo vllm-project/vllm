@@ -177,6 +177,27 @@ def test_delegating_parser_preserves_tool_calls_after_reasoning():
     assert json.loads(tool_calls[0].arguments) == {"x": 1}
 
 
+def test_response_only_quoted_think_marker_preserves_tool_calls():
+    tokenizer = _dummy_tokenizer()
+    parser = KimiK3DelegatingParser(tokenizer)
+    body = f'{{"marker":"{THINK_CLOSE}"}}'
+    output = _response(body) + _tools(_call("calc", 1, _arg("x", "number", "1")))
+
+    reasoning, content, tool_calls = parser.parse(
+        output,
+        _request(),
+        enable_auto_tools=True,
+        model_output_token_ids=tokenizer.encode(output),
+    )
+
+    assert reasoning is None
+    assert content == body
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "calc"
+    assert json.loads(tool_calls[0].arguments) == {"x": 1}
+
+
 def test_delegating_parser_required_tool_choice_uses_xtml_parser():
     parser = KimiK3DelegatingParser(_dummy_tokenizer())
     request = _request().model_copy(update={"tool_choice": "required"})
