@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
 from types import SimpleNamespace
 from typing import Literal, cast
 
@@ -26,18 +25,24 @@ def _make_gdn_decode(
     model_dtype: torch.dtype = torch.bfloat16,
     head_dim: int = 128,
     num_v_heads: int = 8,
+    head_v_dim: int = 128,
 ):
     from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import GDNDecode
 
     config = VllmConfig(kernel_config=KernelConfig(gdn_decode_backend=backend))
     config.model_config = cast(ModelConfig, SimpleNamespace(dtype=model_dtype))
     with set_current_vllm_config(config):
-        return GDNDecode(2, num_v_heads, head_dim, 128, state_dtype)
+        return GDNDecode(2, num_v_heads, head_dim, head_v_dim, state_dtype)
 
 
-def _decode_inputs(state_dtype: torch.dtype, strided_qkv: bool):
+def _decode_inputs(
+    state_dtype: torch.dtype,
+    strided_qkv: bool,
+    batch: int = 4,
+    num_v_heads: int = 8,
+):
     torch.manual_seed(0)
-    batch, h, hv, dim = 4, 2, 8, 128
+    h, hv, dim = 2, num_v_heads, 128
     qkv_width = 2 * h * dim + hv * dim
     projection = torch.randn(
         batch, qkv_width + hv * dim, device="cuda", dtype=torch.bfloat16
@@ -46,10 +51,11 @@ def _decode_inputs(state_dtype: torch.dtype, strided_qkv: bool):
     if not strided_qkv:
         mixed_qkv = mixed_qkv.contiguous()
     gates = torch.randn(batch, 2 * hv, device="cuda", dtype=torch.bfloat16)
+    b, a = gates.chunk(2, dim=-1)
     inputs = {
         "mixed_qkv": mixed_qkv,
-        "a": gates[:, :hv],
-        "b": gates[:, hv:],
+        "a": a,
+        "b": b,
         "A_log": torch.randn(hv, device="cuda", dtype=torch.float32),
         "dt_bias": torch.randn(hv, device="cuda", dtype=torch.float32),
     }
@@ -69,7 +75,7 @@ def _assert_decode_matches(out_fi, out_ref, backing, indices, state_dtype):
     torch.testing.assert_close(
         backing[2, untouched], backing[0, untouched], atol=0, rtol=0
     )
-    torch.testing.assert_close(backing[2, :, 8], backing[0, :, 8], atol=0, rtol=0)
+    torch.testing.assert_close(backing[2, :, -1], backing[0, :, -1], atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("backend", ["auto", "triton"])
@@ -92,42 +98,47 @@ def test_gdn_decode_explicit_flashinfer_rejects_non_cuda(monkeypatch):
     from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
 
     monkeypatch.setattr(qwen_gdn_linear_attn.current_platform, "is_cuda", lambda: False)
-    with pytest.raises(ValueError, match="CUDA"):
-        _make_gdn_decode("flashinfer", torch.float32)
-
-
-def test_gdn_decode_explicit_flashinfer_requires_pool_api(monkeypatch):
-    """An old FlashInfer lacking indexed-state decode cannot silently fall back."""
-    from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
-
-    monkeypatch.setattr(qwen_gdn_linear_attn.current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr(
-        qwen_gdn_linear_attn.current_platform, "has_device_capability", lambda _: True
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "flashinfer.gdn_decode",
-        SimpleNamespace(gated_delta_rule_decode_pretranspose=lambda: None),
-    )
-    with pytest.raises(ValueError, match="pool-indexing API"):
+    with pytest.raises(ValueError, match=r"FlashInfer GDN decode requires CUDA SM80\+"):
         _make_gdn_decode("flashinfer", torch.float32)
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    "overrides,error_match",
     [
-        pytest.param({"model_dtype": torch.float32}, id="fp32-input"),
-        pytest.param({"state_dtype": torch.float16}, id="fp16-state"),
-        pytest.param({"head_dim": 64}, id="unsupported-head-dim"),
-        pytest.param({"num_v_heads": 4}, id="unaligned-packed-gates"),
         pytest.param(
-            {"state_dtype": torch.bfloat16, "num_v_heads": 16},
+            {"model_dtype": torch.float32},
+            "FlashInfer GDN decode currently supports only BF16 model inputs",
+            id="fp32-input",
+        ),
+        pytest.param(
+            {"state_dtype": torch.float16},
+            "FlashInfer GDN decode requires FP32 SSM state",
+            id="fp16-state",
+        ),
+        pytest.param(
+            {"head_dim": 64},
+            "FlashInfer GDN decode currently supports key head dimension 128",
+            id="unsupported-key-head-dim",
+        ),
+        pytest.param(
+            {"head_v_dim": 64},
+            "FlashInfer GDN decode currently supports value head dimension 128",
+            id="unsupported-value-head-dim",
+        ),
+        pytest.param(
+            {"num_v_heads": 3},
+            "FlashInfer GDN decode requires value heads to be a multiple of key heads",
+            id="non-divisible-head-group",
+        ),
+        pytest.param(
+            {"state_dtype": torch.bfloat16},
+            "FlashInfer GDN decode requires FP32 SSM state",
             id="unsupported-bf16-state",
         ),
     ],
 )
 def test_gdn_decode_explicit_flashinfer_rejects_unsupported_config(
-    overrides, monkeypatch
+    overrides, error_match, monkeypatch
 ):
     """Unsupported layouts fail before importing or launching FlashInfer."""
     from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
@@ -141,7 +152,7 @@ def test_gdn_decode_explicit_flashinfer_rejects_unsupported_config(
     )
     monkeypatch.setattr(qwen_gdn_linear_attn, "_get_flashinfer_gdn_decode", unavailable)
     kwargs = {"state_dtype": torch.float32, **overrides}
-    with pytest.raises(ValueError, match="FlashInfer GDN decode"):
+    with pytest.raises(ValueError, match=error_match):
         _make_gdn_decode("flashinfer", **kwargs)
 
 
@@ -198,54 +209,64 @@ def test_gdn_layer_preserves_loaded_bias_with_flashinfer_dtype(backend, monkeypa
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
-    reason="FlashInfer GDN decode requires CUDA SM89+.",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    reason="FlashInfer GDN decode requires CUDA SM80+.",
 )
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("strided_qkv", [False, True])
+@pytest.mark.parametrize("batch,num_v_heads", [(4, 8), (1, 4), (4, 4)])
 def test_flashinfer_decode_preserves_indexed_state(
-    index_dtype: torch.dtype, strided_qkv: bool
+    index_dtype: torch.dtype, strided_qkv: bool, batch: int, num_v_heads: int
 ):
-    """Packed projection views update only valid slots and match Triton decode."""
+    """Packed views and inference-mode Parameters preserve indexed state."""
     pytest.importorskip("flashinfer.gdn_decode")
     state_dtype = torch.float32
-    inputs, backing = _decode_inputs(state_dtype, strided_qkv)
-    indices = torch.tensor([6, 2, 0, -1], device="cuda", dtype=index_dtype)
-    fi_indices = torch.tensor([6, 2, -1, -1], device="cuda", dtype=index_dtype)
-    out_ref = torch.empty(4, 1, 8, 128, device="cuda", dtype=torch.bfloat16)
+    inputs, backing = _decode_inputs(state_dtype, strided_qkv, batch, num_v_heads)
+    if num_v_heads == 4:
+        inputs["A_log"] = torch.nn.Parameter(inputs["A_log"])
+        inputs["dt_bias"] = torch.nn.Parameter(inputs["dt_bias"])
+    indices = torch.tensor([6, 2, 0, -1][:batch], device="cuda", dtype=index_dtype)
+    fi_indices = torch.tensor([6, 2, -1, -1][:batch], device="cuda", dtype=index_dtype)
+    out_ref = torch.empty(
+        batch, 1, num_v_heads, 128, device="cuda", dtype=torch.bfloat16
+    )
     out_fi = torch.empty_like(out_ref)
-    _make_gdn_decode("triton", state_dtype)(
-        **inputs,
-        initial_state=backing[1, :, :8],
-        ssm_state_indices=indices,
-        out=out_ref,
-    )
-    _make_gdn_decode("flashinfer", state_dtype)(
-        **inputs,
-        initial_state=backing[2, :, :8],
-        ssm_state_indices=fi_indices,
-        out=out_fi,
-    )
+    with torch.inference_mode():
+        _make_gdn_decode("triton", state_dtype, num_v_heads=num_v_heads)(
+            **inputs,
+            initial_state=backing[1, :, :num_v_heads],
+            ssm_state_indices=indices,
+            out=out_ref,
+        )
+        _make_gdn_decode("flashinfer", state_dtype, num_v_heads=num_v_heads)(
+            **inputs,
+            initial_state=backing[2, :, :num_v_heads],
+            ssm_state_indices=fi_indices,
+            out=out_fi,
+        )
     _assert_decode_matches(out_fi, out_ref, backing, indices, state_dtype)
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
-    reason="FlashInfer GDN decode requires CUDA SM89+.",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    reason="FlashInfer GDN decode requires CUDA SM80+.",
 )
-def test_flashinfer_decode_graph_reads_remapped_slots():
+@pytest.mark.parametrize("num_v_heads", [4, 8])
+def test_flashinfer_decode_graph_reads_remapped_slots(num_v_heads: int):
     """Graph replay reads current pool indices instead of capture-time values."""
     pytest.importorskip("flashinfer.gdn_decode")
     state_dtype = torch.float32
-    inputs, backing = _decode_inputs(state_dtype, strided_qkv=True)
+    inputs, backing = _decode_inputs(
+        state_dtype, strided_qkv=True, num_v_heads=num_v_heads
+    )
     indices = torch.tensor([6, 2, 0, -1], device="cuda", dtype=torch.int32)
     fi_indices = torch.tensor([6, 2, -1, -1], device="cuda", dtype=torch.int32)
-    out_ref = torch.empty(4, 1, 8, 128, device="cuda", dtype=torch.bfloat16)
+    out_ref = torch.empty(4, 1, num_v_heads, 128, device="cuda", dtype=torch.bfloat16)
     out_fi = torch.empty_like(out_ref)
-    flashinfer = _make_gdn_decode("flashinfer", state_dtype)
+    flashinfer = _make_gdn_decode("flashinfer", state_dtype, num_v_heads=num_v_heads)
     kwargs = dict(
         **inputs,
-        initial_state=backing[2, :, :8],
+        initial_state=backing[2, :, :num_v_heads],
         ssm_state_indices=fi_indices,
         out=out_fi,
     )
@@ -254,12 +275,14 @@ def test_flashinfer_decode_graph_reads_remapped_slots():
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         flashinfer(**kwargs)
+    inputs["a"].add_(1)
+    inputs["b"].neg_()
     backing[2].copy_(backing[0])
     indices.copy_(torch.tensor([5, 3, 0, -1], device="cuda", dtype=torch.int32))
     fi_indices.copy_(torch.tensor([5, 3, -1, -1], device="cuda", dtype=torch.int32))
-    _make_gdn_decode("triton", state_dtype)(
+    _make_gdn_decode("triton", state_dtype, num_v_heads=num_v_heads)(
         **inputs,
-        initial_state=backing[1, :, :8],
+        initial_state=backing[1, :, :num_v_heads],
         ssm_state_indices=indices,
         out=out_ref,
     )

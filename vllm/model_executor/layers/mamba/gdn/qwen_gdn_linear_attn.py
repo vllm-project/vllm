@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
-import inspect
 import os
 from collections.abc import Callable
 from typing import Literal
@@ -453,15 +452,8 @@ class ChunkGatedDeltaRule(CustomOp):
 
 
 def _get_flashinfer_gdn_decode() -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
-    try:
-        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
-    except (ImportError, RuntimeError) as exc:
-        raise ValueError("FlashInfer GDN decode is unavailable") from exc
+    from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
 
-    parameters = inspect.signature(gated_delta_rule_decode_pretranspose).parameters
-    required = {"initial_state", "initial_state_indices", "output", "use_qk_l2norm"}
-    if not required.issubset(parameters):
-        raise ValueError("FlashInfer GDN decode requires the pool-indexing API")
     return gated_delta_rule_decode_pretranspose
 
 
@@ -490,36 +482,38 @@ class GDNDecode(CustomOp):
         self.backend = "triton" if requested == "auto" else requested
         if self.backend == "flashinfer":
             if not current_platform.is_cuda() or not (
-                current_platform.has_device_capability(89)
+                current_platform.has_device_capability(80)
             ):
-                raise ValueError("FlashInfer GDN decode requires CUDA SM89+")
+                raise ValueError("FlashInfer GDN decode requires CUDA SM80+")
             if ssm_state_dtype != torch.float32:
                 raise ValueError(
                     "FlashInfer GDN decode requires FP32 SSM state; its BF16 "
                     "padding path updates the null slot. Set "
                     "--mamba-ssm-cache-dtype float32."
                 )
-            if (
-                vllm_config.model_config.dtype != torch.bfloat16
-                or head_k_dim != 128
-                or head_v_dim != 128
-                or num_v_heads % num_k_heads != 0
-            ):
+            if vllm_config.model_config.dtype != torch.bfloat16:
                 raise ValueError(
-                    "FlashInfer GDN decode requires BF16 inputs, FP32 "
-                    "state, 128-dimensional heads, and grouped value heads"
+                    "FlashInfer GDN decode currently supports only BF16 model inputs"
                 )
-            if num_v_heads % 8 != 0:
+            if head_k_dim != 128:
                 raise ValueError(
-                    "FlashInfer GDN decode requires a per-TP-rank value-head "
-                    "count divisible by 8 to align packed gate views"
+                    "FlashInfer GDN decode currently supports key head dimension 128"
+                )
+            if head_v_dim != 128:
+                raise ValueError(
+                    "FlashInfer GDN decode currently supports value head dimension 128"
+                )
+            if num_v_heads % num_k_heads != 0:
+                raise ValueError(
+                    "FlashInfer GDN decode requires value heads to be a multiple "
+                    "of key heads"
                 )
             self._flashinfer_decode = _get_flashinfer_gdn_decode()
-            self._flashinfer_kwargs = (
-                {"backend": "flashinfer"}
-                if "backend" in inspect.signature(self._flashinfer_decode).parameters
-                else {}
-            )
+            if not envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE:
+                logger.info_once(
+                    "Explicit FlashInfer GDN decode overrides "
+                    "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE=0 for ordinary decode"
+                )
             self._forward_method = self.forward_cuda
         else:
             self._forward_method = self.forward_native
@@ -566,6 +560,11 @@ class GDNDecode(CustomOp):
         query, key, value = mixed_qkv.split(
             (qk_dim, qk_dim, self.num_v_heads * self.head_v_dim), dim=-1
         )
+        if self.num_v_heads % 8 != 0:
+            # FI requires aligned gate pointers even for contiguous single-row views.
+            a = a.clone(memory_format=torch.contiguous_format)
+            b = b.clone(memory_format=torch.contiguous_format)
+        # The default DLPack exporter rejects grad-enabled parameters.
         self._flashinfer_decode(
             q=query.view(batch_size, 1, self.num_k_heads, self.head_k_dim),
             k=key.view(batch_size, 1, self.num_k_heads, self.head_k_dim),
@@ -580,7 +579,7 @@ class GDNDecode(CustomOp):
             use_qk_l2norm=True,
             initial_state=initial_state,
             initial_state_indices=ssm_state_indices,
-            **self._flashinfer_kwargs,
+            backend="flashinfer",
         )
 
 
@@ -1784,6 +1783,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
             if split_non_spec:
+                if self.gdn_decode.backend == "flashinfer":
+                    core_attn_out[num_decode_tokens:num_actual_tokens].copy_(
+                        core_attn_out_non_spec.squeeze(0)
+                    )
+                    return
                 # Stitch the peeled decode outputs in front of the prefill
                 # outputs (decode-first order).
                 core_attn_out_non_spec = torch.cat(

@@ -37,9 +37,9 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not (current_platform.is_cuda() and current_platform.has_device_capability(89)):
+if not (current_platform.is_cuda() and current_platform.has_device_capability(80)):
     pytest.skip(
-        reason="GDN decode split test requires CUDA SM89+.",
+        reason="GDN decode split test requires CUDA SM80+.",
         allow_module_level=True,
     )
 
