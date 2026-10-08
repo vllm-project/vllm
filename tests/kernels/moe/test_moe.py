@@ -1511,8 +1511,77 @@ def test_humming_delegates_to_instance_activation():
     )
 
 
+@pytest.mark.parametrize("input_scale_group_size", [128, 64])
+@pytest.mark.parametrize("num_experts", [32, 512])
+def test_humming_m_major_selection_matches_w4a8_config(
+    monkeypatch: pytest.MonkeyPatch,
+    input_scale_group_size: int,
+    num_experts: int,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.utils.humming as humming
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    config = SimpleNamespace(
+        sm_version=90,
+        mma_type=humming.MmaType.WGMMA,
+        a_dtype=humming.dtypes.float8e4m3,
+        b_dtype=humming.dtypes.float4e2m1,
+        as_dtype=humming.dtypes.float32,
+        bs_dtype=humming.dtypes.float8e8m0,
+        use_fused_e8m0_scale=True,
+        input_scale_group_size=input_scale_group_size,
+        weight_scale_group_size=32,
+        num_experts=num_experts,
+    )
+    get_config = Mock(return_value=[])
+    monkeypatch.setattr(humming, "get_heuristics_config", get_config)
+    experts = SimpleNamespace(
+        humming_configs={"w13": config, "w2": config},
+        humming_gemm_type=lambda: humming.GemmType.GROUPED_CONTIGUOUS,
+    )
+
+    HummingExpertsBase.init_humming_moe(experts)
+
+    expected = input_scale_group_size == 128
+    assert experts.supports_m_major_w4a8 is expected
+    assert experts.compute_config["use_m_major_input_scale"] is expected
+    assert get_config.call_count == (4 if expected else 2)
+    assert [
+        call.kwargs["use_m_major_input_scale"] for call in get_config.call_args_list
+    ] == [expected, expected] + ([False, False] if expected else [])
+    if expected:
+        import json
+
+        assert (
+            json.loads(experts.row_major_compute_config_str)["use_m_major_input_scale"]
+            is False
+        )
+        assert json.loads(experts.row_major_w13_tuning_config_str) == []
+        assert json.loads(experts.row_major_w2_tuning_config_str) == []
+
+
+@pytest.mark.parametrize(
+    "supports_m_major_w4a8,has_expert_counts,deepep_v2_do_expand",
+    [
+        (False, None, None),
+        (False, True, True),
+        (True, None, None),
+        (True, False, False),
+        (True, False, True),
+        (True, True, False),
+        (True, True, True),
+    ],
+)
 def test_humming_grouped_apply_forwards_valid_prefix(
     monkeypatch: pytest.MonkeyPatch,
+    supports_m_major_w4a8: bool,
+    has_expert_counts: bool | None,
+    deepep_v2_do_expand: bool | None,
 ):
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -1529,7 +1598,8 @@ def test_humming_grouped_apply_forwards_valid_prefix(
     }
     experts = SimpleNamespace(
         num_experts=2,
-        estimate_local_valid_shape_m=lambda _: 6,
+        supports_m_major_w4a8=supports_m_major_w4a8,
+        estimate_local_valid_shape_m=lambda _: 16,
         prepare_buffers=lambda *_: buffers,
         _get_permute_scratch=lambda _, *, indices_only=False: object(),
         process_input=Mock(
@@ -1540,9 +1610,12 @@ def test_humming_grouped_apply_forwards_valid_prefix(
             )
         ),
         humming_forward=Mock(),
-        compute_config_str="",
-        w13_tuning_config_str="",
-        w2_tuning_config_str="",
+        compute_config_str="m-major-compute",
+        w13_tuning_config_str="m-major-w13",
+        w2_tuning_config_str="m-major-w2",
+        row_major_compute_config_str="row-major-compute",
+        row_major_w13_tuning_config_str="row-major-w13",
+        row_major_w2_tuning_config_str="row-major-w2",
     )
 
     hidden_states = torch.empty(3, 4)
@@ -1572,7 +1645,14 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         a2_scale=None,
         workspace13=torch.empty(0),
         workspace2=torch.empty(0),
-        expert_tokens_meta=None,
+        expert_tokens_meta=(
+            None
+            if has_expert_counts is None
+            else SimpleNamespace(
+                expert_num_tokens=object() if has_expert_counts else None,
+                deepep_v2_do_expand=deepep_v2_do_expand,
+            )
+        ),
         apply_router_weight_on_input=False,
     )
 
@@ -1581,6 +1661,173 @@ def test_humming_grouped_apply_forwards_valid_prefix(
     assert call_kwargs["inputs"].shape == (6, 4)
     assert call_kwargs["quanted_input"].shape == (6, 2)
     torch.testing.assert_close(call_kwargs["num_valid_tokens"], expert_offsets[-1:])
+    use_m_major_w4a8 = bool(
+        supports_m_major_w4a8 and has_expert_counts and deepep_v2_do_expand
+    )
+    expected_m = topk_ids.numel() if use_m_major_w4a8 else 16
+    assert [
+        call.kwargs["valid_shape_m"] for call in experts.humming_forward.call_args_list
+    ] == [expected_m, expected_m]
+    assert [
+        call.kwargs["use_m_major_input_scale"]
+        for call in experts.process_input.call_args_list
+    ] == [use_m_major_w4a8, use_m_major_w4a8]
+    expected_compute = (
+        "row-major-compute"
+        if supports_m_major_w4a8 and not use_m_major_w4a8
+        else "m-major-compute"
+    )
+    assert [
+        call.kwargs["compute_config"] for call in experts.humming_forward.call_args_list
+    ] == [expected_compute, expected_compute]
+    assert [
+        call.kwargs["tuning_config"] for call in experts.humming_forward.call_args_list
+    ] == (
+        ["m-major-w13", "m-major-w2"]
+        if use_m_major_w4a8 or not supports_m_major_w4a8
+        else ["row-major-w13", "row-major-w2"]
+    )
+
+
+@pytest.mark.parametrize("rows", [4, 5])
+def test_humming_prequantized_group_scales_use_m_major_layout(rows: int):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    experts = SimpleNamespace(
+        quant_config=None,
+        humming_configs={"w13": None},
+        supports_m_major_w4a8=True,
+    )
+    inputs = torch.empty((rows, 256))
+    scales = torch.arange(rows * 2, dtype=torch.float32).reshape(rows, 2)
+
+    result, result_scales, secondary_scale = HummingExpertsBase.process_input(
+        experts, "w13", inputs, None, input_scale=scales
+    )
+
+    assert result is inputs
+    assert secondary_scale is None
+    assert result_scales is not None
+    assert result_scales.shape == (2, (rows + 3) // 4 * 4)
+    assert result_scales.is_contiguous()
+    torch.testing.assert_close(result_scales[:, :rows], scales.T)
+    assert torch.count_nonzero(result_scales[:, rows:]) == 0
+
+
+def test_humming_prequantized_decode_scales_remain_row_major():
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    experts = SimpleNamespace(
+        quant_config=None,
+        humming_configs={"w13": None},
+        supports_m_major_w4a8=True,
+    )
+    inputs = torch.empty((5, 256))
+    scales = torch.arange(10, dtype=torch.float32).reshape(5, 2)
+
+    result, result_scales, _ = HummingExpertsBase.process_input(
+        experts,
+        "w13",
+        inputs,
+        None,
+        input_scale=scales,
+        use_m_major_input_scale=False,
+    )
+
+    assert result is inputs
+    assert result_scales is scales
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "rows,groups,use_deepgemm",
+    [(4, 2, True), (8191, 48, False), (16383, 48, True), (16383, 16, False)],
+)
+def test_humming_prequantized_scales_select_transpose(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: int,
+    groups: int,
+    use_deepgemm: bool,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.utils.deep_gemm as deep_gemm
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    transpose = Mock(side_effect=lambda scales: scales.T.contiguous().T)
+    monkeypatch.setattr(deep_gemm, "is_deep_gemm_supported", lambda: True)
+    monkeypatch.setattr(deep_gemm, "get_col_major_tma_aligned_tensor", transpose)
+    experts = SimpleNamespace(
+        quant_config=None,
+        humming_configs={"w13": None},
+        supports_m_major_w4a8=True,
+    )
+    inputs = torch.empty((rows, 256), device="cuda")
+    scales = torch.arange(rows * groups, dtype=torch.float32, device="cuda").reshape(
+        rows, groups
+    )
+
+    _, result_scales, _ = HummingExpertsBase.process_input(
+        experts, "w13", inputs, None, input_scale=scales
+    )
+
+    if use_deepgemm:
+        transpose.assert_called_once()
+        transpose_input = transpose.call_args.args[0]
+        assert transpose_input.shape == ((rows + 3) // 4 * 4, groups)
+        torch.testing.assert_close(transpose_input[:rows], scales, rtol=0, atol=0)
+    else:
+        transpose.assert_not_called()
+    assert result_scales is not None and result_scales.is_contiguous()
+    torch.testing.assert_close(
+        result_scales,
+        torch.nn.functional.pad(scales.T, (0, -rows % 4)),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("rows,groups", [(4096, 48), (16383, 48), (16383, 16)])
+def test_humming_prequantized_scales_match_old_transpose(rows: int, groups: int):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM is unavailable")
+
+    experts = SimpleNamespace(
+        quant_config=None,
+        humming_configs={"w13": None},
+        supports_m_major_w4a8=True,
+    )
+    inputs = torch.empty((rows, 1), device="cuda")
+    scales = torch.randn((rows, groups), dtype=torch.float32, device="cuda")
+
+    _, result_scales, _ = HummingExpertsBase.process_input(
+        experts, "w13", inputs, None, input_scale=scales
+    )
+    old_result = scales.T.contiguous()
+    if rows % 4:
+        old_result = torch.nn.functional.pad(old_result, (0, 4 - rows % 4))
+
+    assert result_scales is not None and result_scales.is_contiguous()
+    torch.testing.assert_close(result_scales, old_result, rtol=0, atol=0)
 
 
 def test_batched_marlin_activation_uses_expert_token_counts(

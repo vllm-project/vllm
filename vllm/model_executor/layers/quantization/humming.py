@@ -55,6 +55,8 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 
 if TYPE_CHECKING:
+    from compressed_tensors.quantization import QuantizationArgs
+
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.utils.humming import (
         BaseInputSchema,
@@ -666,6 +668,35 @@ class HummingMoEMethod(FusedMoEMethodBase):
             config=self.moe,
             weight_key=weight_key,
             activation_key=activation_key,
+        )
+
+    @classmethod
+    def from_compressed_tensors(
+        cls,
+        *,
+        weight_quant: "QuantizationArgs",
+        input_quant: "QuantizationArgs",
+        compression_format: str,
+        moe: FusedMoEConfig,
+    ) -> "HummingMoEMethod":
+        def schema_config(quant: "QuantizationArgs") -> dict[str, Any]:
+            return {
+                **quant.model_dump(exclude_none=True),
+                "quant_method": "compressed-tensors",
+                "format": compression_format,
+            }
+
+        return cls(
+            HummingLayerQuantizationConfig(
+                weight_schema=_hm.BaseWeightSchema.from_config(
+                    schema_config(weight_quant)
+                ),
+                input_schema=_hm.BaseInputSchema.from_config(
+                    schema_config(input_quant)
+                ),
+                allow_input_schema_fallback=False,
+            ),
+            moe,
         )
 
     def prepare_weight_loader(self, layer, weight_loader):
