@@ -742,24 +742,44 @@ class MoRIIOWrapper:
         if self.notify_thread is not None:
             return
 
-        def _async_wait():
-            host = "*"
-            path = make_zmq_path("tcp", host, self.notify_port)
-            logger.info("Node starting to listen notify from path = %s", path)
+        startup_result: Queue[Exception | None] = Queue(maxsize=1)
 
-            with zmq_ctx(zmq.ROUTER, path) as sock:
-                while True:
-                    try:
-                        identity, msg = sock.recv_multipart()
-                        self._handle_message(msg)
-                    except Exception as e:
-                        logger.error("Error processing message: %s", e)
-                        raise HandshakeError(f"Error processing message: {e}") from e
+        def _async_wait():
+            started = False
+            try:
+                host = "*"
+                path = make_zmq_path("tcp", host, self.notify_port)
+                logger.info("Node starting to listen notify from path = %s", path)
+
+                with zmq_ctx(zmq.ROUTER, path) as sock:
+                    started = True
+                    startup_result.put(None)
+                    while True:
+                        try:
+                            identity, msg = sock.recv_multipart()
+                            self._handle_message(msg)
+                        except Exception as e:
+                            logger.error("Error processing message: %s", e)
+                            raise HandshakeError(
+                                f"Error processing message: {e}"
+                            ) from e
+            except Exception as e:
+                if not started:
+                    startup_result.put(e)
+                    return
+                raise
 
         self.notify_thread = threading.Thread(
             target=_async_wait, daemon=True, name="moriio-notify-listener"
         )
         self.notify_thread.start()
+        startup_error = startup_result.get()
+        if startup_error is not None:
+            self.notify_thread.join()
+            self.notify_thread = None
+            raise HandshakeError(
+                f"Failed to start MoRIIO notification listener: {startup_error}"
+            ) from startup_error
 
     def _handle_message(self, msg: bytes):
         """Handles incoming messages from remote nodes."""
