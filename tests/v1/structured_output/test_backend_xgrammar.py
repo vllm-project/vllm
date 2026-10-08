@@ -2,12 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import ClassVar
+
 import pytest
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from xgrammar import Grammar
 from xgrammar.testing import _is_grammar_accept_string
 
+from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import (
+    XgrammarBackend,
     has_xgrammar_unsupported_json_features,
     validate_xgrammar_grammar,
 )
@@ -462,3 +468,90 @@ class TestIsGrammarAcceptString:
             assert _is_grammar_accept_string(grammar, "yes")
             assert _is_grammar_accept_string(grammar, "no\nplease")
             assert not _is_grammar_accept_string(grammar, r"no\nplease")
+
+
+# ================================================
+# Test XgrammarBackend functionality
+# ================================================
+
+
+class TestXgrammarBackend:
+    class TestPR58067Regressions:
+        """Here we check behavior logic of our flag
+        disable_any_whitespace when used with xgrammar backend.
+        """
+
+        _TOKENIZER = "openai-community/gpt2"
+        _VOCAB_SIZE = 50257
+        tokenizer: ClassVar[PreTrainedTokenizerBase]
+
+        @classmethod
+        @pytest.fixture(scope="class", autouse=True)
+        def _shared_tokenizer(cls):
+            cls.tokenizer = AutoTokenizer.from_pretrained(cls._TOKENIZER)
+
+        @classmethod
+        def _backend(cls, *, disable_any_whitespace: bool) -> XgrammarBackend:
+            vllm_config = VllmConfig(
+                structured_outputs_config=StructuredOutputsConfig(
+                    backend="xgrammar",
+                    disable_any_whitespace=disable_any_whitespace,
+                )
+            )
+            return XgrammarBackend(
+                vllm_config, tokenizer=cls.tokenizer, vocab_size=cls._VOCAB_SIZE
+            )
+
+        @classmethod
+        def _accepts_json(cls, backend: XgrammarBackend, json_text: str) -> bool:
+            grammar = backend.compile_grammar(StructuredOutputOptions.JSON_OBJECT, "")
+            return grammar.accept_tokens("req", cls.tokenizer.encode(json_text))
+
+        def test_disable_any_whitespace_is_false(self):
+            """Verify expected behavior of disable_any_whitespace=False"""
+            backend = self._backend(disable_any_whitespace=False)
+
+            # Check that grammar accepts json with NO space after colon
+            assert self._accepts_json(backend, '{"no_space_after_me":"yes_ofcourse"}')
+
+            # Check that grammar accepts json with space after colon
+            assert self._accepts_json(backend, '{"yes_space_after_me": true}')
+
+            # Check that grammar accepts json with NO space after comma
+            assert self._accepts_json(
+                backend,
+                '{"never_space_after_comma":"accepted","good_boy":":3"}',
+            )
+
+            # Check that grammar accepts json with space after comma
+            assert self._accepts_json(
+                backend,
+                '{"where_space_after_comma":42, "wow_thats_cool":4242}',
+            )
+
+        def test_disable_any_whitespace_is_true(self):
+            """Verify expected behavior of disable_any_whitespace=True"""
+            backend = self._backend(disable_any_whitespace=True)
+
+            # Check that grammar accepts json with NO space after colon
+            assert self._accepts_json(backend, '{"no_space_after_me":"yes_ofcourse"}')
+
+            # Check that grammar rejects json with space after colon
+            assert not self._accepts_json(backend, '{"yes_space_after_me": true}')
+
+            # FIXME(arpera):
+            # Comma + separators=(",", ":") is wrong on xgrammar <=0.2.8
+            # Seehttps://github.com/mlc-ai/xgrammar/issues/945
+            # Re-enable both tests once vLLM pins xgrammar with the fix (>=0.2.9).
+            #
+            # # Check that grammar accepts json with NO space after comma
+            # assert self._accepts_json(
+            #     backend,
+            #     '{"never_space_after_comma":"accepted","good_boy":":3"}',
+            # )
+            #
+            # # Check that grammar rejects json with space after comma
+            # assert not self._accepts_json(
+            #     backend,
+            #     '{"where_space_after_comma":42, "wow_thats_cool":4242}',
+            # )

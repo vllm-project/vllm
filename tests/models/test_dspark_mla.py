@@ -85,6 +85,7 @@ def test_dspark_markov_head_is_replicated(
     assert head.markov_w2.tp_size == 1
     assert head.markov_w1.weight.shape == (128, 8)
     assert head.markov_w2.weight.shape == (128, 8)
+    head.markov_w2.quant_method.process_weights_after_loading(head.markov_w2)
 
     def fail_collective(*args, **kwargs):
         raise AssertionError("replicated Markov head must not invoke TP collectives")
@@ -335,3 +336,36 @@ def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     assert torch.equal(calls[1][1], stacked_output.view(2, 3, 4)[:, 2] + 2)
     assert calls[0][3] is slot_mappings[0]
     assert calls[1][3] is slot_mappings[2]
+
+
+@pytest.mark.cpu_test
+def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
+    """The draft's MLA layers must share a KV cache group with the target's."""
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+    from vllm.v1.core.kv_cache_utils import _get_kv_cache_groups_uniform_page_size
+
+    vllm_config = SimpleNamespace(
+        model_config=None, cache_config=SimpleNamespace(block_size=64)
+    )
+    target_attn = SimpleNamespace(
+        kv_cache_dtype="fp8",
+        head_size=576,
+        sliding_window=None,
+        indexer=None,
+        non_causal_multi_token_decode=False,
+        attn_backend=SimpleNamespace(get_name=lambda: "ROCM_AITER_MLA"),
+        _uses_flat_kv_cache=lambda: False,
+    )
+    draft_attn = SimpleNamespace(
+        kv_cache_dtype="fp8", head_size=576, non_causal_multi_token_decode=True
+    )
+    target_spec = MLAAttention.get_kv_cache_spec(target_attn, vllm_config)
+    draft_spec = MultiHeadLatentAttention.get_kv_cache_spec(draft_attn, vllm_config)
+
+    kv_cache_spec = {f"model.layers.{i}.attn": target_spec for i in range(24)}
+    kv_cache_spec |= {f"draft.layers.{i}.attn": draft_spec for i in range(5)}
+
+    groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    assert len(groups) == 1
+    assert len(groups[0].layer_names) == 29

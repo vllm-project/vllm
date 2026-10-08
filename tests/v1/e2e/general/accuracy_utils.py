@@ -110,8 +110,10 @@ def check_first_divergence(
             # Log-softmax and reconstructing penalties may round in FP32, but
             # a near tie cannot excuse selecting the engine's own worse token.
             assert gap >= -1e-5, f"{detail}: selected token is below its alternative"
-        assert gap <= tolerance.greedy_atol, (
-            f"{detail}: divergence exceeds near-tie bound={tolerance.greedy_atol}"
+        # Same FP32 rounding slack as above, applied to the upper bound.
+        assert gap <= tolerance.greedy_atol + 1e-5, (
+            f"{detail}: divergence exceeds near-tie bound="
+            f"{tolerance.greedy_atol} (+1e-5 slack)"
         )
 
 
@@ -201,9 +203,10 @@ def check_greedy_token(
     )
     best = int(logits.argmax())
     gap = float(logits[best] - logits[token])
-    assert gap <= tolerance.greedy_atol, (
+    # FP32 rounding can push a true near-tie fractionally past the bound.
+    assert gap <= tolerance.greedy_atol + 1e-5, (
         f"{context}: selected token={token}, reference best={best}, "
-        f"logit gap={gap}, bound={tolerance.greedy_atol}"
+        f"logit gap={gap}, bound={tolerance.greedy_atol} (+1e-5 slack)"
     )
     return gap
 
