@@ -101,6 +101,7 @@ def _run_abort_cache_recovery(
     runner: VllmRunner,
     *,
     expect_partial_output: bool,
+    speculative: bool = False,
 ) -> None:
     sampling_params = SamplingParams(
         temperature=0.0,
@@ -108,11 +109,12 @@ def _run_abort_cache_recovery(
         ignore_eos=True,
         allowed_token_ids=[FORCED_TOKEN_ID],
     )
-    # CUDA may increase the block size to fit the GDN state. Include at least
-    # one full block plus a token that must be recomputed on a cache hit.
+    # CUDA may increase the block size to fit the GDN state. MTP drops the
+    # last matched block, so it needs a second full block for a cache hit.
     block_size = runner.llm.llm_engine.vllm_config.cache_config.block_size
     prompt = TokensPrompt(
-        prompt_token_ids=[FORCED_TOKEN_ID] * max(256, block_size + 16)
+        prompt_token_ids=[FORCED_TOKEN_ID]
+        * max(256, (2 if speculative else 1) * block_size + 16)
     )
 
     corrupted_before = _metric_value(runner, "vllm:corrupted_requests")
@@ -234,6 +236,6 @@ def test_async_cudagraph_speculative_nan_abort_cache_recovery(
         _assert_fault_tolerance_config(runner)
         injected = _inject_one_nan(runner, monkeypatch, require_speculative_rows=True)
         replay_calls = _record_full_cudagraph_replays(runner, monkeypatch)
-        _run_abort_cache_recovery(runner, expect_partial_output=True)
+        _run_abort_cache_recovery(runner, expect_partial_output=True, speculative=True)
         assert injected[0]
         assert replay_calls[0] > 0
