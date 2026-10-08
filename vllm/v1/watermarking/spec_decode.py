@@ -8,14 +8,12 @@ from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.watermarker import (
+    DraftBlockState,
     RandomSampler,
     SupportsSpeculativeDecoding,
     Watermarker,
 )
-from vllm.v1.worker.gpu.sample.watermark import (
-    draft_philox_gumbel_sample,
-    draft_watermarking_mask,
-)
+from vllm.v1.worker.gpu.sample.watermark import draft_watermarking_mask
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 
@@ -166,37 +164,38 @@ class DraftWatermarker:
         drafts of its request, so steps must be sampled in order even when
         their logits were computed in parallel.
         """
+        assert apply_temperature
+        assert is_drafting
         assert logits_cache_col is not None
         num_steps = self.num_speculative_steps
-        if (
-            isinstance(self.watermarker, GumbelWatermarker)
-            and type(self.watermarker.prf) is PhiloxPRF
-            and logits.is_cuda
-        ):
-            assert apply_temperature
-            assert is_drafting
-            assert logits_cache is not None
-            return draft_philox_gumbel_sample(
-                logits,
-                self.contexts,
-                self.watermarker.prf.key,
-                num_steps=num_steps,
+        sampled_block = self.watermarker.try_sample_block(
+            logits,
+            num_steps,
+            RandomSampler(
                 expanded_idx_mapping=idx_mapping,
                 temperatures=temperature,
                 seeds=seed,
                 positions=pos,
-                enabled=self.enabled,
+                use_fp64=use_fp64,
+                is_drafting=True,
                 logits_cache=logits_cache,
                 logits_cache_col=logits_cache_col,
-                use_fp64=use_fp64,
+            ),
+            DraftBlockState(
+                contexts=self.contexts,
+                enabled=self.enabled,
                 prior_contexts=self.prior_contexts,
                 all_token_ids=self.all_token_ids,
                 prompt_lens=self.prompt_lens,
                 total_lens=self.total_lens,
-                deduplicate=self.deduplicate_contexts != "none",
-                max_history=self.deduplicate_contexts_max_history,
-                include_prompt=self.deduplicate_contexts == "all",
-            )
+                deduplicate_contexts=self.deduplicate_contexts,
+                deduplicate_contexts_max_history=(
+                    self.deduplicate_contexts_max_history
+                ),
+            ),
+        )
+        if sampled_block is not None:
+            return sampled_block
         num_reqs = logits.shape[0] // num_steps
 
         def by_step(tensor: torch.Tensor) -> torch.Tensor:
