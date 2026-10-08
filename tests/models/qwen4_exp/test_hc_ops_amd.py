@@ -87,8 +87,9 @@ def test_hc_combine_and_mix_matches_reference(
     not hasattr(torch.ops._rocm_C, "qwen4_hc_combine_mix"),
     reason="fused HyperConnection kernel is built for gfx1100 only",
 )
-def test_hc_fused_is_deterministic_and_resets_barrier() -> None:
-    from vllm.models.qwen4_exp.amd.ops.hc import _hc_barrier, hc_combine_and_mix
+def test_hc_fused_is_deterministic() -> None:
+    """The fused kernel reduces in a fixed order (no split-K atomics)."""
+    from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_and_mix
 
     args = _inputs(1, shared_norm=False)
     first = hc_combine_and_mix(*args, EPS, HC)[1]
@@ -96,4 +97,3 @@ def test_hc_fused_is_deterministic_and_resets_barrier() -> None:
         torch.testing.assert_close(
             hc_combine_and_mix(*args, EPS, HC)[1], first, atol=0, rtol=0
         )
-    assert _hc_barrier(first.device)[0].item() == 0

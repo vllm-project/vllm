@@ -377,14 +377,10 @@ def _hc_combine_norm(
     return out, y
 
 
-# Fused decode path (csrc/rocm/qwen4_hc_rdna3.cu, gfx1100 only). Measured at 96 calls
-# per step with cold weights: M=1 2.85 -> 2.05 ms, M=4 3.43 -> 2.69 ms; slower from M=5.
-_HC_FUSED_SHAPE = (
-    4,
-    2560,
-    320,
-)  # (hc_count, hidden_size, lora_rank) the kernel is built for
-_hc_barriers: dict[torch.device, torch.Tensor] = {}
+# Fused decode path (csrc/rocm/qwen4_hc_rdna3.cu, gfx1100 only), built for
+# (hc_count, hidden_size, lora_rank). Measured at 96 calls per step with cold
+# weights: M=1 2.85 -> 2.18 ms, M=4 3.36 -> 2.87 ms; slower from M=5.
+_HC_FUSED_SHAPE = (4, 2560, 320)
 
 
 def _hc_fused_available() -> bool:
@@ -396,15 +392,6 @@ def _hc_fused_available() -> bool:
 
 
 _HC_FUSED = None
-
-
-def _hc_barrier(device: torch.device) -> torch.Tensor:
-    barrier = _hc_barriers.get(device)
-    if barrier is None:
-        barrier = _hc_barriers[device] = torch.zeros(
-            2, dtype=torch.int32, device=device
-        )
-    return barrier
 
 
 def _hc_combine_and_mix(
@@ -439,7 +426,6 @@ def _hc_combine_and_mix(
         and down_weight.is_contiguous()
         and up_weight.is_contiguous()
     ):
-        barrier = _hc_barrier(residual.device)
         residual = residual.contiguous()
         block_output = block_output.contiguous()
         injection_logits = injection_logits.contiguous()
@@ -452,14 +438,13 @@ def _hc_combine_and_mix(
                 down_weight,
                 up_weight,
                 eps,
-                barrier,
             )
             return hidden, block_input, injection
         hidden, xn = _hc_combine_norm(
             residual, block_output, injection_logits, norm_weight, eps, hc_count
         )
         block_input, injection = torch.ops._rocm_C.qwen4_hc_mix_xn(
-            xn, down_weight, up_weight, barrier
+            xn, down_weight, up_weight
         )
         return hidden, block_input, injection
 
