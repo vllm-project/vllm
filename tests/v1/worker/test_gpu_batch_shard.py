@@ -55,6 +55,33 @@ def test_aggregate_num_nans_per_speculative_request():
     ]
 
 
+@requires_cuda
+def test_aggregate_num_nans_handles_empty_and_multi_chunk_ranges():
+    per_row = torch.arange(1, 71, dtype=torch.int32, device=DEVICE)
+    cumulative_row_ends = torch.tensor(
+        [0, 33, 33, 70], dtype=torch.int32, device=DEVICE
+    )
+
+    result = aggregate_num_nans_per_request(per_row, cumulative_row_ends)
+
+    assert result.tolist() == [0, 561, 0, 1924]
+
+    strided_rows = torch.stack((per_row, per_row), dim=1)[:, 0]
+    strided_ends = torch.stack((cumulative_row_ends, cumulative_row_ends), dim=1)[:, 0]
+    assert aggregate_num_nans_per_request(strided_rows, strided_ends).tolist() == [
+        0,
+        561,
+        0,
+        1924,
+    ]
+
+
+@requires_cuda
+def test_aggregate_num_nans_empty_batch():
+    empty = torch.empty(0, dtype=torch.int32, device=DEVICE)
+    assert aggregate_num_nans_per_request(empty, empty).numel() == 0
+
+
 def _make_batch(
     rng: np.random.Generator,
     num_reqs: int,
