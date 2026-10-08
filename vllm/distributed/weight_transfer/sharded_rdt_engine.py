@@ -50,6 +50,7 @@ results behind the choices here.
 """
 
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from math import prod
@@ -162,6 +163,23 @@ class _PendingPull:
     targets: "list[torch.Tensor]"
     blob: "torch.Tensor"
     slot: int
+
+
+@dataclass
+class _PullHooks:
+    """Operations injected into the pure ``_run_lanes`` scheduler."""
+
+    # Start a pull into the slot. The real hook waits if the slot's previous
+    # scatter is still reading it; tests inject transport-free pulls.
+    issue: "Callable[[_Chunk, int], Any]"
+    # Whether issue into the slot would start without waiting.
+    slot_free: "Callable[[int], bool]"
+    # Wait for one pull to land, optionally for at most ``timeout`` seconds.
+    wait_any: "Callable[[list[Any], float | None], int | None]"
+    # Complete a landed pull, dispatch its scatter, and signal its groups.
+    drain: "Callable[[Any, _Chunk], None]"
+    # Signal a group belonging to a chunk with no keys.
+    signal: "Callable[[int], None]"
 
 
 @dataclass
@@ -448,7 +466,6 @@ class ShardedRDTWeightTransferEngine(
         # The worker is often a different install from whatever spawned it, so
         # check here too and not only where the actor options are set.
         check_ray_rdt_version(init_info.staging_device)
-        self._refuse_unbuilt_settings(init_info)
         pool_config = self._configure_ring(init_info)
         self._num_consumers_override = init_info.num_consumers
         self._resolve_producers(init_info)
@@ -467,17 +484,6 @@ class ShardedRDTWeightTransferEngine(
         self._preregister_at_init()
         # Start the background post-processing worker (pull/process pipelining).
         self._ensure_proc_worker()
-
-    @staticmethod
-    def _refuse_unbuilt_settings(
-        init_info: ShardedRDTWeightTransferInitInfo,
-    ) -> None:
-        """Do not silently run settings whose execution paths land later."""
-        if init_info.stages_in_flight != 1:
-            raise NotImplementedError(
-                f"stages_in_flight={init_info.stages_in_flight!r}: only 1 is "
-                "implemented in this build"
-            )
 
     def _configure_ring(
         self, init_info: ShardedRDTWeightTransferInitInfo
@@ -966,6 +972,31 @@ class ShardedRDTWeightTransferEngine(
         ray.get(pending.ref)
         return dict(zip(pending.keys, pending.targets))
 
+    def _slot_free(self, slot: int) -> bool:
+        """Whether a pull into ``slot`` can start without waiting."""
+        if not self._slot_read_done:
+            return True
+        with self._slot_cv:
+            if self._slot_done[slot] < self._slot_queued[slot]:
+                return False
+        return self._slot_read_done[slot].query()
+
+    def _wait_any_head(
+        self,
+        pulls: "list[_PendingPull]",
+        timeout: "float | None" = None,
+    ) -> "int | None":
+        """Return the index of a landed pull, or None after ``timeout``."""
+        if len(pulls) == 1 and timeout is None:
+            # The following complete/get blocks on this pull, as the old
+            # single-window loop did; avoid an extra Ray round trip.
+            return 0
+        import ray
+
+        refs = [pull.ref for pull in pulls]
+        ready, _ = ray.wait(refs, num_returns=1, timeout=timeout)
+        return refs.index(ready[0]) if ready else None
+
     # ---------------- Bake (dry run, at init) / replay ----------------
 
     def _bake(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
@@ -1412,33 +1443,20 @@ class ShardedRDTWeightTransferEngine(
         self._pending_frees.extend(self._router.free_group(group_idx, self._sync_idx))
 
     def _run_chunk_pipeline(self, plan: "_CallPlan") -> None:
-        """Pipelined chunk pulls through the pool's temporary lane-0 adapter.
-
-        Issues up to ``ring_depth`` produce RPCs ahead of the blocking gets, so
-        while chunk i's RDMA streams the producer serves i+1 into its own ring
-        slot and the background thread scatters i-1 out of another. Reads stay
-        serialized on the shared NIC — the bandwidth floor, not a loss.
-
-        Commit 5 replaces this adapter with the stage-stream scheduler. Until
-        then ``_refuse_unbuilt_settings`` keeps ``stages_in_flight`` at one.
+        """Pull stage streams through independent K-deep FIFO lanes.
 
         Slot safety rests on two arguments spelled out in the doc: the producer's
-        ring is no shallower than this one and drain-before-issue orders its
-        reuse; the consumer's slots are held by ``_issue_pull``'s generation
-        handshake.
+        ring is no shallower than a lane's window and FIFO drain-before-issue
+        orders its reuse; the consumer's slots are held by ``_issue_pull``'s
+        generation handshake.
         """
-        from collections import deque
-
-        inflight: deque[tuple[_PendingPull, _Chunk]] = deque()
-
         # Gather groups with no chunk on this worker (plan.pre_free): signal
         # them done before the pipeline — their owners still published them, and
         # a signal that arrives before its publish is counted (fire-and-forget).
         for gi in plan.pre_free:
             self._signal_group_done(gi)
 
-        def drain_one() -> None:
-            pending, chunk = inflight.popleft()
+        def drain(pending: "_PendingPull", chunk: "_Chunk") -> None:
             results = self._complete_pull(pending)
             self._dispatch_item(
                 _ProcItem(chunk=chunk, results=results, slot=pending.slot)
@@ -1449,28 +1467,34 @@ class ShardedRDTWeightTransferEngine(
             for gi in chunk.free:
                 self._signal_group_done(gi)
 
-        for chunk in plan.chunks:
-            if not chunk.keys:
-                # _chunk_module_scatters never emits empty chunks; keep the
-                # signals safe anyway if this ever changes.
-                for gi in chunk.free:
-                    self._signal_group_done(gi)
-                continue
-            # Drain BEFORE issue once the ring is full: frees this chunk's slot
-            # (generation-wise) and guarantees the producer-slot invariant above.
-            # Sync 0 runs SERIAL (max 1 in flight): both sides still grow and
-            # register buffers, and a producer registration mid-flight churns its
-            # agent-metadata version under an in-flight pull (see __init__).
-            depth = 1 if self._completed_syncs == 0 else self._ring_depth
-            if len(inflight) >= depth:
-                drain_one()
-            slots = self._lane_slots(0)
-            cursor = self._lane_cursors[0]
-            slot = slots[cursor]
-            self._lane_cursors[0] = (cursor + 1) % self._ring_depth
-            inflight.append((self._issue_pull(chunk, slot), chunk))
-        while inflight:
-            drain_one()
+        # Sync 0 is serial while both endpoints finish registration. A single
+        # lane always sees the whole plan, preserving the old issue/drain/free
+        # order even when the plan contains several stage streams.
+        if self._completed_syncs == 0:
+            lanes, depth = 1, 1
+        else:
+            lanes, depth = self._lanes, self._ring_depth
+        streams = (
+            [plan.chunks]
+            if lanes == 1
+            else [
+                [chunk for chunk in plan.chunks if chunk.stream == stream]
+                for stream in range(plan.num_streams)
+            ]
+        )
+        _run_lanes(
+            streams,
+            depth=depth,
+            blocks=[self._lane_slots(lane) for lane in range(lanes)],
+            cursors=self._lane_cursors,
+            hooks=_PullHooks(
+                issue=self._issue_pull,
+                slot_free=self._slot_free,
+                wait_any=self._wait_any_head,
+                drain=drain,
+                signal=self._signal_group_done,
+            ),
+        )
 
     def _process_item(self, item: "_ProcItem") -> None:
         """Scatter-thread half: materialize this chunk's first-seen modules,
@@ -1518,7 +1542,10 @@ class ShardedRDTWeightTransferEngine(
                     # autograd view of the leaf.
                     dst = param.data.as_strided(sc.shape, sc.stride, sc.offset)
                     with torch._C.DisableTorchFunctionSubclass():
-                        dst.copy_(results[sc.src])
+                        # Host staging needs this to enqueue rather than wait.
+                        # The read-done event below still prevents overwrite
+                        # until the process stream has consumed the slot.
+                        dst.copy_(results[sc.src], non_blocking=True)
                 # All reads of this slot's buffer are now enqueued on the process
                 # stream; record + publish so the RPC thread can reuse the slot.
                 self._slot_read_done[item.slot].record(self._proc_stream)
@@ -1710,6 +1737,82 @@ def _check_streams(chunks: "list[_Chunk]", groups: list[int]) -> None:
                     f"{stream} and {chunk.stream}, so parallel pulls would "
                     "break its order."
                 )
+
+
+# How long a lane waiting for a slot lets outstanding heads block before the
+# scheduler rechecks that slot.
+_SLOT_POLL_S = 0.005
+
+
+def _run_lanes(
+    streams: "list[list[_Chunk]]",
+    *,
+    depth: int,
+    blocks: "list[range]",
+    cursors: list[int],
+    hooks: _PullHooks,
+) -> None:
+    """Run one K-deep FIFO pull window per disjoint slot block.
+
+    A lane takes the next unstarted stream after issuing its current stream's
+    last chunk, so its window spans the handoff. If a lane is waiting for slot
+    reuse while other lane heads are outstanding, the head wait is bounded:
+    shared producer packs can otherwise deadlock while each replica waits for a
+    pull that another replica has not yet issued.
+    """
+    from collections import deque
+
+    lanes = range(len(blocks))
+    unstarted = deque(streams)
+    todo: list[deque[_Chunk]] = [deque() for _ in lanes]
+    windows: list[deque[tuple[Any, _Chunk]]] = [deque() for _ in lanes]
+
+    def advance(lane: int) -> None:
+        while True:
+            if not todo[lane]:
+                if not unstarted:
+                    return
+                todo[lane].extend(unstarted.popleft())
+            elif todo[lane][0].keys:
+                return
+            else:
+                for group in todo[lane].popleft().free:
+                    hooks.signal(group)
+
+    def next_slot(lane: int) -> int:
+        return blocks[lane][cursors[lane]]
+
+    def issue(lane: int) -> None:
+        chunk = todo[lane].popleft()
+        slot = next_slot(lane)
+        cursors[lane] = (cursors[lane] + 1) % len(blocks[lane])
+        windows[lane].append((hooks.issue(chunk, slot), chunk))
+        advance(lane)
+
+    for lane in lanes:
+        advance(lane)
+    while True:
+        for lane in lanes:
+            while (
+                todo[lane]
+                and len(windows[lane]) < depth
+                and hooks.slot_free(next_slot(lane))
+            ):
+                issue(lane)
+        waiting = [lane for lane in lanes if todo[lane] and len(windows[lane]) < depth]
+        busy = [lane for lane in lanes if windows[lane]]
+        working = [lane for lane in lanes if todo[lane] or windows[lane]]
+        if waiting and (not busy or len(working) == 1):
+            # No other lane can make progress, so let issue perform the slot's
+            # full generation/event wait.
+            issue(waiting[0])
+        elif busy:
+            heads = [windows[lane][0][0] for lane in busy]
+            index = hooks.wait_any(heads, _SLOT_POLL_S if waiting else None)
+            if index is not None:
+                hooks.drain(*windows[busy[index]].popleft())
+        else:
+            return
 
 
 def _plan_digest(keys_per_chunk: list) -> str:
