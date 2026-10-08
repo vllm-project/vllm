@@ -545,6 +545,53 @@ async fn responses_streaming_error_includes_failed_response_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn responses_stream_error_preserves_partial_item_and_closes_it_once() {
+    let (app, engine_task) = test_app_with_stream_output_specs(vec![
+        (bytes_to_token_ids(b"partial"), None),
+        (vec![UNKNOWN_DECODE_TOKEN_ID], None),
+    ])
+    .await;
+    let response = responses_call(&app, json!({"input": "hello", "stream": true})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    engine_task.await.expect("mock engine task");
+    let events = sse_json_payloads(std::str::from_utf8(&body).unwrap());
+    let added = events
+        .iter()
+        .find(|event| event["type"] == "response.output_item.added")
+        .unwrap();
+    let done: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["type"] == "response.output_item.done")
+        .collect();
+    assert_eq!(done.len(), 1);
+    let failed: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["type"] == "response.failed")
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert!(done[0].0 < failed[0].0);
+    assert_eq!(failed[0].0, events.len() - 1);
+    assert!(!events.iter().any(|event| matches!(
+        event["type"].as_str(),
+        Some("response.completed" | "response.incomplete")
+    )));
+    let failed = &failed[0].1["response"];
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(
+        failed["error"]["message"],
+        "The response stream failed before generation completed."
+    );
+    assert_eq!(failed["output"][0]["id"], added["item"]["id"]);
+    assert_eq!(failed["output"][0], done[0].1["item"]);
+    assert_eq!(failed["output"][0]["content"][0]["text"], "partial");
+    assert!(failed["usage"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn responses_non_streaming_includes_reasoning_item() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
