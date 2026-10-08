@@ -212,7 +212,7 @@ def test_preprocess_cmpl_applies_mm_processor_kwargs_to_renderer(
     llm.renderer = renderer
 
     monkeypatch.setattr(
-        "vllm.entrypoints.offline_utils.parse_model_prompt",
+        "vllm.entrypoints.common.offline.parse_model_prompt",
         lambda _model_config, parsed_prompt: parsed_prompt,
     )
 
@@ -246,7 +246,7 @@ def test_preprocess_cmpl_keeps_prompt_mm_processor_kwargs_when_no_override(
     llm.renderer = renderer
 
     monkeypatch.setattr(
-        "vllm.entrypoints.offline_utils.parse_model_prompt",
+        "vllm.entrypoints.common.offline.parse_model_prompt",
         lambda _model_config, parsed_prompt: parsed_prompt,
     )
 
