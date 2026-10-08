@@ -635,6 +635,18 @@ def test_late_chunk_pool_matches_fp32_means_before_projection_and_normalization(
     assert actual.dtype == (head_dtype or dtype)
 
 
+def test_late_chunk_pool_reduces_before_nonlinear_projector():
+    hidden = torch.tensor([[2.0, 0.0], [0.0, 1.0]])
+    projector = torch.nn.Tanh()
+    head = TokenEmbeddingPoolerHead(projector=projector, activation=PoolerNormalize())
+    params = PoolingParams(task="token_embed", late_chunk_size=2, use_activation=True)
+    actual = head.forward_chunk(hidden, params)
+    expected = torch.nn.functional.normalize(projector(hidden.mean(0, keepdim=True)))
+    wrong_order = torch.nn.functional.normalize(projector(hidden).mean(0, keepdim=True))
+    torch.testing.assert_close(actual, expected)
+    assert not torch.allclose(actual, wrong_order)
+
+
 def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage():
     hidden = torch.arange(36, dtype=torch.float32).reshape(9, 4)
     params = [
