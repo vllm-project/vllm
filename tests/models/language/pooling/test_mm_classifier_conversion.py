@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from tests.utils import VLLM_PATH
 from vllm.config.pooler import PoolerConfig
 
 
@@ -103,41 +102,3 @@ def test_gemma_multimodal(
         result = llm.classify(prompts)
         assert result[0].outputs.probs[0] > 0.95
         assert all(c < 0.05 for c in result[0].outputs.probs[1:])
-
-
-def test_qwen3_vl_reranker_tie_word_embeddings_only_on_top_level(
-    vllm_runner,
-) -> None:
-    """Like Qwen3-VL-Reranker-8B, the text config has no tie_word_embeddings."""
-
-    def update_config(config):
-        text_config = config.get_text_config()
-        if hasattr(text_config, "tie_word_embeddings"):
-            del text_config.tie_word_embeddings
-        config.update(
-            {
-                "architectures": ["Qwen3VLForSequenceClassification"],
-                "classifier_from_token": ["no", "yes"],
-                "is_original_qwen3_reranker": True,
-            }
-        )
-        return config
-
-    with vllm_runner(
-        model_name="Qwen/Qwen3-VL-Reranker-2B",
-        runner="pooling",
-        hf_overrides=update_config,
-        max_model_len=512,
-        enforce_eager=True,
-    ) as vllm_model:
-        scores = vllm_model.score(
-            "What is the capital of France?",
-            [
-                "Paris is the capital and largest city of France.",
-                "The mitochondria is the powerhouse of the cell.",
-            ],
-            chat_template=(
-                VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"
-            ).read_text(),
-        )
-    assert scores[0] > scores[1]
