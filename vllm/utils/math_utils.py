@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Math utility functions for vLLM."""
 
+from bisect import bisect_left
+
 # Approximate value of 1/ln(2), used for log/exp base conversion
 # Best FP32 approximation: 1.4426950216 (hex 0x3FB8AA3B)
 RCP_LN2 = 1.4426950216
@@ -30,3 +32,9 @@ def round_down(x: int, y: int) -> int:
 def largest_power_of_2_divisor(n: int) -> int:
     """Return the largest power-of-2 that divides *n* (isolate lowest set bit)."""
     return n & (-n)
+
+
+def round_up_to(values: list[int], n: int) -> int | None:
+    """Round `n` up to the smallest member of sorted `values` >= n, or None."""
+    i = bisect_left(values, n)
+    return values[i] if i < len(values) else None
