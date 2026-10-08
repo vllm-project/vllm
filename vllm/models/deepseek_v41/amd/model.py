@@ -691,15 +691,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             engram_mask,
             full_num_tokens,
         )
+        # Replay collapses inside its own batch. The early loop still sets
+        # ran_layers, so that flag alone must not post again on the full batch.
+        collapsed = False
         if self.decoder_replay_layers is not None:
-            (
-                hidden_states,
-                residual,
-                post_mix,
-                res_mix,
-                pre_mix,
-                *late_aux,
-            ) = self.decoder_replay_layers(
+            hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
                 input_ids,
@@ -710,8 +706,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
             aux_hidden_states.extend(late_aux)
             final_aux_recon = None
-            ran_layers = True
-        if ran_layers:
+            collapsed = True
+        if ran_layers and not collapsed:
             if (
                 self.end_layer in self.aux_hidden_state_layers
                 and final_aux_recon is not None
@@ -784,7 +780,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 engram_hashes,
                 engram_mask,
             )
-            if idx + 1 in self.aux_hidden_state_layers:
+            # The aux id of the first replay layer is the post of the last
+            # full-batch layer. Capture it on the trimmed rows instead.
+            if idx + 1 in self.aux_hidden_state_layers and not (
+                self.decoder_replay_layers is not None
+                and idx + 1 == self.decoder_replay_start
+            ):
                 aux_recon = self.mhc_post(hidden_states, residual, post_mix, res_mix)
                 aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
@@ -812,25 +813,50 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        """Layers past the last KV source, on the rows they are given."""
-        hidden_states, residual, post_mix, res_mix, pre_mix, aux, _, _ = (
-            self._run_layers(
-                range(self.decoder_replay_start, self.end_layer),
-                hidden_states,
-                positions,
-                input_ids,
-                pre_mix,
-                post_mix,
-                res_mix,
-                residual,
-                None,
-                None,
-                positions.shape[0],
+        """Layers past the last KV source, on the rows they are given.
+
+        The final ``mhc_post`` runs here, on this batch. The return is
+        ``(hidden_states, pre_mix, *aux)``.
+        """
+        # Post of the layer before the cut. These rows are already trimmed,
+        # and sequence parallel is unsupported while replay is on.
+        cut_aux: list[torch.Tensor] = []
+        if self.decoder_replay_start in self.aux_hidden_state_layers:
+            cut_aux.append(
+                self.mhc_post(hidden_states, residual, post_mix, res_mix).mean(dim=1)
             )
+        (
+            hidden_states,
+            residual,
+            post_mix,
+            res_mix,
+            pre_mix,
+            aux,
+            final_aux_recon,
+            ran_layers,
+        ) = self._run_layers(
+            range(self.decoder_replay_start, self.end_layer),
+            hidden_states,
+            positions,
+            input_ids,
+            pre_mix,
+            post_mix,
+            res_mix,
+            residual,
+            None,
+            None,
+            positions.shape[0],
         )
         assert residual is not None and post_mix is not None
         assert res_mix is not None and pre_mix is not None
-        return (hidden_states, residual, post_mix, res_mix, pre_mix, *aux)
+        if (
+            self.end_layer in self.aux_hidden_state_layers
+            and final_aux_recon is not None
+        ):
+            hidden_states = final_aux_recon
+        elif ran_layers:
+            hidden_states = self.mhc_post(hidden_states, residual, post_mix, res_mix)
+        return (hidden_states, pre_mix, *cut_aux, *aux)
 
     def _decoder_replay_supported(self, vllm_config: VllmConfig, cut: int) -> bool:
         """Whether this rank may trim the layers after ``cut``; warns when not."""
