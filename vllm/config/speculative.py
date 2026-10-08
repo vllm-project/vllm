@@ -476,9 +476,9 @@ class SpeculativeConfig:
     ngram_lookup: bool = False
     """With method='mtp' and a single running request, draft by copying the
     tokens that followed the last `prompt_lookup_min` to `prompt_lookup_max`
-    tokens where they occur earlier in the context, and skip the MTP decode
-    steps; without a match, or with more requests, draft with MTP alone.
-    Requires Model Runner V2."""
+    tokens (default 12 to 16) where they occur earlier in the context, and
+    skip the MTP decode steps; without a match, or with more requests, draft
+    with MTP alone. Requires Model Runner V2."""
 
     # Alternative drafting strategies
     parallel_drafting: bool = False
@@ -1243,6 +1243,11 @@ class SpeculativeConfig:
 
         else:
             if self.ngram_lookup:
+                if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
+                    # Best of 5, 8 and 12 to 16 on SPEED-Bench, Blazedit and a
+                    # copy-heavy probe (#60615): a longer match replaces fewer
+                    # good MTP drafts with wrong copies.
+                    self.prompt_lookup_min, self.prompt_lookup_max = 12, 16
                 self._resolve_prompt_lookup_window()
             else:
                 self.prompt_lookup_max = 0
