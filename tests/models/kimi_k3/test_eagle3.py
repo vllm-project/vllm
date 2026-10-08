@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -17,8 +18,8 @@ from vllm.models.kimi_k3.nvidia.model import (
 )
 
 
-def _make_kimi_linear_model() -> KimiLinearModel:
-    model = object.__new__(KimiLinearModel)
+def _make_kimi_linear_model(cls: type = KimiLinearModel) -> Any:
+    model: Any = object.__new__(cls)
     object.__setattr__(model, "aux_hidden_state_layers", (2,))
     object.__setattr__(model, "use_sequence_parallel", False)
     object.__setattr__(model, "use_attn_res", False)
@@ -231,14 +232,9 @@ class _AmdAttnResLayer:
 def test_amd_kimi_linear_forward_fills_aux_hidden_states_in_attn_res(
     monkeypatch, is_last_rank: bool
 ):
-    """Pin which AttnRes fills each auxiliary buffer.
-
-    A target layer hands its buffer to the next layer's pre-attention AttnRes,
-    which already adds the same pair. A target layer at the end of the stage
-    hands it to the final AttnRes, or to the one remaining add when no AttnRes
-    follows on this rank.
-    """
-    model = object.__new__(amd_linear.KimiLinearModel)
+    """The next AttnRes fills the aux buffer of a target layer. If no AttnRes
+    follows on this rank, one add fills it."""
+    model = _make_kimi_linear_model(amd_linear.KimiLinearModel)
     object.__setattr__(model, "config", SimpleNamespace(attn_res_block_size=2))
     object.__setattr__(model, "start_layer", 0)
     object.__setattr__(model, "end_layer", 3)
@@ -291,3 +287,53 @@ def test_amd_kimi_linear_forward_fills_aux_hidden_states_in_attn_res(
     else:
         # No AttnRes follows the last layer on this rank, so one add remains.
         torch.testing.assert_close(result["hidden_states"], last_sum)
+
+
+class _StopAfterAttnRes(Exception):
+    pass
+
+
+@pytest.mark.parametrize("with_snapshot", [True, False])
+def test_amd_decoder_layer_hands_prefix_snapshot_to_attn_res(
+    monkeypatch, with_snapshot: bool
+):
+    """The pre-attention AttnRes receives the snapshot that forward() gets."""
+    layer = object.__new__(amd_linear.KimiDecoderLayer)
+    for name, value in {
+        "use_attn_residuals": True,
+        "self_attn": SimpleNamespace(),
+        "self_attention_res_proj": Mock(),
+        "self_attention_res_norm": Mock(),
+        "input_layernorm": Mock(),
+        "prev_valid_blocks": 2,
+        "block_write_idx": 1,
+        "is_block_write_layer": False,
+    }.items():
+        object.__setattr__(layer, name, value)
+    calls = []
+
+    def fake_apply_attn_res(prefix_sum, block_residual, proj, norm, num_blocks, **kw):
+        calls.append((prefix_sum, block_residual, kw))
+        raise _StopAfterAttnRes
+
+    monkeypatch.setattr(amd_linear, "_apply_attn_res", fake_apply_attn_res)
+    hidden_states = torch.tensor([[1.0, 2.0]])
+    residual = torch.zeros(1, 3, 2)
+    prefix_delta = torch.tensor([[3.0, 4.0]])
+    prefix_snapshot = torch.empty(1, 2) if with_snapshot else None
+
+    with pytest.raises(_StopAfterAttnRes):
+        layer.forward(
+            torch.tensor([0]),
+            hidden_states,
+            residual,
+            prefix_delta=prefix_delta,
+            prefix_snapshot=prefix_snapshot,
+        )
+
+    ((got_prefix, got_residual, kw),) = calls
+    assert got_prefix is hidden_states
+    assert got_residual is residual
+    assert kw["delta"] is prefix_delta
+    assert kw["prefix_snapshot"] is prefix_snapshot
+    assert kw["block_write_idx"] == -1

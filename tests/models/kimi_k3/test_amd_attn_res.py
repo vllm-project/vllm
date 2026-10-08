@@ -51,6 +51,8 @@ def _reference(
         pytest.param(0, 3, 5, 128, 0, id="empty"),
         pytest.param(1, 1, 2, 128, 0, id="decode-single"),
         pytest.param(17, 4, 6, 1024, 7, id="decode-padded"),
+        pytest.param(255, 4, 6, 1024, 0, id="decode-limit"),
+        pytest.param(256, 4, 6, 1024, 0, id="prefill-limit"),
         pytest.param(320, 8, 10, 7168, 0, id="prefill-full"),
     ],
 )
@@ -204,12 +206,12 @@ def test_amd_attn_res_fused_contract(
 
 
 @pytest.mark.parametrize(
-    "num_tokens,num_blocks,has_delta,write_block",
+    "num_tokens,num_blocks,has_delta,write_block,capture_prefix",
     [
-        (0, 0, False, False),
-        (1, 0, True, True),
-        (17, 4, True, True),
-        (320, 8, False, False),
+        (0, 0, False, False, True),
+        (1, 0, True, True, False),
+        (17, 4, True, True, True),
+        (320, 8, False, False, True),
     ],
 )
 def test_amd_attn_res_fp8_preserves_prefix_and_quantized_output(
@@ -217,6 +219,7 @@ def test_amd_attn_res_fp8_preserves_prefix_and_quantized_output(
     num_blocks,
     has_delta,
     write_block,
+    capture_prefix,
     default_vllm_config,
 ):
     from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -238,6 +241,7 @@ def test_amd_attn_res_fp8_preserves_prefix_and_quantized_output(
         output_norm_eps=1e-5,
     )
     reference = attn_res(ref_prefix, delta, ref_blocks, norm, score, out_norm, **kwargs)
+    prefix_snapshot = torch.empty_like(prefix) if capture_prefix else None
     output, scale = attn_res(
         prefix,
         delta,
@@ -246,6 +250,7 @@ def test_amd_attn_res_fp8_preserves_prefix_and_quantized_output(
         score,
         out_norm,
         quant_dtype=current_platform.fp8_dtype(),
+        prefix_snapshot=prefix_snapshot,
         **kwargs,
     )
     assert output.dtype == current_platform.fp8_dtype()
@@ -266,6 +271,8 @@ def test_amd_attn_res_fp8_preserves_prefix_and_quantized_output(
         assert code_delta.max().item() <= 1
         assert (code_delta != 0).float().mean().item() < 1e-4
     torch.testing.assert_close(prefix, ref_prefix, atol=0, rtol=0)
+    if prefix_snapshot is not None:
+        torch.testing.assert_close(prefix_snapshot, ref_prefix, atol=0, rtol=0)
     torch.testing.assert_close(blocks, ref_blocks, atol=0, rtol=0)
 
 
