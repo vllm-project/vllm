@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import json
 from typing import Any
 
 from fastapi import Request
@@ -22,10 +21,6 @@ from .question_types import Question, StructuredDecisionError, build_question
 from .strategies import DecisionLimits, ReadStrategy
 
 logger = init_logger(__name__)
-
-
-def state_text(state: Any) -> str:
-    return state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
 
 
 def parse_questions(
@@ -91,7 +86,8 @@ class ServingStructuredDecisions(BaseServing):
             reads = await self.strategy.read(
                 questions,
                 request.instructions,
-                state_text(request.state),
+                request.state,
+                request.images,
                 request_id=request_id,
                 chat_template_kwargs=request.chat_template_kwargs,
                 lora_request=lora_request,

@@ -10,11 +10,15 @@ from fastapi.testclient import TestClient
 from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
 )
-from vllm.entrypoints.generate.structured_decisions.question_types import LABELS
-from vllm.entrypoints.generate.structured_decisions.serving import state_text
+from vllm.entrypoints.generate.structured_decisions.question_types import (
+    LABELS,
+    build_question,
+)
 from vllm.entrypoints.generate.structured_decisions.strategies import (
+    LiquidStrategy,
     NextTokenStrategy,
-    reply_label_ids,
+    label_token_ids,
+    reply_tail,
     select_read_strategy,
 )
 from vllm.entrypoints.serve.exception_handling.register import (
@@ -30,6 +34,8 @@ def test_strategy_selection():
     qwen = "Qwen3ForCausalLM"
     assert select_read_strategy(model(qwen)) is NextTokenStrategy
     assert select_read_strategy(model(qwen, "processed_logprobs")) is NextTokenStrategy
+    lfm = "Lfm2VlForConditionalGeneration"
+    assert select_read_strategy(model(lfm)) is LiquidStrategy
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"))
     with pytest.raises(ValueError, match="not raw_logits"):
@@ -63,8 +69,10 @@ def test_unsupported_model_returns_501():
 
 
 def test_structured_state_keeps_unicode_in_prompt():
-    state = {"message": "Français 日本語"}
-    assert state_text(state) == '{"message": "Français 日本語"}'
+    strategy = object.__new__(NextTokenStrategy)
+    q = build_question("q", "choice", "", {"a": None, "b": None}, 26)
+    content = strategy.content({"message": "Français 日本語"}, q)
+    assert content.startswith('{"message": "Français 日本語"}\n\n')
 
 
 @pytest.fixture(scope="module")
@@ -84,9 +92,52 @@ def qwen():
 
 def test_labels_start_the_reply(qwen):
     tokenizer, prompt_ids = qwen
-    tail, ids = reply_label_ids(tokenizer, prompt_ids)
+    tail, tail_text = reply_tail(tokenizer, prompt_ids)
+    ids = label_token_ids(tokenizer, tail, tail_text, LABELS)
     assert tokenizer.decode(tail) == "\n\n"
     assert [tokenizer.decode([i]) for i in ids] == list(LABELS)
+    # A noul's and a score's labels are one token here too.
+    assert (
+        len(set(label_token_ids(tokenizer, tail, tail_text, ("yes", "no", "1", "9"))))
+        == 4
+    )
     # After a colon, Qwen writes ":A" as one token, so "A" is not one token.
+    tail, tail_text = reply_tail(tokenizer, tokenizer.encode("team:"))
     with pytest.raises(ValueError, match="not one distinct token"):
-        reply_label_ids(tokenizer, tokenizer.encode("team:"))
+        label_token_ids(tokenizer, tail, tail_text, LABELS)
+
+
+@pytest.mark.parametrize(
+    "type_name,criteria,ask",
+    [
+        (
+            "choice",
+            {"billing": "Charges", "app_fault": None},
+            "Which?\n\nOptions:\nA Charges\nB app fault\n\n"
+            "Reply with the option code only.",
+        ),
+        (
+            "choice",
+            {"a": "Berlin", "b": "Paris"},
+            "Which?\n\nOptions:\na Berlin\nb Paris\n\nReply with the option code only.",
+        ),
+        (
+            "noul",
+            {"true": "asks to cancel", "false": "anything else"},
+            "Which?\nYes: asks to cancel\nNo: anything else\n\n"
+            "Reply with yes or no only.",
+        ),
+        (
+            "score",
+            ["low", "high"],
+            "Which?\n\n0 low\n1 high\n\nReply with a single digit 0-1 only.",
+        ),
+    ],
+)
+def test_liquid_prompt_matches_the_checkpoint(type_name, criteria, ask):
+    # The wording of prompt.py in LiquidAI/d1-3B, which the model was trained on.
+    strategy = object.__new__(LiquidStrategy)
+    q = build_question("q", type_name, "Which?", criteria, 26)
+    assert strategy.content(None, q) == ask
+    assert strategy.content("Hi.", q) == f"Hi.\n\n\nQUESTION:\n{ask}"
+    assert strategy.content({"k": "é"}, q).startswith('{\n  "k": "é"\n}\n\n\nQUEST')
