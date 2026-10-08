@@ -383,6 +383,7 @@ def _register_overlaid_mla_worker(
     worker._has_mamba = False
     worker._is_csa_linear = False
     worker.vllm_config = MagicMock()
+    worker.vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
     worker.backend_name = "FLASHMLA"
     worker.num_blocks = num_blocks
     worker.nixl_memory_type = "VRAM"
