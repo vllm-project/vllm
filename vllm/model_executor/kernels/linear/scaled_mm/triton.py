@@ -30,36 +30,6 @@ from .ScaledMMLinearKernel import (
 )
 
 
-def _triton_per_token_fp8_scaled_mm(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    out_dtype: torch.dtype,
-    bias: torch.Tensor | None,
-) -> torch.Tensor:
-    # Dynamo must not freeze the tile heuristic using a symbolic M's hint.
-    return triton_scaled_mm(A, B, As, Bs, out_dtype, bias)
-
-
-def _triton_per_token_fp8_scaled_mm_fake(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    out_dtype: torch.dtype,
-    bias: torch.Tensor | None,
-) -> torch.Tensor:
-    return torch.empty((A.size(0), B.size(1)), dtype=out_dtype, device=A.device)
-
-
-direct_register_custom_op(
-    "triton_per_token_fp8_scaled_mm",
-    _triton_per_token_fp8_scaled_mm,
-    fake_impl=_triton_per_token_fp8_scaled_mm_fake,
-)
-
-
 class TritonPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     """Native Triton FP8 GEMM for RDNA4 per-token/per-channel quantization."""
 
@@ -100,7 +70,7 @@ class TritonPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return torch.ops.vllm.triton_per_token_fp8_scaled_mm(
+        return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
             A, B, As, Bs, out_dtype, bias
         ).view(*output_shape)
 
@@ -259,6 +229,38 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             list(self.weight_group_shape),
             self.config.out_dtype,
         )
+
+
+def _w8a8_triton_per_token_scaled_mm_func(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    # Dynamo must not freeze the tile heuristic using a symbolic M's hint.
+    return triton_scaled_mm(qx, weight, x_scale, weight_scale, output_dtype, bias)
+
+
+def _w8a8_triton_per_token_scaled_mm_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    return torch.empty(
+        (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device
+    )
+
+
+direct_register_custom_op(
+    "w8a8_triton_per_token_scaled_mm_func",
+    _w8a8_triton_per_token_scaled_mm_func,
+    fake_impl=_w8a8_triton_per_token_scaled_mm_fake,
+)
 
 
 # TODO we should be able to change the type of block_size to GroupShape

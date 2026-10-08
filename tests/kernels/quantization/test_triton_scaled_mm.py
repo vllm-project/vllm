@@ -255,7 +255,7 @@ def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(monkeypatch, n):
     sb = torch.rand(n, 1, device=device) + 0.5
 
     def run(a, sa):
-        return torch.ops.vllm.triton_per_token_fp8_scaled_mm(
+        return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
             a, b, sa, sb, torch.bfloat16, None
         )
 
