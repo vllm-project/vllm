@@ -41,9 +41,7 @@ async def init_render_app_state(
     )
 
     if args.enable_log_requests:
-        request_logger = RequestLogger(
-            max_log_len=args.max_log_len, log_requests_path=args.log_requests_path
-        )
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
     else:
         request_logger = None
 

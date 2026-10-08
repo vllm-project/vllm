@@ -145,10 +145,6 @@ class BaseFrontendArgs:
     max_log_len: int | None = None
     """Max number of prompt characters or prompt ID numbers being printed in
     log. The default of None means unlimited."""
-    log_requests_path: str | None = None
-    """Save full request bodies to the given JSONL file when 
-    `--enable-log-requests` is set.
-    Logging to this file is unaffected by `--max-log-len` and log level."""
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
     enable_per_request_metrics: bool = False
@@ -530,8 +526,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
-    if args.log_requests_path and not args.enable_log_requests:
-        raise TypeError("Error: --log-requests-path requires --enable-log-requests")
 
     # SSE keep-alive interval must be zero (disabled) or a positive integer.
     if getattr(args, "sse_keep_alive_interval", 0) < 0:
