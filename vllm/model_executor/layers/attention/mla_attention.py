@@ -245,6 +245,7 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    DCPGroupColumnParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -1071,6 +1072,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # kv_b_proj loaded for the whole DCP group (--dcp-kv-b-replicate).
+        kv_b_group_size = (
+            self.kv_b_proj.group_size
+            if isinstance(self.kv_b_proj, DCPGroupColumnParallelLinear)
+            and self.kv_b_proj.local_output
+            else 1
+        )
+        if kv_b_group_size > 1 and self.is_amx_bmm_enabled:
+            raise NotImplementedError(
+                "dcp_kv_b_replicate is not implemented for the AMX MLA path."
+            )
+
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)
@@ -1105,25 +1118,35 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "FP4/FP8 MLA BMM paths."
                 )
 
+        kv_b_num_heads = self.num_heads * kv_b_group_size
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            kv_b_num_heads * (self.qk_nope_head_dim + self.v_head_dim),
         ), (
             f"{kv_b_proj_weight.shape=}, "
             f"{self.kv_lora_rank=}, "
-            f"{self.num_heads=}, "
+            f"{kv_b_num_heads=}, "
             f"{self.qk_nope_head_dim=}, "
             f"{self.v_head_dim=}"
         )
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
-            self.num_heads,
+            kv_b_num_heads,
             self.qk_nope_head_dim + self.v_head_dim,
         )
 
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
+        # Group-wide W_UK is exactly the qrep weight; keep this rank's heads
+        # for everything else.
+        W_UK_group = None
+        if kv_b_group_size > 1:
+            W_UK_group = W_UK
+            assert isinstance(self.kv_b_proj, DCPGroupColumnParallelLinear)
+            start = self.kv_b_proj.rank_in_group * self.num_heads
+            W_UK = W_UK[:, start : start + self.num_heads]
+            W_UV = W_UV[:, start : start + self.num_heads]
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         if self.is_aiter_triton_fp4_bmm_enabled:
@@ -1186,8 +1209,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Convert from (L, N, P) to (N, P, L)
             replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
             if self.dcp_q_replicate:
-                self.W_UK_T_dcp_qrep = get_dcp_group().all_gather(
-                    self.W_UK_T.contiguous(), dim=0
+                self.W_UK_T_dcp_qrep = (
+                    W_UK_group.permute(1, 2, 0).contiguous()
+                    if W_UK_group is not None
+                    else get_dcp_group().all_gather(self.W_UK_T.contiguous(), dim=0)
                 )
 
         # If we should not load quant weights, we initialize the scales to 1.0

@@ -1086,12 +1086,20 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.q_proj",
             )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
-        self.kv_b_proj = ColumnParallelLinear(
+        # Under qrep, optionally load W_UK/W_UV for the whole DCP group so the
+        # group-wide W_UK_T needs no load-time all-gather.
+        kv_b_proj_cls: type[ColumnParallelLinear] = ColumnParallelLinear
+        kv_b_proj_kwargs = {}
+        if qrep_enabled and vllm_config.parallel_config.dcp_kv_b_replicate:
+            kv_b_proj_cls = DCPGroupColumnParallelLinear
+            kv_b_proj_kwargs["local_output"] = True
+        self.kv_b_proj = kv_b_proj_cls(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
+            **kv_b_proj_kwargs,
         )
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,

@@ -30,6 +30,10 @@ from vllm.model_executor.layers.attention.mla_attention import (
     _use_masked_mha,
     build_mla_chunked_context_metadata,
 )
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    DCPGroupColumnParallelLinear,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -364,6 +368,86 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
     torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+
+
+def _post_load_mla_layer(kv_b_weight, num_heads, dcp_q_replicate, kv_b_proj=None):
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_lora_rank = kv_b_weight.shape[1]
+    layer.num_heads = num_heads
+    layer.qk_nope_head_dim = 3
+    layer.v_head_dim = 4
+    layer.kv_b_proj = kv_b_proj if kv_b_proj is not None else torch.nn.Module()
+    layer.kv_b_proj.weight = torch.nn.Parameter(kv_b_weight.clone())
+    layer.kv_b_proj.quant_method = None
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.is_amx_bmm_enabled = False
+    layer.dcp_q_replicate = dcp_q_replicate
+    layer.q_pad_num_heads = None
+    layer.W_UK_T_dcp_qrep = None
+    layer.quant_config = None
+    layer.layer_name = "test"
+    layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
+    with torch.no_grad():
+        layer.process_weights_after_loading(torch.float32)
+    return layer
+
+
+def test_mla_post_load_dcp_kv_b_replicate_matches_gathered_shards(monkeypatch):
+    """A group-wide kv_b_proj must yield the same local W_UK_T/W_UV as the
+    per-rank shard, and a qrep W_UK_T equal to the all-gather it replaces."""
+    group_size, num_heads, head_dim, kv_lora_rank = 4, 2, 3 + 4, 5
+    group_weight = torch.randn(group_size * num_heads * head_dim, kv_lora_rank)
+    shards = group_weight.chunk(group_size, dim=0)
+
+    monkeypatch.setattr(
+        mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
+    )
+    baseline = [_post_load_mla_layer(w, num_heads, False) for w in shards]
+
+    def no_gather():
+        raise AssertionError("dcp_kv_b_replicate must not all-gather W_UK_T")
+
+    monkeypatch.setattr(mla_attention_module, "get_dcp_group", no_gather)
+    for rank in range(group_size):
+        kv_b_proj = DCPGroupColumnParallelLinear.__new__(DCPGroupColumnParallelLinear)
+        torch.nn.Module.__init__(kv_b_proj)
+        kv_b_proj.local_output = True
+        kv_b_proj.group_size = group_size
+        kv_b_proj.rank_in_group = rank
+        layer = _post_load_mla_layer(group_weight, num_heads, True, kv_b_proj)
+        torch.testing.assert_close(layer.W_UK_T, baseline[rank].W_UK_T)
+        torch.testing.assert_close(layer.W_UV, baseline[rank].W_UV)
+        torch.testing.assert_close(
+            layer.W_UK_T_dcp_qrep, torch.cat([b.W_UK_T for b in baseline], dim=0)
+        )
+
+
+@pytest.mark.parametrize("rank_in_group", [0, 2])
+def test_dcp_group_linear_local_output_returns_the_rank_shard(
+    monkeypatch, rank_in_group
+):
+    """local_output slices the group-wide output back to the column shard a
+    plain ColumnParallelLinear on this rank would have produced."""
+    group_size, out_per_rank = 4, 6
+    weight = torch.randn(group_size * out_per_rank, 5)
+    x = torch.randn(3, 5)
+    monkeypatch.setattr(
+        ColumnParallelLinear, "forward", lambda self, x_: (x_ @ weight.T, None)
+    )
+    layer = DCPGroupColumnParallelLinear.__new__(DCPGroupColumnParallelLinear)
+    torch.nn.Module.__init__(layer)
+    layer.group_size = group_size
+    layer.rank_in_group = rank_in_group
+    layer.local_output = True
+    layer.return_bias = True
+
+    out, bias = layer(x)
+
+    expected = x @ weight.chunk(group_size, dim=0)[rank_in_group].T
+    torch.testing.assert_close(out, expected)
+    assert bias is None
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.

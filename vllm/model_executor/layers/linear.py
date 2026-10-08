@@ -630,9 +630,14 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
 
     :meth:`forward` returns the group's full head set. :meth:`_local_view`
     extracts this rank's TP shard for prefill.
+
+    With ``local_output=True`` the weight is still group-wide but :meth:`forward`
+    returns only this rank's TP shard, so callers see a plain
+    ``ColumnParallelLinear``. Used for MLA ``kv_b_proj``, whose group-wide weight
+    is consumed only at load time.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, local_output: bool = False, **kwargs):
         dcp_world_size = (
             get_current_vllm_config().parallel_config.decode_context_parallel_size
         )
@@ -641,12 +646,29 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
         self.group_size = max(dcp_world_size, 1)
         self.qrep_active = self.group_size > 1
         self.rank_in_group = rank % self.group_size
+        self.local_output = local_output
         super().__init__(
             *args,
             **kwargs,
             tp_rank=rank // self.group_size,
             tp_size=world_size // self.group_size,
         )
+
+    def forward(
+        self, input_: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        out = super().forward(input_)
+        if not self.local_output or self.group_size == 1:
+            return out
+        output, output_bias = out if self.return_bias else (out, None)
+        n = output.shape[-1] // self.group_size
+        start = self.rank_in_group * n
+        output = output[..., start : start + n]
+        if not self.return_bias:
+            return output
+        if output_bias is not None:
+            output_bias = output_bias[start : start + n]
+        return output, output_bias
 
     def _local_view(self, out: torch.Tensor) -> torch.Tensor:
         """Slice this rank's tp head shard from a group-heads output.

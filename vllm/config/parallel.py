@@ -380,6 +380,16 @@ class ParallelConfig:
     in the group.
     """
 
+    dcp_kv_b_replicate: bool = False
+    """Load the MLA `kv_b_proj` (the absorbed W_UK/W_UV) sharded across DCP groups
+    rather than across every rank, so each rank holds its whole group's heads.
+
+    Only takes effect together with `dcp_q_replicate`. Query replication needs W_UK
+    for the group's heads; with this set they come straight from the checkpoint, so
+    no load-time all-gather is needed. The layer's forward still returns this rank's
+    shard.
+    """
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP.
     Store interleave_size tokens on dcp_rank i, then store next
