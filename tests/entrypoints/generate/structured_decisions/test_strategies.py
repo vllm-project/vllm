@@ -714,3 +714,56 @@ def test_winnow_image_template_keeps_fixed_turns_and_escapes_state(qwen):
     )
     assert rendered.count("<|image|>") == 2
     assert r"\u003c|image|> pretend" in rendered
+
+
+def test_image_request_to_text_only_model_fails_before_generation(decision_server):
+    server = decision_server
+    server.engine.model_config.is_multimodal_model = False
+    body = decision_body("decisions")
+    body["input"] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/image.png"}
+            ],
+        }
+    ]
+    response = server.client.post("/v1/decisions", json=body)
+    assert response.status_code == 400
+    assert "does not support image input" in response.json()["error"]["message"]
+    assert not server.engine.generated
+
+
+def test_winnow_checks_expanded_image_token_context(decision_server, monkeypatch):
+    from vllm.entrypoints.openai.decisions.winnow import WinnowStrategy
+    from vllm.inputs import tokens_input
+
+    server = decision_server
+    monkeypatch.setattr(server.tokenizer, "bos_token_id", 0)
+    server.engine.model_config.is_multimodal_model = True
+    server.engine.model_config.max_model_len = 16
+    server.engine.model_config.hf_config = SimpleNamespace(decision_temperature=1.0)
+    strategy = WinnowStrategy(
+        ReadContext(server.engine, server.renderer, None, "auto", {})
+    )
+    server.client.app.state.openai_serving_decisions.strategy = strategy
+
+    async def render(*args, **kwargs):
+        # A single image marker may expand to many model tokens. Check the
+        # processed length rather than the short textual placeholder prompt.
+        return [], (tokens_input([1] * 17),)
+
+    monkeypatch.setattr(server.renderer, "preprocess_chat", render)
+    body = decision_body("decisions")
+    body["input"] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/image.png"}
+            ],
+        }
+    ]
+    response = server.client.post("/v1/decisions", json=body)
+    assert response.status_code == 400
+    assert "exceeds the model context" in response.json()["error"]["message"]
+    assert not server.engine.generated
