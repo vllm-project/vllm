@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+import logging
+import math
+from argparse import Namespace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -7,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from starlette.datastructures import State
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -17,15 +22,18 @@ from vllm.entrypoints.generate.structured_decisions.protocol import (
     StructuredDecisionRequest,
     StructuredDecisionResponse,
 )
-from vllm.entrypoints.generate.structured_decisions.question_types import (
-    LABELS,
-    StructuredDecisionError,
-)
 from vllm.entrypoints.generate.structured_decisions.serving import (
     ServingStructuredDecisions,
     state_text,
 )
-from vllm.entrypoints.generate.structured_decisions.strategies import (
+from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_router
+from vllm.entrypoints.openai.decisions.question_types import (
+    LABELS,
+    StructuredDecisionError,
+)
+from vllm.entrypoints.openai.decisions.serving import OpenAIServingDecisions
+from vllm.entrypoints.openai.decisions.state import init_decisions_state
+from vllm.entrypoints.openai.decisions.strategies import (
     DiffusionGemmaCanvasStrategy,
     NextTokenStrategy,
     ReadContext,
@@ -34,9 +42,9 @@ from vllm.entrypoints.generate.structured_decisions.strategies import (
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.exception_handling.register import (
-    init_exception_handler,
-)
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
@@ -46,6 +54,8 @@ TRACE_HEADERS = {
     "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
     "tracestate": "vendor=value",
 }
+
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
 def model(architecture: str, logprobs_mode: str = "raw_logprobs") -> Any:
@@ -69,8 +79,10 @@ def test_strategy_selection():
 def test_route_is_registered_by_default():
     app = FastAPI()
     register_structured_decisions_api_router(app)
+    register_decisions_api_router(app)
     paths = {getattr(route, "path", None) for route in app.routes}
     assert "/v1/systemone" in paths
+    assert "/v1/decisions" in paths
 
 
 def test_unsupported_model_returns_501():
@@ -92,6 +104,18 @@ def test_unsupported_model_returns_501():
     assert response.status_code == 501
 
 
+def test_decisions_route_returns_501_without_supported_strategy():
+    app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    app.state.openai_serving_decisions = None
+    init_exception_handler(app)
+    register_decisions_api_router(app)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/decisions", json=decision_body("decisions"))
+    assert response.status_code == 501
+
+
 def test_structured_state_keeps_unicode_in_prompt():
     state = {"message": "Français 日本語"}
     assert state_text(state) == '{"message": "Français 日本語"}'
@@ -110,6 +134,38 @@ def qwen():
         return_dict=False,
     )
     return tokenizer, prompt_ids
+
+
+def test_decisions_state_initializes(qwen):
+    tokenizer, _ = qwen
+    engine = SimpleNamespace(
+        model_config=model("Qwen3ForCausalLM"), renderer=None, input_processor=None
+    )
+    state = State()
+    state.online_renderer = SimpleNamespace(
+        renderer=SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    )
+    state.openai_serving_models = OpenAIServingModels(
+        engine, [BaseModelPath(name="test-model", model_path="test-model")]
+    )
+    args = Namespace(chat_template_content_format="auto")
+
+    strategy = init_decisions_state(engine, state, args, None, None, {})
+
+    assert isinstance(strategy, NextTokenStrategy)
+    assert isinstance(state.openai_serving_decisions, OpenAIServingDecisions)
+
+
+def test_unsupported_decisions_state_does_not_block_startup():
+    engine = SimpleNamespace(model_config=model("Qwen3ForCausalLM", "raw_logits"))
+    state = State()
+
+    strategy = init_decisions_state(
+        engine, state, Namespace(chat_template_content_format="auto"), None, None, {}
+    )
+
+    assert strategy is None
+    assert state.openai_serving_decisions is None
 
 
 def test_labels_start_the_reply(qwen):
@@ -256,3 +312,165 @@ def test_canvas_read():
         strategy._read_input(
             {"type": "token", "prompt_token_ids": [1, 2, 3, 4]}, [1, 2, 3, 4]
         )
+
+
+@pytest.fixture
+def decision_server(qwen):
+    tokenizer, _ = qwen
+
+    class Engine:
+        model_config = SimpleNamespace(is_encoder_decoder=False)
+        renderer = input_processor = None
+        errored = False
+        failure = None
+
+        def __init__(self):
+            self.admitted = []
+            self.generated = []
+
+        def check_admission(self, count):
+            self.admitted.append(count)
+
+        async def generate(self, prompt, params, request_id, **kwargs):
+            self.generated.append(prompt)
+            if self.failure == "bad_request":
+                raise ValueError("Invalid generation input")
+            if self.failure == "no_result":
+                return
+            ids = params.logprob_token_ids
+            logprobs = {i: Logprob(-math.log(len(ids))) for i in ids}
+            if self.failure == "missing_label":
+                logprobs.pop(ids[-1])
+            output = CompletionOutput(
+                index=0,
+                text="A",
+                token_ids=[ids[0]],
+                cumulative_logprob=None,
+                logprobs=[logprobs],
+                finish_reason="error" if self.failure == "error" else "length",
+            )
+            if self.failure == "no_logprobs":
+                output.logprobs = None
+            yield RequestOutput(
+                request_id=request_id,
+                prompt=None,
+                prompt_token_ids=prompt["prompt_token_ids"],
+                prompt_logprobs=None,
+                outputs=[] if self.failure == "no_output" else [output],
+                finished=True,
+            )
+
+    class Renderer:
+        renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+
+        async def preprocess_chat(self, request, messages, **kwargs):
+            await asyncio.sleep(0)
+            ids = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                enable_thinking=False,
+                tokenize=True,
+                return_dict=False,
+            )
+            return [], [tokens_input(ids)]
+
+    engine, renderer = Engine(), Renderer()
+    strategy = NextTokenStrategy(ReadContext(engine, renderer, None, "auto", {}))
+    models = OpenAIServingModels(
+        engine, [BaseModelPath(name="test-model", model_path="test-model")]
+    )
+    request_logger = RequestLogger(max_log_len=None)
+    app = FastAPI()
+    app.state.args = Namespace(log_error_stack=False)
+    app.state.serving_structured_decisions = ServingStructuredDecisions(
+        models, strategy, request_logger=request_logger
+    )
+    app.state.openai_serving_decisions = OpenAIServingDecisions(
+        models, strategy, request_logger=request_logger
+    )
+    init_exception_handler(app)
+    register_structured_decisions_api_router(app)
+    register_decisions_api_router(app)
+    with TestClient(app, headers={"X-Request-Id": "test-request"}) as client:
+        yield SimpleNamespace(
+            client=client, engine=engine, renderer=renderer, tokenizer=tokenizer
+        )
+
+
+def decision_body(endpoint, count=1):
+    questions = [
+        {"type": "choice", "instructions": f"Question {i}"} for i in range(count)
+    ]
+    if endpoint == "decisions":
+        return dict(
+            model="test-model",
+            input="evidence",
+            safety_identifier="test-user",
+            questions=[
+                dict(q, choices=[{"value": "yes"}, {"value": "no"}]) for q in questions
+            ],
+        )
+    return dict(
+        model="test-model",
+        state="evidence",
+        questions={
+            str(i): dict(q, criteria={"yes": None, "no": None})
+            for i, q in enumerate(questions)
+        },
+    )
+
+
+@pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
+@pytest.mark.parametrize("count,status", [(64, 200), (65, 400)])
+def test_model_question_limit_is_enforced_before_admission(
+    decision_server, endpoint, count, status
+):
+    server = decision_server
+    response = server.client.post(
+        f"/v1/{endpoint}", json=decision_body(endpoint, count)
+    )
+    assert response.status_code == status, response.text
+    assert server.engine.admitted == ([count] if status == 200 else [])
+    if status == 400:
+        assert "at most 64" in response.json()["error"]["message"]
+        assert not server.engine.generated
+
+
+@pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
+@pytest.mark.parametrize(
+    "failure",
+    ["no_result", "no_output", "error", "no_logprobs", "missing_label", "bad_request"],
+)
+def test_generation_failures_are_server_errors(decision_server, endpoint, failure):
+    server = decision_server
+    server.engine.failure = failure
+    response = server.client.post(f"/v1/{endpoint}", json=decision_body(endpoint))
+    status = 400 if failure == "bad_request" else 500
+    assert response.status_code == status, response.text
+    assert response.json()["error"]["type"] == (
+        "BadRequestError" if status == 400 else "InternalServerError"
+    )
+    assert len(server.engine.generated) == 1
+
+
+def test_decisions_logging_includes_receipt_and_body(
+    decision_server, caplog, monkeypatch
+):
+    logger_name = "vllm.entrypoints.serve.utils.request_logger"
+    monkeypatch.setattr(logging.getLogger(logger_name), "propagate", True)
+    with caplog.at_level(logging.DEBUG, logger=logger_name):
+        response = decision_server.client.post(
+            "/v1/decisions", json=decision_body("decisions")
+        )
+    assert response.status_code == 200, response.text
+    assert "Received request decision-test-request" in caplog.text
+    assert "evidence" in caplog.text
+    assert '"safety_identifier":"test-user"' in caplog.text
+
+
+def test_prompts_retain_question_order(decision_server):
+    server = decision_server
+    response = server.client.post("/v1/decisions", json=decision_body("decisions", 2))
+    assert response.status_code == 200, response.text
+    for i, prompt in enumerate(server.engine.generated):
+        assert f"Question {i}" in server.tokenizer.decode(prompt["prompt_token_ids"])
