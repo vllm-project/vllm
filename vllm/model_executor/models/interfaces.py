@@ -21,6 +21,7 @@ from typing import (
     ClassVar,
     Literal,
     Protocol,
+    Self,
     TypeAlias,
     overload,
     runtime_checkable,
@@ -31,7 +32,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
-from typing_extensions import Self, TypeIs
+from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
