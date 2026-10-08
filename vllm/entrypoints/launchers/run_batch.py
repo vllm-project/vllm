@@ -482,7 +482,7 @@ async def upload_data(
 async def batch_output_writer(
     path_or_url: str, output_tmp_dir: str | None
 ) -> AsyncIterator[IO[str]]:
-    """Yield a file that receives responses as they complete.
+    """Yield a file that receives responses in input order.
 
     A local file holds the responses for a prefix of the input if the run
     fails. A URL destination is staged and uploaded only once the batch

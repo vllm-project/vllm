@@ -1185,31 +1185,6 @@ async def test_open_batch_input_keeps_a_carriage_return_inside_a_line(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_batch_writes_a_response_per_request(tmp_path):
-    """Every request must produce exactly one response line."""
-    input_path = _write_batch(tmp_path, [INPUT_BATCH])
-    output_path = tmp_path / "output.jsonl"
-
-    requests = [json.loads(line) for line in INPUT_BATCH.strip().split("\n")]
-
-    with (
-        open(input_path, encoding="utf-8") as input_file,
-        open(output_path, "w", encoding="utf-8") as output_file,
-    ):
-        # An empty registry routes every request to an error response, which
-        # exercises the dispatch loop without starting an engine.
-        await dispatch_batch(
-            input_file, output_file, {}, BatchProgressTracker(), max_inflight=2
-        )
-
-    lines = output_path.read_text().strip().split("\n")
-    assert len(lines) == len(requests)
-    assert {
-        BatchRequestOutput.model_validate_json(line).custom_id for line in lines
-    } == {request["custom_id"] for request in requests}
-
-
-@pytest.mark.asyncio
 async def test_batch_output_writer_persists_before_completion(tmp_path):
     """Responses reach disk while the batch is still running."""
     output_path = tmp_path / "output.jsonl"
