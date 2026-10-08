@@ -84,6 +84,10 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
     ``TopKWeightAndReduceNoOP``.
     """
 
+    # The output is zeroed and then only accumulated into, so the caller's
+    # buffer can be written directly instead of copied into afterwards.
+    writes_output_from_zero = True
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,

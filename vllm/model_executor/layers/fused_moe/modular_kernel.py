@@ -1316,7 +1316,10 @@ class FusedMoEKernelModularImpl:
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
+            if use_output_alias and (
+                rocm_aiter_ops.is_fused_moe_enabled()
+                or getattr(self.fused_experts, "writes_output_from_zero", False)
+            ):
                 fused_out = output_alias
         elif use_output_alias:
             fused_out = output_alias
