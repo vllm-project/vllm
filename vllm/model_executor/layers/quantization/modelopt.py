@@ -890,6 +890,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         act_dtype: torch.dtype,
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> tuple[int, int]:
+        """Align each expert partition to complete checkpoint quantization groups."""
         hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
             hidden_size=hidden_size,
             intermediate_size_per_partition=intermediate_size_per_partition,

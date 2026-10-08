@@ -529,6 +529,7 @@ class RoutedExperts(PluggableLayer):
         tp_rank: int,
         load_full: bool = False,
     ):
+        """Load one gate/up TP shard, clearing padding with no checkpoint data."""
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         if self.moe_config.is_act_and_mul:
@@ -592,6 +593,7 @@ class RoutedExperts(PluggableLayer):
         tp_rank: int,
         load_full: bool = False,
     ):
+        """Load the down-projection TP shard and clear unused aligned padding."""
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
         shard_alignment = getattr(
