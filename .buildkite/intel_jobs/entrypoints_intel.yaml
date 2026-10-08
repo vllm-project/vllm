@@ -50,7 +50,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
-    pytest -v -s entrypoints/llm/test_generate.py &&
+    pytest -v -s entrypoints/llm/generate &&
     pytest -v -s entrypoints/llm/offline_mode'
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server)"

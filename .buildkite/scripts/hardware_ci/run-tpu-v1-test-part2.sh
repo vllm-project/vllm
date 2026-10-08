@@ -126,8 +126,8 @@ run_and_track_test() {
 }
 
 # --- Actual Test Execution ---
-run_and_track_test 1 "test_struct_output_generate.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
+run_and_track_test 1 "structured_output" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/structured_output -k \"not test_structured_output_with_reasoning_matrices\""
 run_and_track_test 2 "test_moe_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
 run_and_track_test 3 "test_lora.py" \
