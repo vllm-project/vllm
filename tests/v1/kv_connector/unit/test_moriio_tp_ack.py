@@ -460,7 +460,7 @@ def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid
     assert worker.get_block_ids_with_load_errors() == expected_invalid
 
 
-def test_hybrid_step_barrier_fails_closed(monkeypatch):
+def test_hybrid_step_barrier_fails_closed():
     class FailingWrapper:
         def waiting_for_transfer_complete(self, _statuses):
             raise TransferError("failed")
@@ -471,15 +471,157 @@ def test_hybrid_step_barrier_fails_closed(monkeypatch):
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = True
     worker._reads_issued_this_step = [object()]
-    worker._mamba_reads_this_step = [object()]
     worker.moriio_wrapper = FailingWrapper()
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.get_forward_context",
-        lambda: SimpleNamespace(cudagraph_runtime_mode=None),
-    )
 
     with pytest.raises(TransferError, match="failed"):
         worker._await_reads_issued_this_step()
+
+
+def test_step_barrier_awaits_every_read_before_forward():
+    # Indexer caches have no per-layer hook, and the drafter may replay a FULL
+    # graph after a PIECEWISE target forward, so every read is awaited up front.
+    class RecordingWrapper:
+        def __init__(self):
+            self.awaited = []
+
+        def waiting_for_transfer_complete(self, statuses):
+            self.awaited.append(list(statuses))
+
+        def shutdown(self):
+            pass
+
+    attn, indexer, mtp_attn = object(), object(), object()
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = False
+    worker._reads_issued_this_step = [attn, indexer, mtp_attn]
+    worker.moriio_wrapper = RecordingWrapper()
+
+    worker._await_reads_issued_this_step()
+    worker._await_reads_issued_this_step()
+
+    assert worker.moriio_wrapper.awaited == [[attn, indexer, mtp_attn]]
+    assert worker._reads_issued_this_step == []
+
+
+def test_wait_for_layer_load_is_noop():
+    # The per-layer hook must stay a no-op: reads are awaited in start_load_kv,
+    # so touching the worker here would re-introduce the removed per-layer wait.
+    class _Boom:
+        def __getattr__(self, name):
+            raise AssertionError("wait_for_layer_load must not touch the worker")
+
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.connector_worker = _Boom()
+
+    assert connector.wait_for_layer_load("layer") is None
+
+
+def test_step_barrier_without_mamba_does_not_raise_on_failure():
+    # Attention-only (no HMA): a failed read is reported via
+    # get_block_ids_with_load_errors, not raised, so the step can recover.
+    class FailingWrapper:
+        def waiting_for_transfer_complete(self, _statuses):
+            raise TransferError("failed")
+
+        def shutdown(self):
+            pass
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = False
+    worker._reads_issued_this_step = [object()]
+    worker.moriio_wrapper = FailingWrapper()
+
+    # Must not raise (contrast test_hybrid_step_barrier_fails_closed).
+    worker._await_reads_issued_this_step()
+    assert worker._reads_issued_this_step == []
+
+
+def test_step_barrier_noop_when_no_reads_posted():
+    # Steady-state decode (and producers / WRITE mode) post no reads, so the
+    # barrier must not call into the transfer wrapper at all.
+    class RecordingWrapper:
+        def __init__(self):
+            self.called = False
+
+        def waiting_for_transfer_complete(self, _statuses):
+            self.called = True
+
+        def shutdown(self):
+            pass
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = False
+    worker._reads_issued_this_step = []
+    worker.moriio_wrapper = RecordingWrapper()
+
+    worker._await_reads_issued_this_step()
+
+    assert worker.moriio_wrapper.called is False
+
+
+def test_write_mode_read_blocks_posts_no_read():
+    # WRITE mode never reads: _read_blocks returns before posting anything, so
+    # the step barrier has nothing to await and no release notify is sent.
+    class RecordingWrapper:
+        def __init__(self):
+            self.sent = []
+
+        def send_notify(self, *args, **kwargs):
+            self.sent.append((args, kwargs))
+
+        def shutdown(self):
+            pass
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.mode = MoRIIOMode.WRITE
+    worker._reads_issued_this_step = []
+    worker.moriio_wrapper = RecordingWrapper()
+
+    worker._read_blocks(
+        local_block_ids=[1, 2],
+        remote_block_ids=[[10, 11], [90]],
+        dst_engine_id="prefill",
+        request_id="req-write",
+        transfer_id="tx-write",
+        remote_host="127.0.0.1",
+        remote_notify_port=7000,
+        remote_tp_size=8,
+    )
+
+    assert worker._reads_issued_this_step == []
+    assert worker.moriio_wrapper.sent == []
+
+
+def test_producer_start_load_kv_posts_no_read():
+    # The producer (prefill) leg only acks the consumer's reads; it must never
+    # post a read of its own, so _reads_issued_this_step stays empty and the
+    # barrier wrapper is never touched.
+    class RecordingWrapper:
+        def __init__(self):
+            self.waited = False
+            self.async_waited = False
+
+        def async_wait_reqid(self):
+            self.async_waited = True
+
+        def waiting_for_transfer_complete(self, _statuses):
+            self.waited = True
+
+        def shutdown(self):
+            pass
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = True
+    worker._reads_issued_this_step = []
+    worker._consumer_notification_counts = {}
+    worker._completed_consumer_notifications = set()
+    worker.moriio_wrapper = RecordingWrapper()
+
+    worker.start_load_kv(SimpleNamespace(transfer_id_to_request_id={}))
+
+    assert worker._reads_issued_this_step == []
+    assert worker.moriio_wrapper.async_waited is True
+    assert worker.moriio_wrapper.waited is False
 
 
 def test_requested_cudagraph_mode_is_never_overridden():
