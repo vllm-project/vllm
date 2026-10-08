@@ -144,20 +144,18 @@ class LoRAModelManager:
             else set()
         )
 
-        # When the engine is started with enable_mixed_moe_lora_format=True
-        # we force the universal 2D wrapper (FusedMoEWithLoRA) regardless of
-        # the model's 3D flag, so 2D and 3D adapters can coexist.
+        # Mixed-format and shared-outer adapters both use FusedMoEWithLoRA.
+        # FusedMoE3DWithLoRA only implements the fused gate/up PEFT pair.
         self._enable_mixed_moe_lora_format = (
             is_moe and lora_config.enable_mixed_moe_lora_format
         )
+        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self._is_3d_moe_model = (
             self._is_moe
             and self.model.is_3d_moe_weight
             and not self._enable_mixed_moe_lora_format
+            and not self._enable_moe_shared_loras
         )
-        # Shared MoE adapters: w13 lora_A / w2 lora_B shared across experts,
-        # stored as pre-stacked experts.w{1,2,3} tensors (startup opt-in).
-        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self.packed_modules_mapping = process_packed_modules_mapping(
             self.model,
             force_2d_moe=self._enable_mixed_moe_lora_format,
