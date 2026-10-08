@@ -118,12 +118,6 @@ def _prefill(manager, stub, request, *, external=0) -> list[int]:
         )
         request.num_computed_tokens = start + num_new
         ends.append(request.num_computed_tokens)
-        if stub.use_lookahead_block_hashes:
-            # Lookahead blocks are published from the step's output.
-            request.mark_lookahead_hashes_publishable(
-                request.num_computed_tokens, stub.hash_block_size
-            )
-            manager.cache_blocks(request, request.num_computed_tokens)
         _, retained = manager.take_kv_cache_block_copies()
         if retained:
             manager.block_pool.free_blocks(retained)
@@ -408,7 +402,6 @@ def test_async_prompt_tail_state_is_copied_before_the_next_chunk(lookahead):
 
     ends: list[int] = []
     copied_sources: list[set[int]] = []
-    unpublished = 0
     while request.num_computed_tokens < request.num_tokens:
         start = request.num_computed_tokens
         num_new = Scheduler._mamba_block_aligned_split(
@@ -422,11 +415,6 @@ def test_async_prompt_tail_state_is_copied_before_the_next_chunk(lookahead):
         if retained:
             manager.block_pool.free_blocks(retained)
         manager.new_step_starts()
-        if lookahead and unpublished:
-            # The previous step's output only arrives now.
-            request.mark_lookahead_hashes_publishable(unpublished, hash_block_size)
-            manager.cache_blocks(request, unpublished)
-        unpublished = request.num_computed_tokens
 
     tail = next(e for e in ends if e % block_size and e < request.num_prompt_tokens)
     step = ends.index(tail)

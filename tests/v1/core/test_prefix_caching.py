@@ -603,14 +603,10 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         finished_recving_kv_req_ids={request.request_id},
         prefix_replay_tokens=0,
         prefix_replay_group_ids=(),
-        use_lookahead_block_hashes=False,
     )
     scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
     scheduler._load_restores_replay_window = MethodType(
         Scheduler._load_restores_replay_window, scheduler
-    )
-    scheduler._mark_lookahead_hashes_publishable = MethodType(
-        Scheduler._mark_lookahead_hashes_publishable, scheduler
     )
     Scheduler._update_waiting_for_remote_kv(scheduler, request)
     assert request.num_tokens - request.num_computed_tokens == 1
@@ -4180,8 +4176,6 @@ def test_eagle_identical_prompt_hits_last_safe_block():
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    req.mark_lookahead_hashes_publishable(req.num_tokens, block_size)
-    manager.cache_blocks(req, req.num_tokens)
     manager.free(req)
 
     # New request with same tokens + Eagle enabled
@@ -4226,8 +4220,6 @@ def test_eagle_with_partial_blocks():
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    req.mark_lookahead_hashes_publishable(req.num_tokens, block_size)
-    manager.cache_blocks(req, req.num_tokens)
     manager.free(req)
 
     # New request with Eagle enabled
@@ -4263,8 +4255,6 @@ def test_eagle_successor_token_controls_last_block_hit():
     )
     computed_blocks, _, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
-    first.mark_lookahead_hashes_publishable(first.num_tokens, block_size)
-    manager.cache_blocks(first, first.num_tokens)
     manager.free(first)
 
     same_successor = make_request(
@@ -4288,49 +4278,6 @@ def test_eagle_successor_token_controls_last_block_hit():
     assert num_tokens == block_size
 
 
-def test_eagle_blocks_are_published_only_after_draft_materialization():
-    block_size = 2
-    manager = make_kv_cache_manager(
-        make_kv_cache_config(block_size, num_blocks=20),
-        max_model_len=8192,
-        enable_caching=True,
-        use_eagle=True,
-        use_lookahead_block_hashes=True,
-        hash_block_size=block_size,
-    )
-    first = make_request(
-        "first",
-        [0, 1, 2, 3, 4],
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
-    )
-    computed_blocks, _, _ = manager.get_computed_blocks(first)
-    manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
-
-    before_draft = make_request(
-        "before_draft",
-        first.all_token_ids[:],
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
-    )
-    _, num_tokens, _ = manager.get_computed_blocks(before_draft)
-    assert num_tokens == 0
-
-    first.mark_lookahead_hashes_publishable(first.num_tokens, block_size)
-    manager.cache_blocks(first, first.num_tokens)
-    after_draft = make_request(
-        "after_draft",
-        first.all_token_ids[:],
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
-    )
-    _, num_tokens, _ = manager.get_computed_blocks(after_draft)
-    assert num_tokens == 2 * block_size
-
-
 def test_eagle_kv_events_publish_successor_hashes():
     block_size = 2
     manager = make_kv_cache_manager(
@@ -4351,8 +4298,6 @@ def test_eagle_kv_events_publish_successor_hashes():
     )
     computed_blocks, _, _ = manager.get_computed_blocks(request)
     manager.allocate_slots(request, request.num_tokens, 0, computed_blocks)
-    request.mark_lookahead_hashes_publishable(request.num_tokens, block_size)
-    manager.cache_blocks(request, request.num_tokens)
 
     events = manager.take_events()
 
@@ -4511,7 +4456,7 @@ def test_masked_block_does_not_emit_empty_stored_event():
     assert pool.take_events() == []
 
 
-def test_lookahead_hash_is_published_when_successor_arrives():
+def test_lookahead_hash_is_created_when_successor_arrives():
     block_size = 2
     request = make_request(
         "request",
@@ -4540,11 +4485,6 @@ def test_lookahead_hash_is_published_when_successor_arrives():
         use_lookahead_hashes=True,
     )
     assert request.block_hashes == expected.block_hashes
-    assert request.num_publishable_block_hashes == 0
-
-    request.mark_lookahead_hashes_publishable(request.num_tokens, block_size)
-
-    assert request.num_publishable_block_hashes == len(request.block_hashes)
 
 
 def test_lookahead_block_hashes_support_resumable_requests():
@@ -4621,13 +4561,9 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
     )
     computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, 1248, num_computed, computed_blocks)
-    first.mark_lookahead_hashes_publishable(first.num_tokens, hash_block_size)
-    manager.cache_blocks(first, 1248)
     first.num_computed_tokens = 1248
     manager.new_step_starts()
     manager.allocate_slots(first, 1)
-    first.mark_lookahead_hashes_publishable(first.num_tokens, hash_block_size)
-    manager.cache_blocks(first, 1249)
     first.num_computed_tokens = 1249
     manager.new_step_starts()
     manager.free(first)
@@ -5636,9 +5572,6 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
         )
         assert blocks is not None
         req0.num_computed_tokens = chunk_end
-        # Lookahead blocks are published from the step's output.
-        req0.mark_lookahead_hashes_publishable(chunk_end, block_size)
-        manager.cache_blocks(req0, chunk_end)
 
     pool = manager.block_pool
     for i in range(4):

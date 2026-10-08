@@ -26,7 +26,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import BlockHash, resolve_kv_cache_block_sizes
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
@@ -112,26 +112,12 @@ class MooncakeStoreScheduler:
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
-        # The final lookahead hash becomes publishable after the request's last
-        # step, so its save is pinned at finish and emitted in the next step.
+        # The final lookahead hash exists only after the request's last sampled
+        # token, so its save is pinned at finish and emitted in the next step.
         self._finished_lookahead_save_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
-
-    def _publishable_hashes(self, request: Request) -> list[BlockHash]:
-        if self.use_lookahead_block_hashes:
-            return request.block_hashes[: request.num_publishable_block_hashes]
-        return request.block_hashes
-
-    def _request_hashes_for_meta(
-        self,
-        request: Request,
-        load_spec: LoadSpec | None,
-    ) -> list[BlockHash]:
-        if load_spec is not None and load_spec.can_load:
-            return request.block_hashes
-        return self._publishable_hashes(request)
 
     def _max_save_tokens(
         self,
@@ -144,7 +130,7 @@ class MooncakeStoreScheduler:
             and load_spec.can_load
         ):
             return None
-        return request.num_publishable_block_hashes * self._hash_block_size
+        return len(request.block_hashes) * self._hash_block_size
 
     def get_num_new_matched_tokens(
         self,
@@ -302,7 +288,7 @@ class MooncakeStoreScheduler:
                 # A consumer may write decode KV without becoming a prefill
                 # producer. Loads are still carried by the same metadata.
                 skip_save=is_consumer,
-                block_hashes=self._request_hashes_for_meta(request_real, load_spec),
+                block_hashes=request_real.block_hashes,
                 max_save_tokens=self._max_save_tokens(request_real, load_spec),
             )
             if req_meta is not None:
@@ -355,9 +341,7 @@ class MooncakeStoreScheduler:
                         self._block_size,
                         load_spec=load_spec,
                         skip_save=is_consumer,
-                        block_hashes=self._request_hashes_for_meta(
-                            request_real, load_spec
-                        ),
+                        block_hashes=request_real.block_hashes,
                         max_save_tokens=self._max_save_tokens(
                             request_real,
                             load_spec,
@@ -396,7 +380,7 @@ class MooncakeStoreScheduler:
                         self._block_size,
                         load_spec=None,
                         skip_save=False,
-                        block_hashes=self._publishable_hashes(unfinished_req),
+                        block_hashes=unfinished_req.block_hashes,
                         max_save_tokens=self._max_save_tokens(unfinished_req),
                     )
 
@@ -431,9 +415,7 @@ class MooncakeStoreScheduler:
                     self._block_size,
                     load_spec=load_spec,
                     skip_save=None,
-                    block_hashes=self._request_hashes_for_meta(
-                        unfinished_req, load_spec
-                    ),
+                    block_hashes=unfinished_req.block_hashes,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -566,7 +548,7 @@ class MooncakeStoreScheduler:
         req_meta = ReqMeta.from_request_tracker(
             tracker,
             self._block_size,
-            block_hashes=self._publishable_hashes(request),
+            block_hashes=request.block_hashes,
             max_save_tokens=self._max_save_tokens(request),
         )
         if req_meta is None or not self._pin_store_job(req_meta):
@@ -622,7 +604,7 @@ class MooncakeStoreScheduler:
             block_ids=tuple(
                 block_ids[group_id].copy() for group_id in self._store_group_ids
             ),
-            block_hashes=list(self._publishable_hashes(request)),
+            block_hashes=list(request.block_hashes),
             can_save=True,
             num_prompt_tokens=tracker.prefill_end_tokens,
             store_job_id=store_job_id,
@@ -680,7 +662,7 @@ class MooncakeStoreScheduler:
                     req_id=req_id,
                     token_len_chunk=0,
                     block_ids=tracker.allocated_block_ids,
-                    block_hashes=self._publishable_hashes(req_tuple[0]),
+                    block_hashes=req_tuple[0].block_hashes,
                     can_save=True,
                     num_prompt_tokens=tracker.prefill_end_tokens,
                     boundary_state_offloads=accepted,

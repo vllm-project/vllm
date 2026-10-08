@@ -332,7 +332,10 @@ def test_scheduler_stats_route_to_existing_output_client():
     assert len(engine_core_outputs[1].outputs) == 1
 
 
-def test_scheduler_publishes_lookahead_blocks_after_step_output():
+def test_scheduler_publishes_lookahead_blocks_at_allocation():
+    """A lookahead block is published once its lookahead token exists: prompt
+    blocks at their own allocation, the block ending at the first sampled
+    token at the allocation after it is sampled."""
     block_size = 2
     init_none_hash(sha256)
     scheduler = create_scheduler(
@@ -341,29 +344,25 @@ def test_scheduler_publishes_lookahead_blocks_after_step_output():
         max_num_batched_tokens=16,
     )
     _enable_eagle_prefix_hashing(scheduler)
-    coordinator = scheduler.kv_cache_manager.coordinator
-    coordinator.eagle_group_ids = {0}
-    coordinator.single_type_managers[0].use_eagle = True
 
-    request = Request(
-        request_id="first",
-        prompt_token_ids=[0, 1, 2, 3, 4],
-        sampling_params=SamplingParams(max_tokens=2),
-        pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
-    )
+    def make_request(request_id: str, prompt_token_ids: list[int]) -> Request:
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=SamplingParams(max_tokens=3, ignore_eos=True),
+            pooling_params=None,
+            block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+        )
+
+    def num_cached_tokens(prompt_token_ids: list[int]) -> int:
+        probe = make_request("probe", prompt_token_ids)
+        return scheduler.kv_cache_manager.get_computed_blocks(probe)[1]
+
+    request = make_request("first", [0, 1, 2, 3])
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
-
-    before_output = Request(
-        request_id="before_output",
-        prompt_token_ids=[0, 1, 2, 3, 4],
-        sampling_params=SamplingParams(max_tokens=1),
-        pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
-    )
-    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(before_output)
-    assert num_tokens == 0
+    # Block [2, 4) waits for its lookahead token, the first sampled one.
+    assert num_cached_tokens([0, 1, 2, 3, 5, 7]) == block_size
 
     scheduler.update_from_output(
         scheduler_output,
@@ -373,28 +372,9 @@ def test_scheduler_publishes_lookahead_blocks_after_step_output():
             sampled_token_ids=[[5]],
         ),
     )
-
-    after_output = Request(
-        request_id="after_output",
-        prompt_token_ids=[0, 1, 2, 3, 4],
-        sampling_params=SamplingParams(max_tokens=1),
-        pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
-    )
-    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(after_output)
-    assert num_tokens == 2 * block_size
-
-    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
-    scheduler._update_requests_with_invalid_blocks(
-        [request], {block_ids[0]}, {}, evict_blocks=False
-    )
-    assert request.num_publishable_block_hashes == 0
-
-    request.mark_lookahead_hashes_publishable(4, block_size)
-    assert request.num_publishable_block_hashes == 2
-    scheduler.running.remove(request)
-    scheduler._preempt_request(request, timestamp=0.0)
-    assert request.num_publishable_block_hashes == 0
+    scheduler.schedule()
+    assert num_cached_tokens([0, 1, 2, 3, 5, 7]) == 2 * block_size
+    assert num_cached_tokens([0, 1, 2, 3, 6, 7]) == block_size
 
 
 def test_finished_request_publishes_block_ending_at_last_sampled_token():
@@ -431,7 +411,6 @@ def test_finished_request_publishes_block_ending_at_last_sampled_token():
     assert request.is_finished()
     # Tokens 0-3 were computed; token 4 is the lookahead of block [2, 4).
     assert request.num_computed_tokens == 4
-    assert request.num_publishable_block_hashes == 2
 
     probe = Request(
         request_id="probe",
@@ -474,7 +453,6 @@ def test_connector_finish_includes_partial_eagle_block(
         ),
     )
     assert request.num_computed_tokens == 33
-    assert request.num_publishable_block_hashes == 2
 
     captured_block_ids = None
 

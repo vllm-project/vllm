@@ -50,104 +50,6 @@ def _enable_eagle_prefix_hashing(scheduler: AsyncScheduler) -> None:
     manager.block_pool.use_lookahead_block_hashes = True
 
 
-def test_chunked_prefill_publishes_each_committed_async_step() -> None:
-    block_size = 2
-    init_none_hash(sha256)
-    scheduler = create_scheduler(
-        async_scheduling=True,
-        max_num_seqs=1,
-        enable_prefix_caching=True,
-        block_size=block_size,
-        max_num_batched_tokens=3,
-        max_model_len=16,
-    )
-    assert isinstance(scheduler, AsyncScheduler)
-    _enable_eagle_prefix_hashing(scheduler)
-
-    def make_request(request_id: str) -> Request:
-        return Request(
-            request_id=request_id,
-            prompt_token_ids=list(range(7)),
-            sampling_params=SamplingParams(max_tokens=1),
-            pooling_params=None,
-            block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
-        )
-
-    request = make_request("request")
-    scheduler.add_request(request)
-
-    first_step = scheduler.schedule()
-    second_step = scheduler.schedule()
-    assert first_step.num_scheduled_tokens[request.request_id] == 3
-    assert second_step.num_scheduled_tokens[request.request_id] == 3
-    assert request.num_computed_tokens == 6
-    assert request.num_output_placeholders == 0
-
-    scheduler.update_from_output(
-        first_step,
-        _make_model_runner_output(first_step, sampled_token_ids=[[]]),
-    )
-
-    assert request.num_publishable_block_hashes == 1
-    probe = make_request("probe")
-    _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
-    assert num_cached_tokens == 2
-
-    # The second chunk's output commits it.
-    scheduler.update_from_output(
-        second_step,
-        _make_model_runner_output(second_step, sampled_token_ids=[[]]),
-    )
-    assert request.num_publishable_block_hashes == 3
-    _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
-    assert num_cached_tokens == 6
-
-
-def test_eagle_publication_advances_past_rejected_async_drafts() -> None:
-    """Async steps are scheduled before earlier drafts are rejected; the
-    committed frontier must still advance on every step."""
-    block_size = 2
-    init_none_hash(sha256)
-    scheduler = create_scheduler(
-        async_scheduling=True,
-        enable_prefix_caching=True,
-        block_size=block_size,
-        num_speculative_tokens=1,
-        speculative_method="ngram_gpu",
-        max_num_batched_tokens=64,
-        max_model_len=64,
-    )
-    assert isinstance(scheduler, AsyncScheduler)
-    _enable_eagle_prefix_hashing(scheduler)
-    request = Request(
-        request_id="eagle",
-        prompt_token_ids=list(range(8)),
-        sampling_params=SamplingParams(max_tokens=16, ignore_eos=True),
-        pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
-    )
-    scheduler.add_request(request)
-
-    in_flight = scheduler.schedule()
-    for token_id in range(100, 106):
-        next_step = scheduler.schedule()
-        # One sampled token per step: every scheduled draft is rejected.
-        scheduler.update_from_output(
-            in_flight,
-            _make_model_runner_output(
-                in_flight,
-                sampled_token_ids=[[token_id]],
-            ),
-        )
-        in_flight = next_step
-
-    committed = request.num_computed_tokens - request.num_in_flight_tokens
-    assert committed > len(request.prompt_token_ids)
-    assert request.num_publishable_block_hashes == min(
-        len(request.block_hashes), committed // block_size
-    )
-
-
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
 def test_stop_by_max_tokens(max_tokens: int):
     scheduler = create_scheduler(async_scheduling=True)
@@ -788,8 +690,8 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
         assert getattr(req, "num_stale_output_tokens", 0) == 0
 
 
-def test_stale_output_does_not_restore_eagle_materialization():
-    """A preemption fence must survive the return of an in-flight step."""
+def test_stale_output_does_not_republish_preempted_lookahead_blocks():
+    """The return of an in-flight step must not cache a preempted request."""
     block_size = 4
     init_none_hash(sha256)
     scheduler = create_scheduler(
@@ -798,9 +700,8 @@ def test_stale_output_does_not_restore_eagle_materialization():
         block_size=block_size,
         max_num_batched_tokens=32,
     )
-    scheduler.use_lookahead_block_hashes = True
-    scheduler.kv_cache_manager.coordinator.use_lookahead_block_hashes = True
-    scheduler.kv_cache_manager.block_pool.use_lookahead_block_hashes = True
+    assert isinstance(scheduler, AsyncScheduler)
+    _enable_eagle_prefix_hashing(scheduler)
     request = Request(
         request_id="eagle",
         prompt_token_ids=list(range(9)),
@@ -821,7 +722,6 @@ def test_stale_output_does_not_restore_eagle_materialization():
     assert in_flight_step.scheduled_cached_reqs.num_computed_tokens == [9]
 
     scheduler.reset_prefix_cache(reset_running_requests=True)
-    assert request.num_publishable_block_hashes == 0
     assert request.num_stale_output_tokens > 0
 
     scheduler.update_from_output(
@@ -830,7 +730,14 @@ def test_stale_output_does_not_restore_eagle_materialization():
     )
 
     assert request.num_stale_output_tokens == 0
-    assert request.num_publishable_block_hashes == 0
+    probe = Request(
+        request_id="probe",
+        prompt_token_ids=list(range(9)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+    )
+    assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 0
 
 
 def test_requires_kv_delivery_defaults_to_producer_role():

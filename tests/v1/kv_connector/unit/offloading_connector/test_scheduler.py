@@ -3928,10 +3928,11 @@ class TestEagle:
         runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0),))
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
-    def test_successor_hash_store_stops_at_materialized_boundary(
+    def test_lookahead_store_includes_block_hashed_by_sampled_token(
         self, request_runner, async_scheduling: bool
     ):
-        """Offloading must not publish a hash before its draft KV exists."""
+        """The last prompt block is hashed only once the first token is
+        sampled; it must still be stored, leaving no hole."""
         block_size = 4
         blocks_per_chunk = 2
         runner = request_runner(
@@ -3944,15 +3945,14 @@ class TestEagle:
         assert connector.supports_lookahead_block_hashes
         connector.set_lookahead_block_hashes(True)
 
-        request = runner.new_request(token_ids=[0] * block_size * 4)
-        request.mark_lookahead_hashes_publishable(3 * block_size, block_size)
+        runner.new_request(token_ids=[0] * block_size * 4)
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output(keys)
         )
 
         runner.run(
             decoded_tokens=[EOS_TOKEN_ID],
-            expected_stored=((0, 0), (0, 1)),
+            expected_stored=((0, 0), (0, 1), (0, 2), (0, 3)),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])

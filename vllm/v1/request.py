@@ -223,9 +223,6 @@ class Request:
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         self.block_hashes: list[BlockHash] = []
-        # Leading lookahead hashes whose target and draft KV are committed and
-        # can be published to content-addressed caches.
-        self.num_publishable_block_hashes = 0
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -301,25 +298,6 @@ class Request:
             return
         num_hashes = max(num_tokens - lookahead_tokens, 0) // hash_block_size
         del self.block_hashes[num_hashes:]
-        self.invalidate_lookahead_hash_publication(num_hashes)
-
-    def mark_lookahead_hashes_publishable(
-        self,
-        num_tokens: int,
-        hash_block_size: int,
-    ) -> None:
-        """Advance the lookahead-hash publication fence to committed tokens."""
-        num_hashes = min(len(self.block_hashes), num_tokens // hash_block_size)
-        self.num_publishable_block_hashes = max(
-            self.num_publishable_block_hashes,
-            num_hashes,
-        )
-
-    def invalidate_lookahead_hash_publication(self, num_hashes: int = 0) -> None:
-        """Lower the publication fence to a surviving resident prefix."""
-        self.num_publishable_block_hashes = min(
-            self.num_publishable_block_hashes, num_hashes
-        )
 
     @property
     def use_structured_output(self) -> bool:

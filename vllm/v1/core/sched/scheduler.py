@@ -1607,7 +1607,6 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
-        request.invalidate_lookahead_hash_publication()
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -2044,17 +2043,6 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids, bitmask, num_acceptable_drafts
         )
 
-    def _mark_lookahead_hashes_publishable(
-        self,
-        request: Request,
-        num_tokens: int,
-    ) -> None:
-        if self.use_lookahead_block_hashes:
-            request.mark_lookahead_hashes_publishable(
-                num_tokens,
-                self.hash_block_size,
-            )
-
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -2217,19 +2205,16 @@ class Scheduler(SchedulerInterface):
 
             if (
                 self.use_lookahead_block_hashes
+                and stopped
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
             ):
-                # Rejections are already rolled back and later steps are still
-                # in flight, so this is the committed frontier. The drafter
-                # writes draft KV for every scheduled token in the step.
-                committed_tokens = (
-                    request.num_computed_tokens - request.num_in_flight_tokens
+                # The last sampled token is the lookahead token of the block
+                # before it, which no later allocation will publish.
+                self.kv_cache_manager.cache_blocks(
+                    request,
+                    request.num_computed_tokens - request.num_in_flight_tokens,
                 )
-                request.mark_lookahead_hashes_publishable(
-                    committed_tokens, self.hash_block_size
-                )
-                self.kv_cache_manager.cache_blocks(request, committed_tokens)
 
             if new_token_ids and not self.structured_output_manager.accept_tokens(
                 request, new_token_ids
@@ -3195,10 +3180,6 @@ class Scheduler(SchedulerInterface):
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
                 # Cache any valid computed tokens.
-                self._mark_lookahead_hashes_publishable(
-                    request,
-                    request.num_computed_tokens,
-                )
                 self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
                 if self.needs_kv_cache_zeroing:
                     # The failed load left the blocks beyond the valid
@@ -3218,10 +3199,6 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            self._mark_lookahead_hashes_publishable(
-                request,
-                request.num_computed_tokens,
-            )
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
         # DSV41 SWA bounded replay recomputes the tail of a hit loaded without
@@ -3401,10 +3378,6 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
-
-                request.invalidate_lookahead_hash_publication(
-                    request.num_computed_tokens // self.hash_block_size
-                )
 
                 affected_req_ids.add(request.request_id)
 

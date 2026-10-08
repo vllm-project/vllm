@@ -2030,8 +2030,7 @@ class MambaManager(SingleTypeKVCacheManager):
             replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
-        if not self.block_pool.use_lookahead_block_hashes:
-            self.cache_partial_tail(request, num_tokens, retention_interval)
+        self.cache_partial_tail(request, num_tokens, retention_interval)
         if num_cached_blocks_after > num_cached_blocks_before:
             blocks = self.req_to_blocks[request.request_id]
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):

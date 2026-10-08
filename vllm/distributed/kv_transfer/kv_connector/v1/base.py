@@ -116,8 +116,8 @@ class SupportsHMA(ABC):
 
         ``block_ids`` contains every resident block covering the request's
         computed prefix, including a partial physical tail. Content-addressed
-        connectors must apply ``request.num_publishable_block_hashes`` before
-        storing blocks by hash.
+        connectors must store only blocks covered by ``request.block_hashes``;
+        lookahead hashes lag the computed tokens by up to one block.
 
         The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
@@ -641,8 +641,8 @@ class KVConnectorBase_V1(ABC):
 
         ``block_ids`` contains every resident block covering the request's
         computed prefix, including a partial physical tail. Content-addressed
-        connectors must apply ``request.num_publishable_block_hashes`` before
-        storing blocks by hash.
+        connectors must store only blocks covered by ``request.block_hashes``;
+        lookahead hashes lag the computed tokens by up to one block.
 
         The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.

@@ -1551,14 +1551,13 @@ def test_worker_metadata_aggregates_completions_across_ranks():
     assert merged.completed_saves == {1: 2, 2: 1}
 
 
-def test_eagle_materialized_prefix_is_retried_without_new_blocks():
+def test_eagle_hashed_prefix_is_retried_without_new_blocks():
     scheduler = _make_bare_scheduler()
     scheduler.use_lookahead_block_hashes = True
     token_ids = list(range(32))
     request = SimpleNamespace(
         all_token_ids=token_ids,
         block_hashes=[b"eagle-0"],
-        num_publishable_block_hashes=1,
         num_output_placeholders=0,
     )
     scheduler._unfinished_requests["req-0"] = (request, ([1, 2],))
@@ -1593,9 +1592,9 @@ def test_eagle_materialized_prefix_is_retried_without_new_blocks():
     assert scheduler._request_trackers["req-0"].num_saved_tokens == 16
 
 
-def test_eagle_finished_request_flushes_materialized_prefix():
-    # The last successor hash becomes publishable only once the request has
-    # finished, so its save is pinned at finish and emitted on the next step.
+def test_eagle_finished_request_flushes_last_hashed_block():
+    # The last lookahead hash exists only once the request has finished, so
+    # its save is pinned at finish and emitted on the next step.
     scheduler = _make_bare_scheduler()
     scheduler.use_lookahead_block_hashes = True
     token_ids = list(range(32))
@@ -1604,7 +1603,6 @@ def test_eagle_finished_request_flushes_materialized_prefix():
         all_token_ids=token_ids,
         block_hashes=[b"eagle-0"],
         num_tokens=32,
-        num_publishable_block_hashes=1,
     )
     scheduler._request_trackers["req-0"] = RequestTracker(
         req_id="req-0",

@@ -676,11 +676,10 @@ class OffloadingConnectorScheduler:
     ) -> int:
         num = min(num_computed_tokens, req_status.req.num_tokens)
         if self.use_lookahead_block_hashes:
-            # Lookahead keys are exposed only up to the committed frontier.
+            # Lookahead keys lag the computed tokens by up to one block.
             num = min(
                 num,
-                req_status.req.num_publishable_block_hashes
-                * self.config.tokens_per_hash,
+                len(req_status.req.block_hashes) * self.config.tokens_per_hash,
             )
         max_offload_tokens = req_status.max_offload_tokens
         if max_offload_tokens is not None:
