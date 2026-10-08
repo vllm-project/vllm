@@ -53,6 +53,12 @@ def register_generate_api_routers(app: FastAPI):
 
     register_generative_scoring_api_router(app)
 
+    from .structured_decisions.api_router import (
+        register_structured_decisions_api_router,
+    )
+
+    register_structured_decisions_api_router(app)
+
 
 async def init_generate_state(
     engine_client: "EngineClient",
@@ -112,10 +118,12 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
+            tool_strict_level=args.tool_strict_level,
             tool_server=state.tool_server,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            enable_per_request_metrics=args.enable_per_request_metrics,
             enable_log_outputs=args.enable_log_outputs,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
@@ -136,6 +144,7 @@ async def init_generate_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
@@ -177,10 +186,12 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
+            tool_strict_level=args.tool_strict_level,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             default_chat_template_kwargs=default_chat_template_kwargs,
+            disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
         )
         if "generate" in supported_tasks
         else None
@@ -197,6 +208,7 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
+            tool_strict_level=args.tool_strict_level,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
@@ -213,4 +225,32 @@ async def init_generate_state(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
+    )
+
+    from .structured_decisions.serving import ServingStructuredDecisions
+    from .structured_decisions.strategies import ReadContext, select_read_strategy
+
+    strategy = None
+    if "generate" in supported_tasks:
+        try:
+            strategy_cls = select_read_strategy(engine_client.model_config)
+            strategy = strategy_cls(
+                ReadContext(
+                    engine_client=engine_client,
+                    online_renderer=state.online_renderer,
+                    chat_template=resolved_chat_template,
+                    chat_template_content_format=args.chat_template_content_format,
+                    default_chat_template_kwargs=default_chat_template_kwargs,
+                )
+            )
+        except ValueError:
+            strategy = None
+    state.serving_structured_decisions = (
+        ServingStructuredDecisions(
+            state.openai_serving_models,
+            strategy,
+            request_logger=request_logger,
+        )
+        if strategy is not None
+        else None
     )

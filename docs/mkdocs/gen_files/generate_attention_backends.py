@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Generates documentation table for attention backends showing feature support.
+"""Generates documentation table for attention backends showing feature support.
 
 This script parses all registered attention backends using AST (no imports needed)
 and generates a markdown table showing what features each backend supports,
@@ -52,7 +51,7 @@ BACKEND_KV_DTYPE_EXCLUDES: dict[str, set[str]] = {
 
 MLA_PREFILL_DIR = BACKENDS_DIR / "mla" / "prefill"
 MLA_PREFILL_REGISTRY_FILE = MLA_PREFILL_DIR / "registry.py"
-MLA_PREFILL_SELECTOR_FILE = MLA_PREFILL_DIR / "selector.py"
+PLATFORM_INTERFACE_FILE = REPO_ROOT / "vllm" / "platforms" / "interface.py"
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +303,7 @@ def parse_mla_prefill_registry() -> dict[str, str]:
 
     Returns:
         A dict mapping backend names to their class paths.
+
     """
     if not MLA_PREFILL_REGISTRY_FILE.exists():
         return {}
@@ -320,66 +320,83 @@ def parse_mla_prefill_registry() -> dict[str, str]:
 
 
 def parse_mla_prefill_priorities() -> dict[str, list[str]]:
-    """Parse MLA prefill backend priorities from selector.py.
+    """Parse MLA prefill backend priorities from platforms/interface.py.
 
     Returns:
         A dict with keys like 'blackwell' and 'default' containing
         lists of backend enum names in priority order.
+
     """
-    if not MLA_PREFILL_SELECTOR_FILE.exists():
+    if not PLATFORM_INTERFACE_FILE.exists():
         return {}
 
     try:
-        tree = ast.parse(MLA_PREFILL_SELECTOR_FILE.read_text())
+        tree = ast.parse(PLATFORM_INTERFACE_FILE.read_text())
     except Exception:
         return {}
+
+    def extract_backends(stmt: ast.AST) -> list[str] | None:
+        """Read a backend enum list from a return/assignment statement."""
+        if isinstance(stmt, ast.Return) or (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            value = stmt.value
+        else:
+            return None
+        if not isinstance(value, ast.List):
+            return None
+        return [elt.attr for elt in value.elts if isinstance(elt, ast.Attribute)]
+
+    def extract_last_list(nodes: list[ast.stmt], recurse: bool) -> list[str] | None:
+        """Return the last backend list found among the given statements."""
+        result = None
+        for stmt in nodes:
+            backends = extract_backends(stmt)
+            if backends is not None:
+                result = backends
+            elif recurse and isinstance(stmt, ast.If):
+                nested = extract_last_list([*stmt.body, *stmt.orelse], True)
+                if nested is not None:
+                    result = nested
+        return result
+
+    def is_blackwell_check(stmt: ast.AST) -> bool:
+        return (
+            isinstance(stmt, ast.If)
+            and isinstance(stmt.test, ast.Compare)
+            and isinstance(stmt.test.left, ast.Attribute)
+            and stmt.test.left.attr == "major"
+            and stmt.test.comparators
+            and isinstance(stmt.test.comparators[0], ast.Constant)
+            and stmt.test.comparators[0].value == 10
+        )
 
     priorities: dict[str, list[str]] = {}
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
+        if not isinstance(node, ast.ClassDef) or node.name != "Platform":
             continue
-        if node.name != "_get_mla_prefill_backend_priorities":
+
+        method = find_method(node, "get_mla_prefill_backend_cls")
+        if method is None:
             continue
 
         # Look for if statements checking device_capability.major
-        for stmt in ast.walk(node):
+        for stmt in ast.walk(method):
             if not isinstance(stmt, ast.If):
                 continue
 
-            # Check if it's a capability.major == 10 check (Blackwell)
-            is_blackwell = (
-                isinstance(stmt.test, ast.Compare)
-                and isinstance(stmt.test.left, ast.Attribute)
-                and stmt.test.left.attr == "major"
-                and stmt.test.comparators
-                and isinstance(stmt.test.comparators[0], ast.Constant)
-                and stmt.test.comparators[0].value == 10
-            )
-
-            # Extract backends from return statements
-            for body_stmt in stmt.body:
-                if isinstance(body_stmt, ast.Return) and isinstance(
-                    body_stmt.value, ast.List
-                ):
-                    backends = []
-                    for elt in body_stmt.value.elts:
-                        if isinstance(elt, ast.Attribute):
-                            backends.append(elt.attr)
-                    if is_blackwell:
-                        priorities["blackwell"] = backends
-                    else:
-                        priorities["default"] = backends
-
-            # Extract from else branch
-            for else_stmt in stmt.orelse:
-                if isinstance(else_stmt, ast.Return) and isinstance(
-                    else_stmt.value, ast.List
-                ):
-                    backends = []
-                    for elt in else_stmt.value.elts:
-                        if isinstance(elt, ast.Attribute):
-                            backends.append(elt.attr)
+            if is_blackwell_check(stmt):
+                # The Blackwell lists live in the nested if/else inside the
+                # major == 10 branch.
+                backends = extract_last_list(stmt.body, True)
+                if backends is not None:
+                    priorities["blackwell"] = backends
+            else:
+                backends = extract_last_list([*stmt.body, *stmt.orelse], False)
+                if backends is not None:
                     priorities["default"] = backends
 
     return priorities
@@ -549,6 +566,7 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
 
     Returns:
         A dict with backend properties, or None if parsing fails.
+
     """
     file_path = get_file_from_class_path(class_path)
     if file_path is None:

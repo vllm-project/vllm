@@ -17,6 +17,7 @@ from typing import (
     Final,
     Generic,
     Literal,
+    Required,
     TypeAlias,
     TypeVar,
     Union,
@@ -48,7 +49,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 # pydantic needs the TypedDict from typing_extensions
-from typing_extensions import Required, TypedDict, override
+from typing_extensions import TypedDict, override
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -223,9 +224,7 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
 
 
 class PILImage(BaseModel):
-    """
-    A PIL.Image.Image object.
-    """
+    """A PIL.Image.Image object."""
 
     image_pil: Image.Image
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -238,6 +237,7 @@ class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
     {
         "image_pil": ImageAsset('cherry_blossom').pil_image
     }
+
     """
 
     image_pil: PILImage | None
@@ -256,6 +256,7 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     {
         "image_url": "https://example.com/image.jpg"
     }
+
     """
 
     image_url: str | None
@@ -273,6 +274,7 @@ class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     {
         "audio_url": "https://example.com/audio.mp3"
     }
+
     """
 
     audio_url: str | None
@@ -285,6 +287,7 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     {
         "video_url": "https://example.com/video.mp4"
     }
+
     """
 
     video_url: str | None
@@ -304,6 +307,7 @@ class CustomThinkCompletionContentParam(TypedDict, total=False):
         "closed": True,
         "type": "thinking"
     }
+
     """
 
     thinking: Required[str]
@@ -324,6 +328,7 @@ class CustomChatCompletionContentToolReferenceParam(TypedDict, total=False):
         "name": "get_weather",
         "type": "tool_reference"
     }
+
     """
 
     name: str
@@ -586,8 +591,7 @@ def _get_embeds_data(
 
 
 class BaseMultiModalItemTracker(ABC, Generic[_T]):
-    """
-    Tracks multi-modal items in a given request and ensures that the number
+    """Tracks multi-modal items in a given request and ensures that the number
     of multi-modal items in a given request does not exceed the configured
     maximum per prompt.
     """
@@ -651,8 +655,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return get_video_processor_cls_name(self.model_config)
 
     def add(self, modality: ModalityStr, item: _T) -> str | None:
-        """
-        Add a multi-modal item to the current prompt and returns the
+        """Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
 
         An optional uuid can be added which serves as a unique identifier of the
@@ -663,6 +666,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             pre-computed embeddings that do not go through any HF processor, encoder,
             or model-specific placeholder logic. The corresponding placeholder string is
             managed by the parser via `_add_placeholder`, so we return None here.
+
         """
         add_info = self._validate_add(modality)
         if add_info is None:
@@ -791,13 +795,13 @@ def _resolve_items(
     mm_processor: BaseMultiModalProcessor | None,
     modality_order: dict[str, list[str]],
 ) -> tuple[MultiModalDataDict, MultiModalUUIDDict]:
-    """
-    Materialize the tracker's per-modality items into `mm_data` / `mm_uuids`.
+    """Materialize the tracker's per-modality items into `mm_data` / `mm_uuids`.
 
     Note:
         `mm_processor` is `None` for text-only models (no registered HF
         processor) whose only modality is `prompt_embeds`. Every other
         modality requires a processor, enforced by the guard below.
+
     """
     if "image" in items_by_modality and "image_embeds" in items_by_modality:
         raise VLLMValidationError(
@@ -1447,6 +1451,7 @@ class ChatTemplateConfig:
     chat_template: str | None = None
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     trust_request_chat_template: bool = False
+    trust_request_mm_kwargs: bool = False
 
 
 def validate_chat_template(chat_template: Path | str | None):
@@ -1568,7 +1573,6 @@ def _get_full_multimodal_text_prompt(
     multimodal_content_part_separator: str = "\n",
 ) -> str:
     """Combine multimodal prompts for a multimodal language model."""
-
     # flatten storage to make it looks like
     # {
     #   "<|image|>": 2,
@@ -1687,8 +1691,7 @@ def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
 def _parse_chat_message_content_mm_part(
     part: ChatCompletionContentPartParam,
 ) -> tuple[str, _ContentPart]:
-    """
-    Parses a given multi-modal content part based on its type.
+    """Parses a given multi-modal content part based on its type.
 
     Args:
         part: A dict containing the content part, with a potential 'type' field.
@@ -1700,6 +1703,7 @@ def _parse_chat_message_content_mm_part(
 
     Raises:
         ValueError: If the 'type' field is missing and no direct URL is found.
+
     """
     assert isinstance(
         part, dict
@@ -1807,6 +1811,37 @@ PART_TYPES_TO_SKIP_NONE_CONTENT = (
     "refusal",
 )
 
+# Content part types parsed as text rather than multimodal data.
+TEXT_PART_TYPES = frozenset(
+    {"text", "input_text", "output_text", "refusal", "thinking"}
+)
+# Content part types that carry no multimodal data.
+_TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | {"tool_reference"}
+# Keys that mark a content part as multimodal, whatever its ``type``.
+_MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
+
+
+def has_non_text_content(messages: Any) -> bool:
+    """Whether any message in ``messages`` has a non-text content part.
+
+    Only list content is inspected, so validated chat content that is a
+    one-shot iterator is never consumed.
+    """
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and (
+                any(key in part for key in _MEDIA_CONTENT_PART_KEYS)
+                or not isinstance(part_type := part.get("type", "text"), str)
+                or part_type not in _TEXT_CONTENT_PART_TYPES
+            ):
+                return True
+    return False
+
 
 def _parse_chat_message_content_parts(
     role: str,
@@ -1901,7 +1936,7 @@ def _parse_chat_message_content_part(
         )
         return None
 
-    if part_type in ("text", "input_text", "output_text", "refusal", "thinking"):
+    if part_type in TEXT_PART_TYPES:
         str_content = cast(str, content)
         _reject_reserved_placeholder_in_text(str_content, mm_parser.model_config)
         if wrap_dicts:
@@ -2001,6 +2036,41 @@ _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
 
+_CLAUDE_CODE_BILLING_HEADER = "x-anthropic-billing-header"
+
+
+def _strip_claude_code_billing_header(
+    parts: Iterable[ChatCompletionContentPartParam],
+) -> list[ChatCompletionContentPartParam]:
+    """Drop Claude Code's attribution header line from system text parts.
+
+    Its ``cch`` value changes on every request, so a prompt that keeps it
+    misses the prefix cache from the header on. Gateways that translate
+    Anthropic requests to chat completions keep it; ``/v1/messages`` drops
+    the same block.
+    """
+    out: list[ChatCompletionContentPartParam] = []
+    for part in parts:
+        if isinstance(part, str):
+            text: object = part
+        elif isinstance(part, dict) and part.get("type") == "text":
+            text = part.get("text")
+        else:
+            text = None
+        if not (isinstance(text, str) and text.startswith(_CLAUDE_CODE_BILLING_HEADER)):
+            out.append(part)
+            continue
+        rest = text.partition("\n")[2]
+        if not rest:
+            continue
+        out.append(
+            cast(ChatCompletionContentPartParam, rest)
+            if isinstance(part, str)
+            else cast(ChatCompletionContentPartParam, {**part, "text": rest})
+        )
+    return out
+
+
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
@@ -2016,6 +2086,8 @@ def _parse_chat_message_content(
         content = []
     elif isinstance(content, str):
         content = [ChatCompletionContentPartTextParam(type="text", text=content)]
+    if role == "system":
+        content = _strip_claude_code_billing_header(content)  # type: ignore[arg-type]
     result = _parse_chat_message_content_parts(
         role,
         content,  # type: ignore

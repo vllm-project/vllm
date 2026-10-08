@@ -6,6 +6,7 @@ import torch
 
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
@@ -33,20 +34,25 @@ class ROCmLatentMoERunner(MoERunner):
 
         transform = self.routed_output_transform
         up_proj = getattr(transform, "up_proj", None)
-        tp_size = self.moe_config.tp_size
+        tp_size = get_tensor_model_parallel_world_size()
 
+        self._up_proj_preshard = bool(getattr(transform, "row_sharded", False))
         self._up_proj_shard_size = 0
         self._tail_shardable = (
             up_proj is not None
             and tp_size > 1
-            and up_proj.weight.shape[0] % tp_size == 0
+            and (self._up_proj_preshard or up_proj.weight.shape[0] % tp_size == 0)
             and self._shared_experts is not None
             and not self.moe_config.is_sequence_parallel
             and self.routed_scaling_factor == 1.0
         )
         if self._tail_shardable:
             assert up_proj is not None
-            self._up_proj_shard_size = up_proj.weight.shape[0] // tp_size
+            self._up_proj_shard_size = (
+                up_proj.weight.shape[0]
+                if self._up_proj_preshard
+                else up_proj.weight.shape[0] // tp_size
+            )
         else:
             logger.warning_once(
                 "K3 latent-MoE tail is not shardable under this config, "
@@ -61,9 +67,7 @@ class ROCmLatentMoERunner(MoERunner):
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
-        """
-        Tier 2: column-parallel up-projection folded into the final reduce.
-        """
+        """Tier 2: column-parallel up-projection folded into the final reduce."""
         if not self._logged_sharded_tail:
             self._logged_sharded_tail = True
             logger.info_once(
@@ -81,7 +85,12 @@ class ROCmLatentMoERunner(MoERunner):
 
         shard_size = self._up_proj_shard_size
         shard_start = get_tensor_model_parallel_rank() * shard_size
-        up_proj_shard = transform.up_proj.weight.narrow(0, shard_start, shard_size)
+        weight = transform.up_proj.weight
+        up_proj_shard = (
+            weight
+            if self._up_proj_preshard
+            else weight.narrow(0, shard_start, shard_size)
+        )
         hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
 
         # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's

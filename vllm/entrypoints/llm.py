@@ -3,13 +3,12 @@
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import overload
 
 from vllm.config import (
     AttentionConfig,
@@ -28,21 +27,19 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.config.quantization import QuantizationConfigArgs
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightTransferUpdateRequest,
-)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
+from vllm.entrypoints.common.offline import _O, _R, OfflineInferenceMixin
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
+from vllm.entrypoints.rl.offline import RLOfflineMixin
 from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import PoolingRequestOutput, RequestOutput
@@ -56,7 +53,6 @@ from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from ..renderers import ChatParams
-from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -64,7 +60,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
+class LLM(
+    BeamSearchOfflineMixin, PoolingOfflineMixin, RLOfflineMixin, OfflineInferenceMixin
+):
     """An LLM for generating texts from given prompts and sampling parameters.
 
     This class includes a tokenizer, a language model (possibly distributed
@@ -76,8 +74,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     Args:
         model: The name or path of a HuggingFace Transformers model.
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
-        tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
-            if available, and "slow" will always use the slow tokenizer.
+        tokenizer_mode: The tokenizer mode. See
+            [ModelConfig.tokenizer_mode][vllm.config.ModelConfig.tokenizer_mode].
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer. Expect valid prompt_token_ids and None for prompt
             from the input.
@@ -174,6 +172,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     Note:
         This class is intended to be used for offline inference. For online
         serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
+
     """
 
     def __init__(
@@ -224,7 +223,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
-
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
@@ -338,6 +336,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             **kwargs,
         )
 
+        configure_logging_if_needed(engine_args.create_logging_config())
         log_non_default_args(engine_args)
 
         self.llm_engine = LLMEngine.from_engine_args(
@@ -398,6 +397,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         Returns:
             The world size (tensor_parallel_size * pipeline_parallel_size),
             optionally multiplied by data_parallel_size if include_dp is True.
+
         """
         parallel_config = self.llm_engine.vllm_config.parallel_config
         if include_dp:
@@ -457,6 +457,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         Returns:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
+
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
@@ -507,6 +508,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Returns:
             A list of request IDs for the enqueued requests.
+
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
@@ -558,6 +560,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Returns:
             A list of output objects for all completed requests.
+
         """
         if output_type is None:
             output_type = (RequestOutput, PoolingRequestOutput)
@@ -571,8 +574,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        """
-        Execute an RPC call on all workers.
+        """Execute an RPC call on all workers.
 
         Args:
             method: Name of the worker method to execute, or a callable that
@@ -592,13 +594,12 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
-        """
 
+        """
         return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """
-        Run a function directly on the model inside each worker,
+        """Run a function directly on the model inside each worker,
         returning the result for each of them.
 
         !!! warning
@@ -625,8 +626,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
-        """
-        Generate responses for a chat conversation.
+        """Generate responses for a chat conversation.
 
         The chat conversation is converted into a text prompt using the
         tokenizer and calls the [generate][vllm.LLM.generate] method to generate
@@ -670,10 +670,12 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 template.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
             mm_processor_kwargs: Overrides for `processor.__call__`.
+            tools: Tools to make available to the model, if any.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
+
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
@@ -751,6 +753,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Returns:
             A list of request IDs for the enqueued requests.
+
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
@@ -780,15 +783,30 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
-    def start_profile(self, profile_prefix: str | None = None) -> None:
-        """Start profiling with optional custom trace prefix.
+    def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides.
 
         Args:
             profile_prefix: Optional prefix for the trace file names. If provided,
                            trace files will be named as "<prefix>_dp<X>_pp<Y>_tp<Z>".
                            If not provided, default naming will be used.
+            delay_iterations: Optional number of worker iterations to skip before
+                profiling starts.
+            max_iterations: Optional maximum number of worker iterations to profile.
+                Zero means no limit.
+
         """
-        self.llm_engine.start_profile(profile_prefix)
+        self.llm_engine.start_profile(
+            profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+        )
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
@@ -801,8 +819,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         )
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
-        """
-        Put the engine to sleep. The engine should not process any requests.
+        """Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
 
@@ -822,12 +839,20 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
+
         """
         self.llm_engine.sleep(level=level, mode=mode)
 
-    def wake_up(self, tags: list[str] | None = None):
+    def release_kv_cache_memory(self) -> None:
+        """Release the GPU physical memory backing the KV cache.
+
+        Requires a completed ``sleep(level=0)`` and resident executor memory.
+        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
         """
-        Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
+        self.llm_engine.release_kv_cache_memory()
+
+    def wake_up(self, tags: list[str] | None = None) -> bool:
+        """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
         method for more details.
 
         Args:
@@ -837,8 +862,12 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 is reallocated. wake_up should be called with all tags
                 (or None) before the engine is used again.
                 Use tags=["scheduling"] to resume from level 0 sleep.
+
+        Returns:
+            Whether the engine is fully awake.
+
         """
-        self.llm_engine.wake_up(tags)
+        return self.llm_engine.wake_up(tags)
 
     def get_metrics(self) -> list["Metric"]:
         """Return a snapshot of aggregated metrics from Prometheus.
@@ -849,62 +878,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Note:
             This method is only available with the V1 LLM engine.
+
         """
         return self.llm_engine.get_metrics()
-
-    def init_weight_transfer_engine(
-        self, request: WeightTransferInitRequest | dict
-    ) -> None:
-        """
-        Initialize weight transfer for RL training.
-
-        Args:
-            request: Weight transfer initialization request with backend-specific info
-        """
-        init_info_dict = (
-            request["init_info"] if isinstance(request, dict) else request.init_info
-        )
-
-        self.llm_engine.collective_rpc(
-            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
-        )
-
-    def start_weight_update(self) -> None:
-        """Start a new weight update."""
-        self.llm_engine.collective_rpc("start_weight_update")
-
-    def start_draft_weight_update(self) -> None:
-        """Start a new weight update targeting the speculative draft model."""
-        self.llm_engine.collective_rpc("start_draft_weight_update")
-
-    def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
-        """
-        Update the weights of the model.
-
-        Args:
-            request: Weight update request with backend-specific update info
-        """
-        update_info_dict = (
-            request["update_info"] if isinstance(request, dict) else request.update_info
-        )
-
-        self.llm_engine.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
-        )
-
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
-        """Finish the weight update and set its version if provided."""
-        self.llm_engine.collective_rpc("finish_weight_update")
-        if weight_version is not None:
-            self.llm_engine.set_weight_version(weight_version)
-
-    def update_weight_version(self, new_version: str) -> None:
-        """Set the weight version without updating weights."""
-        self.llm_engine.set_weight_version(new_version)
-
-    def get_weight_version(self) -> str:
-        """Return the latest committed weight version."""
-        return self.llm_engine.get_weight_version()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
