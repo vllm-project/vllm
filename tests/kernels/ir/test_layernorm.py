@@ -23,6 +23,41 @@ rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 IS_GPGPU_DEVICE = current_platform.is_cuda_alike() or current_platform.is_xpu()
 
 
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize(
+    "dtype,layout,weight_dtype,variance_size",
+    [
+        (torch.float16, "slice", torch.float32, None),
+        (torch.float32, "transpose", torch.float16, None),
+        (torch.bfloat16, "expand", None, None),
+        (torch.float32, "broadcast", torch.float32, None),
+        (torch.float32, "contiguous", torch.float32, 4),
+    ],
+)
+def test_norm_fake_metadata(fused, dtype, layout, weight_dtype, variance_size):
+    """Fake inference must preserve layouts, broadcasts, and dtype conversions."""
+    x = torch.randn(3, 8, dtype=dtype)
+    if layout == "slice":
+        x = x[:, ::2]
+    elif layout == "transpose":
+        x = x.T
+    elif layout == "expand":
+        x = x[:1].expand(3, -1)
+    weight_shape = (2, 1, x.shape[-1]) if layout == "broadcast" else (x.shape[-1],)
+    weight = (
+        torch.randn(weight_shape, dtype=weight_dtype)
+        if weight_dtype is not None
+        else None
+    )
+    op = ir.ops.fused_add_rms_norm if fused else ir.ops.rms_norm
+    args = (x, torch.randn_like(x), weight) if fused else (x, weight)
+    args += (1e-5, variance_size)
+    with op.set_priority(["native"]):
+        torch.library.opcheck(op.torch_op, args)
+        if fused:
+            torch.library.opcheck(op.maybe_inplace.torch_op, args)
+
+
 @pytest.mark.skipif(
     not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
