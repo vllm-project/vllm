@@ -119,6 +119,7 @@ def main(args: argparse.Namespace):
                     beam_width=args.n,
                     max_tokens=args.output_len,
                     ignore_eos=True,
+                    watermarking=False,
                 ),
             )
 
