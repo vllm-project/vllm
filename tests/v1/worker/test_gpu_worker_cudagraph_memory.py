@@ -7,7 +7,7 @@ Whether profiling runs at all, and whether its result is subtracted, decides
 how much memory the KV cache gets.
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -33,7 +33,7 @@ class _FakeModelRunner:
         self._estimate = estimate
         self.profile_cudagraph_memory_calls = 0
 
-    def profile_run(self) -> None:
+    def profile_run(self, randomize_inputs: bool = False) -> None:
         pass
 
     def profile_cudagraph_memory(self) -> int:
@@ -83,7 +83,9 @@ def patched_env(monkeypatch):
         lambda nbytes, multimodal_config, api_process_count: nbytes,
     )
     monkeypatch.setattr(
-        gw, "current_platform", SimpleNamespace(is_cuda_alike=lambda: True)
+        gw,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True, is_xpu=lambda: False),
     )
     monkeypatch.setattr(gw, "logger", recording_logger)
     return SimpleNamespace(monkeypatch=monkeypatch, logger=recording_logger)
@@ -109,6 +111,8 @@ def _run(
             compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode)
         ),
         model_runner=model_runner,
+        randomize_dummy_inputs=False,
+        _scoped_allocator_max_split=lambda max_split_size_mb: nullcontext(),
         init_snapshot=SimpleNamespace(
             free_memory=FREE_MEMORY, total_memory=TOTAL_MEMORY
         ),
