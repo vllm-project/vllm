@@ -193,7 +193,7 @@ def test_picks_longest_match_among_2_3_4_grams():
 def test_picks_rightmost_when_multiple_matches(max_model_len):
     """Pick the last valid match across blocks, ignoring trailing tokens."""
     spec = _make_speculator(min_n=3, max_n=3, k=2, max_model_len=max_model_len)
-    padding = [0] * (spec.block_l - 5) if spec.n_blocks > 1 else []
+    padding = [0] * (spec.lookup.block_l - 5) if spec.lookup.n_blocks > 1 else []
     row = [1, 2, 3, 100] + padding + [1, 2, 3, 200, 1, 2, 3, 300, 1, 2, 3]
     drafts = _propose(spec, [row + [1, 2, 3, 999, 1, 2, 3]], seq_lens=[len(row)])
     assert drafts == [[300, 1]]
@@ -277,3 +277,77 @@ def test_construction_validates_speculative_config():
     # No-op hooks must not raise.
     spec.init_cudagraph_manager(None)
     spec.capture()
+
+
+def test_lookup_reports_which_requests_matched():
+    """has_match is set only where a draft was gathered from the context."""
+    spec = _make_speculator(min_n=2, max_n=2, k=2)
+    rows = [[1, 2, 3, 1, 2], [4, 5, 6], [1, 2, 3, 1, 2]]
+    _propose(spec, rows, num_sampled=[1, 1, 0])
+    assert spec.lookup.has_match[:3].tolist() == [True, False, False]
+
+
+class _FakeMTPPropose:
+    """Stands in for the MTP chain: records the draft steps it would run."""
+
+    def __init__(self, fill: int):
+        self.fill = fill
+        self.draft_steps: list[int] = []
+
+    def install(self, monkeypatch) -> None:
+        from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+            TargetDependentARSpeculator,
+        )
+
+        def propose(speculator, input_batch, *args, **kwargs):
+            k = speculator.num_speculative_steps
+            self.draft_steps.append(speculator.num_draft_steps(k))
+            drafts = speculator.draft_tokens[: input_batch.num_reqs]
+            drafts.fill_(self.fill)
+            return drafts
+
+        monkeypatch.setattr(TargetDependentARSpeculator, "propose", propose)
+
+
+def _make_ngram_mtp(min_n: int, max_n: int, k: int):
+    from vllm.v1.worker.gpu.spec_decode.mtp.speculator import NgramMTPSpeculator
+    from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramLookup
+
+    ngram = _make_speculator(min_n=min_n, max_n=max_n, k=k)
+    speculator = object.__new__(NgramMTPSpeculator)
+    speculator.num_speculative_steps = k
+    speculator.req_states = ngram.req_states
+    speculator.max_num_reqs = ngram.max_num_reqs
+    speculator.draft_tokens = torch.zeros(
+        (ngram.max_num_reqs, k), dtype=torch.int64, device=DEVICE
+    )
+    speculator.ngram = NgramLookup(
+        min_n, max_n, k, ngram.max_num_reqs, ngram.max_model_len, DEVICE
+    )
+    speculator.can_skip_decode = True
+    speculator.all_matched_cpu = torch.zeros(1, dtype=torch.bool, pin_memory=True)
+    speculator.all_matched_event = torch.cuda.Event()
+    speculator.all_matched_pending = False
+    return speculator
+
+
+@pytest.mark.parametrize(
+    ("rows", "num_sampled", "expected_drafts", "expected_steps"),
+    [
+        # One request without a match: the MTP chain runs in full.
+        ([[1, 2, 3, 1, 2], [4, 5, 6]], [1, 1], [[3, 1, 2], [9, 9, 9]], 3),
+        # Every request matched: only the draft prefill runs.
+        ([[1, 2, 3, 1, 2], [7, 8, 7]], [1, 1], [[3, 1, 2], [8, 7, 9]], 1),
+        # A request that sampled nothing (chunked prefill) needs no draft.
+        ([[1, 2, 3, 1, 2], [4, 5, 6]], [1, 0], [[3, 1, 2], [9, 9, 9]], 1),
+    ],
+)
+def test_ngram_mtp_uses_lookup_first_and_skips_mtp_decode(
+    monkeypatch, rows, num_sampled, expected_drafts, expected_steps
+):
+    fake = _FakeMTPPropose(fill=9)
+    fake.install(monkeypatch)
+    speculator = _make_ngram_mtp(min_n=1, max_n=2, k=3)
+    drafts = _propose(speculator, rows, num_sampled=num_sampled, last_sampled=[9, 9])
+    assert fake.draft_steps == [expected_steps]
+    assert drafts == expected_drafts

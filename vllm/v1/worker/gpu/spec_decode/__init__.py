@@ -61,6 +61,12 @@ def init_speculator(
 
         return MultiModuleMTPSpeculator(vllm_config, device)
     elif speculative_config.method == "mtp":
+        if speculative_config.ngram_lookup:
+            from vllm.v1.worker.gpu.spec_decode.mtp.speculator import (
+                NgramMTPSpeculator,
+            )
+
+            return NgramMTPSpeculator(vllm_config, device, req_states)
         from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
         return MTPSpeculator(vllm_config, device)
