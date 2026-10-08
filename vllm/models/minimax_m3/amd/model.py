@@ -374,13 +374,14 @@ class MiniMaxM3MoE(nn.Module):
         else:
             self.e_score_correction_bias = None
 
-        # Router weights are stored in fp32; GateLinear upcasts the bf16
-        # activations and computes the gate in fp32 (fp32 router logits).
+        router_dtype = getattr(config, "router_dtype", "float32")
+        if router_dtype not in ("float32", "bfloat16"):
+            raise ValueError("router_dtype must be float32 or bfloat16")
         self.gate = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=False,
-            params_dtype=torch.float32,
+            params_dtype=getattr(torch, router_dtype),
             out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
@@ -482,7 +483,7 @@ class MiniMaxM3MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
+        # Router logits stay FP32 for either supported weight dtype.
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -1393,10 +1394,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.config = config
         self._mono: M3Mono | None = None
         self._mono_config = vllm_config if envs.VLLM_ROCM_USE_ATOM_M3_MONO else None
-        if self._mono_config is not None:
-            from vllm.models.minimax_m3.amd.mono import validate_model_config
-
-            validate_model_config(vllm_config)
 
         self.vocab_size = config.vocab_size
 
