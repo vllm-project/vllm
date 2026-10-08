@@ -301,3 +301,16 @@ def test_late_chunk_contexts_remain_isolated_when_rendering_interleaves(
     assert first_output.late_chunking is not second_output.late_chunking
     assert shared.late_chunking_params is not None
     assert shared.late_chunking_params.metadata is None
+
+
+def test_plain_token_embed_skips_chunk_metadata(late_chunk_processor):
+    ctx = _late_chunk_context()
+    ctx.pooling_params = PoolingParams()
+    factory, _ = late_chunk_processor.get_request_factory_offline(ctx)
+    request = next(factory())
+    result = late_chunk_processor.render(request)
+    assert not ctx.late_chunking
+    assert result["params"].late_chunking_params is None
+    assert not late_chunk_processor.renderer.render_cmpl.call_args.kwargs[
+        "tok_params"
+    ].return_token_offsets
