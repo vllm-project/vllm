@@ -299,6 +299,69 @@ def test_strict_namespace_function_enables_auto_structural_tag():
     assert _is_grammar_accept_string(grammar, _hermes_call("crm__lookup"))
 
 
+def _allowed_tools_request(
+    mode: str, entries: list[dict[str, Any]] | None = None
+) -> ResponsesRequest:
+    return ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "get_weather", "parameters": {}},
+                _namespace_tool(),
+                _MCP_TOOL,
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": mode,
+                "tools": entries or [{"type": "function", "name": "lookup"}],
+            },
+        }
+    )
+
+
+class _HermesParser(DelegatingParser):
+    tool_parser_cls = Hermes2ProToolParser
+
+
+@pytest.mark.parametrize("mode", ["auto", "required"])
+def test_allowed_tools_constrain_and_parse_calls(mode: str):
+    request = _allowed_tools_request(mode)
+    parser = _HermesParser(MagicMock(), tools=request.tools)
+
+    request = parser.adjust_request(request)
+
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    call = _hermes_call("crm__lookup")
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, _hermes_call("get_weather"))
+    assert _is_grammar_accept_string(grammar, "No tool needed.") == (mode == "auto")
+
+    _, content, tool_calls = parser.parse(call, request, enable_auto_tools=True)
+
+    assert not content
+    assert [(c.name, json.loads(c.arguments)) for c in tool_calls] == [
+        ("crm__lookup", {"id": "1"})
+    ]
+
+
+def test_allowed_tools_ignore_builtin_entries():
+    """Hermes is only shown function tools, so builtin entries cannot be allowed."""
+    mcp_entry = {"type": "mcp", "server_label": "docs"}
+    mixed = _allowed_tools_request(
+        "required", [{"type": "function", "name": "lookup"}, mcp_entry]
+    )
+    builtin_only = _allowed_tools_request("required", [mcp_entry])
+    parser = _HermesParser(MagicMock(), tools=mixed.tools)
+
+    mixed = parser.adjust_request(mixed)
+    builtin_only = parser.adjust_request(builtin_only)
+
+    grammar = Grammar.from_structural_tag(mixed.structured_outputs.structural_tag)
+    assert _is_grammar_accept_string(grammar, _hermes_call("crm__lookup"))
+    assert not _is_grammar_accept_string(grammar, _hermes_call("get_weather"))
+    assert builtin_only.structured_outputs is None
+
+
 def test_harmony_structural_tag_keeps_builtin_tools():
     """Harmony can call builtin tools, so they still shape its grammar."""
     request = ResponsesRequest.model_validate(

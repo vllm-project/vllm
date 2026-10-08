@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.sampling_params import StructuredOutputsParams
@@ -304,6 +305,59 @@ class TestToolChoice_Plus_ResponseFormat:
         assert _is_grammar_accept_string(grammar, self._qwen_tool_call())
         assert not _is_grammar_accept_string(grammar, '{"text": "hi"}')
         mock_warn.assert_called_once()
+
+    # ================================
+    # Test cases
+    # tool_choice=allowed_tools (Responses) + text.format
+    # ================================
+
+    def test_allowed_tools_auto(self):
+        request = ResponsesRequest.model_validate(
+            {
+                "input": "hi",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                    {"type": "function", "name": "get_time", "parameters": {}},
+                ],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": "get_weather"}],
+                },
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                        },
+                    }
+                },
+            }
+        )
+
+        class TestParser(DelegatingParser):
+            tool_parser_cls = Qwen3EngineToolParser
+
+        out = TestParser(MagicMock(), tools=request.tools).adjust_request(request)
+
+        assert out.structured_outputs is not None
+        grammar = Grammar.from_structural_tag(out.structured_outputs.structural_tag)
+        assert _is_grammar_accept_string(grammar, '{"text": "hi"}')
+        assert _is_grammar_accept_string(grammar, self._qwen_tool_call())
+        get_time_call = self._qwen_tool_call().replace("get_weather", "get_time")
+        assert not _is_grammar_accept_string(grammar, get_time_call)
+        assert not _is_grammar_accept_string(grammar, "Hello")
 
 
 @pytest.mark.parametrize("field", ["json", "structural_tag"])
