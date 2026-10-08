@@ -1556,6 +1556,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/libtorch_stable/attention/
+  - csrc/core/vec_dtypes/
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
@@ -4639,6 +4640,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/libtorch_stable/attention/
+  - csrc/core/vec_dtypes/
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
