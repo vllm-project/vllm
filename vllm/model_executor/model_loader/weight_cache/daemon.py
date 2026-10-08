@@ -184,6 +184,8 @@ class WeightCacheDaemon:
         pp_rank: int = 0,
     ):
         parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_eplb:
+            raise ValueError("The weight cache daemon does not support EPLB.")
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -234,6 +236,8 @@ class WeightCacheDaemon:
             dp_size=self.dp_size,
             dp_rank=dp_rank,
             is_draft=is_draft,
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
+            expert_placement_strategy=parallel_config.expert_placement_strategy,
         )
 
     def load_model(self) -> None:

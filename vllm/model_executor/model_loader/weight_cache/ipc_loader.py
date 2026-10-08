@@ -193,6 +193,8 @@ class IpcModelLoader(BaseModelLoader):
         # An unsupported platform is a permanent misconfiguration rather than
         # a transient daemon outage, so it is raised even when fallback is on.
         check_ipc_platform_support()
+        if vllm_config.parallel_config.enable_eplb:
+            raise ValueError("The IPC weight cache loader does not support EPLB.")
         state_fetched = False
         try:
             # Cross-check the routing flag against the identity of the model
@@ -343,8 +345,11 @@ class IpcModelLoader(BaseModelLoader):
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
     def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
+        from vllm.config import get_current_vllm_config
+
         dp_group = get_dp_group()
         pp_group = get_pp_group()
+        parallel_config = get_current_vllm_config().parallel_config
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
@@ -354,6 +359,8 @@ class IpcModelLoader(BaseModelLoader):
             dp_size=dp_group.world_size,
             dp_rank=dp_group.rank_in_group,
             is_draft=self.is_draft,
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
+            expert_placement_strategy=parallel_config.expert_placement_strategy,
         )
         if not self.fallback:
             return self._request_state_with_startup_wait(cache_config)
