@@ -159,6 +159,51 @@ def _default_input_image_details(value: Any) -> Any:
     return {**value, "content": new_content} if changed else value
 
 
+def _tool_field(tool: Any, field: str) -> Any:
+    return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
+
+
+def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
+    """Resolve a named tool choice to the flat ``<namespace>__<name>`` form."""
+    from vllm.tool_parsers.utils import flat_namespace_tool_name
+
+    exact_names: set[str] = set()
+    local_names: dict[str, list[str]] = {}
+    for tool in tools:
+        if _tool_field(tool, "type") == "namespace":
+            namespace = _tool_field(tool, "name")
+            namespaced_tools = _tool_field(tool, "tools")
+            if not isinstance(namespaced_tools, list) or not isinstance(namespace, str):
+                return tool_name
+            for namespaced_tool in namespaced_tools:
+                local_name = _tool_field(namespaced_tool, "name")
+                if not isinstance(local_name, str):
+                    continue
+                flat_name = flat_namespace_tool_name(namespace, local_name)
+                exact_names.add(flat_name)
+                local_names.setdefault(local_name, []).append(flat_name)
+        else:
+            name = _tool_field(tool, "name")
+            if isinstance(name, str):
+                exact_names.add(name)
+    if tool_name in exact_names:
+        return tool_name
+    candidates = local_names.get(tool_name, [])
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise VLLMValidationError(
+            f"Tool choice '{tool_name}' is ambiguous: it is defined in more "
+            f"than one namespace ({', '.join(candidates)}). Select it by its "
+            "full '<namespace>__<name>' name.",
+            parameter="tool_choice",
+        )
+    raise VLLMValidationError(
+        "Tool choice 'function' not found in 'tools' parameter.",
+        parameter="tool_choice",
+    )
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -662,31 +707,14 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
         elif is_named_tool_choice and tools is not None:
             tool_name = tool_choice.get("name")
-            tool_names = set()
-            for tool in tools:
-                if isinstance(tool, dict):
-                    if tool.get("type") == "namespace":
-                        namespace = tool.get("name")
-                        namespaced_tools = tool.get("tools")
-                        if not isinstance(namespaced_tools, list):
-                            return data
-                        for namespaced_tool in namespaced_tools:
-                            namespaced_name = (
-                                namespaced_tool.get("name")
-                                if isinstance(namespaced_tool, dict)
-                                else getattr(namespaced_tool, "name", None)
-                            )
-                            tool_names.add(namespaced_name)
-                            tool_names.add(f"{namespace}__{namespaced_name}")
-                    else:
-                        tool_names.add(tool.get("name"))
-                else:
-                    tool_names.add(getattr(tool, "name", None))
-            if not tool_name or tool_name not in tool_names:
+            if not tool_name:
                 raise VLLMValidationError(
                     "Tool choice 'function' not found in 'tools' parameter.",
                     parameter="tool_choice",
                 )
+            resolved = _resolve_named_tool_choice(tool_name, tools)
+            if resolved != tool_name:
+                data["tool_choice"] = {**tool_choice, "name": resolved}
 
         return data
 

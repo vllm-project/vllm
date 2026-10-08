@@ -156,6 +156,8 @@ def test_sparse_mla_sink_matches_ragged_reference(
         num_decodes=batch_size,
         num_decode_tokens=batch_size,
         max_query_len=1,
+        max_seq_len=max(seq_lens),
+        topk_tokens=max(seq_lens),
     )
     sinks = torch.linspace(-2.0, 6.0, real_heads, device=device)
 
@@ -367,12 +369,15 @@ def test_sparse_mla_sink_matches_dense_attention_with_empty_rows_and_paged_cache
         for page, offset in rows
     ]
     lengths = torch.tensor([0, *(len(rows) for rows in selected_rows)])
+    longest_row = max(len(rows) for rows in selected_rows)
     metadata = SimpleNamespace(
         block_size=block_size,
         num_prefills=0,
         num_decodes=len(selected_rows),
         num_decode_tokens=len(selected_rows),
         max_query_len=1,
+        max_seq_len=longest_row,
+        topk_tokens=longest_row,
         qo_indptr=torch.arange(
             len(selected_rows) + 1, dtype=torch.int32, device="cuda"
         ),
@@ -479,6 +484,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
         num_decodes=num_tokens,
         num_decode_tokens=num_tokens,
         max_query_len=1,
+        max_seq_len=kv.shape[0],
         block_size=block_size,
         topk_tokens=impl.topk_indices_buffer.shape[1],
         req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device="cuda"),

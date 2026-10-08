@@ -378,9 +378,6 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(
-                pass_config=SimpleNamespace(enable_sp=False)
-            ),
             parallel_config=SimpleNamespace(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),

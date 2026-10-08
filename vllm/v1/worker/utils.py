@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
@@ -478,6 +478,32 @@ def customize_attention_spec(
     return spec
 
 
+def _block_size_is_supported(
+    backends: list[type[AttentionBackend]],
+    block_size: int,
+    specs: Sequence[KVCacheSpec | None],
+) -> bool:
+    """Check if the block size is supported by all backends.
+
+    An exact ``int`` declaration must match exactly; a ``MultipleOf``
+    declaration accepts any multiple of its base.
+    """
+    for backend, spec in zip(backends, specs, strict=True):
+        is_supported = False
+        for supported_size in backend.get_supported_kernel_block_sizes(spec):
+            if isinstance(supported_size, int):
+                if block_size == supported_size:
+                    is_supported = True
+            elif isinstance(supported_size, MultipleOf):
+                if block_size % supported_size.base == 0:
+                    is_supported = True
+            else:
+                raise ValueError(f"Unknown supported size: {supported_size}")
+        if not is_supported:
+            return False
+    return True
+
+
 def select_common_block_size(
     kv_manager_block_size: int,
     backends: list[type[AttentionBackend]],
@@ -502,27 +528,7 @@ def select_common_block_size(
 
     """
     specs = kv_cache_specs or [None] * len(backends)
-
-    def block_size_is_supported(
-        backends: list[type[AttentionBackend]], block_size: int
-    ) -> bool:
-        """Check if the block size is supported by all backends."""
-        for backend, spec in zip(backends, specs, strict=True):
-            is_supported = False
-            for supported_size in backend.get_supported_kernel_block_sizes(spec):
-                if isinstance(supported_size, int):
-                    if block_size == supported_size:
-                        is_supported = True
-                elif isinstance(supported_size, MultipleOf):
-                    if block_size % supported_size.base == 0:
-                        is_supported = True
-                else:
-                    raise ValueError(f"Unknown supported size: {supported_size}")
-            if not is_supported:
-                return False
-        return True
-
-    if block_size_is_supported(backends, kv_manager_block_size):
+    if _block_size_is_supported(backends, kv_manager_block_size, specs):
         return kv_manager_block_size
 
     # MultipleOf constraints also accept the manager size if they accept a divisor.
@@ -535,7 +541,7 @@ def select_common_block_size(
     }
 
     for size in sorted(candidates, reverse=True):
-        if block_size_is_supported(backends, size):
+        if _block_size_is_supported(backends, size, specs):
             return size
     raise ValueError(
         f"No common block size for {kv_manager_block_size} ("
@@ -959,35 +965,6 @@ def get_uniform_decode_token_count(
     ):
         return max_query_len
     return None
-
-
-def is_residual_scattered_for_sp(
-    vllm_config: VllmConfig, num_input_tokens: int
-) -> bool:
-    """Check if the residual tensor is scattered for sequence parallelism.
-
-    The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled. SP is only supported in
-    full-graph compilation mode.
-    """
-    if not vllm_config.compilation_config.pass_config.enable_sp:
-        return False
-
-    tp = vllm_config.parallel_config.tensor_parallel_size
-
-    if tp == 1:
-        return False
-
-    assert (
-        vllm_config.compilation_config.use_inductor_graph_partition
-        or not vllm_config.compilation_config.splitting_ops
-    ), "Sequence parallelism requires full-graph compilation"
-
-    # When sequence parallelism is enabled, we always pad num_input_tokens
-    # to be a multiple of tensor_parallel_size (tp) earlier.
-    assert num_input_tokens % tp == 0
-
-    return True
 
 
 @dataclass
