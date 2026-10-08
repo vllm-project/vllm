@@ -423,6 +423,10 @@ class AsyncLLM(EngineClient):
             )
 
         if isinstance(prompt, AsyncGenerator):
+            if hidden_state_capture is not None:
+                raise ValueError(
+                    "Hidden-state capture does not support streaming input"
+                )
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
 

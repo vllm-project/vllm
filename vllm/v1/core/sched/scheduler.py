@@ -54,7 +54,6 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.hidden_state_capture import accepted_hidden_range
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -2199,63 +2198,33 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             capture_result = None
-            capture_skip_reason = None
-            if (capture_buffer := request.hidden_state_capture) is not None:
-                capture_skip_reason = (
-                    model_runner_output.hidden_capture_errors or {}
-                ).get(req_id)
-                if capture_skip_reason is None:
-                    if (
-                        not output_is_stale
-                        and (
-                            chunk := (
-                                model_runner_output.hidden_state_capture or {}
-                            ).get(req_id)
-                        )
-                        is not None
-                        and new_token_ids
-                    ):
-                        scheduled_end = request.num_computed_tokens + num_rejected
-                        accepted_start, accepted_end = accepted_hidden_range(
-                            scheduled_end,
-                            num_tokens_scheduled,
-                            len(new_token_ids),
-                            bool(scheduled_spec_token_ids),
-                        )
-                        capture_buffer.add(chunk.accepted(accepted_start, accepted_end))
-                    if stopped or (
-                        not output_is_stale
-                        and request.num_computed_tokens
-                        >= capture_buffer.plan.window_end_abs
-                    ):
-                        capture_result = capture_buffer.finish()
-                        if capture_result is None:
-                            capture_skip_reason = (
-                                "ended_before_window"
-                                if stopped
-                                and request.num_computed_tokens
-                                < capture_buffer.plan.window_start_abs
-                                else "insufficient_rows"
-                            )
-                            logger.info(
-                                "Hidden-state capture skipped for %s (%s): %d rows, "
-                                "minimum %d",
-                                req_id,
-                                capture_skip_reason,
-                                capture_buffer.num_rows,
-                                capture_buffer.plan.min_rows,
-                            )
-                if capture_skip_reason is not None or capture_result is not None:
+            if (
+                capture_buffer := request.hidden_state_capture
+            ) is not None and not output_is_stale:
+                accepted_end = request.num_prompt_tokens - 1 + request.num_output_tokens
+                accepted_start = accepted_end - len(new_token_ids)
+                capture_result, request.hidden_capture_skip_reason = (
+                    capture_buffer.update(
+                        (model_runner_output.hidden_state_capture or {}).get(req_id),
+                        accepted_start,
+                        accepted_end,
+                        stopped=stopped,
+                        error=(model_runner_output.hidden_capture_errors or {}).get(
+                            req_id
+                        ),
+                    )
+                )
+                if (
+                    request.hidden_capture_skip_reason is not None
+                    or capture_result is not None
+                ):
                     request.hidden_state_capture = None
                     self.finished_hidden_capture_req_ids.add(req_id)
 
+            capture_skip_reason = request.hidden_capture_skip_reason
             routed_experts = None
             should_emit_output = bool(
-                new_token_ids
-                or pooler_output is not None
-                or stopped
-                or capture_result is not None
-                or capture_skip_reason is not None
+                new_token_ids or pooler_output is not None or stopped
             )
             if self.aux_output_connector is not None and should_emit_output:
                 routed_experts = self.aux_output_connector.take_output(
@@ -2344,6 +2313,7 @@ class Scheduler(SchedulerInterface):
                         hidden_capture_skip_reason=capture_skip_reason,
                     )
                 )
+                request.hidden_capture_skip_reason = None
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

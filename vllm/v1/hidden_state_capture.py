@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from time import perf_counter
 from typing import TYPE_CHECKING, Literal
 
@@ -17,13 +16,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.sampling_params import SamplingParams
     from vllm.v1.engine import EngineCoreRequest
-
-
-class HiddenStateCaptureState(Enum):
-    DISABLED = "disabled"
-    ARMED = "armed"
-    CAPTURING = "capturing"
-    FINISHED = "finished"
 
 
 @dataclass(frozen=True)
@@ -121,6 +113,8 @@ def validate_hidden_state_capture(
 
     if not isinstance(params, SamplingParams) or params.n != 1:
         raise ValueError("Hidden-state capture requires a single completion")
+    if params.stop:
+        raise ValueError("Hidden-state capture does not support stop strings")
     prompt_len = length_from_prompt_token_ids_or_embeds(
         request.prompt_token_ids, request.prompt_embeds
     )
@@ -145,19 +139,6 @@ class HiddenStateCaptureChunk:
             self.copied_bytes,
             self.copy_ms,
         )
-
-
-def accepted_hidden_range(
-    scheduled_end: int,
-    num_scheduled: int,
-    num_generated: int,
-    speculative: bool,
-) -> tuple[int, int]:
-    """Map emitted tokens to their model-input hidden positions."""
-    start = (
-        scheduled_end - num_scheduled if speculative else scheduled_end - num_generated
-    )
-    return start, start + num_generated
 
 
 def drop_incompatible_aux_plans(
@@ -262,7 +243,6 @@ class HiddenStateCaptureResult:
 class HiddenStateCaptureBuffer:
     plan: HiddenStateCapturePlan
     chunks: list[HiddenStateCaptureChunk] = field(default_factory=list)
-    state: HiddenStateCaptureState = HiddenStateCaptureState.ARMED
     copied_bytes: int = 0
     copy_ms: float = 0.0
 
@@ -270,7 +250,6 @@ class HiddenStateCaptureBuffer:
         self.copied_bytes += chunk.copied_bytes
         self.copy_ms += chunk.copy_ms
         if chunk.positions.size:
-            self.state = HiddenStateCaptureState.CAPTURING
             self.chunks.append(chunk)
 
     @property
@@ -280,7 +259,6 @@ class HiddenStateCaptureBuffer:
         return len(np.unique(np.concatenate([c.positions for c in self.chunks])))
 
     def finish(self) -> HiddenStateCaptureResult | None:
-        self.state = HiddenStateCaptureState.FINISHED
         if not self.chunks:
             return None
         positions = np.concatenate([chunk.positions for chunk in self.chunks])
@@ -304,3 +282,29 @@ class HiddenStateCaptureBuffer:
             copied_bytes=self.copied_bytes,
             copy_ms=self.copy_ms,
         )
+
+    def update(
+        self,
+        chunk: HiddenStateCaptureChunk | None,
+        accepted_start: int,
+        accepted_end: int,
+        *,
+        stopped: bool,
+        error: str | None = None,
+    ) -> tuple[HiddenStateCaptureResult | None, str | None]:
+        """Settle returned rows using accepted output progress."""
+        if error is not None:
+            return None, error
+        if chunk is not None and accepted_start < accepted_end:
+            self.add(chunk.accepted(accepted_start, accepted_end))
+        if not stopped and accepted_end < self.plan.window_end_abs:
+            return None, None
+        result = self.finish()
+        if result is not None:
+            return result, None
+        reason = (
+            "ended_before_window"
+            if stopped and accepted_end <= self.plan.window_start_abs
+            else "insufficient_rows"
+        )
+        return None, reason

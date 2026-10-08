@@ -7,12 +7,9 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.sampling_params import SamplingParams
 from vllm.v1.hidden_state_capture import (
     HiddenStateCaptureBuffer,
     HiddenStateCapturePlan,
-    HiddenStateCaptureState,
-    accepted_hidden_range,
     capture_scheduled_hidden_states,
     drop_incompatible_aux_plans,
     hidden_state_capture_capability,
@@ -94,11 +91,8 @@ def test_hidden_capture_discards_rejected_speculative_rows_and_short_samples():
     )["req"]
 
     buffer = HiddenStateCaptureBuffer(plan)
-    assert buffer.state == HiddenStateCaptureState.ARMED
-    buffer.add(chunk.accepted(10, 12))
-    assert buffer.state == HiddenStateCaptureState.CAPTURING
-    result = buffer.finish()
-    assert buffer.state == HiddenStateCaptureState.FINISHED
+    result, reason = buffer.update(chunk, 10, 12, stopped=True)
+    assert reason is None
     assert result is not None
     np.testing.assert_array_equal(result.hidden_positions, [10, 11])
     torch.testing.assert_close(result.hidden_states, hidden[:2])
@@ -108,13 +102,9 @@ def test_hidden_capture_discards_rejected_speculative_rows_and_short_samples():
     assert result.includes_final_layer
 
     early_eos = HiddenStateCaptureBuffer(plan)
-    early_eos.add(chunk.accepted(10, 11))
-    assert early_eos.finish() is None
-
-
-def test_hidden_capture_acceptance_uses_last_prefill_or_first_speculative_rows():
-    assert accepted_hidden_range(100, 100, 1, speculative=False) == (99, 100)
-    assert accepted_hidden_range(105, 5, 2, speculative=True) == (100, 102)
+    result, reason = early_eos.update(chunk, 10, 11, stopped=True)
+    assert result is None
+    assert reason == "insufficient_rows"
 
 
 def test_hidden_capture_preserves_aux_final_layout_and_deduplicates_retries():
@@ -222,6 +212,8 @@ def test_hidden_capture_fails_closed_for_unmapped_runners():
 
 
 def test_hidden_capture_rejects_unsupported_config_before_admission():
+    from vllm.sampling_params import SamplingParams
+
     config = SimpleNamespace(
         device_config=SimpleNamespace(device_type="npu"),
         scheduler_config=SimpleNamespace(async_scheduling=False),
@@ -237,3 +229,16 @@ def test_hidden_capture_rejects_unsupported_config_before_admission():
     plan = HiddenStateCapturePlan.from_window("req", 2, 0, 1, "collection")
     with pytest.raises(ValueError, match="only the CUDA GPU"):
         validate_hidden_state_capture(plan, request, SamplingParams(), config)
+
+
+@pytest.mark.parametrize("stop", ["stop", ["stop"]])
+def test_hidden_capture_rejects_frontend_stop_strings(stop):
+    """Frontend termination cannot return the scheduler's buffered partial window."""
+    from vllm.sampling_params import SamplingParams
+
+    request = SimpleNamespace(
+        request_id="req", prompt_token_ids=[1, 2], prompt_embeds=None
+    )
+    plan = HiddenStateCapturePlan.from_window("req", 2, 0, 4, "collection", min_rows=1)
+    with pytest.raises(ValueError, match="stop strings"):
+        validate_hidden_state_capture(plan, request, SamplingParams(stop=stop), None)

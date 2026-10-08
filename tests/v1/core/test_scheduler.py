@@ -54,6 +54,11 @@ from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCaptureBuffer,
+    HiddenStateCaptureChunk,
+    HiddenStateCapturePlan,
+)
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -76,6 +81,147 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _capture_model_output(requests, sampled, positions=None, errors=None):
+    chunks = {}
+    for index, request in enumerate(requests):
+        rows = (positions or {}).get(request.request_id, [])
+        if rows:
+            chunks[request.request_id] = HiddenStateCaptureChunk(
+                np.array(rows),
+                torch.tensor(
+                    [[index * 1000 + row] for row in rows], dtype=torch.float32
+                ),
+            )
+    return ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index={request.request_id: i for i, request in enumerate(requests)},
+        sampled_token_ids=sampled,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        hidden_state_capture=chunks,
+        hidden_capture_errors=errors,
+    )
+
+
+def test_hidden_capture_waits_for_returned_prefill_with_two_chunks_in_flight():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=64, max_model_len=256, pipeline_parallel_size=2
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=100)
+    request.hidden_state_capture = HiddenStateCaptureBuffer(
+        HiddenStateCapturePlan.from_window(request.request_id, 100, 0, 1, "capture")
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    second = scheduler.schedule()
+    assert first.num_scheduled_tokens[request.request_id] == 64
+    assert second.num_scheduled_tokens[request.request_id] == 36
+    assert request.num_computed_tokens == 100
+
+    outputs = scheduler.update_from_output(
+        first, _capture_model_output([request], [[]])
+    )
+    assert not any(output.outputs for output in outputs.values())
+    assert request.hidden_state_capture is not None
+
+    outputs = scheduler.update_from_output(
+        second,
+        _capture_model_output([request], [[42]], {request.request_id: [99]}),
+    )
+    capture = outputs[request.client_index].outputs[0].hidden_state_capture
+    assert capture is not None
+    np.testing.assert_array_equal(capture.hidden_positions, [99])
+    torch.testing.assert_close(capture.hidden_states, torch.tensor([[99.0]]))
+
+
+def test_hidden_capture_aux_skip_waits_for_first_generated_token():
+    scheduler = create_scheduler(max_num_batched_tokens=64, max_model_len=256)
+    (request,) = create_requests(num_requests=1, num_tokens=200)
+    request.hidden_state_capture = HiddenStateCaptureBuffer(
+        HiddenStateCapturePlan.from_window(
+            request.request_id, 200, 0, 1, "capture", aux_layer_ids=(3,)
+        )
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    prefill_stats = request.prefill_stats
+    outputs = scheduler.update_from_output(
+        first,
+        _capture_model_output(
+            [request], [[]], errors={request.request_id: "aux_layers_unavailable"}
+        ),
+    )
+    assert not any(output.outputs for output in outputs.values())
+    assert request.prefill_stats is prefill_stats
+    assert request.hidden_capture_skip_reason == "aux_layers_unavailable"
+    for _ in range(2):
+        step = scheduler.schedule()
+        outputs = scheduler.update_from_output(
+            step, _capture_model_output([request], [[]])
+        )
+        assert not any(output.outputs for output in outputs.values())
+        assert request.prefill_stats is prefill_stats
+    step = scheduler.schedule()
+    outputs = scheduler.update_from_output(
+        step, _capture_model_output([request], [[42]])
+    )
+    output = outputs[request.client_index].outputs[0]
+    assert output.new_token_ids == [42]
+    assert output.hidden_capture_skip_reason == "aux_layers_unavailable"
+    assert output.prefill_stats is prefill_stats
+    assert request.hidden_capture_skip_reason is None
+
+
+@pytest.mark.parametrize("termination", ["max_tokens", "stop_token", "eos"])
+def test_hidden_capture_mixed_speculative_rejection_returns_accepted_partial_rows(
+    termination,
+):
+    """Early termination keeps accepted rows, never rejected speculative drafts."""
+    scheduler = create_scheduler(num_speculative_tokens=3, max_model_len=256)
+    terminal_token = EOS_TOKEN_ID if termination == "eos" else 12
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=2,
+        max_tokens=3 if termination == "max_tokens" else 16,
+        stop_token_ids=[12] if termination == "stop_token" else None,
+    )
+    for request in requests:
+        request.hidden_state_capture = HiddenStateCaptureBuffer(
+            HiddenStateCapturePlan.from_window(
+                request.request_id, 2, 1, 4, "capture", min_rows=2
+            )
+        )
+        scheduler.add_request(request)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _capture_model_output(requests, [[10], [20]]))
+    scheduler.update_draft_token_ids(
+        DraftTokenIds(
+            [request.request_id for request in requests], [[11, 99, 98], [21, 99, 98]]
+        )
+    )
+    step = scheduler.schedule()
+    assert all(
+        len(tokens) == 3 for tokens in step.scheduled_spec_decode_tokens.values()
+    )
+    outputs = scheduler.update_from_output(
+        step,
+        _capture_model_output(
+            requests,
+            [[11, terminal_token], [21, terminal_token]],
+            {request.request_id: [2, 3, 4] for request in requests},
+        ),
+    )
+    for index, output in enumerate(outputs[0].outputs):
+        assert output.finish_reason is not None
+        capture = output.hidden_state_capture
+        assert capture is not None
+        np.testing.assert_array_equal(capture.hidden_positions, [2, 3])
+        torch.testing.assert_close(
+            capture.hidden_states,
+            torch.tensor([[index * 1000 + 2.0], [index * 1000 + 3.0]]),
+        )
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():

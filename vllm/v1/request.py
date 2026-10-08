@@ -92,6 +92,7 @@ class Request:
             if hidden_state_capture is not None
             else None
         )
+        self.hidden_capture_skip_reason: str | None = None
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
