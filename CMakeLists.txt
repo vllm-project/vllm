@@ -1568,6 +1568,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     include(cmake/external_projects/triton_kernels.cmake)
 endif()
 
+# DeepGEMM and DeepSelect host code uses C++20 <format>, which libstdc++
+# provides only from GCC 13 onward.
+if (VLLM_GPU_LANG STREQUAL "CUDA"
+    AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "13")
+  message(FATAL_ERROR
+    "GCC >= 13 is required to build vLLM with CUDA (found ${CMAKE_CXX_COMPILER_VERSION}). "
+    "The DeepGEMM and DeepSelect dependencies use C++20 <format> in host code, "
+    "which libstdc++ does not provide before GCC 13. "
+    "See: https://github.com/vllm-project/vllm/issues/58158")
+endif()
+
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/deepgemm.cmake)
