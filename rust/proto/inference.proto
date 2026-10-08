@@ -59,12 +59,24 @@ message GenerateRequest {
 
   KVHintsEnvelope kv_hints = 17;
 
-  // Per-request kwargs for the engine's configured reasoning parser.
-  // Includes chat_template_kwargs used to render the prompt.
-  google.protobuf.Struct reasoning_parser_kwargs = 18;
-  // Preserve presence: false means generation starts inside reasoning;
-  // omission lets the engine infer the initial reasoning state.
-  optional bool reasoning_ended = 19;
+  // Transitional, to be deprecated: only consulted when the engine runs its own
+  // reasoning parser and the structured-output constraint covers only the
+  // output after reasoning. Prefer a constraint that covers the full output
+  // from the first generated token.
+  EngineReasoningGate engine_reasoning_gate = 18;
+}
+
+// Inputs to the engine's reasoning gate, which keeps a structured-output
+// constraint inactive until the engine's reasoning parser detects the end of
+// reasoning.
+message EngineReasoningGate {
+  // Omitted: the engine infers the initial state from the prompt.
+  // true: apply the constraint from the first generated token.
+  // false: generation starts inside reasoning.
+  optional bool reasoning_ended = 1;
+  // Chat template kwargs used to render the prompt, so the engine's reasoning
+  // parser observes the same thinking mode.
+  google.protobuf.Struct chat_template_kwargs = 2;
 }
 
 message KVHintsEnvelope {

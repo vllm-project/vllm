@@ -175,12 +175,15 @@ mod tests {
                     payload: BTreeMap::new(),
                 }],
             }),
-            reasoning_parser_kwargs: Some(ReasoningParserKwargs::from([(
-                "chat_template_kwargs".to_string(),
-                serde_json::json!({
-                    "enable_thinking": true,
-                }),
-            )])),
+            reasoning_parser_kwargs: Some(ReasoningParserKwargs {
+                chat_template_kwargs: [(
+                    "chat_template_kwargs".to_string(),
+                    serde_json::json!({
+                        "enable_thinking": true,
+                    }),
+                )]
+                .into(),
+            }),
             reasoning_ended: None,
             lora_request: None,
         }
@@ -217,7 +220,7 @@ mod tests {
             request
                 .reasoning_parser_kwargs
                 .as_ref()
-                .and_then(|kwargs| kwargs.get("chat_template_kwargs")),
+                .and_then(|kwargs| kwargs.chat_template_kwargs.get("chat_template_kwargs")),
             Some(&serde_json::json!({
                 "enable_thinking": true
             }))

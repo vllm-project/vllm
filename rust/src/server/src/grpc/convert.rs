@@ -9,6 +9,7 @@ use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
@@ -84,6 +85,7 @@ pub fn to_text_request(
     };
     let session_id = req.session_id.filter(|s| !s.is_empty());
     let kv_hints = req.kv_hints.map(kv_hints_from_proto);
+    let reasoning_gate = req.engine_reasoning_gate.unwrap_or_default();
 
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
@@ -137,17 +139,15 @@ pub fn to_text_request(
         data_parallel_rank: None,
         session_id,
         kv_hints,
-        reasoning_parser_kwargs: req
-            .reasoning_parser_kwargs
-            .map(|kwargs| {
-                kwargs
-                    .fields
-                    .into_iter()
-                    .map(|(key, value)| (key, proto_value_to_json(&value)))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        reasoning_ended: req.reasoning_ended,
+        reasoning_parser_kwargs: ReasoningParserKwargs {
+            chat_template_kwargs: reasoning_gate
+                .chat_template_kwargs
+                .map(|kwargs| {
+                    kwargs.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect()
+                })
+                .unwrap_or_default(),
+        },
+        reasoning_ended: reasoning_gate.reasoning_ended,
         lora_request: None,
         arrival_time: None,
     })
@@ -623,28 +623,38 @@ mod tests {
 
     #[test]
     fn grpc_reasoning_controls_reach_engine_request_with_presence_intact() {
-        let kwargs = serde_json::json!({
-            "chat_template_kwargs": {"enable_thinking": false, "reasoning_effort": "high"},
-            "plugin_options": {"values": [true, null, "low", 2.5]}
-        });
-        for (kwargs, reasoning_ended, budget) in [
-            (Some(kwargs), Some(false), Some(0)),
-            (Some(serde_json::json!({})), None, None),
+        let chat_template_kwargs =
+            serde_json::json!({"enable_thinking": false, "reasoning_effort": "high"});
+        for (gate, budget) in [
+            (None, None),
             (
-                Some(serde_json::json!({"plugin_options": {"enabled": true}})),
-                Some(true),
+                Some(pb::EngineReasoningGate {
+                    reasoning_ended: Some(false),
+                    chat_template_kwargs: json_to_proto_struct(&chat_template_kwargs),
+                }),
+                Some(0),
+            ),
+            (
+                Some(pb::EngineReasoningGate {
+                    reasoning_ended: Some(true),
+                    chat_template_kwargs: None,
+                }),
                 Some(128),
             ),
-            (
-                Some(serde_json::json!({"chat_template_kwargs": null})),
-                None,
-                Some(-1),
-            ),
-            (None, None, None),
+            (Some(pb::EngineReasoningGate::default()), Some(-1)),
         ] {
+            let expected = (
+                serde_json::json!({
+                    "chat_template_kwargs": gate
+                        .as_ref()
+                        .and_then(|gate| gate.chat_template_kwargs.as_ref())
+                        .map_or_else(|| serde_json::json!({}), |_| chat_template_kwargs.clone()),
+                }),
+                gate.as_ref().and_then(|gate| gate.reasoning_ended),
+                budget.filter(|v| *v >= 0).map(|v| v as u64),
+            );
             let request = pb::GenerateRequest {
-                reasoning_parser_kwargs: kwargs.as_ref().and_then(json_to_proto_struct),
-                reasoning_ended,
+                engine_reasoning_gate: gate,
                 stopping: Some(pb::StoppingCriteria {
                     thinking_token_budget: budget,
                     ..Default::default()
@@ -676,11 +686,7 @@ mod tests {
                         engine.reasoning_ended,
                         engine.sampling_params.thinking_token_budget,
                     ),
-                    (
-                        kwargs.clone().unwrap_or_else(|| serde_json::json!({})),
-                        reasoning_ended,
-                        budget.filter(|v| *v >= 0).map(|v| v as u64),
-                    ),
+                    expected,
                 );
             }
         }
