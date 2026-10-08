@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -295,8 +296,51 @@ def test_extends_precede_prefills_through_the_splitter():
     assert classify(req_ids) == (1, 1, 1)
 
     # Ordering context-less first is what the classifier cannot recover from:
-    # "resumed" then falls on the prefill side of the boundary.
-    assert classify(["d0", "fresh", "resumed"]) == (1, 0, 2)
+    # "resumed" would fall on the prefill side of the boundary and lose its KV
+    # history. The splitter now asserts the precondition rather than returning a
+    # well-formed but wrong answer, so the misordering is loud.
+    with pytest.raises(AssertionError, match="extends-before-prefills"):
+        classify(["d0", "fresh", "resumed"])
+
+
+def test_ordering_holds_for_the_dcp_splitter_threshold():
+    """The same ordering must satisfy the splitter's other caller.
+
+    split_dcp_context_queries (vllm/v1/worker/cp_utils.py) calls
+    split_decodes_prefills_and_extends with the default decode_threshold=1,
+    not decode_query_len. With spec decode a context-less chunk of exactly
+    decode_query_len tokens is decode-shaped but is a prefill to that split,
+    so leaving it among the decodes puts it at first_prefill and sweeps every
+    extend behind it onto the prefill path, which never reads the KV cache.
+    """
+    decode_query_len = 4
+    num_tokens_per_req = {"fresh": 4, "extend": 4096, "d0": 4}
+    req_id_to_index = {"fresh": 0, "extend": 1, "d0": 2}
+    num_computed = np.array([0, 100_000, 512], dtype=np.int32)
+    draft_tokens = {"d0": [0, 0, 0]}
+
+    req_ids = sort_batch_req_ids(
+        num_tokens_per_req,
+        draft_tokens,
+        decode_query_len,
+        num_computed,
+        req_id_to_index,
+    )
+    # The fresh decode-shaped chunk must trail the extend, not lead it.
+    assert req_ids == ["d0", "extend", "fresh"]
+
+    metadata = _make_common_attn_metadata(
+        [num_tokens_per_req[r] for r in req_ids],
+        [int(num_computed[req_id_to_index[r]]) for r in req_ids],
+    )
+    # decode_threshold=1 is what cp_utils uses.
+    num_decodes, num_extends, num_prefills, *_ = split_decodes_prefills_and_extends(
+        metadata
+    )
+    assert (num_decodes, num_extends, num_prefills) == (0, 2, 1)
+
+    # The request carrying 100k of context must not be on the prefill side.
+    assert req_ids[len(req_ids) - num_prefills :] == ["fresh"]
 
 
 def test_uniform_decode_uses_state_index_not_batch_position():

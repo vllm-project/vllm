@@ -2398,6 +2398,21 @@ def sort_batch_req_ids(
     # the rest, so a context-less request sorted ahead of one with context
     # makes that request a prefill, and the prefill path never reads the KV
     # cache.
+    #
+    # The context term precedes the decode-length term rather than following it,
+    # because the same splitter is called from two places with different
+    # thresholds. split_dcp_context_queries uses the default decode_threshold=1,
+    # and to it a context-less chunk of exactly decode_query_len tokens is not a
+    # decode but a prefill, so leaving such a chunk among the decodes puts it at
+    # first_prefill and sweeps every extend behind it onto the prefill path.
+    #
+    # Ordering it after the extends is also what this module's classifier already
+    # requires: a prompt chunk of exactly decode_query_len tokens has a decode
+    # batch's shape but must not be counted as a uniform decode.
+    #
+    # num > 1 keeps genuine single-token requests out of this term, which is what
+    # bounds the change: without that guard the decode boundary moves on roughly
+    # three times as many batches.
     def key(r: str) -> tuple[bool, bool, bool, int]:
         num = num_tokens_per_req[r]
         # seq_len == query_len in the classifier, i.e. no computed context.
@@ -2406,6 +2421,11 @@ def sort_batch_req_ids(
             and req_id_to_index is not None
             and num_computed_tokens[req_id_to_index[r]] == 0
         )
-        return (not draft_tokens.get(r), num != decode_query_len, no_context, num)
+        return (
+            not draft_tokens.get(r),
+            num > 1 and no_context,
+            num != decode_query_len,
+            num,
+        )
 
     return sorted(num_tokens_per_req, key=key)

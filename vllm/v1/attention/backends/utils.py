@@ -766,6 +766,22 @@ def split_decodes_prefills_and_extends(
     if not torch.any(is_prefill_or_extend):
         return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
 
+    # Everything from first_prefill onwards is counted as a prefill without being
+    # re-checked, and the prefill path never reads the KV cache. If the batch is
+    # misordered, a request with computed context lands there and silently attends
+    # to its current chunk only -- well-formed output, wrong logits. Fail loudly
+    # instead. Zero-length rows are padding and carry no context, so they are
+    # excluded rather than tripping this.
+    if __debug__ and torch.any(is_prefill):
+        _has_context = (seq_lens != query_lens) & (query_lens > 0)
+        _stray = _has_context[first_prefill:]
+        assert not torch.any(_stray), (
+            "batch is not ordered extends-before-prefills: the request at index "
+            f"{first_prefill + int(_stray.int().argmax())} carries computed "
+            "context but falls after the first context-less request, so its KV "
+            "history would be silently dropped. See sort_batch_req_ids."
+        )
+
     num_prefills_or_extends = num_reqs - num_decodes
     num_prefill_or_extend_tokens = num_tokens - num_decode_tokens
     if not torch.any(is_prefill):
