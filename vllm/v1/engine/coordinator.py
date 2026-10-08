@@ -9,8 +9,9 @@ import weakref
 import msgspec.msgpack
 import zmq
 
-from vllm.config import LoggingConfig, ParallelConfig
+from vllm.config import LoggingConfig, VllmConfig
 from vllm.logger import configure_logging, init_logger
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
@@ -78,10 +79,11 @@ class DPCoordinator:
 
     def __init__(
         self,
-        parallel_config: ParallelConfig,
+        vllm_config: VllmConfig,
         enable_wave_coordination: bool = True,
         logging_config: LoggingConfig | None = None,
     ):
+        parallel_config = vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
 
@@ -115,7 +117,10 @@ class DPCoordinator:
             },
             daemon=True,
         )
-        self.proc.start()
+        with numa_utils.configure_subprocess(
+            vllm_config, local_rank=0, process_kind="DPCoordinator"
+        ):
+            self.proc.start()
         child_zmq_addr_pipe.close()
         (
             front_publish_address,

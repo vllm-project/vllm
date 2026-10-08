@@ -47,6 +47,7 @@ def _make_config(**parallel_kwargs):
         nnodes_within_dp=1,
         data_parallel_rank_local=0,
         data_parallel_index=0,
+        data_parallel_size_local=1,
         pipeline_parallel_size=1,
         tensor_parallel_size=1,
     )
@@ -389,10 +390,82 @@ def test_get_numactl_args_requires_detectable_nodes(monkeypatch):
         numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=0)
 
 
+def test_get_numactl_args_coordinator_single_local_engine():
+    """With one local DP rank, the coordinator binds to that rank's own
+    NUMA node — same as EngineCore would for that shard."""
+    vllm_config = _make_config(
+        numa_bind=True,
+        numa_bind_nodes=[0],
+        data_parallel_size_local=1,
+    )
+    assert (
+        numa_utils._get_numactl_coordinator_args(vllm_config.parallel_config)
+        == "--cpunodebind=0 --membind=0"
+    )
+
+
+def test_get_numactl_args_coordinator_spans_all_local_shards():
+    """With two local DP ranks on different NUMA nodes, the coordinator
+    binds to the union of both — it talks to every local rank, not just
+    one."""
+    vllm_config = _make_config(
+        numa_bind=True,
+        numa_bind_nodes=[0, 1],
+        data_parallel_size_local=2,
+        tensor_parallel_size=1,
+    )
+    assert (
+        numa_utils._get_numactl_coordinator_args(vllm_config.parallel_config)
+        == "--cpunodebind=0,1 --membind=0,1"
+    )
+
+
+def test_get_numactl_args_coordinator_pct_spans_local_nodes(monkeypatch):
+    """PCT priority-core union for the coordinator covers every local
+    shard's nodes, not just one."""
+    _patch_pct_gates(
+        monkeypatch,
+        model_match=True,
+        highest_perf=46,
+        cpulist_by_node={0: "0-31,128-159", 1: "64-95,192-223"},
+    )
+    vllm_config = _make_config(
+        numa_bind=True,
+        numa_bind_nodes=[0, 1],
+        data_parallel_size_local=2,
+        tensor_parallel_size=1,
+    )
+    assert numa_utils._get_numactl_coordinator_args(vllm_config.parallel_config) == (
+        "--physcpubind="
+        "0,1,16,17,64,65,80,81,128,129,144,145,192,193,208,209"
+        " --membind=0,1"
+    )
+
+
+def test_configure_subprocess_coordinator_process_kind(monkeypatch):
+    """configure_subprocess routes process_kind='DPCoordinator' through
+    the coordinator's node-union helper rather than the single-shard
+    EngineCore/worker paths."""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/numactl")
+    monkeypatch.setattr(numa_utils.envs, "VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    vllm_config = _make_config(
+        numa_bind=True,
+        numa_bind_nodes=[0, 1],
+        data_parallel_size_local=2,
+        tensor_parallel_size=1,
+    )
+    with numa_utils.configure_subprocess(
+        vllm_config, local_rank=0, process_kind="DPCoordinator"
+    ):
+        numactl_args = os.environ[numa_utils._NUMACTL_ARGS_ENV]
+        assert numactl_args == "--cpunodebind=0,1 --membind=0,1"
+
+
 def test_configure_subprocess_rejects_unknown_process_kind():
-    """configure_subprocess only knows 'worker' and 'EngineCore'; anything
-    else must raise ValueError instead of silently routing to the worker
-    path."""
+    """configure_subprocess only knows 'worker', 'EngineCore', and
+    'DPCoordinator'; anything else must raise ValueError instead of
+    silently routing to the worker path."""
     vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0])
     with (
         pytest.raises(ValueError, match="process_kind"),

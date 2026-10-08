@@ -1230,7 +1230,7 @@ def launch_core_engines(
 
     if run_coordinator:
         coordinator = DPCoordinator(
-            parallel_config,
+            vllm_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
             logging_config=vllm_config.logging_config,
         )

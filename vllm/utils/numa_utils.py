@@ -446,6 +446,40 @@ def _get_numactl_enginecore_args(
     return f"--cpunodebind={membind_arg} --membind={membind_arg}"
 
 
+def _get_numactl_coordinator_args(parallel_config) -> str:
+    """Compute the numactl args for the DP coordinator subprocess.
+
+    Unlike a single EngineCore shard, the coordinator has no single home
+    node: it aggregates stats and wave state from every local DP rank on
+    this host, so bind it to the union of NUMA nodes spanned by all of
+    them instead of picking one.
+    """
+    local_size = parallel_config.data_parallel_size_local
+    shard_nodes: set[int] = set()
+    for dp_local_rank in range(local_size):
+        shard_nodes.update(_get_enginecore_numa_nodes(parallel_config, dp_local_rank))
+    sorted_nodes = sorted(shard_nodes)
+    membind_arg = ",".join(str(n) for n in sorted_nodes)
+
+    pct_cpus = (
+        None
+        if parallel_config.numa_bind_cpus is not None
+        else _maybe_get_pct_cpu_binding(sorted_nodes)
+    )
+
+    if pct_cpus is not None:
+        cpu_binding = ",".join(str(c) for c in pct_cpus)
+        logger.info(
+            "Binding DPCoordinator subprocess to CPUs %s and NUMA nodes %s",
+            cpu_binding,
+            membind_arg,
+        )
+        return f"--physcpubind={cpu_binding} --membind={membind_arg}"
+
+    logger.info("Binding DPCoordinator subprocess to NUMA nodes %s", membind_arg)
+    return f"--cpunodebind={membind_arg} --membind={membind_arg}"
+
+
 def _log_numactl_show(label: str) -> bool:
     try:
         result = subprocess.run(
@@ -525,9 +559,12 @@ def configure_subprocess(
         numactl_args = _get_numactl_worker_args(
             parallel_config, local_rank, dp_local_rank
         )
+    elif process_kind == "DPCoordinator":
+        numactl_args = _get_numactl_coordinator_args(parallel_config)
     else:
         raise ValueError(
-            f"Unknown process_kind {process_kind!r}; expected 'worker' or 'EngineCore'."
+            f"Unknown process_kind {process_kind!r}; expected 'worker', "
+            "'EngineCore', or 'DPCoordinator'."
         )
 
     executable, debug_str = _get_numactl_executable()
