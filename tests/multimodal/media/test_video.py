@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -135,6 +136,42 @@ def test_opencv_video_metadata_matches_sampled_frame_timeline(tmp_path):
     assert metadata["duration"] == pytest.approx(2.0)
     assert metadata["frames_indices"] == [0, 3, 6, 9]
     assert metadata["total_num_frames"] == 4
+
+
+def _media_opencv_decode_worker_abort(*args, **kwargs):
+    """Module-level abort so spawn can pickle the worker for VideoMediaIO tests."""
+    os._exit(1)
+
+
+def test_video_media_io_survives_opencv_decode_worker_abort(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """VideoMediaIO rejects a crashed OpenCV child instead of dying itself."""
+    from vllm.multimodal.video_decoders import opencv as opencv_decoders
+
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+    opencv_decoders._reset_decode_pool()
+
+    image_path = f"{tmp_path}/media_io_frame.png"
+    Image.new("RGB", (8, 8), color=(0, 255, 0)).save(image_path)
+    video_path = f"{tmp_path}/media_io_clip.mp4"
+    create_video_from_image(image_path, video_path, num_frames=6, fps=6.0)
+    with open(video_path, "rb") as f:
+        data = f.read()
+
+    video_io = VideoMediaIO(ImageMediaIO(), num_frames=4)
+    monkeypatch.setattr(
+        opencv_decoders, "_decode_opencv_worker", _media_opencv_decode_worker_abort
+    )
+    with pytest.raises(ValueError, match="terminated unexpectedly"):
+        video_io.load_bytes(data)
+
+    monkeypatch.undo()
+    opencv_decoders._reset_decode_pool()
+    loaded = VideoMediaIO(ImageMediaIO(), num_frames=4).load_bytes(data)
+    frames, metadata = loaded.media
+    assert frames.shape[0] == 4
+    assert metadata["video_backend"] == "opencv"
 
 
 NUM_FRAMES = 10

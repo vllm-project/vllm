@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
+import atexit
+import multiprocessing
+import threading
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from io import BytesIO
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -24,8 +33,81 @@ except ImportError:
 
 logger = init_logger(__name__)
 
+_DECODE_POOL: ProcessPoolExecutor | None = None
+_DECODE_POOL_LOCK = threading.Lock()
 
-def decode_opencv(
+
+def _get_decode_pool() -> ProcessPoolExecutor:
+    """Lazy spawn-context pool for OpenCV decode isolation."""
+    global _DECODE_POOL
+    with _DECODE_POOL_LOCK:
+        if _DECODE_POOL is None:
+            ctx = multiprocessing.get_context("spawn")
+            _DECODE_POOL = ProcessPoolExecutor(
+                max_workers=max(1, envs.VLLM_MEDIA_LOADING_THREAD_COUNT),
+                mp_context=ctx,
+            )
+        return _DECODE_POOL
+
+
+def _reset_decode_pool() -> None:
+    global _DECODE_POOL
+    with _DECODE_POOL_LOCK:
+        if _DECODE_POOL is not None:
+            _DECODE_POOL.shutdown(wait=False, cancel_futures=True)
+            _DECODE_POOL = None
+
+
+def _shutdown_decode_pool() -> None:
+    global _DECODE_POOL
+    with _DECODE_POOL_LOCK:
+        if _DECODE_POOL is not None:
+            _DECODE_POOL.shutdown(wait=False, cancel_futures=True)
+            _DECODE_POOL = None
+
+
+atexit.register(_shutdown_decode_pool)
+
+
+def _decode_opencv_worker(
+    loader_cls: type,
+    data: bytes,
+    target: VideoTargetMetadata,
+    sampling_kwargs: dict[str, Any],
+    frame_recovery: bool,
+) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
+    """Top-level worker entry so it can be pickled into a spawn child."""
+    return _decode_opencv_inprocess(
+        loader_cls,
+        data,
+        target,
+        sampling_kwargs,
+        frame_recovery=frame_recovery,
+    )
+
+
+def _run_in_opencv_decode_process(fn, /, *args, **kwargs):
+    """Run ``fn`` in the OpenCV decode process pool.
+
+    A native fault in the child (for example SIGSEGV inside OpenCV/FFmpeg)
+    breaks the pool instead of the API server process. Map that to a
+    ``ValueError`` so the request fails closed.
+    """
+    try:
+        return _get_decode_pool().submit(fn, *args, **kwargs).result()
+    except BrokenProcessPool as exc:
+        _reset_decode_pool()
+        raise ValueError(
+            "OpenCV video decoder terminated unexpectedly while decoding "
+            "the input. The request was rejected to keep the API server "
+            "process alive."
+        ) from exc
+    except Exception:
+        # A worker that raises leaves the pool usable; no reset needed.
+        raise
+
+
+def _decode_opencv_inprocess(
     loader_cls,
     data: bytes,
     target: VideoTargetMetadata,
@@ -51,6 +133,30 @@ def decode_opencv(
     return frames, source, frame_idx, valid
 
 
+def decode_opencv(
+    loader_cls,
+    data: bytes,
+    target: VideoTargetMetadata,
+    sampling_kwargs: dict,
+    *,
+    frame_recovery: bool = False,
+) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
+    """Decode video bytes with OpenCV in an isolated child process.
+
+    OpenCV's FFmpeg IO path can native-fault on malformed containers. Running
+    the decode out of process keeps those faults from terminating the API
+    server listener.
+    """
+    return _run_in_opencv_decode_process(
+        _decode_opencv_worker,
+        loader_cls,
+        data,
+        target,
+        sampling_kwargs,
+        frame_recovery,
+    )
+
+
 class OpenCVVideoBackendMixin:
     @staticmethod
     def get_cv2_video_api():
@@ -67,7 +173,7 @@ class OpenCVVideoBackendMixin:
         return api_pref
 
     @classmethod
-    def open_video_capture(cls, data: bytes) -> "cv2.VideoCapture":
+    def open_video_capture(cls, data: bytes) -> cv2.VideoCapture:
         backend = cls.get_cv2_video_api()
         cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
@@ -75,7 +181,7 @@ class OpenCVVideoBackendMixin:
         return cap
 
     @staticmethod
-    def get_video_metadata(cap: "cv2.VideoCapture") -> VideoSourceMetadata:
+    def get_video_metadata(cap: cv2.VideoCapture) -> VideoSourceMetadata:
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         # CAP_PROP_FRAME_COUNT counts every physical sample in the container,
@@ -124,7 +230,7 @@ class OpenCVVideoBackendMixin:
     @classmethod
     def _read_frames_with_recovery(
         cls,
-        cap: "cv2.VideoCapture",
+        cap: cv2.VideoCapture,
         frame_indices: list[int],
         total_frames: int,
     ) -> tuple[npt.NDArray, list[int], dict[int, int]]:
@@ -281,7 +387,7 @@ class OpenCVVideoBackendMixin:
     @classmethod
     def read_frames(
         cls,
-        cap: "cv2.VideoCapture",
+        cap: cv2.VideoCapture,
         frame_idx: list[int],
         total_frames_num: int,
         *,

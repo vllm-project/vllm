@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import os
 import subprocess
 import sys
 import threading
@@ -13,6 +14,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
+from PIL import Image
 from transformers import AutoVideoProcessor, Qwen3VLVideoProcessor
 from transformers.video_utils import VideoMetadata
 
@@ -35,6 +37,7 @@ from vllm.multimodal.video import (
     get_video_loader_backend_for_processor,
 )
 from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
+from vllm.multimodal.video_decoders import opencv as opencv_decoders
 from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
 from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
@@ -877,6 +880,56 @@ def test_video_processor_from_model_repo(
                 f"{vllm_indices[:5].tolist()}..{vllm_indices[-5:].tolist()}"
             ),
         )
+
+
+def _opencv_decode_worker_abort() -> None:
+    """Module-level abort used to simulate a native decoder fault in a child."""
+    os._exit(1)
+
+
+def _tiny_opencv_video_bytes(tmp_path: Path, num_frames: int = 8) -> bytes:
+    image_path = tmp_path / "frame.png"
+    Image.new("RGB", (8, 8), color=(255, 0, 0)).save(image_path)
+    video_path = tmp_path / "clip.mp4"
+    create_video_from_image(
+        str(image_path), str(video_path), num_frames=num_frames, fps=8
+    )
+    return video_path.read_bytes()
+
+
+def test_opencv_decode_worker_abort_is_contained(tmp_path: Path):
+    """A child-process abort must become a ValueError, not kill the parent."""
+    opencv_decoders._reset_decode_pool()
+    with pytest.raises(ValueError, match="terminated unexpectedly"):
+        opencv_decoders._run_in_opencv_decode_process(_opencv_decode_worker_abort)
+
+    # Pool recovers so a later legitimate OpenCV decode still succeeds.
+    frames, metadata = VideoBackend.load_bytes(
+        _tiny_opencv_video_bytes(tmp_path),
+        num_frames=4,
+        backend="opencv",
+    )
+    assert frames.shape[0] == 4
+    assert metadata["total_num_frames"] == 8
+
+
+def test_opencv_decode_runs_out_of_process(tmp_path: Path):
+    """Happy-path OpenCV decode still returns frames through process isolation."""
+    opencv_decoders._reset_decode_pool()
+    frames, metadata = VideoBackend.load_bytes(
+        _tiny_opencv_video_bytes(tmp_path),
+        num_frames=4,
+        backend="opencv",
+    )
+    assert frames.shape[0] == 4
+    assert metadata["video_backend"] == "opencv"
+
+
+def test_dynamic_opencv_decode_worker_abort_is_contained():
+    """opencv_dynamic uses the same isolated OpenCV decode entry point."""
+    opencv_decoders._reset_decode_pool()
+    with pytest.raises(ValueError, match="terminated unexpectedly"):
+        opencv_decoders._run_in_opencv_decode_process(_opencv_decode_worker_abort)
 
 
 def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
