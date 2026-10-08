@@ -6,6 +6,8 @@ These tests verify that:
 1. split_group is used for both device and CPU group creation.
 2. Multiple subgroups work correctly with split_group.
 3. Both GPU and CPU all-reduce work on split groups.
+4. Pipeline-parallel P2P stays on a per-peer ``new_group`` backend.
+5. A singleton world reuses the default device ProcessGroup.
 """
 
 import os
@@ -19,6 +21,8 @@ import torch.distributed
 import vllm.envs as envs
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
+    _pp_device_backend,
+    get_world_group,
     init_distributed_environment,
 )
 from vllm.utils.system_utils import update_environment_variables
@@ -92,6 +96,22 @@ def _verify_cpu_group(coordinator: GroupCoordinator):
         f"CPU group all-reduce failed: expected {expected}, "
         f"got {tensor.flatten()[0].item()}"
     )
+
+
+@worker_fn_wrapper
+def singleton_group_worker():
+    coordinator = get_world_group()
+    assert coordinator.backend == "nccl"
+    assert coordinator.device_group is torch.distributed.group.WORLD
+    assert coordinator.device_group is not coordinator.cpu_group
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU to run the test.",
+)
+def test_singleton_group_reuses_world_process_group():
+    distributed_run(singleton_group_worker, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -231,3 +251,70 @@ def test_split_group_contract_same_split_ranks_on_all_ranks():
     disjoint partitions but is a documented contract violation.
     """
     distributed_run(split_group_contract_worker, 4)
+
+
+@worker_fn_wrapper
+def pipeline_parallel_lazy_p2p_worker():
+    rank = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
+    original_split_group = torch.distributed.split_group
+
+    def unexpected_split_group(*args, **kwargs):
+        raise AssertionError("pipeline-parallel groups must use new_group")
+
+    torch.distributed.split_group = unexpected_split_group
+    try:
+        coordinator = GroupCoordinator(
+            group_ranks=[list(range(world_size))],
+            local_rank=rank,
+            torch_distributed_backend="nccl",
+            use_device_communicator=False,
+            group_name="pp",
+        )
+    finally:
+        torch.distributed.split_group = original_split_group
+
+    assert torch.distributed.get_backend(coordinator.device_group) == "nccl-lazy"
+
+
+@pytest.mark.skipif(
+    not torch.distributed.is_backend_available("nccl-lazy"),
+    reason="NCCL2 lazy backend is unavailable.",
+)
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2,
+    reason="Need at least 2 GPUs to run the test.",
+)
+def test_pipeline_parallel_uses_lazy_p2p_group():
+    """PP uses new_group with NCCL2's per-peer lazy backend."""
+    distributed_run(pipeline_parallel_lazy_p2p_worker, 2)
+
+
+@pytest.mark.parametrize(
+    ("resolved_backend", "expected"),
+    [
+        ("nccl2", "nccl-lazy"),
+        ("nccl", "nccl"),
+    ],
+)
+def test_pipeline_parallel_backend_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    resolved_backend: str,
+    expected: str,
+):
+    class BackendImpl:
+        def name(self):
+            return resolved_backend
+
+    class DefaultProcessGroup:
+        def _get_backend(self, device):
+            assert device.type == "cuda"
+            return BackendImpl()
+
+    monkeypatch.setattr(
+        torch.distributed.distributed_c10d,
+        "_get_default_group",
+        lambda: DefaultProcessGroup(),
+    )
+
+    assert _pp_device_backend("pp", "nccl") == expected
