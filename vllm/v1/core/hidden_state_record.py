@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
 
@@ -135,16 +136,26 @@ def get_record_carrier_group(kv_cache_config: KVCacheConfig) -> int:
     )
 
 
-def get_record_head_bytes(kv_cache_config: KVCacheConfig, group_id: int) -> int:
-    """Bytes of one KV head of one token slot, summed over the carrier group's
-    layers: the record bytes one token slot holds."""
-    group = kv_cache_config.kv_cache_groups[group_id]
-    specs = iter_layer_specs(group.kv_cache_spec)
-    if len(specs) == len(group.layer_names):
-        return sum(spec.state_content_size_bytes for spec in specs)
-    # A uniform group spec stands for each of its layers.
-    (spec,) = specs
-    return spec.state_content_size_bytes * len(group.layer_names)
+def get_record_layers(kv_cache_config: KVCacheConfig) -> tuple[tuple[str, int], ...]:
+    """The carrier group's layers, each with the bytes one KV head of one token
+    slot holds. Resolved into the config from the per-layer specs when the
+    engine builds it (the scheduler's copy keeps one spec per group)."""
+    if kv_cache_config.hidden_state_record_layers:
+        return kv_cache_config.hidden_state_record_layers
+    group = kv_cache_config.kv_cache_groups[get_record_carrier_group(kv_cache_config)]
+    spec = group.kv_cache_spec
+
+    return tuple(
+        (
+            name,
+            (
+                spec.kv_cache_specs[name]
+                if isinstance(spec, UniformTypeKVCacheSpecs)
+                else spec
+            ).state_content_size_bytes,
+        )
+        for name in group.layer_names
+    )
 
 
 def get_record_tail_tokens(
@@ -158,5 +169,5 @@ def get_record_tail_tokens(
         * get_dtype_size(vllm_config.model_config.dtype)
         * RECORD_ENCODING_EXPANSION
     )
-    group_id = get_record_carrier_group(kv_cache_config)
-    return cdiv(record_bytes, get_record_head_bytes(kv_cache_config, group_id))
+    head_bytes = sum(size for _, size in get_record_layers(kv_cache_config))
+    return cdiv(record_bytes, head_bytes)

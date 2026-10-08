@@ -322,3 +322,46 @@ def test_sliding_window_carrier_hands_over_record_blocks():
     blocks = scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
     last_record_block = (num_tokens + TAIL_TOKENS - 1) // bs
     assert remote_block_ids[-1] == blocks[last_record_block] != 0
+
+
+def test_record_size_agrees_with_mixed_layer_sizes():
+    """The scheduler's config keeps one spec per group, so the record's size
+    comes from the per-layer specs resolved into the config: the scheduler and
+    the workers reserve and use the same slots."""
+    from vllm.v1.core.hidden_state_record import (
+        get_record_layers,
+        get_record_tail_tokens,
+    )
+    from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config={"hidden_state_handoff": True}
+    )
+    bs = vllm_config.cache_config.block_size
+    specs = {
+        f"layer{i}": FullAttentionSpec(
+            block_size=bs, num_kv_heads=2, head_size=head_size, dtype=torch.float16
+        )
+        for i, head_size in enumerate((32, 96, 96))
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    worker_config = KVCacheConfig(
+        num_blocks=1000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(list(specs), group_spec)],
+    )
+    # (32 + 32) * 2 + 2 * (96 + 96) * 2 bytes per token slot.
+    assert sum(size for _, size in get_record_layers(worker_config)) == 896
+    worker_tail = get_record_tail_tokens(vllm_config, worker_config)
+    assert worker_tail == cdiv(3072, 896)
+
+    # Without the resolved layers, the scheduler's one spec per group would
+    # size it as three 128-byte layers.
+    unresolved = generate_scheduler_kv_cache_config([worker_config])
+    assert get_record_tail_tokens(vllm_config, unresolved) == cdiv(3072, 384)
+
+    worker_config.hidden_state_record_layers = get_record_layers(worker_config)
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+    assert get_record_tail_tokens(vllm_config, scheduler_config) == worker_tail
