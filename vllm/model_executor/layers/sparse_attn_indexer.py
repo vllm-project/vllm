@@ -29,6 +29,13 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    FUSED_MQA_TOPK_MAX_KEYS,
+    fused_mqa_topk_config_supported,
+    fused_mqa_topk_key_scales,
+    fused_mqa_topk_prefill,
+    get_fused_mqa_topk_workspace,
+)
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     get_indexer_topk,
@@ -497,13 +504,29 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
+        uses_fused = (
+            envs.VLLM_USE_FUSED_MQA_TOPK
+            and not use_pcp
+            and dcp_world_size == 1
+            and not use_fp4_cache
+            and candidate_blocks is None
+            and fused_mqa_topk_config_supported(q_quant, topk_tokens)
+        )
+        if uses_fused:
+            # The fused prefill kernel's fixed-size workspace is persistent;
+            # allocate it during profiling so it is accounted for.
+            get_fused_mqa_topk_workspace(q_quant.device)
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
-        )
+        # Skipped when the fused kernel serves every prefill chunk: the planner never
+        # packs a chunk past its key limit, so with max_model_len within that limit
+        # no chunk reaches the dense logits path.
+        if not (uses_fused and max_model_len <= FUSED_MQA_TOPK_MAX_KEYS):
+            # FP8 elements so elements == bytes
+            max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            _ = torch.empty(
+                max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            )
 
         # The dummy run returns before exchange_topk executes, so reserve its
         # worst-case transient for the memory profile.
@@ -706,70 +729,109 @@ def sparse_attn_indexer(
                     k_scale_cast = k_scale.view(
                         torch.int32 if mqa_logits_use_mx_scales() else torch.float32
                     ).squeeze(-1)
-                if current_platform.is_xpu():
-                    if q_scale_slice is not None:
-                        raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
-                    logits = torch.ops.vllm.xpu_fp8_mqa_logits(
+                # Single-launch fused MQA-logits + top-k (SM100, FP8, 32 heads,
+                # top-k 2048): no logits buffer, any context length. DCP/PCP,
+                # the FP4 cache and v4.1 candidate selection stay dense.
+                use_fused = (
+                    envs.VLLM_USE_FUSED_MQA_TOPK
+                    and not use_pcp
+                    and dcp_world_size == 1
+                    and not current_platform.is_xpu()
+                )
+                if (
+                    use_fused
+                    and q_scale_slice is None
+                    and candidate_blocks is None
+                    and fused_mqa_topk_prefill(
                         q_slice_cast,
                         k_quant_cast,
-                        k_scale_cast,
+                        fused_mqa_topk_key_scales(k_scale_cast),
                         weights[row_start:row_end],
                         cu_seqlen_ks,
                         cu_seqlen_ke,
+                        topk_indices,
+                        # A single-request chunk has every row start at 0.
+                        rows_start_at_zero=chunk.block_table.shape[0] == 1,
                     )
-                    row_starts = cu_seqlen_ks
-                    row_ends = cu_seqlen_ke
-                else:
-                    q_scale_slice, chunk_weights = mqa_logits_mx_inputs(
-                        q_slice_cast, q_scale_slice, weights[row_start:row_end]
+                ):
+                    continue
+                # Fused-planned chunks are not bounded by the logits budget, so
+                # the dense fallback splits their rows to stay within it.
+                dense_rows = q_slice_cast.shape[0]
+                if use_fused:
+                    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+                    dense_rows = max(1, budget // (4 * max(1, chunk.max_seqlen_k)))
+                for sub in range(0, q_slice_cast.shape[0], dense_rows):
+                    rows = slice(sub, min(sub + dense_rows, q_slice_cast.shape[0]))
+                    tokens = slice(row_start + rows.start, row_start + rows.stop)
+                    sub_ks, sub_ke = cu_seqlen_ks[rows], cu_seqlen_ke[rows]
+                    sub_q_scale = (
+                        q_scale_slice[rows] if q_scale_slice is not None else None
                     )
-                    row_ends = cu_seqlen_ke - cu_seqlen_ks
-                    logits = as_fp32_logits(
-                        fp8_fp4_mqa_logits(
-                            (q_slice_cast, q_scale_slice),
-                            (k_quant_cast, k_scale_cast),
-                            chunk_weights,
-                            cu_seqlen_ks,
-                            cu_seqlen_ke,
-                            chunk.max_seqlen_k,
-                        ),
-                        row_ends,
-                    )
-                num_rows = logits.shape[0]
-                if candidate_blocks is not None:
-                    # Two-level selection (v4.1): the candidate source
-                    # publishes its top blocks; later indexers mask their
-                    # scores to them. Both before the row top-k.
-                    chunk_candidates = candidate_blocks[
-                        chunk.token_start : chunk.token_end
-                    ]
-                    if candidate_write:
-                        _select_candidate_blocks(
-                            logits,
-                            row_starts,
-                            row_ends,
-                            chunk_candidates.shape[1],
-                            candidate_block_size,
-                            chunk_candidates,
+                    if current_platform.is_xpu():
+                        if sub_q_scale is not None:
+                            raise RuntimeError(
+                                "XPU fp8_mqa_logits does not support FP4 Q"
+                            )
+                        logits = torch.ops.vllm.xpu_fp8_mqa_logits(
+                            q_slice_cast[rows],
+                            k_quant_cast,
+                            k_scale_cast,
+                            weights[tokens],
+                            sub_ks,
+                            sub_ke,
                         )
+                        row_starts = sub_ks
+                        row_ends = sub_ke
                     else:
-                        _apply_candidate_mask(
-                            logits,
-                            row_starts,
-                            row_ends,
-                            chunk_candidates,
-                            candidate_block_size,
+                        sub_q_scale, chunk_weights = mqa_logits_mx_inputs(
+                            q_slice_cast[rows], sub_q_scale, weights[tokens]
                         )
-                ops.top_k_per_row_prefill(
-                    logits,
-                    torch.zeros_like(row_ends) if row_starts is None else row_starts,
-                    row_ends,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+                        row_ends = sub_ke - sub_ks
+                        logits = as_fp32_logits(
+                            fp8_fp4_mqa_logits(
+                                (q_slice_cast[rows], sub_q_scale),
+                                (k_quant_cast, k_scale_cast),
+                                chunk_weights,
+                                sub_ks,
+                                sub_ke,
+                                chunk.max_seqlen_k,
+                            ),
+                            row_ends,
+                        )
+                    num_rows = logits.shape[0]
+                    if candidate_blocks is not None:
+                        # Two-level selection (v4.1): the candidate source
+                        # publishes its top blocks; later indexers mask their
+                        # scores to them. Both before the row top-k.
+                        chunk_candidates = candidate_blocks[tokens]
+                        if candidate_write:
+                            _select_candidate_blocks(
+                                logits,
+                                row_starts,
+                                row_ends,
+                                chunk_candidates.shape[1],
+                                candidate_block_size,
+                                chunk_candidates,
+                            )
+                        else:
+                            _apply_candidate_mask(
+                                logits,
+                                row_starts,
+                                row_ends,
+                                chunk_candidates,
+                                candidate_block_size,
+                            )
+                    ops.top_k_per_row_prefill(
+                        logits,
+                        torch.zeros_like(row_ends) if row_starts is None else row_starts,
+                        row_ends,
+                        topk_indices[rows],
+                        num_rows,
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
 
             if deinterleave_idx is None:
                 # Under the PCP path the top-k already ran over the whole
