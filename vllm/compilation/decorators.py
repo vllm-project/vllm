@@ -30,6 +30,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+from .caching import VllmSerializableFunction
 from .monitor import monitor_profiling_run, monitor_torch_compile
 
 DynamicArgDims: TypeAlias = dict[str, int | list[int] | dict[int, str]]
@@ -311,8 +312,9 @@ def _try_load_aot_compiled_fn(
                 loaded_fn.disable_guard_check()
             # Eagerly load compiled artifacts now that traced_files
             # is populated by _verify_source_unchanged.
-            with maybe_use_cudagraph_partition_wrapper(model.vllm_config):
-                loaded_fn._artifacts.compiled_fn.finalize_loading(model.vllm_config)
+            if isinstance(loaded_fn._artifacts.compiled_fn, VllmSerializableFunction):
+                with maybe_use_cudagraph_partition_wrapper(model.vllm_config):
+                    loaded_fn._artifacts.compiled_fn.finalize_loading(model.vllm_config)
             compilation_counter.num_aot_artifacts_loaded += 1
             tag = getattr(model, "_compile_tag", "")
             log_prefix = f"[{tag}] " if tag else ""
