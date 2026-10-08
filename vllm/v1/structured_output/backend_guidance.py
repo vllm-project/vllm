@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -39,7 +39,7 @@ def is_guidance_tokenizer_supported(tokenizer: Any) -> bool:
     """Return whether GuidanceBackend can construct an LLTokenizer."""
     if is_mistral_tokenizer(tokenizer):
         return tokenizer.is_tekken
-    return isinstance(tokenizer, PreTrainedTokenizerFast)
+    return isinstance(tokenizer, TokenizersBackend)
 
 
 _SCHEMA_MAP_KEYWORDS = (

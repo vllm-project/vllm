@@ -6,7 +6,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
-from transformers import MistralCommonBackend, PreTrainedTokenizerFast
+from transformers import MistralCommonBackend, TokenizersBackend
 
 from vllm.config import StructuredOutputsConfig
 from vllm.exceptions import VLLMClientError, VLLMValidationError
@@ -334,8 +334,9 @@ def test_auto_backend_falls_back_on_unsupported_schema(
         StructuredOutputsConfig(backend="auto"),
         tokenizer=_StubSlowTokenizer()
         if slow_tokenizer
-        else object.__new__(PreTrainedTokenizerFast),
+        else object.__new__(TokenizersBackend),
     )
+    assert params.structured_outputs is not None
     assert params.structured_outputs._backend == expected_backend
 
 
@@ -379,7 +380,7 @@ def test_guidance_rejects_unsupported_tokenizers(
     "tokenizer_factory, raw_mistral",
     [
         pytest.param(
-            lambda: object.__new__(PreTrainedTokenizerFast),
+            lambda: object.__new__(TokenizersBackend),
             False,
             id="fast-hf",
         ),
