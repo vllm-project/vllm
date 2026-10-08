@@ -665,8 +665,8 @@ class Worker(WorkerBase):
         will_capture_cudagraphs = (
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        # Profiling captures every graph, so it is not free. Skip it entirely
-        # when the estimate would only be discarded.
+        # Profiling captures every graph and takes time. Skip it when the
+        # estimate is not used.
         cudagraph_memory_estimate = 0
         if will_capture_cudagraphs and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
@@ -726,8 +726,7 @@ class Worker(WorkerBase):
             will_capture_cudagraphs
             and not envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
         ):
-            # No estimate to quote a utilization against, because profiling was
-            # skipped rather than measured and thrown away.
+            # Profiling did not run, so there is no estimate to report.
             logger.warning_once(
                 "CUDA graph memory profiling is disabled "
                 "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
@@ -914,11 +913,8 @@ class Worker(WorkerBase):
             with self._get_cudagraph_capture_context():
                 cuda_graph_memory_bytes = self.model_runner.capture_model()
 
-        # Compare actual vs estimated CUDA graph memory (if we did profiling).
-        # Profiling captures the same graphs first and keeps the scratch they
-        # allocate, so the capture above only pays for what profiling did not
-        # already leave behind. Comparing the estimate against the capture
-        # alone would report a large miss for an estimate that was correct.
+        # Compare the estimate with the capture plus the memory that profiling
+        # kept. The real capture uses that memory again.
         if (
             hasattr(self, "cudagraph_memory_estimate")
             and self.cudagraph_memory_estimate > 0

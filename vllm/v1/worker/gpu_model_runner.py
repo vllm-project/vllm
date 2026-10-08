@@ -890,9 +890,8 @@ class GPUModelRunner(
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
-        # Memory that memory profiling allocated and did not give back. The
-        # real capture reuses it, so it belongs to any comparison of the
-        # estimate against what the graphs actually cost.
+        # Memory that profiling allocates and does not release. The real capture
+        # uses this memory again.
         self.cudagraph_profiling_retained_memory = 0
 
         self.mm_budget = (
@@ -6581,9 +6580,8 @@ class GPUModelRunner(
 
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
-        # Baseline for the estimate. Everything this function allocates from
-        # here on is memory the steady state has to live with, whether it is
-        # the capture pool or the setup the pool needs.
+        # Start the estimate here. Memory allocated after this point stays
+        # allocated during serving.
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
         free_before_profiling = torch.accelerator.get_memory_info()[0]
@@ -6647,14 +6645,8 @@ class GPUModelRunner(
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
-                # Capture every descriptor instead of extrapolating from the
-                # first two. Pool growth across capture sizes is not linear, and
-                # a graph captured during profiling can reuse the memory of the
-                # one before it, so a two-sample extrapolation can report a
-                # small fraction of the pool the real capture goes on to build.
-                # Under-reporting here is not conservative: the shortfall is
-                # handed to the KV cache, which then pushes total usage past
-                # gpu_memory_utilization.
+                # Capture every descriptor. Pool growth is not linear, so two
+                # samples can give an estimate that is too small.
                 for mode, descs in capture_descs:
                     mode_mem_before = torch.accelerator.get_memory_info()[0]
 
@@ -6673,9 +6665,8 @@ class GPUModelRunner(
                         )
 
                     torch.accelerator.synchronize()
-                    # Diagnostic only, and deliberately unclamped: a negative
-                    # value is a useful signal that this mode ran mostly out of
-                    # memory the allocator already held.
+                    # Debug output only. A negative value shows that the mode
+                    # used memory that the allocator already held.
                     logger.debug(
                         "Estimated %s CUDA graph memory: %.2f MiB for %d graphs",
                         mode.name,
@@ -6684,21 +6675,9 @@ class GPUModelRunner(
                         len(descs),
                     )
 
-                # Measure the modes together rather than summing them. They
-                # capture back to back into one pool, so a mode can measure
-                # negative when the allocator releases more than that mode took,
-                # and clamping each mode before summing would then overcount.
-                # One span across all of them also subsumes whatever the modes
-                # overlay in the shared pool.
-                #
-                # The span starts at function entry, not at the capture loop.
-                # Standing up the profiling KV cache also initializes the
-                # attention backends and metadata builders, whose scratch is
-                # sized by the capture shapes and is rebuilt for the real KV
-                # cache. Nothing else budgets it: memory profiling ran before
-                # any of it existed. It does count the profiling KV cache,
-                # which is deliberately minimal and errs toward reserving
-                # slightly too much rather than too little.
+                # Measure all modes as one span from function entry. The span
+                # includes the attention scratch for the capture shapes and the
+                # small profiling KV cache.
                 decoder_free_after = torch.accelerator.get_memory_info()[0]
                 decoder_memory_estimate = max(
                     free_before_profiling - decoder_free_after, 0
@@ -6735,9 +6714,8 @@ class GPUModelRunner(
             self._cleanup_profiling_kv_cache()
             compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
 
-        # Cleanup above discards the graphs and empties the cache, but scratch
-        # the captured shapes allocated stays live and the real capture reuses
-        # it. Without this, that memory looks like it was never spent.
+        # Cleanup releases the graphs, but scratch for the captured shapes stays
+        # allocated. The real capture uses this memory again.
         self.cudagraph_profiling_retained_memory = max(
             free_before_profiling - torch.accelerator.get_memory_info()[0], 0
         )
