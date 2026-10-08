@@ -692,6 +692,58 @@ class TestBeginSync:
         assert ("sentinel",) in server._pack_dsts
 
 
+class TestSyncTaggedFreeSignals:
+    def test_signal_before_begin_sync_is_applied_to_that_sync(self, server_factory):
+        server = server_factory()
+        server.free_group(GI_A, sync_idx=0)
+        server.free_group(GI_A, sync_idx=0)
+
+        server.begin_sync(2, sync_idx=0)
+        _publish(server, GI_A, GROUP_A)
+
+        assert server._inflight_groups == []
+        assert server._freed_pending == [GI_A]
+
+    def test_future_signal_waits_for_its_sync(self, server_factory):
+        server = server_factory()
+        server.begin_sync(1, sync_idx=0)
+        _publish(server, GI_A, GROUP_A)
+        server.free_group(GI_A, sync_idx=1)
+        assert server._inflight_groups == [GI_A]
+
+        server.begin_sync(1, sync_idx=1)
+        _publish(server, GI_A, GROUP_A)
+        assert server._inflight_groups == []
+
+    def test_matching_signal_counts_normally(self, server_factory):
+        server = server_factory()
+        server.begin_sync(1, sync_idx=3)
+        _publish(server, GI_A, GROUP_A)
+
+        server.free_group(GI_A, sync_idx=3)
+
+        assert server._inflight_groups == []
+
+    def test_past_signal_is_ignored(self, server_factory):
+        server = server_factory()
+        server.begin_sync(2, sync_idx=3)
+        _publish(server, GI_A, GROUP_A)
+
+        server.free_group(GI_A, sync_idx=2)
+        server.free_group(GI_A, sync_idx=3)
+
+        assert server._inflight_groups == [GI_A]
+
+    def test_untagged_signal_counts_toward_current_sync(self, server_factory):
+        server = server_factory()
+        server.begin_sync(1, sync_idx=3)
+        _publish(server, GI_A, GROUP_A)
+
+        server.free_group(GI_A)
+
+        assert server._inflight_groups == []
+
+
 class TestServedNamesGuard:
     """A producer serves only the names it holds: its stage's groups, and
     within them its own EP coordinate's experts plus the replicated names.

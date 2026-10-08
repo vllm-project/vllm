@@ -254,14 +254,19 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
 
 @dataclass
 class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Update info for the sharded RDT backend: intentionally EMPTY.
+    """Update info for the sharded RDT backend: the sync's index, nothing else.
 
     The chunk/free plan is a pure function of the baked plan and the driver's
     gather-group partition, both fixed for the engine's lifetime, so it is built
     once at ``init_transfer_engine`` from ``ShardedRDTWeightTransferInitInfo``'s
     ``names`` + ``group_lens``. ONE ``update_weights`` per sync then just re-runs
-    that plan; there is nothing per-sync to carry.
+    that plan.
     """
+
+    sync_idx: int = -1
+    """The trainer's count of this sync, sent with every ``free_group`` so a
+    producer that has not begun the sync yet keeps the signal instead of losing
+    it to its ``begin_sync``. -1 (an older trainer) sends untagged signals."""
 
 
 class ShardedRDTWeightTransferEngine(
@@ -360,6 +365,7 @@ class ShardedRDTWeightTransferEngine(
         self._targets_cache: dict[tuple[int, int], tuple[int, list[torch.Tensor]]] = {}
         self._buffer_presize = 0  # bytes; set from init_info
         self._pending_frees: list[Any] = []  # free_group signal refs, drained per sync
+        self._sync_idx: int | None = None  # this sync's index, tagged on every free
         # The STATIC plan: built once — at init from init_info.group_lens, else
         # lazily on the first update_weights — and reused. Non-None means
         # update_weights ignores its per-sync names.
@@ -677,8 +683,8 @@ class ShardedRDTWeightTransferEngine(
 
         The chunk/free plan is STATIC across syncs — a pure function of the baked
         plan and the driver's group partition — so it was built once at init and
-        every sync just re-runs the pipeline over its self-describing chunks, with
-        no per-sync bookkeeping and an empty ``update_info``.
+        every sync just re-runs the pipeline over its self-describing chunks. The
+        update carries only the sync index used to tag free signals.
 
         Assumes each baked module's source names fall within one gather group,
         which the per-layer / pre / post partition guarantees (a leaf module's
@@ -687,7 +693,7 @@ class ShardedRDTWeightTransferEngine(
         pipeline already freed, which parks the pull until the producer's stall
         watchdog fires.
         """
-        del update_info  # the plan is static; nothing arrives per sync
+        self._sync_idx = update_info.sync_idx if update_info.sync_idx >= 0 else None
         if self._router is None:
             raise RuntimeError(
                 "Sharded RDT engine not initialized. Call init_transfer_engine() first."
@@ -1236,7 +1242,7 @@ class ShardedRDTWeightTransferEngine(
         the counters, and a straggler landing in the next sync would credit a
         group it does not belong to."""
         assert self._router is not None
-        self._pending_frees.extend(self._router.free_group(group_idx))
+        self._pending_frees.extend(self._router.free_group(group_idx, self._sync_idx))
 
     def _run_chunk_pipeline(self, plan: "_CallPlan") -> None:
         """Pipelined chunk pulls over the ring of receive slots.
