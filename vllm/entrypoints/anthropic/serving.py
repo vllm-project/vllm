@@ -239,6 +239,11 @@ class AnthropicServingMessages(OpenAIServingChat):
         Both the tool and non-tool templates are checked since they may differ.
         """
         renderer = online_renderer.renderer
+        tokenizer = getattr(renderer, "tokenizer", None)
+        if getattr(tokenizer, "supports_inline_system_messages", False) is True:
+            # Native encoder (e.g. DeepSeek V4.1) renders mid-conversation
+            # system messages in place; merging would poison prefix reuse.
+            return False
         tool_variants: tuple[list[dict[str, Any]] | None, ...] = (None, [])
         if not isinstance(renderer, HfRenderer) or renderer.tokenizer is None:
             merge = cls._detect_merge_inline_system(online_renderer.chat_template)

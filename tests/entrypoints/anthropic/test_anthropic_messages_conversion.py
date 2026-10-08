@@ -1453,6 +1453,44 @@ class TestDetectMergeInlineSystem:
         )
         assert mock_logger.warning_once.called is expected
 
+    def test_native_encoder_without_cli_template_preserves(self, monkeypatch):
+        """Native V4.1 encoder keeps inline systems without --chat-template."""
+        import vllm.entrypoints.anthropic.serving as serving_mod
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
+        renderer = SimpleNamespace(
+            tokenizer=SimpleNamespace(supports_inline_system_messages=True)
+        )
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template=None,
+            model_config=None,
+        )
+        assert (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+            is False
+        )
+        assert not mock_logger.warning_once.called
+
+    def test_no_marker_without_template_still_merges(self, monkeypatch):
+        """No capability marker and no template → conservative merge."""
+        import vllm.entrypoints.anthropic.serving as serving_mod
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
+        renderer = SimpleNamespace(tokenizer=SimpleNamespace())
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template=None,
+            model_config=None,
+        )
+        assert (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+            is True
+        )
+        assert mock_logger.warning_once.called
+
 
 # ======================================================================
 # Full (non-streaming) response conversion: messages_full_converter
