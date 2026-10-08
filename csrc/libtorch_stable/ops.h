@@ -44,6 +44,15 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 double int8_max);
 
 #ifndef USE_ROCM
+std::tuple<torch::stable::Tensor, torch::stable::Tensor, torch::stable::Tensor>
+tpsp_fused_matmul_reduce_scatter_norm_all_gather(
+    const torch::stable::Tensor& a, const torch::stable::Tensor& b,
+    const torch::stable::Tensor& weight, const torch::stable::Tensor& residual,
+    const std::optional<torch::stable::Tensor>& projection_bias,
+    const std::optional<torch::stable::Tensor>& norm_bias, double eps,
+    int64_t norm_kind, int64_t microchunk_rows, int64_t comm_address,
+    int64_t tp_size);
+
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);

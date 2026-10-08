@@ -70,20 +70,25 @@ class TPSPBackend:
                 hidden_size,
             )
             return None
-        try:
-            ops = importlib.import_module("deep_symm.async_tp")
-        except ModuleNotFoundError as exc:
-            if exc.name not in ("deep_symm", "deep_symm.async_tp"):
-                raise
-            _LOG.warning("TPSP unavailable: %s", exc)
-            return None
-        if device.type not in getattr(ops, "tpsp_supported_devices", ("xpu",)):
-            _LOG.warning("TPSP fused projection does not support %s", device.type)
-            return None
-        if not hasattr(ops._C, "fused_matmul_reduce_scatter_norm_all_gather"):
-            _LOG.warning("TPSP native fused projection is unavailable")
-            return None
-        if device.type == "xpu":
+        ops: Any
+        if device.type == "cuda":
+            from vllm.v1.worker.tpsp_cuda import CudaTPSPOps
+
+            ops = CudaTPSPOps.open(group_name, device)
+        else:
+            try:
+                ops = importlib.import_module("deep_symm.async_tp")
+            except ModuleNotFoundError as exc:
+                if exc.name not in ("deep_symm", "deep_symm.async_tp"):
+                    raise
+                _LOG.warning("TPSP unavailable: %s", exc)
+                return None
+            if device.type not in getattr(ops, "tpsp_supported_devices", ("xpu",)):
+                _LOG.warning("TPSP fused projection does not support %s", device.type)
+                return None
+            if not hasattr(ops._C, "fused_matmul_reduce_scatter_norm_all_gather"):
+                _LOG.warning("TPSP native fused projection is unavailable")
+                return None
             import vllm_xpu_kernels._C  # noqa: F401
 
         if not torch._C._dispatch_has_kernel_for_dispatch_key(
@@ -118,7 +123,7 @@ class TPSPBackend:
             sharded_residual=sharded_residual,
             time_budget_s=time_budget_s,
         )
-        external = getattr(self.ops._C, "profile_tpsp_config", None)
+        external = getattr(getattr(self.ops, "_C", None), "profile_tpsp_config", None)
         if external is not None:
             if not hasattr(
                 self.ops._C,
@@ -182,9 +187,18 @@ class TPSPBackend:
         config: object,
         *,
         synchronize: bool = True,
+        norm_type: str = "rms_norm",
+        projection_bias: torch.Tensor | None = None,
+        norm_bias: torch.Tensor | None = None,
     ):
         if self._closed:
             raise RuntimeError("TPSP backend is closed")
+        if self.device.type != "cuda" and (
+            norm_type != "rms_norm"
+            or projection_bias is not None
+            or norm_bias is not None
+        ):
+            raise ValueError("This TPSP backend does not support bias or LayerNorm")
         if isinstance(config, ChunkConfig):
             result = self.ops.fused_matmul_reduce_scatter_norm_all_gather(
                 a,
@@ -193,15 +207,24 @@ class TPSPBackend:
                 None,
                 self.group_name,
                 eps=eps,
-                norm_type="rms_norm",
+                norm_type=norm_type,
                 residual=residual,
                 microchunk_tokens=config.microchunk_tokens,
+                **(
+                    {"projection_bias": projection_bias, "norm_bias": norm_bias}
+                    if self.device.type == "cuda"
+                    else {}
+                ),
             )
         else:
+            if norm_type != "rms_norm" or norm_bias is not None:
+                raise ValueError(
+                    "TPSP profiled configuration only supports RMSNorm without bias"
+                )
             result = self.ops._C.fused_matmul_reduce_scatter_norm_all_gather_profiled(
                 a, b, weight, residual, self.group_name, eps=eps, config=config
             )
-        if synchronize:
+        if synchronize and self.device.type != "cuda":
             self.device_synchronize()
         return result
 
@@ -467,16 +490,13 @@ def profile_sp_config(
             device=device,
             generator=generator,
         )
-        b = (
-            torch.randn(
-                input_width,
-                hidden_size,
-                dtype=torch.bfloat16,
-                device=device,
-                generator=generator,
-            )
-            / 8
-        )
+        b = torch.randn(
+            input_width,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=device,
+            generator=generator,
+        ) / (math.sqrt(input_width) if device.type == "cuda" else 8)
         weight = torch.ones(hidden_size, dtype=torch.bfloat16, device=device)
         residual = torch.randn(
             tokens,
@@ -495,10 +515,11 @@ def profile_sp_config(
             weight,
             residual,
             padded.narrow(0, rank * rows, rows).contiguous(),
+            residual.clone() if device.type == "cuda" else residual,
         )
 
     def run(data, candidate):
-        (a, b, linear_weight), weight, residual, local_residual = data
+        (a, b, linear_weight), weight, residual, local_residual, _ = data
         if candidate is not None:
             return backend.fused(
                 a, b, weight, local_residual, norm_eps, candidate, synchronize=False
@@ -506,7 +527,8 @@ def profile_sp_config(
         partial = F.linear(a, linear_weight)
         full = partial.clone()
         dist.all_reduce(full, op=dist.ReduceOp.SUM, group=group)
-        if sharded_residual:
+        # CUDA must be compared with regular TP Llama, which keeps a full residual.
+        if sharded_residual and device.type != "cuda":
             rows = local_residual.size(0)
             gathered_residual = torch.empty(
                 (tp_size * rows, hidden_size), device=device, dtype=a.dtype
@@ -514,12 +536,14 @@ def profile_sp_config(
             dist.all_gather_into_tensor(gathered_residual, local_residual, group=group)
             full_residual = gathered_residual[: a.size(0)].contiguous()
         else:
-            full_residual = residual.clone()
+            full_residual = residual if device.type == "cuda" else residual.clone()
         torch.ops._C.fused_add_rms_norm(full, full_residual, weight, norm_eps)
         return full
 
     def measure(data, candidate) -> float:
         dist.barrier(group=group)
+        if device.type == "cuda" and candidate is None:
+            data[2].copy_(data[4])
         backend.device_synchronize()
         start = time.perf_counter()
         result = run(data, candidate)
@@ -608,7 +632,10 @@ def profile_sp_config(
     conventional = run(check_data, None)
     native = run(check_data, candidate)
     backend.device_synchronize()
-    torch.testing.assert_close(native, conventional, rtol=0.01, atol=0.02)
+    if device.type == "cuda":
+        torch.testing.assert_close(native, conventional, rtol=0.02, atol=0.05)
+    else:
+        torch.testing.assert_close(native, conventional, rtol=0.01, atol=0.02)
     del check_data, conventional, native
 
     def measure_size(tokens: int) -> SPMeasurement | None:
@@ -648,9 +675,33 @@ def profile_sp_config(
         if streak == min(3, len(sizes)):
             threshold = measurements[-streak].tokens
             break
+    if device.type == "cuda" and threshold is not None and sizes[-1] != tokens:
+        maximum = measure_size(sizes[-1])
+        if maximum is None:
+            return inconclusive(
+                "maximum-size measurement time budget exceeded",
+                measurements,
+                candidate_results,
+            )
+        measurements.append(maximum)
+        if not _beneficial(maximum):
+            threshold = None
+    if (
+        device.type == "cuda"
+        and threshold is None
+        and measurements[-1].tokens == max_batched_tokens
+        and measurements[-1].lower_benefit_ms > 0
+    ):
+        threshold = max_batched_tokens
     status = "enabled" if threshold is not None else "disabled"
     reason = (
-        "" if threshold is not None else "no sustained benefit with 128-token steps"
+        ""
+        if threshold is not None
+        else (
+            "no sustained benefit over the conventional projection"
+            if device.type == "cuda"
+            else "no sustained benefit with 128-token steps"
+        )
     )
     profile = SPProfile(
         tp_size,

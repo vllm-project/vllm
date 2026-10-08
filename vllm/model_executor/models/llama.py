@@ -630,7 +630,10 @@ class TPSPLlamaDecoderLayer(LlamaDecoderLayer):
                 raise RuntimeError("TP/SP residual shard has an unexpected shape")
             local_residual = residual
 
-        if projection.bias is None and select_sp_config(profile, x.size(0)):
+        if (
+            projection.bias is None
+            or (backend is not None and backend.device.type == "cuda")
+        ) and select_sp_config(profile, x.size(0)):
             if backend is None or profile.config is None:
                 raise RuntimeError("TP/SP Llama profile has no enabled configuration")
             if x.dtype != torch.bfloat16 or projection.weight.dtype != torch.bfloat16:
@@ -648,6 +651,7 @@ class TPSPLlamaDecoderLayer(LlamaDecoderLayer):
                 local_residual,
                 norm.variance_epsilon,
                 profile.config,
+                projection_bias=projection.bias,
             )
             return gathered, reduced
 
@@ -714,6 +718,10 @@ class TPSPLlamaDecoderLayer(LlamaDecoderLayer):
 class TPSPLlamaModel(LlamaModel):
     def __init__(self, *, vllm_config, prefix="", layer_type=TPSPLlamaDecoderLayer):
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        if vllm_config.device_config.device.type == "cuda":
+            # NCCL collectives in the CUDA microchunk path cannot be partitioned
+            # by Dynamo's full-graph compilation.
+            self.do_not_compile = True
         self.tpsp_profile: TPSPProfileSession | None = None
 
     def forward(
@@ -731,6 +739,10 @@ class TPSPLlamaModel(LlamaModel):
         if self.tpsp_profile is None or self.tpsp_profile.profiles is None:
             raise RuntimeError("TP/SP Llama requires worker startup profiling")
         profiles = self.tpsp_profile.profiles
+        if not (profiles["o"].enabled and profiles["down"].enabled):
+            return super().forward(
+                input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
+            )
         hidden_states = (
             inputs_embeds
             if inputs_embeds is not None

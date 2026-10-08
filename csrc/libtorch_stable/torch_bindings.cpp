@@ -30,6 +30,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 
 #ifndef USE_ROCM
+  ops.def(
+      "tpsp_fused_matmul_reduce_scatter_norm_all_gather("
+      "Tensor a, Tensor b, Tensor weight, Tensor residual, "
+      "Tensor? projection_bias, Tensor? norm_bias, float eps, int norm_kind, "
+      "int microchunk_rows, int comm_address, int tp_size) "
+      "-> (Tensor, Tensor, Tensor)");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -753,6 +759,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_int8));
 
 #ifndef USE_ROCM
+  ops.impl("tpsp_fused_matmul_reduce_scatter_norm_all_gather",
+           TORCH_BOX(&tpsp_fused_matmul_reduce_scatter_norm_all_gather));
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));

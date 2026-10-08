@@ -1,0 +1,482 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+#include "torch_utils.h"
+#include "cub_helpers.h"
+
+#include <cuda_bf16.h>
+#include <nccl.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
+
+namespace {
+
+using bf16 = __nv_bfloat16;
+
+struct alignas(16) TpspBf16Vec {
+  bf16 data[8];
+};
+
+__global__ void pack_tpsp_chunk(const bf16* input, bf16* packed, int tokens,
+                                int width, int rows, int chunk_rows, int offset,
+                                int tp_size) {
+  int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t count = int64_t(tp_size) * chunk_rows * width;
+  if (index >= count) {
+    return;
+  }
+  int row = index / width;
+  int rank = row / chunk_rows;
+  int source_row = rank * rows + offset + row % chunk_rows;
+  packed[index] = source_row < tokens
+                      ? input[int64_t(source_row) * width + index % width]
+                      : bf16(0.0f);
+}
+
+__global__ void unpack_tpsp_chunk(const bf16* packed, bf16* output, int tokens,
+                                  int width, int rows, int chunk_rows,
+                                  int offset) {
+  int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t count = int64_t((tokens + rows - 1) / rows) * chunk_rows * width;
+  if (index >= count) {
+    return;
+  }
+  int packed_row = index / width;
+  int row = packed_row / chunk_rows * rows + offset + packed_row % chunk_rows;
+  if (row < tokens) {
+    output[int64_t(row) * width + index % width] = packed[index];
+  }
+}
+
+template <bool LayerNorm>
+__global__ void tpsp_add_norm(const bf16* reduced, const bf16* residual,
+                              const bf16* projection_bias, const bf16* weight,
+                              const bf16* norm_bias, bf16* new_residual,
+                              bf16* normalized, int hidden_size, float eps) {
+  int row = blockIdx.x;
+  float sum = 0.0f;
+  for (int col = threadIdx.x; col < hidden_size; col += blockDim.x) {
+    int index = row * hidden_size + col;
+    bf16 projected = reduced[index];
+    if (projection_bias) {
+      projected = bf16(float(projected) + float(projection_bias[col]));
+    }
+    bf16 value = bf16(float(projected) + float(residual[index]));
+    new_residual[index] = value;
+    float x = float(value);
+    sum += LayerNorm ? x : x * x;
+  }
+  using BlockReduce = cub::BlockReduce<float, 256>;
+  __shared__ typename BlockReduce::TempStorage reduce_store;
+  sum = BlockReduce(reduce_store).Reduce(sum, CubAddOp{}, blockDim.x);
+  __shared__ float mean;
+  if constexpr (LayerNorm) {
+    if (threadIdx.x == 0) {
+      mean = sum / hidden_size;
+    }
+    __syncthreads();
+    sum = 0.0f;
+    for (int col = threadIdx.x; col < hidden_size; col += blockDim.x) {
+      float centered = float(new_residual[row * hidden_size + col]) - mean;
+      sum += centered * centered;
+    }
+    sum = BlockReduce(reduce_store).Reduce(sum, CubAddOp{}, blockDim.x);
+  }
+  __shared__ float inverse_std;
+  if (threadIdx.x == 0) {
+    inverse_std = rsqrtf(sum / hidden_size + eps);
+  }
+  __syncthreads();
+  for (int col = threadIdx.x; col < hidden_size; col += blockDim.x) {
+    int index = row * hidden_size + col;
+    float value = float(new_residual[index]);
+    if constexpr (LayerNorm) {
+      value -= mean;
+    }
+    value *= inverse_std;
+    value *= float(weight[col]);
+    if constexpr (LayerNorm) {
+      if (norm_bias) {
+        value += float(norm_bias[col]);
+      }
+    }
+    normalized[index] = bf16(value);
+  }
+}
+
+template <bool LayerNorm>
+__global__ void tpsp_add_norm_vector(const bf16* reduced, const bf16* residual,
+                                     const bf16* projection_bias,
+                                     const bf16* weight, const bf16* norm_bias,
+                                     bf16* new_residual, bf16* normalized,
+                                     int hidden_size, float eps) {
+  using Vec = TpspBf16Vec;
+  const int row = blockIdx.x;
+  const int vec_hidden = hidden_size / 8;
+  const auto* reduced_v =
+      reinterpret_cast<const Vec*>(reduced + int64_t(row) * hidden_size);
+  const auto* residual_v =
+      reinterpret_cast<const Vec*>(residual + int64_t(row) * hidden_size);
+  const auto* projection_bias_v = reinterpret_cast<const Vec*>(projection_bias);
+  const auto* weight_v = reinterpret_cast<const Vec*>(weight);
+  const auto* norm_bias_v = reinterpret_cast<const Vec*>(norm_bias);
+  auto* new_residual_v =
+      reinterpret_cast<Vec*>(new_residual + int64_t(row) * hidden_size);
+  auto* normalized_v =
+      reinterpret_cast<Vec*>(normalized + int64_t(row) * hidden_size);
+
+  float variance = 0.0f;
+  for (int idx = threadIdx.x; idx < vec_hidden; idx += blockDim.x) {
+    Vec value = reduced_v[idx];
+    Vec other = residual_v[idx];
+    Vec bias;
+    if (projection_bias) {
+      bias = projection_bias_v[idx];
+    }
+#pragma unroll
+    for (int j = 0; j < 8; j += 2) {
+      __nv_bfloat162 pair{value.data[j], value.data[j + 1]};
+      if (projection_bias) {
+        pair += __nv_bfloat162{bias.data[j], bias.data[j + 1]};
+      }
+      pair += __nv_bfloat162{other.data[j], other.data[j + 1]};
+      value.data[j] = pair.x;
+      value.data[j + 1] = pair.y;
+    }
+    new_residual_v[idx] = value;
+#pragma unroll
+    for (int j = 0; j < 8; j += 2) {
+      float2 pair =
+          __bfloat1622float2(__nv_bfloat162{value.data[j], value.data[j + 1]});
+      if constexpr (LayerNorm) {
+        variance += pair.x + pair.y;
+      } else {
+        variance += pair.x * pair.x + pair.y * pair.y;
+      }
+    }
+  }
+
+  using BlockReduce = cub::BlockReduce<float, 256>;
+  __shared__ typename BlockReduce::TempStorage reduce_store;
+  variance = BlockReduce(reduce_store).Reduce(variance, CubAddOp{}, blockDim.x);
+  __shared__ float mean;
+  if constexpr (LayerNorm) {
+    if (threadIdx.x == 0) {
+      mean = variance / hidden_size;
+    }
+    __syncthreads();
+    variance = 0.0f;
+    for (int idx = threadIdx.x; idx < vec_hidden; idx += blockDim.x) {
+      Vec value = new_residual_v[idx];
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        float centered = __bfloat162float(value.data[j]) - mean;
+        variance += centered * centered;
+      }
+    }
+    variance =
+        BlockReduce(reduce_store).Reduce(variance, CubAddOp{}, blockDim.x);
+  }
+  __shared__ float inverse_std;
+  if (threadIdx.x == 0) {
+    inverse_std = rsqrtf(variance / hidden_size + eps);
+  }
+  __syncthreads();
+
+  for (int idx = threadIdx.x; idx < vec_hidden; idx += blockDim.x) {
+    Vec value = new_residual_v[idx];
+    Vec weights = weight_v[idx];
+    Vec bias;
+    if constexpr (LayerNorm) {
+      if (norm_bias) {
+        bias = norm_bias_v[idx];
+      }
+    }
+    Vec output;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      float x = __bfloat162float(value.data[j]);
+      if constexpr (LayerNorm) {
+        x -= mean;
+      }
+      float w = __bfloat162float(weights.data[j]);
+      float y = x * inverse_std * w;
+      if constexpr (LayerNorm) {
+        if (norm_bias) {
+          y += __bfloat162float(bias.data[j]);
+        }
+      }
+      output.data[j] = __float2bfloat16(y);
+    }
+    normalized_v[idx] = output;
+  }
+}
+
+struct CudaEvent {
+  cudaEvent_t handle{};
+
+  CudaEvent() {
+    STD_CUDA_CHECK(cudaEventCreateWithFlags(&handle, cudaEventDisableTiming));
+  }
+  ~CudaEvent() { cudaEventDestroy(handle); }
+  CudaEvent(const CudaEvent&) = delete;
+  CudaEvent& operator=(const CudaEvent&) = delete;
+};
+
+struct PipelineState {
+  std::array<CudaEvent, 2> gemm_ready;
+  std::array<CudaEvent, 2> comm_done;
+  cudaStream_t comm_stream{};
+
+  PipelineState() {
+    int least_priority;
+    int greatest_priority;
+    STD_CUDA_CHECK(
+        cudaDeviceGetStreamPriorityRange(&least_priority, &greatest_priority));
+    STD_CUDA_CHECK(cudaStreamCreateWithPriority(
+        &comm_stream, cudaStreamNonBlocking, greatest_priority));
+  }
+  ~PipelineState() { cudaStreamDestroy(comm_stream); }
+};
+
+thread_local std::unordered_map<int, std::unique_ptr<PipelineState>>
+    pipeline_states;
+
+struct ChunkBuffers {
+  torch::stable::Tensor packed;
+  torch::stable::Tensor partial;
+  torch::stable::Tensor local;
+  torch::stable::Tensor gathered;
+};
+
+torch::stable::Tensor make_bf16(const torch::stable::Tensor& a, int64_t rows,
+                                int64_t cols) {
+  return torch::stable::empty({rows, cols}, a.scalar_type(), std::nullopt,
+                              a.device());
+}
+
+}  // namespace
+
+std::tuple<torch::stable::Tensor, torch::stable::Tensor, torch::stable::Tensor>
+tpsp_fused_matmul_reduce_scatter_norm_all_gather(
+    const torch::stable::Tensor& a, const torch::stable::Tensor& b,
+    const torch::stable::Tensor& weight, const torch::stable::Tensor& residual,
+    const std::optional<torch::stable::Tensor>& projection_bias,
+    const std::optional<torch::stable::Tensor>& norm_bias, double eps,
+    int64_t norm_kind, int64_t microchunk_rows, int64_t comm_address,
+    int64_t tp_size) {
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(
+      a.is_cuda() && b.is_cuda() && weight.is_cuda() && residual.is_cuda(),
+      "TPSP requires CUDA tensors");
+  STD_TORCH_CHECK(a.scalar_type() == ScalarType::BFloat16 &&
+                      b.scalar_type() == ScalarType::BFloat16 &&
+                      weight.scalar_type() == ScalarType::BFloat16 &&
+                      residual.scalar_type() == ScalarType::BFloat16,
+                  "TPSP requires BF16 tensors");
+  STD_TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && weight.dim() == 1 &&
+                      residual.dim() == 2 && a.is_contiguous() &&
+                      b.is_contiguous() && weight.is_contiguous() &&
+                      residual.is_contiguous(),
+                  "TPSP requires contiguous matrices and vectors");
+  STD_TORCH_CHECK(a.device() == b.device() && a.device() == weight.device() &&
+                      a.device() == residual.device(),
+                  "TPSP tensors must reside on the same CUDA device");
+  STD_TORCH_CHECK(norm_kind == 0 || norm_kind == 1,
+                  "TPSP norm must be RMSNorm or LayerNorm");
+  STD_TORCH_CHECK(!norm_bias || norm_kind == 1,
+                  "TPSP norm bias requires LayerNorm");
+  for (const auto* bias : {&projection_bias, &norm_bias}) {
+    if (*bias) {
+      STD_TORCH_CHECK(
+          bias->value().is_cuda() &&
+              bias->value().scalar_type() == ScalarType::BFloat16 &&
+              bias->value().device() == a.device() &&
+              bias->value().is_contiguous() && bias->value().dim() == 1 &&
+              bias->value().size(0) == b.size(1),
+          "TPSP bias must be a contiguous CUDA BF16 hidden-size vector");
+    }
+  }
+  STD_TORCH_CHECK(a.size(1) == b.size(0) && b.size(1) == weight.size(0) &&
+                      tp_size >= 2 && tp_size <= 8 && microchunk_rows > 0 &&
+                      comm_address != 0 && eps > 0,
+                  "Invalid TPSP shape or configuration");
+  int64_t tokens = a.size(0);
+  int64_t width = a.size(1);
+  int64_t hidden = b.size(1);
+  int64_t rows = (tokens + tp_size - 1) / tp_size;
+  STD_TORCH_CHECK(
+      tokens > 0 && residual.size(0) == rows && residual.size(1) == hidden,
+      "TPSP residual shard has an unexpected shape");
+  STD_TORCH_CHECK(tokens <= INT32_MAX && width <= INT32_MAX &&
+                      hidden <= INT32_MAX && rows <= INT32_MAX &&
+                      microchunk_rows <= INT32_MAX && tp_size <= INT32_MAX,
+                  "TPSP dimensions exceed CUDA kernel limits");
+
+  const torch::stable::accelerator::DeviceGuard guard(a.get_device_index());
+  cudaStream_t stream = get_current_cuda_stream();
+  cublasHandle_t blas = get_current_cuda_blas_handle();
+  ncclComm_t comm = reinterpret_cast<ncclComm_t>(comm_address);
+  int64_t max_chunk = std::min(rows, microchunk_rows);
+  int64_t num_chunks = (rows + max_chunk - 1) / max_chunk;
+  PipelineState* pipeline = nullptr;
+  if (num_chunks > 1) {
+    auto& state = pipeline_states[a.get_device_index()];
+    if (!state) {
+      state = std::make_unique<PipelineState>();
+    }
+    pipeline = state.get();
+  }
+  std::vector<ChunkBuffers> buffers;
+  for (int slot = 0; slot < (pipeline ? 2 : 1); ++slot) {
+    buffers.push_back({
+        make_bf16(a, max_chunk * tp_size, width),
+        make_bf16(a, max_chunk * tp_size, hidden),
+        make_bf16(a, max_chunk, hidden),
+        make_bf16(a, max_chunk * tp_size, hidden),
+    });
+  }
+  auto new_residual = make_bf16(a, rows, hidden);
+  auto normalized = make_bf16(a, rows, hidden);
+  auto gathered = make_bf16(a, tokens, hidden);
+
+  auto* a_ptr = reinterpret_cast<const bf16*>(a.const_data_ptr());
+  auto* b_ptr = reinterpret_cast<const bf16*>(b.const_data_ptr());
+  auto* residual_ptr = reinterpret_cast<const bf16*>(residual.const_data_ptr());
+  auto* new_residual_ptr =
+      reinterpret_cast<bf16*>(new_residual.mutable_data_ptr());
+  auto* normalized_ptr = reinterpret_cast<bf16*>(normalized.mutable_data_ptr());
+  auto* output_ptr = reinterpret_cast<bf16*>(gathered.mutable_data_ptr());
+  auto* weight_ptr = reinterpret_cast<const bf16*>(weight.const_data_ptr());
+  auto* projection_bias_ptr =
+      projection_bias
+          ? reinterpret_cast<const bf16*>(projection_bias->const_data_ptr())
+          : nullptr;
+  auto* norm_bias_ptr =
+      norm_bias ? reinterpret_cast<const bf16*>(norm_bias->const_data_ptr())
+                : nullptr;
+  constexpr int threads = 256;
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+
+  for (int64_t offset = 0; offset < rows; offset += max_chunk) {
+    int slot = (offset / max_chunk) % buffers.size();
+    if (pipeline && offset >= 2 * max_chunk) {
+      STD_CUDA_CHECK(
+          cudaStreamWaitEvent(stream, pipeline->comm_done[slot].handle, 0));
+    }
+    auto& scratch = buffers[slot];
+    auto* packed_ptr =
+        reinterpret_cast<bf16*>(scratch.packed.mutable_data_ptr());
+    auto* partial_ptr =
+        reinterpret_cast<bf16*>(scratch.partial.mutable_data_ptr());
+    auto* local_ptr = reinterpret_cast<bf16*>(scratch.local.mutable_data_ptr());
+    auto* chunk_ptr =
+        reinterpret_cast<bf16*>(scratch.gathered.mutable_data_ptr());
+    int chunk_rows = static_cast<int>(std::min(max_chunk, rows - offset));
+    bool whole_input = tokens % tp_size == 0 && chunk_rows == rows;
+    if (tokens % tp_size == 0) {
+      STD_TORCH_CHECK(
+          cublasGemmStridedBatchedEx(
+              blas, CUBLAS_OP_N, CUBLAS_OP_N, hidden, chunk_rows, width, &alpha,
+              b_ptr, CUDA_R_16BF, hidden, 0, a_ptr + offset * width,
+              CUDA_R_16BF, width, rows * width, &beta, partial_ptr, CUDA_R_16BF,
+              hidden, int64_t(chunk_rows) * hidden, tp_size, CUBLAS_COMPUTE_32F,
+              CUBLAS_GEMM_DEFAULT_TENSOR_OP) == CUBLAS_STATUS_SUCCESS,
+          "TPSP BF16 batched GEMM failed");
+    } else {
+      int64_t pack_elems = chunk_rows * tp_size * width;
+      pack_tpsp_chunk<<<(pack_elems + threads - 1) / threads, threads, 0,
+                        stream>>>(a_ptr, packed_ptr, tokens, width, rows,
+                                  chunk_rows, offset, tp_size);
+      STD_CUDA_CHECK(cudaGetLastError());
+      STD_TORCH_CHECK(
+          cublasGemmEx(blas, CUBLAS_OP_N, CUBLAS_OP_N, hidden,
+                       chunk_rows * tp_size, width, &alpha, b_ptr, CUDA_R_16BF,
+                       hidden, packed_ptr, CUDA_R_16BF, width, &beta,
+                       partial_ptr, CUDA_R_16BF, hidden, CUBLAS_COMPUTE_32F,
+                       CUBLAS_GEMM_DEFAULT_TENSOR_OP) == CUBLAS_STATUS_SUCCESS,
+          "TPSP BF16 GEMM failed");
+    }
+    cudaStream_t comm_stream = pipeline ? pipeline->comm_stream : stream;
+    if (pipeline) {
+      STD_CUDA_CHECK(
+          cudaEventRecord(pipeline->gemm_ready[slot].handle, stream));
+      STD_CUDA_CHECK(cudaStreamWaitEvent(comm_stream,
+                                         pipeline->gemm_ready[slot].handle, 0));
+    }
+    STD_TORCH_CHECK(
+        ncclReduceScatter(partial_ptr, local_ptr, chunk_rows * hidden,
+                          ncclBfloat16, ncclSum, comm,
+                          comm_stream) == ncclSuccess,
+        "TPSP reduce-scatter failed");
+
+    auto* residual_chunk = residual_ptr + offset * hidden;
+    auto* new_residual_chunk = new_residual_ptr + offset * hidden;
+    auto* normalized_chunk = normalized_ptr + offset * hidden;
+    bool aligned =
+        hidden % 8 == 0 && ((reinterpret_cast<uintptr_t>(local_ptr) |
+                             reinterpret_cast<uintptr_t>(residual_chunk) |
+                             reinterpret_cast<uintptr_t>(weight_ptr) |
+                             reinterpret_cast<uintptr_t>(projection_bias_ptr) |
+                             reinterpret_cast<uintptr_t>(norm_bias_ptr) |
+                             reinterpret_cast<uintptr_t>(new_residual_chunk) |
+                             reinterpret_cast<uintptr_t>(normalized_chunk)) &
+                            15) == 0;
+    if (aligned) {
+      if (norm_kind == 0) {
+        tpsp_add_norm_vector<false><<<chunk_rows, threads, 0, comm_stream>>>(
+            local_ptr, residual_chunk, projection_bias_ptr, weight_ptr,
+            norm_bias_ptr, new_residual_chunk, normalized_chunk, hidden,
+            static_cast<float>(eps));
+      } else {
+        tpsp_add_norm_vector<true><<<chunk_rows, threads, 0, comm_stream>>>(
+            local_ptr, residual_chunk, projection_bias_ptr, weight_ptr,
+            norm_bias_ptr, new_residual_chunk, normalized_chunk, hidden,
+            static_cast<float>(eps));
+      }
+    } else {
+      if (norm_kind == 0) {
+        tpsp_add_norm<false><<<chunk_rows, threads, 0, comm_stream>>>(
+            local_ptr, residual_chunk, projection_bias_ptr, weight_ptr,
+            norm_bias_ptr, new_residual_chunk, normalized_chunk, hidden,
+            static_cast<float>(eps));
+      } else {
+        tpsp_add_norm<true><<<chunk_rows, threads, 0, comm_stream>>>(
+            local_ptr, residual_chunk, projection_bias_ptr, weight_ptr,
+            norm_bias_ptr, new_residual_chunk, normalized_chunk, hidden,
+            static_cast<float>(eps));
+      }
+    }
+    STD_CUDA_CHECK(cudaGetLastError());
+    STD_TORCH_CHECK(
+        ncclAllGather(normalized_ptr + offset * hidden,
+                      whole_input ? output_ptr : chunk_ptr, chunk_rows * hidden,
+                      ncclBfloat16, comm, comm_stream) == ncclSuccess,
+        "TPSP all-gather failed");
+    if (!whole_input) {
+      int64_t output_elems = tp_size * chunk_rows * hidden;
+      unpack_tpsp_chunk<<<(output_elems + threads - 1) / threads, threads, 0,
+                          comm_stream>>>(chunk_ptr, output_ptr, tokens, hidden,
+                                         rows, chunk_rows, offset);
+      STD_CUDA_CHECK(cudaGetLastError());
+    }
+    if (pipeline) {
+      STD_CUDA_CHECK(
+          cudaEventRecord(pipeline->comm_done[slot].handle, comm_stream));
+    }
+  }
+  if (pipeline) {
+    STD_CUDA_CHECK(cudaStreamWaitEvent(
+        stream, pipeline->comm_done[(num_chunks - 1) % 2].handle, 0));
+  }
+  return {new_residual, normalized, gathered};
+}
