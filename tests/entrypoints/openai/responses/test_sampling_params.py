@@ -47,6 +47,7 @@ class TestResponsesRequestSamplingParams:
             repetition_penalty=1.2,
             seed=42,
             stop=["END", "STOP"],
+            stop_token_ids=[42, 43],
             ignore_eos=True,
             vllm_xargs={"custom": "value"},
         )
@@ -56,6 +57,7 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.repetition_penalty == 1.2
         assert sampling_params.seed == 42
         assert sampling_params.stop == ["END", "STOP"]
+        assert sampling_params.stop_token_ids == [42, 43]
         assert sampling_params.ignore_eos is True
         assert sampling_params.extra_args == {"custom": "value"}
 
