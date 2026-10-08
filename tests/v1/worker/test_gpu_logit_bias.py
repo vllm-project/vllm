@@ -12,6 +12,7 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
+import vllm.envs as envs
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logits_processor import (
@@ -48,10 +49,13 @@ def _only_stop_token_left(num_rows: int) -> torch.Tensor:
     return logits
 
 
-def _apply(logits: torch.Tensor, structured: list[bool]) -> torch.Tensor:
-    """Run the fused bias kernel with one logits row per request."""
+def _state(max_num_reqs: int) -> LogitBiasState:
+    # The buffer caps are read from vllm.envs at construction; make sure a
+    # cached __getattr__ from an in-process engine does not hide monkeypatched
+    # values.
+    envs.disable_envs_cache()
     req_states = RequestState(
-        max_num_reqs=4,
+        max_num_reqs=max_num_reqs,
         max_model_len=64,
         max_num_batched_tokens=16,
         num_speculative_steps=1,
@@ -60,8 +64,12 @@ def _apply(logits: torch.Tensor, structured: list[bool]) -> torch.Tensor:
     )
     # add_request() reads prompt_len per slot; every slot here uses the same one.
     req_states.prompt_len.np[:] = PROMPT_LEN
+    return LogitBiasState(None, LogitsProcRequestState.from_request_state(req_states))
 
-    state = LogitBiasState(None, LogitsProcRequestState.from_request_state(req_states))
+
+def _apply(logits: torch.Tensor, structured: list[bool]) -> torch.Tensor:
+    """Run the fused bias kernel with one logits row per request."""
+    state = _state(max_num_reqs=4)
     for req_idx, is_structured in enumerate(structured):
         state.add_request(req_idx, _params(is_structured))
     state.apply_staged_writes()
@@ -113,3 +121,35 @@ def test_v2_min_tokens_mixed_batch_gates_restore_per_request():
 
     assert out[0, STOP_TOKEN] == 1.0
     assert torch.isneginf(out[1]).all()
+
+
+def test_v2_caps_default_to_1024():
+    state = _state(max_num_reqs=1)
+    assert state.allowed_token_ids.gpu.shape[1] == 1024
+    assert state.logit_bias_token_ids.gpu.shape[1] == 1024
+    assert state.logit_bias.gpu.shape[1] == 1024
+
+
+def test_v2_allowed_token_ids_cap_follows_env(monkeypatch: pytest.MonkeyPatch):
+    """Both the buffer width and the accepted list length follow
+    VLLM_MAX_NUM_ALLOWED_TOKEN_IDS; a small cap keeps the test cheap."""
+    monkeypatch.setenv("VLLM_MAX_NUM_ALLOWED_TOKEN_IDS", "8")
+    state = _state(max_num_reqs=2)
+    assert state.allowed_token_ids.gpu.shape[1] == 8
+
+    state.add_request(0, SamplingParams(allowed_token_ids=list(range(8))))
+    with pytest.raises(ValueError, match="VLLM_MAX_NUM_ALLOWED_TOKEN_IDS"):
+        state.add_request(1, SamplingParams(allowed_token_ids=list(range(9))))
+
+
+def test_v2_logit_bias_cap_follows_env(monkeypatch: pytest.MonkeyPatch):
+    """Same contract for VLLM_MAX_NUM_LOGIT_BIAS_TOKENS, which sizes both the
+    token-id and the bias rows."""
+    monkeypatch.setenv("VLLM_MAX_NUM_LOGIT_BIAS_TOKENS", "4")
+    state = _state(max_num_reqs=2)
+    assert state.logit_bias_token_ids.gpu.shape[1] == 4
+    assert state.logit_bias.gpu.shape[1] == 4
+
+    state.add_request(0, SamplingParams(logit_bias={i: -1.0 for i in range(4)}))
+    with pytest.raises(ValueError, match="VLLM_MAX_NUM_LOGIT_BIAS_TOKENS"):
+        state.add_request(1, SamplingParams(logit_bias={i: -1.0 for i in range(5)}))
