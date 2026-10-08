@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
@@ -32,45 +31,52 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-def _validate_prefix_cache_retention_interval(
+def _validate_decode_checkpoints(
     retention_interval: int | None,
-    retain_decode_checkpoints: bool,
     enable_caching: bool,
+    use_eagle: bool,
     scheduler_block_size: int,
     kv_cache_config: KVCacheConfig,
 ) -> None:
-    if retain_decode_checkpoints:
-        if not enable_caching:
-            raise ValueError(
-                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires "
-                "prefix caching to be enabled."
-            )
-        if retention_interval != 0:
-            raise ValueError(
-                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires "
-                "prefix_cache_retention_interval=0."
-            )
-        mamba_specs = [
-            group.kv_cache_spec
-            for group in kv_cache_config.kv_cache_groups
-            if isinstance(group.kv_cache_spec, MambaSpec)
-        ]
-        if not mamba_specs:
-            raise ValueError(
-                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires a "
-                "Mamba KV cache group."
-            )
-        if any(spec.mamba_cache_mode != "align" for spec in mamba_specs):
-            raise ValueError(
-                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires all "
-                "Mamba KV cache groups to use mamba_cache_mode='align'."
-            )
-        if any(spec.block_size != scheduler_block_size for spec in mamba_specs):
-            raise ValueError(
-                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires every "
-                "Mamba block size to equal scheduler_block_size."
-            )
+    if not enable_caching:
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires prefix caching to be enabled."
+        )
+    if use_eagle:
+        raise ValueError(
+            "enable_mamba_decode_checkpoint is not compatible with hidden-state "
+            "speculative decoding."
+        )
+    if retention_interval != 0:
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires prefix_cache_retention_interval=0."
+        )
+    mamba_specs = [
+        group.kv_cache_spec
+        for group in kv_cache_config.kv_cache_groups
+        if isinstance(group.kv_cache_spec, MambaSpec)
+    ]
+    if not mamba_specs:
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires a Mamba KV cache group."
+        )
+    if any(spec.mamba_cache_mode != "align" for spec in mamba_specs):
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires all Mamba KV cache groups "
+            "to use mamba_cache_mode='align'."
+        )
+    if any(spec.block_size != scheduler_block_size for spec in mamba_specs):
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires every Mamba block size to "
+            "equal scheduler_block_size."
+        )
 
+
+def _validate_prefix_cache_retention_interval(
+    retention_interval: int | None,
+    scheduler_block_size: int,
+    kv_cache_config: KVCacheConfig,
+) -> None:
     if retention_interval is None:
         return
 
@@ -195,21 +201,10 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = kv_cache_config.prefix_cache_retention_interval
-        self.retain_decode_checkpoints = (
-            envs.VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS
-        )
-        if self.retain_decode_checkpoints and use_eagle:
-            raise ValueError(
-                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS is not compatible "
-                "with hidden-state speculative decoding."
-            )
         _validate_prefix_cache_retention_interval(
-            self.retention_interval,
-            self.retain_decode_checkpoints,
-            enable_caching,
-            self.scheduler_block_size,
-            kv_cache_config,
+            self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
+        self.retain_decode_checkpoints = False
 
     def get_num_blocks_to_allocate(
         self,
@@ -437,6 +432,17 @@ class KVCacheCoordinator(ABC):
             manager.block_pool for manager in self.single_type_managers
         )
         return all([pool.reset_prefix_cache() for pool in pools])
+
+    def enable_decode_checkpoints(self) -> None:
+        """Enable ``CacheConfig.enable_mamba_decode_checkpoint``."""
+        _validate_decode_checkpoints(
+            self.retention_interval,
+            self.block_pool.enable_caching,
+            bool(self.eagle_group_ids),
+            self.scheduler_block_size,
+            self.kv_cache_config,
+        )
+        self.retain_decode_checkpoints = True
 
     def update_decode_checkpoint_candidates(
         self, request: Request, materialized_tokens: int

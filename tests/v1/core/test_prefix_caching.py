@@ -4970,8 +4970,7 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     assert len(computed_blocks.blocks[1]) == 0
 
 
-def _make_decode_checkpoint_manager(monkeypatch):
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
+def _make_decode_checkpoint_manager():
     block_size = 4
     manager = make_kv_cache_manager(
         _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
@@ -4979,6 +4978,7 @@ def _make_decode_checkpoint_manager(monkeypatch):
         enable_caching=True,
         retention_interval=0,
         hash_block_size=block_size,
+        enable_mamba_decode_checkpoint=True,
     )
     return manager, block_size
 
@@ -5003,9 +5003,9 @@ def _materialize_checkpoint_test_request(manager, block_size, num_decode_blocks=
 
 
 @pytest.mark.parametrize("keep", [True, False])
-def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch, keep):
+def test_mamba_decode_checkpoints_publish_latest_on_finish(keep):
     """The latest materialized decode state becomes reusable after finish."""
-    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
+    manager, block_size = _make_decode_checkpoint_manager()
     request = _materialize_checkpoint_test_request(manager, block_size)
 
     assert manager.block_pool.get_cached_block(request.block_hashes[4], [1]) is None
@@ -5023,9 +5023,9 @@ def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch, keep):
     assert full_hit == (20 if keep else 4)
 
 
-def test_mamba_decode_checkpoint_pin_survives_state_rotation(monkeypatch):
+def test_mamba_decode_checkpoint_pin_survives_state_rotation():
     """A private pin keeps an old state out of the allocator after rotation."""
-    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
+    manager, block_size = _make_decode_checkpoint_manager()
     request = _materialize_checkpoint_test_request(
         manager, block_size, num_decode_blocks=2
     )
@@ -5054,9 +5054,9 @@ def test_mamba_decode_checkpoint_pin_survives_state_rotation(monkeypatch):
     assert candidate.block.ref_cnt == 0
 
 
-def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary(monkeypatch):
+def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary():
     """Allocated/in-flight tokens and a sampled EOS cannot form a candidate."""
-    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
+    manager, block_size = _make_decode_checkpoint_manager()
     request = _materialize_checkpoint_test_request(
         manager, block_size, num_decode_blocks=2
     )
@@ -5092,9 +5092,8 @@ def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary(monkeypatch):
     ],
 )
 def test_decode_checkpoints_reject_unsupported_config(
-    monkeypatch, retention_interval, enable_caching, use_eagle, expected_match
+    retention_interval, enable_caching, use_eagle, expected_match
 ):
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
     with pytest.raises(ValueError, match=expected_match):
         make_kv_cache_manager(
             _make_hybrid_kv_cache_config(4, 100, ["full", "mamba_align"]),
@@ -5103,6 +5102,7 @@ def test_decode_checkpoints_reject_unsupported_config(
             retention_interval=retention_interval,
             use_eagle=use_eagle,
             hash_block_size=4,
+            enable_mamba_decode_checkpoint=True,
         )
 
 
