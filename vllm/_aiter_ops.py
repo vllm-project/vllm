@@ -1404,9 +1404,11 @@ def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
     Below M=32 the preshuffled Triton GEMM takes unshuffled per-1x32 scales,
     which is the layout AITER's fused AR+RMSNorm+MXFP4 epilogue writes, so
     there the quant runs in the all-reduce kernel instead of as a separate
-    launch. Everywhere else this is the unfused sequence. Batch-invariant mode
-    always takes the unfused sequence, as ``gemm_with_dynamic_quant`` skips the
-    preshuffled GEMM there and would read these scales as shuffled.
+    launch. From M=32 both GEMMs take the shuffled scales FlyDSL INT4
+    QuickReduce writes, so where that all-reduce runs it quantizes in its
+    epilogue. Everywhere else this is the unfused sequence. Batch-invariant mode
+    takes the unfused sequence below M=32, as ``gemm_with_dynamic_quant`` skips
+    the preshuffled GEMM there and would read the decode scales as shuffled.
 
     The pattern only matches linears with ``use_asm_gemm``, which requires a
     tuned preshuffled config for the weight shape.
@@ -1414,6 +1416,25 @@ def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     m = input_.shape[0]
+    if m >= 32 and not aiter_ar.use_1stage_fused_ar_rms(input_):
+        from vllm.distributed import get_tp_group
+
+        qr_comm = getattr(get_tp_group().device_communicator, "qr_comm", None)
+        if qr_comm is not None and qr_comm.should_fused_allreduce_rmsnorm_mxfp4(
+            input_, residual, norm_weight
+        ):
+            norm_out, residual_out, x_q, x_s = qr_comm.fused_allreduce_rmsnorm_mxfp4(
+                input_, residual, norm_weight, epsilon, gemma_norm
+            )
+            out = torch.ops.vllm.gemm_with_dynamic_quant(
+                x_q,
+                weight,
+                weight_scale,
+                rocm_use_aiter_fp4_asm_gemm=True,
+                out_dtype=out_dtype,
+                x_scales=x_s,
+            )
+            return out, norm_out, residual_out
     stage = None
     if m < 32 and not envs.VLLM_BATCH_INVARIANT:
         stage = aiter_ar.mxfp4_fused_ar_rms_stage(input_)

@@ -95,6 +95,7 @@ class _FakeFlyDSLInt4:
         self.allreduce_calls = 0
         self.rmsnorm_calls = []
         self.closed = False
+        self.supports_mxfp4 = True
 
     def allreduce(self, inp, out):
         self.allreduce_calls += 1
@@ -188,6 +189,25 @@ def test_flydsl_int4_should_fused_allreduce_rmsnorm_gates_operands():
 
     quick_reduce._flydsl_int4 = None
     assert not quick_reduce.should_fused_allreduce_rmsnorm(inp, residual, weight)
+
+
+def test_flydsl_int4_should_fused_allreduce_rmsnorm_mxfp4_needs_gfx950_kernel():
+    quick_reduce, fake = _make_flydsl_quick_allreduce_for_test()
+    hidden = 8192
+    inp = torch.empty((MB // hidden, hidden), dtype=torch.bfloat16)
+    residual = torch.empty_like(inp)
+    weight = torch.empty(hidden, dtype=torch.bfloat16)
+
+    assert quick_reduce.supports_fused_allreduce_rmsnorm_mxfp4
+    assert quick_reduce.should_fused_allreduce_rmsnorm_mxfp4(inp, residual, weight)
+    # It takes only the operands the plain fused path takes.
+    assert not quick_reduce.should_fused_allreduce_rmsnorm_mxfp4(
+        inp[:16], residual[:16], weight
+    )
+
+    fake.supports_mxfp4 = False
+    assert not quick_reduce.supports_fused_allreduce_rmsnorm_mxfp4
+    assert not quick_reduce.should_fused_allreduce_rmsnorm_mxfp4(inp, residual, weight)
 
 
 def test_close_closes_flydsl_int4():

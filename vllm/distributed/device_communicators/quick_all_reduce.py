@@ -400,6 +400,60 @@ class QuickAllReduce:
         )
         return out, residual_out
 
+    @property
+    def supports_fused_allreduce_rmsnorm_mxfp4(self) -> bool:
+        """FlyDSL INT4 QuickReduce is active and can MXFP4-quantize the norm."""
+        return (
+            not self.disabled
+            and self._flydsl_int4 is not None
+            and self._flydsl_int4.supports_mxfp4
+        )
+
+    def should_fused_allreduce_rmsnorm_mxfp4(
+        self, inp: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+    ) -> bool:
+        """Whether FlyDSL INT4 QuickReduce can also MXFP4-quantize the norm."""
+        return (
+            self.supports_fused_allreduce_rmsnorm_mxfp4
+            and self.should_fused_allreduce_rmsnorm(inp, residual, weight)
+        )
+
+    def fused_allreduce_rmsnorm_mxfp4(
+        self,
+        inp: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+        gemma_norm: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``fused_allreduce_rmsnorm`` plus the MXFP4 quant of its output.
+
+        Returns ``(out, residual_out, x_q, x_s)``, where ``x_q, x_s`` are what
+        ``aiter.per_1x32_f4_quant_hip(out, shuffle=True)`` returns.
+        """
+        assert self._flydsl_int4 is not None
+        m, k = inp.shape
+        out = torch.empty_like(inp)
+        residual_out = torch.empty_like(residual)
+        x_q = torch.empty((m, k // 2), dtype=torch.float4_e2m1fn_x2, device=inp.device)
+        x_s = torch.empty(
+            self._flydsl_int4.mxfp4_scale_shape(m, k),
+            dtype=torch.float8_e8m0fnu,
+            device=inp.device,
+        )
+        self._flydsl_int4.allreduce_rmsnorm_mxfp4(
+            inp,
+            residual,
+            weight,
+            epsilon,
+            out,
+            residual_out,
+            x_q,
+            x_s,
+            gemma_norm=gemma_norm,
+        )
+        return out, residual_out, x_q, x_s
+
     def quick_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place custom quick all reduce."""
         # quick allreduce doesn't require a separate graph mode,

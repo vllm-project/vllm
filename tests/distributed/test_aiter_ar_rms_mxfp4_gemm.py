@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import vllm._aiter_ops as aiter_ops
+import vllm.distributed as vllm_distributed
 from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
     AiterCustomAllreduce,
 )
@@ -24,7 +25,13 @@ def _inputs(m: int):
     return inp, residual, norm_weight, weight, weight_scale
 
 
-def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, batch_invariant: bool = False):
+def _patch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stage,
+    batch_invariant: bool = False,
+    qr_comm=None,
+):
     calls: dict[str, list] = {"stage": [], "fused_quant": [], "gemm": [], "ar_rms": []}
 
     class FakeAiterCA:
@@ -37,6 +44,9 @@ def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, batch_invariant: bool = Fa
 
     class FakeAiterAllReduce:
         aiter_ca = FakeAiterCA()
+
+        def use_1stage_fused_ar_rms(self, inp):
+            return inp.shape[0] <= 80
 
         def mxfp4_fused_ar_rms_stage(self, inp):
             calls["stage"].append(inp)
@@ -61,7 +71,28 @@ def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, batch_invariant: bool = Fa
         torch.ops.vllm, "gemm_with_dynamic_quant", fake_gemm, raising=False
     )
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(
+        vllm_distributed,
+        "get_tp_group",
+        lambda: SimpleNamespace(device_communicator=SimpleNamespace(qr_comm=qr_comm)),
+    )
     return calls
+
+
+class _FakeFlyDSLQuickReduce:
+    def __init__(self, accepts: bool):
+        self.accepts = accepts
+        self.calls: list[tuple] = []
+
+    def should_fused_allreduce_rmsnorm_mxfp4(self, inp, residual, weight):
+        return self.accepts
+
+    def fused_allreduce_rmsnorm_mxfp4(self, inp, residual, weight, eps, gemma_norm):
+        self.calls.append((inp, residual, weight, eps, gemma_norm))
+        m, k = inp.shape
+        x_q = torch.empty(m, k // 2, dtype=torch.uint8)
+        x_s = torch.empty((m + 255) // 256 * 256, k // 32, dtype=torch.uint8)
+        return inp + 3, residual + 3, x_q, x_s
 
 
 @pytest.mark.parametrize("gemma_norm", [True, False])
@@ -138,6 +169,67 @@ def test_falls_back_to_the_unfused_sequence(
     assert out.shape == (m, OUT)
     torch.testing.assert_close(norm_out, inp + 2)
     torch.testing.assert_close(residual_out, residual + 2)
+
+
+@pytest.mark.parametrize("gemma_norm", [True, False])
+def test_prefill_quantizes_in_the_flydsl_quickreduce_kernel(
+    monkeypatch: pytest.MonkeyPatch, gemma_norm: bool
+):
+    qr_comm = _FakeFlyDSLQuickReduce(accepts=True)
+    calls = _patch(monkeypatch, stage=None, qr_comm=qr_comm)
+    inp, residual, norm_weight, weight, weight_scale = _inputs(256)
+
+    out, norm_out, residual_out = (
+        aiter_ops._rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
+            inp,
+            residual,
+            norm_weight,
+            1e-6,
+            gemma_norm,
+            weight,
+            weight_scale,
+            torch.bfloat16,
+        )
+    )
+
+    assert calls["ar_rms"] == [] and calls["fused_quant"] == []
+    ((got_inp, got_res, got_w, eps, got_gemma),) = qr_comm.calls
+    assert got_inp is inp and got_res is residual and got_w is norm_weight
+    assert (eps, got_gemma) == (1e-6, gemma_norm)
+    (x, _, gemm_kwargs) = calls["gemm"][0]
+    assert x.dtype == torch.uint8
+    assert gemm_kwargs["x_scales"].shape == (256, HIDDEN // 32)
+    assert gemm_kwargs["rocm_use_aiter_fp4_asm_gemm"] is True
+    assert out.shape == (256, OUT)
+    torch.testing.assert_close(norm_out, inp + 3)
+    torch.testing.assert_close(residual_out, residual + 3)
+
+
+@pytest.mark.parametrize(
+    ("m", "accepts"),
+    [
+        # FlyDSL QuickReduce declines (below its window, unsupported hidden size).
+        (256, False),
+        # The one-stage custom all-reduce owns small batches.
+        (64, True),
+    ],
+)
+def test_prefill_falls_back_when_flydsl_quickreduce_does_not_run(
+    monkeypatch: pytest.MonkeyPatch, m: int, accepts: bool
+):
+    qr_comm = _FakeFlyDSLQuickReduce(accepts=accepts)
+    calls = _patch(monkeypatch, stage=None, qr_comm=qr_comm)
+    inp, residual, norm_weight, weight, weight_scale = _inputs(m)
+
+    aiter_ops._rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
+        inp, residual, norm_weight, 1e-6, True, weight, weight_scale, torch.bfloat16
+    )
+
+    assert qr_comm.calls == []
+    assert calls["ar_rms"] == [True]
+    (x, _, gemm_kwargs) = calls["gemm"][0]
+    assert x.dtype == torch.bfloat16
+    assert "x_scales" not in gemm_kwargs
 
 
 @pytest.mark.parametrize(

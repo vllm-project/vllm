@@ -1719,9 +1719,12 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 "aiter past PR #2823 to enable the trailing per-group "
                 "FP8 quant fusion."
             )
-        supports_mxfp4_gemm = (
-            rocm_aiter_ops.is_asm_fp4_gemm_supported()
-            and ca_comm.build_supports_gemma_mxfp4_quant()
+        # Decode quantizes in the custom-AR epilogue, prefill in the FlyDSL
+        # INT4 QuickReduce one; either is worth matching the linear for.
+        qr_comm = getattr(get_tp_group().device_communicator, "qr_comm", None)
+        supports_mxfp4_gemm = rocm_aiter_ops.is_asm_fp4_gemm_supported() and (
+            ca_comm.build_supports_gemma_mxfp4_quant()
+            or (qr_comm is not None and qr_comm.supports_fused_allreduce_rmsnorm_mxfp4)
         )
 
         for epsilon in [1e-5, 1e-6]:
