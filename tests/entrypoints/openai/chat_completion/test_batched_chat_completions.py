@@ -424,8 +424,8 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
         def set_prompt_token_ids(self, prompt_token_ids):
             self.prompt_token_ids = prompt_token_ids
 
-        def parse(self, model_output, **kwargs):
-            prefixes.append(self.prompt_token_ids)
+        def parse_with_prompt(self, model_output, *, prompt_token_ids, **kwargs):
+            prefixes.append((self.prompt_token_ids, prompt_token_ids))
             return None, model_output, None
 
     serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
@@ -453,4 +453,4 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
         parser_cls=RecordingParser,
     )
 
-    assert prefixes == [[1], [2]]
+    assert prefixes == [([1], [1]), ([2], [2])]

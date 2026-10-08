@@ -272,10 +272,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         ),
                     )
                     parser.set_prompt_token_ids(final_res.prompt_token_ids)
-                    reasoning, content, _ = parser.parse(
+                    reasoning, content, _ = parser.parse_with_prompt(
                         output.text,
                         request=single_request,
                         model_output_token_ids=output.token_ids,
+                        prompt_token_ids=final_res.prompt_token_ids,
                     )
                     if not request.include_reasoning:
                         reasoning = None
