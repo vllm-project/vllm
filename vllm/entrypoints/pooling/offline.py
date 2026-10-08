@@ -362,6 +362,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         assert isinstance(pooling_params, PoolingParams)
         pooling_task = io_processor.pooling_task
+        # Clone to avoid modifying the caller's pooling parameters.
+        pooling_params = pooling_params.clone()
         if pooling_params.task is None:
             pooling_params.task = pooling_task
         elif pooling_params.task != pooling_task:

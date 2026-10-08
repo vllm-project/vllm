@@ -381,6 +381,7 @@ class KVCacheManager:
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -413,6 +414,8 @@ class KVCacheManager:
                 blocks an already in-flight (prefilling) sequence is relying on.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
+            skip_zeroing_group_ids: Groups whose external-token blocks will be
+                written by an async load and must not be zeroed concurrently.
 
         Blocks layout:
         ```
@@ -437,7 +440,7 @@ class KVCacheManager:
         ----------------------------------------------------------------------
         ```
 
-        Abbrivations:
+        Abbreviations:
 
         ```
         comp      = request.num_computed_tokens
@@ -512,6 +515,10 @@ class KVCacheManager:
         ):
             watermark_blocks = self.watermark_blocks
 
+        # Matches the scheduler's own prefill boundary: `num_tokens - 1`
+        # extends it to resumed requests replaying their output tokens.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -525,6 +532,7 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
+                prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
@@ -559,6 +567,7 @@ class KVCacheManager:
             + num_external_computed_tokens,
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
+            prefill_end=prefill_end,
         )
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
@@ -580,6 +589,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -855,20 +865,6 @@ class KVCacheManager:
         ids: list[int] = []
         for mgr in self.coordinator.single_type_managers:
             ids.extend(mgr.take_new_block_ids())
-        return ids
-
-    def get_zeroing_block_ids_in_range(
-        self, request_id: str, start_token: int, end_token: int
-    ) -> list[int]:
-        """The request's block ids covering [start_token, end_token), from
-        the groups whose new blocks are zeroed by the worker."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
-            if mgr.records_new_block_ids:
-                start_idx = start_token // mgr.block_size
-                end_idx = cdiv(end_token, mgr.block_size)
-                blocks = mgr.req_to_blocks[request_id]
-                ids.extend(blk.block_id for blk in blocks[start_idx:end_idx])
         return ids
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:

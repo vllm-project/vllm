@@ -339,9 +339,16 @@ def _shard_grammar_output(
         cursor += num_req_logits
     if not local_ids:
         return None
+    # num_acceptable_drafts is ordered with structured_output_request_ids.
+    num_acceptable = grammar_output.num_acceptable_drafts
+    if num_acceptable is not None:
+        owned = set(local_ids)
+        ids = grammar_output.structured_output_request_ids
+        num_acceptable = [n for i, n in zip(ids, num_acceptable) if i in owned]
     return GrammarOutput(
         structured_output_request_ids=local_ids,
         grammar_bitmask=grammar_output.grammar_bitmask[keep_indices],
+        num_acceptable_drafts=num_acceptable,
     )
 
 
@@ -617,8 +624,6 @@ def gather_sampler_output(
         device=device,
     )
     if local_output is not None:
-        assert local_output.num_sampled is not None
-        assert local_output.num_rejected is not None
         assert not gather_num_nans or local_output.num_nans is not None
         num_src_cols = min(
             local_output.sampled_token_ids.shape[1], max_num_logits_per_req
