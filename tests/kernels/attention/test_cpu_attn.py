@@ -472,7 +472,7 @@ def varlen_with_paged_kv(
     scale = head_size**-0.5
     token_num = sum(query_lens)
     dynamic_causal_tensor = (
-        torch.tensor(dynamic_causal, dtype=torch.bool)
+        torch.tensor(dynamic_causal, dtype=torch.int32)
         if dynamic_causal is not None
         else None
     )
@@ -836,7 +836,7 @@ def varlen_encoder_zentorch_sdpa(
         key,
         value,
         output,
-        SimpleNamespace(query_start_loc=query_start_loc, causal=False),  # type: ignore[arg-type]
+        SimpleNamespace(query_start_loc=query_start_loc, causal=False),
         scale,
         sliding_window if sliding_window is not None else -1,
         alibi_slopes,

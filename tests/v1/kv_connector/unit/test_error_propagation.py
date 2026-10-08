@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from unittest.mock import Mock
 
 import pytest
 
@@ -10,6 +9,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import FinishReason, Request, RequestStatus
 
 from .utils import (
+    create_mock_connector,
     create_model_runner_output,
     create_request,
     create_scheduler,
@@ -56,7 +56,7 @@ def test_error_propagation_sync_load(fail_scheduler: Scheduler):
         request.request_id: num_external_computed_tokens,
     }
 
-    fail_scheduler.connector = Mock()
+    fail_scheduler.connector = create_mock_connector()
     fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
     )
@@ -110,7 +110,8 @@ def test_error_propagation_async_load(fail_scheduler: Scheduler):
         request.request_id: num_external_computed_tokens,
     }
 
-    fail_scheduler.connector = Mock()
+    fail_scheduler.connector = create_mock_connector()
+    fail_scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, True)
     )

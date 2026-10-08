@@ -10,7 +10,7 @@ Usage:
     python tools/pre_commit/mypy.py <python_version> <changed_files...>
 
 Args:
-    python_version: Python version to use (e.g., "3.10") or "local" to use
+    python_version: Python version to use (e.g., "3.11") or "local" to use
         the local Python version.
     changed_files: List of changed files to check.
 
@@ -38,10 +38,10 @@ SILENT_GROUPS = [
     "tests/entrypoints/generate",
     "tests/entrypoints/multimodal",
     "tests/entrypoints/pooling",
+    "tests/entrypoints/rl",
     "tests/entrypoints/serve",
     "tests/entrypoints/tool_parsers",
     "tests/entrypoints/unit_tests",
-    "tests/entrypoints/weight_transfer",
     "tests/kernels/attention",
     "tests/kernels/core",
     "tests/kernels/helion",
@@ -109,10 +109,6 @@ SEPARATE_GROUPS = [
     "tests/v1/worker",
 ]
 
-EXCLUDE = [
-    r"vllm/model_executor/models/[kK]",
-]
-
 
 def group_files(changed_files: list[str]) -> dict[str, list[str]]:
     """Group changed files into different mypy calls.
@@ -124,16 +120,12 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         A dictionary mapping file group names to lists of changed files.
 
     """
-    exclude_pattern = re.compile(f"^{'|'.join(EXCLUDE)}.*")
     silent_pattern = re.compile(f"^({'|'.join(SILENT_GROUPS)}).*")
     file_groups: dict[str, list[str]] = {"": []}
     file_groups.update({k: [] for k in SEPARATE_GROUPS})
     # Longest path first so a sub-directory is not shadowed by its parent
     separate_groups = sorted(SEPARATE_GROUPS, key=len, reverse=True)
     for changed_file in changed_files:
-        # Skip files which should be ignored completely
-        if exclude_pattern.match(changed_file):
-            continue
         # Already-fixed paths go in the default group, which runs at the
         # stricter follow_imports setting from pyproject.toml
         if silent_pattern.match(changed_file):
@@ -160,7 +152,7 @@ def mypy(
 
     Args:
         targets: List of files or directories to check.
-        python_version: Python version to use (e.g., "3.10") or None to use
+        python_version: Python version to use (e.g., "3.11") or None to use
             the default mypy version.
         follow_imports: Value for the --follow-imports option or None to use
             the default mypy behavior.

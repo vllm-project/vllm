@@ -2314,7 +2314,7 @@ class TestQuarkInt4Format:
                     None,
                     quant_config.quant_config["global_quant_config"]["weight"],
                     quant_config.pack_method,
-                    moe_config,  # type: ignore[arg-type]
+                    moe_config,
                 )
 
             layer = _FakeLayer(moe_config)
@@ -2326,7 +2326,7 @@ class TestQuarkInt4Format:
                 requires_grad=False,
             )
             loader = method.get_weight_loader(
-                layer,  # type: ignore[arg-type]
+                layer,
                 weight_loader=None,
             )
             loader(

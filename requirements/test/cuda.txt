@@ -36,8 +36,9 @@ anthropic==0.112.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-anyio==4.14.1
+anyio==4.14.2
     # via
+    #   -r requirements/test/cuda.in
     #   anthropic
     #   httpx
     #   httpx2
@@ -76,8 +77,10 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/cuda.in
-black==24.10.0
-    # via datamodel-code-generator
+black==26.5.1
+    # via
+    #   -r requirements/test/cuda.in
+    #   datamodel-code-generator
 blake3==1.0.9
     # via -r requirements/test/../common.txt
 blobfile==3.0.0
@@ -154,8 +157,9 @@ coverage==7.10.6
     # via pytest-cov
 cramjam==2.9.0
     # via fastparquet
-cryptography==46.0.5
+cryptography==50.0.1
     # via
+    #   -r requirements/test/cuda.in
     #   azure-identity
     #   azure-storage-blob
     #   msal
@@ -257,18 +261,21 @@ fastsafetensors==0.3.3
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
-filelock==3.16.1
+filelock==4.0.7
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   blobfile
     #   datasets
     #   huggingface-hub
+    #   python-discovery
     #   ray
     #   torch
     #   virtualenv
-fonttools==4.55.0
-    # via matplotlib
+fonttools==4.66.1
+    # via
+    #   -r requirements/test/cuda.in
+    #   matplotlib
 frozendict==2.4.6
     # via einx
 frozenlist==1.5.0
@@ -333,16 +340,20 @@ h11==0.16.0
     #   httpcore
     #   httpcore2
     #   uvicorn
-h2==4.3.0
-    # via httpx
+h2==4.4.1
+    # via
+    #   -r requirements/test/cuda.in
+    #   httpx
 harfile==0.5.0
     # via schemathesis
 hf-xet==1.6.0
     # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
-hpack==4.1.0
-    # via h2
+hpack==4.2.0
+    # via
+    #   -r requirements/test/cuda.in
+    #   h2
 html2text==2025.4.15
     # via gpt-oss
 httpcore==1.0.9
@@ -364,7 +375,9 @@ httpx==0.27.2
     #   perceptron
     #   schemathesis
 httpx2==2.12.0
-    # via mcp
+    # via
+    #   -r requirements/test/cuda.in
+    #   mcp
 huggingface-hub==1.31.0
     # via
     #   -c requirements/common.txt
@@ -497,13 +510,16 @@ lm-format-enforcer==0.11.3
     #   -r requirements/test/../common.txt
 loguru==0.7.3
     # via compressed-tensors
-lxml==5.3.0
+lxml==6.1.3
     # via
+    #   -r requirements/test/cuda.in
     #   blobfile
     #   gpt-oss
     #   sacrebleu
-mako==1.3.10
-    # via alembic
+mako==1.4.3
+    # via
+    #   -r requirements/test/cuda.in
+    #   alembic
 markdown-it-py==3.0.0
     # via rich
 markupsafe==3.0.1
@@ -539,14 +555,15 @@ more-itertools==10.5.0
     # via lm-eval
 mpmath==1.3.0
     # via sympy
-msal==1.34.0
+msal==1.39.0
     # via
     #   azure-identity
     #   msal-extensions
 msal-extensions==1.3.1
     # via azure-identity
-msgpack==1.1.0
+msgpack==1.2.3
     # via
+    #   -r requirements/test/cuda.in
     #   librosa
     #   ray
 msgspec==0.21.1
@@ -733,8 +750,10 @@ opentelemetry-semantic-conventions-ai==0.4.13
     #   -r requirements/test/../common.txt
 optuna==3.6.1
     # via genai-perf
-orjson==3.11.5
-    # via genai-perf
+orjson==3.12.0
+    # via
+    #   -r requirements/test/cuda.in
+    #   genai-perf
 oss-harmony==0.0.11
     # via
     #   -c requirements/common.txt
@@ -765,6 +784,7 @@ packaging==24.2
     #   statsmodels
     #   transformers
     #   typepy
+    #   virtualenv
 pandas==2.2.3
     # via
     #   datasets
@@ -775,13 +795,13 @@ pandas==2.2.3
     #   statsmodels
 partial-json-parser==0.2.1.1.post7
     # via -r requirements/test/../common.txt
-pathspec==0.12.1
+pathspec==1.1.1
     # via black
 pathvalidate==3.2.1
     # via pytablewriter
 patsy==1.0.1
     # via statsmodels
-peft==0.19.1
+peft==0.21.1
     # via -r requirements/test/cuda.in
 perceptron==0.1.4
     # via -r requirements/test/cuda.in
@@ -862,12 +882,14 @@ py-cpuinfo==9.0.0
     # via -r requirements/test/../common.txt
 py-spy==0.4.0
     # via ray
-pyarrow==23.0.0
+pyarrow==25.0.1
     # via
+    #   -r requirements/test/cuda.in
     #   datasets
     #   genai-perf
-pyasn1==0.6.1
+pyasn1==0.6.4
     # via
+    #   -r requirements/test/cuda.in
     #   pyasn1-modules
     #   rsa
 pyasn1-modules==0.4.2
@@ -915,13 +937,17 @@ pydantic-extra-types==2.10.5
     #   fastapi
     #   mistral-common
 pydantic-settings==2.14.2
-    # via fastapi
-pygments==2.18.0
     # via
+    #   -r requirements/test/cuda.in
+    #   fastapi
+pygments==2.21.0
+    # via
+    #   -r requirements/test/cuda.in
     #   pytest
     #   rich
-pyjwt==2.11.0
+pyjwt==2.15.1
     # via
+    #   -r requirements/test/cuda.in
     #   mcp
     #   msal
 pyparsing==3.2.0
@@ -966,6 +992,8 @@ python-dateutil==2.9.0.post0
     #   matplotlib
     #   pandas
     #   typepy
+python-discovery==1.6.1
+    # via virtualenv
 python-dotenv==1.2.2
     # via
     #   pydantic-settings
@@ -974,10 +1002,13 @@ python-json-logger==4.1.0
     # via -r requirements/test/../common.txt
 python-multipart==0.0.32
     # via
+    #   -r requirements/test/cuda.in
     #   fastapi
     #   mcp
 python-rapidjson==1.20
     # via tritonclient
+pytokens==0.4.1
+    # via black
 pytrec-eval-terrier==0.5.7
     # via mteb
 pytz==2024.2
@@ -1028,7 +1059,7 @@ regex==2026.2.28
     #   sacrebleu
     #   tiktoken
     #   transformers
-requests==2.32.3
+requests==2.34.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1133,7 +1164,7 @@ sentry-sdk==2.63.0
     # via fastapi-cloud-cli
 setproctitle==1.3.7
     # via -r requirements/test/../common.txt
-setuptools==77.0.3
+setuptools==80.10.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1235,7 +1266,7 @@ timm==1.0.17
     #   -r requirements/test/cuda.in
     #   open-clip-torch
     #   segmentation-models-pytorch
-tokenizers==0.23.1
+tokenizers==0.23.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1304,7 +1335,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.17.0
+transformers==5.19.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1395,8 +1426,9 @@ typing-inspection==0.4.2
     #   pydantic-settings
 tzdata==2024.2
     # via pandas
-urllib3==2.2.3
+urllib3==2.8.0
     # via
+    #   -r requirements/test/cuda.in
     #   blobfile
     #   botocore
     #   docker
@@ -1416,8 +1448,10 @@ uvloop==0.22.1
     # via uvicorn
 vector-quantize-pytorch==1.21.2
     # via -r requirements/test/cuda.in
-virtualenv==20.31.2
-    # via ray
+virtualenv==21.14.0
+    # via
+    #   -r requirements/test/cuda.in
+    #   ray
 vocos==0.1.0
     # via -r requirements/test/cuda.in
 watchfiles==1.2.0
@@ -1428,8 +1462,10 @@ wcwidth==0.2.13
     # via ftfy
 websockets==16.0
     # via uvicorn
-werkzeug==3.1.3
-    # via schemathesis
+werkzeug==3.1.9
+    # via
+    #   -r requirements/test/cuda.in
+    #   schemathesis
 word2number==1.1
     # via lm-eval
 wrapt==1.17.2
