@@ -36,7 +36,7 @@ use self::convert::{ResponseMeta, build_response, build_usage, prepare_responses
 use self::streaming::{OutputItemStreamer, ResponseStreamEvent, response_lifecycle_event};
 use self::types::{ResponseError, ResponseItemStatus, ResponsesRequest, ResponsesResponse};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, chat_submit_error, server_error};
+use crate::error::{ApiError, chat_submit_error, server_error, text_submit_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
@@ -45,9 +45,17 @@ use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
 pub async fn create_responses(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ResponsesRequest>,
+    ValidatedJson(mut body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
-    let stream_requested = body.stream;
+    let stream_requested = body.stream.unwrap_or(false);
+    let sampling_hints = match state.chat.text().request_processor().sampling_hints() {
+        Ok(hints) => hints,
+        Err(error) => {
+            return text_submit_error("failed to resolve sampling defaults", error).into_response();
+        }
+    };
+    body.temperature = body.temperature.or(sampling_hints.default_temperature);
+    body.top_p = body.top_p.or(sampling_hints.default_top_p);
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state
         .resolve_model_with_loras(body.model.as_deref().filter(|model| !model.is_empty()))

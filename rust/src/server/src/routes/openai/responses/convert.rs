@@ -49,7 +49,7 @@ use crate::utils::{
 pub(crate) struct ResponseMeta {
     pub model: String,
     pub instructions: Option<String>,
-    pub metadata: Option<Value>,
+    pub metadata: Option<std::collections::HashMap<String, String>>,
     pub tools: Vec<Value>,
     pub tool_choice: Value,
     pub parallel_tool_calls: bool,
@@ -284,7 +284,7 @@ pub(crate) fn prepare_responses_request(
             stop_strings: stop.map(|stop| stop.into_vec()),
             min_tokens: min_tokens.unwrap_or(0),
         },
-        intermediate: stream,
+        intermediate: stream.unwrap_or(false),
         prompt_truncation,
         priority: ctx.priority.or(priority).unwrap_or(0),
         documents: None,
