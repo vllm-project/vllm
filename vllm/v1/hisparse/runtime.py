@@ -611,14 +611,6 @@ def build_hisparse_prefill_staging_plan(
 _RESIDENT_COPY_ROWS = 1 << 16
 
 
-def get_hisparse_prefill_staging_bytes(vllm_config: VllmConfig, row_bytes: int) -> int:
-    """Bytes to stage one max_model_len request's history, plus the plan's
-    block-0 padding."""
-    block_size = vllm_config.cache_config.block_size
-    max_model_len = vllm_config.model_config.max_model_len
-    return (cdiv(max_model_len, block_size) + 1) * block_size * row_bytes
-
-
 def _has_hisparse_ops() -> bool:
     if not hasattr(torch.ops, "_C_cache_ops"):
         return False
@@ -1353,8 +1345,11 @@ def create_hisparse_cache_handle(
     if is_index_group_leader and index_group is not None:
         index_group.hisparse_group = runtime.index_group
     if stages_prefill:
-        runtime.prefill_staging_bytes = get_hisparse_prefill_staging_bytes(
-            vllm_config, row_width * kv_dtype.itemsize
+        # One max_model_len request's history, plus the plan's block-0 padding.
+        block_size = vllm_config.cache_config.block_size
+        num_blocks = cdiv(vllm_config.model_config.max_model_len, block_size) + 1
+        runtime.prefill_staging_bytes = (
+            num_blocks * block_size * row_width * kv_dtype.itemsize
         )
         current_workspace_manager().get_simultaneous(runtime.prefill_staging_spec)
     logger.info_once(

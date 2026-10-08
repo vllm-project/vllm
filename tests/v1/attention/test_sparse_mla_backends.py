@@ -3133,7 +3133,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
     assert plan is metadata.prefill.host_staging_plans[0]
     prefill_blocks = cdiv(batch_spec.seq_lens[-1], block_size)
     assert staged.shape[0] <= prefill_blocks + 1  # +1: block-0 tail padding
-    # Staging reuses the buffer reserved before memory profiling.
     # Staging uses the shared workspace, after the impl's own buffers.
     *_, reserved = current_workspace_manager().get_simultaneous(
         *impl.workspace_specs, cache_handle.runtime.prefill_staging_spec
@@ -4091,7 +4090,6 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
         num_decodes=0,
         num_decode_tokens=0,
         seq_lens=torch.tensor([1], dtype=torch.int32),
-        prefill=SimpleNamespace(host_staging_plans=[plan]),
         req_id_per_token=torch.tensor([0], dtype=torch.int32),
     )
 
