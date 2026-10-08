@@ -58,6 +58,8 @@ ENV HSA_NO_SCRATCH_RECLAIM=1
 
 ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
+# Keep pip's download cache (several GB of SDK and torch wheels) out of the image.
+ENV PIP_NO_CACHE_DIR=1
 
 RUN mkdir -p /app
 WORKDIR /app
@@ -268,7 +270,10 @@ RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
-    && mkdir -p /app/install && cp dist/*.whl /app/install
+    && python3 -m wheel unpack dist/*.whl -d /tmp/triton-wheel \
+    && find /tmp/triton-wheel -name '*.so' -exec strip --strip-debug {} + \
+    && mkdir -p /app/install \
+    && python3 -m wheel pack /tmp/triton-wheel/* -d /app/install
 
 
 ###

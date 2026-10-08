@@ -204,6 +204,28 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
         assert expected in ci_bake
 
 
+def test_rocm_ci_base_content_hash_covers_nic_args() -> None:
+    """Changing the MoRI NIC packages must invalidate the cached ci_base."""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; discover_dockerfile_stage_args '
+            'docker/Dockerfile.rocm "$DEFAULT_CI_BASE_DOCKERFILE_STAGES"',
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    assert {"NIC_BACKEND", "AINIC_VERSION", "UBUNTU_CODENAME"} <= set(
+        result.stdout.split()
+    )
+
+
 def test_rocm_ci_smoke_runs_in_shared_buildkit_graph() -> None:
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
     ci_hcl = (REPO_ROOT / "docker" / "ci-rocm.hcl").read_text()
