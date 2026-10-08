@@ -280,9 +280,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # rotated q and k above, and this launch would apply cos=1, sin=0 on
         # top of that.
         fuse = (
-            self._fused_qk_prep
-            and self.rotary_emb is None
-            and q_dcp_replicated is None
+            self._fused_qk_prep and self.rotary_emb is None and q_dcp_replicated is None
         )
         if fuse:
             attn_metadata, layer, kv_cache, slot_mapping = get_attention_context(

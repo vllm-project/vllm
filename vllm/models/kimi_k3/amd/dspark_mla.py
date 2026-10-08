@@ -67,6 +67,10 @@ def _make_dspark_mla_attention(
     v_head_dim = config.v_head_dim
     q_lora_rank = config.q_lora_rank
     kv_lora_rank = config.kv_lora_rank
+    assert qk_nope_head_dim is not None
+    assert qk_rope_head_dim is not None
+    assert v_head_dim is not None
+    assert kv_lora_rank is not None
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     tp_size = get_tensor_model_parallel_world_size()
