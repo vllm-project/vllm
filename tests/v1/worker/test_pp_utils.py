@@ -2,11 +2,30 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Which rows the PP sampled-token broadcast must carry."""
 
-from unittest.mock import Mock
+from collections import deque
+from contextlib import nullcontext
+from unittest.mock import Mock, call
 
 import numpy as np
+import pytest
+import torch
 
-from vllm.v1.worker.gpu import pp_utils
+from vllm.v1.worker.gpu import model_runner, pp_utils, warmup
+from vllm.v1.worker.gpu.pp_utils import PPHandler
+
+
+def _cuda_handler(max_sample_len=6):
+    handler = object.__new__(PPHandler)
+    handler.is_last_rank = True
+    handler.max_sample_len = max_sample_len
+    handler.num_speculative_steps = max_sample_len - 1
+    handler.recv_launch_delay = 0
+    handler.last_rank = 1
+    handler.broadcast_group = Mock()
+    handler.device = torch.device("cuda")
+    handler.main_stream = torch.cuda.current_stream()
+    handler.broadcast_stream = torch.cuda.Stream()
+    return handler
 
 
 def _batch(
@@ -166,3 +185,272 @@ def test_finishing_prefill_row_does_not_drop_a_sibling_row():
 
     assert mask is not None
     assert mask.tolist() == [False, True]
+
+
+def test_deferred_receive_cadence_fifo_and_flush():
+    handler = PPHandler.__new__(PPHandler)
+    slots = [Mock(launched=False) for _ in range(3)]
+    handler.queue = deque([None, slots[0], slots[1], slots[2]])
+    handler.recv_launch_delay = 3
+    handler.pending_post_model_receive = None
+    handler.is_last_rank = False
+    handler._launch_receive = Mock(
+        side_effect=lambda slot: setattr(slot, "launched", True)
+    )
+
+    handler._advance_receive_queue()
+    handler._advance_receive_queue()  # Launches the older pending slot first.
+    handler.launch_post_model_receive()
+    handler.flush_pending_collectives()
+    handler.flush_pending_collectives()
+
+    assert handler._launch_receive.call_args_list == [
+        call(slots[0]),
+        call(slots[1]),
+        call(slots[2]),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "is_cuda", "expected_delay"),
+    [
+        ({}, True, 0),
+        ({"async_scheduling": False}, True, 0),
+        ({"async_scheduling": True}, True, 3),
+        ({"async_scheduling": True}, False, 0),
+    ],
+)
+def test_constructor_preserves_immediate_receives_for_legacy_callers(
+    monkeypatch, kwargs, is_cuda, expected_delay
+):
+    """Ascend's existing three-argument constructor must remain valid."""
+    group = Mock(is_last_rank=False, last_rank=3, world_size=4)
+    monkeypatch.setattr(pp_utils, "get_pp_group", lambda: group)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda _: Mock())
+    monkeypatch.setattr(torch.cuda, "Stream", lambda _: Mock())
+    monkeypatch.setattr(pp_utils.current_platform, "is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(pp_utils.current_platform, "is_xpu", lambda: False)
+
+    handler = PPHandler(8, 0, torch.device("cpu"), **kwargs)
+    handler.enable_deferred_collectives(
+        jit_warmup_complete=True, runtime_device_syncs=False
+    )
+
+    assert handler.recv_launch_delay == expected_delay
+
+
+@pytest.mark.parametrize(
+    (
+        "deferred_delay",
+        "jit_warmup_complete",
+        "runtime_device_syncs",
+        "expected_delay",
+    ),
+    [
+        (3, True, False, 3),
+        (3, False, False, 0),
+        (3, True, True, 0),
+        (0, True, False, 0),
+    ],
+)
+def test_deferred_receive_requires_sync_free_warmed_runtime(
+    deferred_delay, jit_warmup_complete, runtime_device_syncs, expected_delay
+):
+    handler = PPHandler.__new__(PPHandler)
+    handler.deferred_recv_launch_delay = deferred_delay
+    handler.recv_launch_delay = 0
+
+    handler.enable_deferred_collectives(
+        jit_warmup_complete=jit_warmup_complete,
+        runtime_device_syncs=runtime_device_syncs,
+    )
+
+    assert handler.recv_launch_delay == expected_delay
+
+
+def test_receive_launch_is_idempotent_when_cpu_event_is_none(monkeypatch):
+    handler = PPHandler.__new__(PPHandler)
+    handler.main_stream, handler.broadcast_stream = Mock(), Mock()
+    handler.broadcast_stream.record_event.return_value = None
+    handler.last_rank, handler.broadcast_group = 3, Mock()
+    tensors = [Mock(), Mock(), Mock()]
+    slot = Mock(
+        launched=False,
+        event=None,
+        sampled_tokens=tensors[0],
+        combined=tensors[1],
+        draft_tokens=tensors[2],
+    )
+    broadcast = Mock()
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+
+    handler._launch_receive(slot)
+    handler._launch_receive(slot)
+
+    assert slot.launched
+    handler.broadcast_stream.wait_stream.assert_called_once_with(handler.main_stream)
+    assert [item.args[0] for item in broadcast.call_args_list] == tensors
+
+
+def test_alloc_combined_keeps_unbind_views_16_byte_aligned():
+    for num_reqs in range(1, 9):
+        combined = pp_utils._alloc_combined(num_reqs, torch.device("cpu"))
+        num_sampled, num_rejected = combined[:, :num_reqs].unbind(dim=0)
+        assert num_sampled.data_ptr() % 16 == 0
+        assert num_rejected.data_ptr() % 16 == 0
+        assert num_sampled.shape == (num_reqs,)
+        assert num_rejected.shape == (num_reqs,)
+        assert combined.shape[1] >= num_reqs
+
+
+def test_receive_exposes_logical_views_of_padded_combined(monkeypatch):
+    handler = PPHandler.__new__(PPHandler)
+    handler.is_last_rank = False
+    handler.num_speculative_steps = 0
+    handler.max_sample_len = 1
+    handler.device = torch.device("cpu")
+    handler.broadcast_stream = Mock()
+    handler.recv_launch_delay = 1
+    handler.req_idx_gen_np = np.zeros(5, dtype=np.int32)
+    handler.queue = deque([None])
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+
+    batch = _batch(
+        num_computed=[1] * 5,
+        prefill_len=[1] * 5,
+        num_scheduled=[1] * 5,
+    )
+    batch.idx_mapping_np = np.arange(5, dtype=np.int64)
+    batch.idx_mapping = torch.arange(5)
+
+    assert handler.receive(batch)
+    slot = handler.queue[-1]
+    assert slot is not None
+    assert slot.combined.shape == (2, 8)
+    assert slot.num_sampled.shape == (5,)
+    assert slot.num_rejected.shape == (5,)
+
+    slot.combined[:, :5] = torch.arange(10, dtype=torch.int32).view(2, 5)
+    assert slot.num_sampled.tolist() == [0, 1, 2, 3, 4]
+    assert slot.num_rejected.tolist() == [5, 6, 7, 8, 9]
+
+
+def test_broadcast_drafts_snapshots_table_before_side_stream_can_stall(monkeypatch):
+    handler = PPHandler.__new__(PPHandler)
+    handler.is_last_rank = True
+    handler.last_rank = 3
+    handler.broadcast_group = Mock()
+    handler.main_stream = Mock()
+    handler.broadcast_stream = Mock()
+
+    draft_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int64)
+    batch = _batch(
+        num_computed=[1, 1],
+        prefill_len=[1, 1],
+        num_scheduled=[1, 1],
+    )
+    batch.idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
+
+    class _StalledSideStream:
+        def __enter__(self):
+            # Model a later main-stream step overwriting the persistent table
+            # before a backlogged broadcast stream can execute new work.
+            draft_table.fill_(99)
+
+        def __exit__(self, *args):
+            return False
+
+    sent = []
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: _StalledSideStream())
+    monkeypatch.setattr(
+        torch.distributed, "broadcast", lambda tensor, **_: sent.append(tensor.clone())
+    )
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda *_: None)
+
+    handler.broadcast_drafts(draft_table, batch)
+
+    assert sent[0].tolist() == [[20, 21], [10, 11]]
+
+
+def test_filtered_receive_mapping_keeps_serving_int32_specialization():
+    handler = PPHandler.__new__(PPHandler)
+    handler.queue = deque(
+        [
+            pp_utils.PendingRecv(
+                event=None,
+                sampled_tokens=torch.empty(2, 1, dtype=torch.int64),
+                combined=torch.empty(2, 2, dtype=torch.int32),
+                num_sampled=torch.tensor([2, 3], dtype=torch.int32),
+                num_rejected=torch.empty(2, dtype=torch.int32),
+                idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
+                idx_mapping_np=np.array([0, 1], dtype=np.intp),
+                need_sampled_mask=np.array([True, True]),
+                gen_at_receive_np=np.array([0, 0], dtype=np.int32),
+                launched=True,
+            )
+        ]
+    )
+    handler.recv_launch_delay = 0
+    handler.req_idx_gen_np = np.array([1, 0], dtype=np.int32)
+    handler.device = torch.device("cpu")
+
+    outputs = handler.get_prev_sampled_outputs()
+
+    assert outputs is not None
+    assert outputs["idx_mapping"].dtype == torch.int32
+    assert outputs["idx_mapping"].tolist() == [-1, 1]
+    assert outputs["num_sampled"].tolist() == [0, 3]
+
+
+def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
+    calls = []
+    monkeypatch.setattr(warmup, "post_update", lambda *args: calls.append(args))
+
+    runner = object.__new__(model_runner.GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.pp_handler = Mock(max_sample_len=3)
+    runner.req_states = Mock()
+    runner.model_state = Mock()
+
+    warmup._warmup_pp_decode_update(runner, num_reqs=2)
+
+    assert len(calls) == 1
+    args = calls[0]
+    idx_mapping, _, _, output_bin_counts = args[:4]
+    sampled_tokens, num_sampled, num_rejected, query_start_loc = args[4:8]
+    assert len(args) == 10
+    assert idx_mapping.tolist() == [-1, -1] and idx_mapping.dtype == torch.int32
+    assert output_bin_counts is None
+    assert query_start_loc is None
+    assert sampled_tokens.shape == (2, 3) and sampled_tokens.dtype == torch.int64
+    assert num_sampled.dtype == torch.int32
+    assert num_rejected.dtype == torch.int32
+    runner.model_state.warmup_postprocess_state.assert_called_once_with(
+        idx_mapping,
+        num_sampled,
+        runner.req_states.num_computed_tokens.gpu,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA stream")
+def test_broadcast_pads_plain_sampler_rows_to_max_sample_len(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        pp_utils.torch.distributed,
+        "broadcast",
+        lambda tensor, **kw: sent.append(tensor),
+    )
+    handler = _cuda_handler()
+    batch = _batch(num_computed=[10], prefill_len=[8], num_scheduled=[1])
+
+    handler.broadcast(
+        torch.zeros(1, 1, dtype=torch.int64, device="cuda"),
+        torch.ones(1, dtype=torch.int32, device="cuda"),
+        torch.zeros(1, dtype=torch.int32, device="cuda"),
+        batch,
+    )
+
+    assert sent[0].shape == (1, 6)
+    assert sent[1].shape == (2, 4)
+    torch.accelerator.synchronize()

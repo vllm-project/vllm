@@ -26,9 +26,38 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
+from vllm.v1.worker.gpu.input_batch import post_update
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
+
+
+def _warmup_pp_decode_update(model_runner: GPUModelRunner, num_reqs: int) -> None:
+    """Warm deferred PP post-update kernels without changing request state."""
+    assert model_runner.pp_handler is not None
+    idx_mapping = torch.full(
+        (num_reqs,), -1, dtype=torch.int32, device=model_runner.device
+    )
+    num_sampled = torch.zeros(num_reqs, dtype=torch.int32, device=model_runner.device)
+    post_update(
+        idx_mapping,
+        model_runner.req_states.num_computed_tokens.gpu,
+        model_runner.req_states.last_sampled_tokens,
+        None,
+        torch.zeros(
+            (num_reqs, model_runner.pp_handler.max_sample_len),
+            dtype=torch.int64,
+            device=model_runner.device,
+        ),
+        num_sampled,
+        torch.zeros_like(num_sampled),
+        None,
+        model_runner.req_states.all_token_ids.gpu,
+        model_runner.req_states.total_len.gpu,
+    )
+    model_runner.model_state.warmup_postprocess_state(
+        idx_mapping, num_sampled, model_runner.req_states.num_computed_tokens.gpu
+    )
 
 
 def _reserved_block_count(
@@ -458,6 +487,11 @@ def _warmup_kernels(
 
         for step_indices, step_spec_flags in decode_steps:
             _run_decode_step(step_indices, step_spec_flags)
+            # Non-last PP ranks consume each sampled result several scheduler
+            # steps later. Warm the post-update kernels against the metadata for
+            # every decode shape now, while receives still launch immediately.
+            if not model_runner.is_last_pp_rank and model_runner.pp_handler is not None:
+                _warmup_pp_decode_update(model_runner, len(step_indices))
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()

@@ -132,6 +132,10 @@ class WorkerBase:
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 
+    def flush_pending_collectives(self) -> None:
+        """Post deferred collectives before a cross-worker synchronization."""
+        return
+
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
