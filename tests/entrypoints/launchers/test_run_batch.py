@@ -12,7 +12,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pydantic
 import pytest
 
 import vllm.envs as envs
@@ -1164,12 +1163,25 @@ def test_validate_batch_counts_requests(tmp_path):
 def test_validate_batch_rejects_malformed_request(tmp_path):
     """A malformed request is rejected before any of the batch is run."""
     input_path = _write_batch(tmp_path, [INPUT_BATCH, INVALID_INPUT_BATCH])
+    bad_line = len(INPUT_BATCH.strip().split("\n")) + 1
 
     with (
         open(input_path, encoding="utf-8") as f,
-        pytest.raises(pydantic.ValidationError),
+        pytest.raises(ValueError, match=f"line {bad_line}:"),
     ):
         validate_batch(f)
+
+
+@pytest.mark.asyncio
+async def test_open_batch_input_keeps_a_carriage_return_inside_a_line(tmp_path):
+    """A bare carriage return is JSON whitespace, not a line break."""
+    request = INPUT_BATCH.strip().split("\n")[0].replace(", ", ",\r", 1)
+    assert "\r" in request
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_bytes((request + "\n").encode())
+
+    async with open_batch_input(str(input_path), None) as f:
+        assert validate_batch(f) == 1
 
 
 @pytest.mark.asyncio
@@ -1316,8 +1328,10 @@ def test_unwritable_output_file_is_rejected_before_engine_start(tmp_path):
             structured_outputs_config=SimpleNamespace(reasoning_parser=None),
         )
 
-    with pytest.raises(ValueError, match="not writable"):
+    with pytest.raises(ValueError, match="does not exist"):
         validate_run_batch_args(args(str(tmp_path / "missing" / "out.jsonl")))
+    with pytest.raises(ValueError, match="is a directory"):
+        validate_run_batch_args(args(str(tmp_path)))
 
     validate_run_batch_args(args(str(tmp_path / "out.jsonl")))
     validate_run_batch_args(args("https://example.com/out.jsonl"))

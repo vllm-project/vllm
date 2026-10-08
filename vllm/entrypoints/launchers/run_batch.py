@@ -361,7 +361,12 @@ def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
     if tmp_dir is None:
         return StringIO()
     return tempfile.NamedTemporaryFile(
-        mode="w+", encoding="utf-8", dir=tmp_dir, prefix=prefix, suffix=".jsonl"
+        mode="w+",
+        encoding="utf-8",
+        newline="\n",
+        dir=tmp_dir,
+        prefix=prefix,
+        suffix=".jsonl",
     )
 
 
@@ -384,10 +389,13 @@ async def open_batch_input(
             await global_http_connection.async_download_file(
                 path_or_url, download_path, chunk_size=_STAGING_CHUNK_SIZE
             )
-            yield stack.enter_context(download_path.open(encoding="utf-8"))
+            yield stack.enter_context(
+                download_path.open(encoding="utf-8", newline="\n")
+            )
             return
 
-        source = stack.enter_context(open(path_or_url, encoding="utf-8"))
+        # JSON allows a bare "\r" as whitespace, so split lines on "\n" only.
+        source = stack.enter_context(open(path_or_url, encoding="utf-8", newline="\n"))
         if source.seekable():
             yield source
             return
@@ -402,10 +410,14 @@ async def open_batch_input(
 def validate_batch(input_file: IO[str]) -> int:
     """Parse every request and return the count; requests are re-parsed when run."""
     num_requests = 0
-    for request_json in input_file:
-        if request_json.strip():
+    for line_number, request_json in enumerate(input_file, start=1):
+        if not request_json.strip():
+            continue
+        try:
             BatchRequestInput.model_validate_json(request_json)
-            num_requests += 1
+        except pydantic.ValidationError as e:
+            raise ValueError(f"Invalid request on line {line_number}: {e}") from e
+        num_requests += 1
     return num_requests
 
 
@@ -873,10 +885,14 @@ def validate_run_batch_args(args):
 
     output_file = args.output_file
     if not is_url(output_file):
-        if not os.path.exists(output_file):
-            output_file = os.path.dirname(os.path.abspath(output_file))
-        if not os.access(output_file, os.W_OK):
-            raise ValueError(f"--output-file {args.output_file} is not writable.")
+        parent = os.path.dirname(os.path.abspath(output_file))
+        if os.path.isdir(output_file):
+            raise ValueError(f"--output-file {output_file} is a directory.")
+        if not os.path.exists(output_file) and not os.path.isdir(parent):
+            raise ValueError(f"--output-file directory {parent} does not exist.")
+        target = output_file if os.path.exists(output_file) else parent
+        if not os.access(target, os.W_OK):
+            raise ValueError(f"--output-file {output_file} is not writable.")
 
     valid_reasoning_parsers = ReasoningParserManager.list_registered()
     if (
@@ -931,7 +947,7 @@ async def dispatch_batch(
     running = asyncio.Semaphore(max_inflight)
     unwritten = asyncio.Semaphore(window)
     inflight: set[asyncio.Task[None]] = set()
-    finished: dict[int, BatchRequestOutput] = {}
+    finished: dict[int, str] = {}
     next_index = 0
     failure: BaseException | None = None
     stopping = False
@@ -946,9 +962,9 @@ async def dispatch_batch(
             # Handlers answer a cancellation with an error response; drop it.
             if stopping:
                 return
-            finished[index] = response
+            finished[index] = response.model_dump_json()
             while next_index in finished:
-                print(finished.pop(next_index).model_dump_json(), file=output_file)
+                print(finished.pop(next_index), file=output_file)
                 next_index += 1
                 tracker.completed()
                 unwritten.release()
@@ -1012,7 +1028,11 @@ async def run_batch(
         * config.scheduler_config.max_num_seqs
         * config.parallel_config.data_parallel_size,
     )
-    # The final drain reacquires every slot, so hold no more than the batch needs.
+    if (queue_limit := config.scheduler_config.max_num_queued_reqs) is not None:
+        # Requests past the limit are rejected rather than queued.
+        max_inflight = min(max_inflight, max(queue_limit, 1))
+    # The final drain reacquires every window slot, and the window is at least
+    # max_inflight, so neither may exceed the batch.
     max_inflight = min(max_inflight, max(num_requests, 1))
     window = min(max_inflight * _REORDER_WINDOW_FACTOR, max(num_requests, 1))
     tracker = BatchProgressTracker()
@@ -1029,6 +1049,9 @@ async def run_batch(
                 max_inflight,
                 window,
             )
+        # A dead engine answers every request with an error; fail before upload.
+        if engine_client.errored:
+            raise engine_client.dead_error
 
 
 async def main(args: Namespace):
