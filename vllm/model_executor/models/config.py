@@ -682,7 +682,10 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        if cache_config.enable_prefix_caching:
+        if (
+            cache_config.enable_prefix_caching
+            or cache_config.mamba_cache_mode == "align"
+        ):
             if cache_config.mamba_cache_mode == "none":
                 cache_config.mamba_cache_mode = "align"
                 logger.info(
