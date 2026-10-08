@@ -137,6 +137,12 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._response_open_ids = tokenizer.encode(
             self._response_open, add_special_tokens=False
         )
+        self._generation_prefix_ids = (
+            tokenizer.encode(
+                '<|open|>message role="assistant"<|sep|>', add_special_tokens=False
+            )
+            + self._think_open_ids
+        )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
 
@@ -194,8 +200,21 @@ class KimiK3ReasoningParser(ReasoningParser):
             return False
         carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
         head = len(input_ids) - len(delta)
-        window = list(input_ids[max(0, head - carry) : head]) + delta
-        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
+        window_start = max(0, head - carry)
+        window = list(input_ids[window_start:head]) + delta
+        if _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0:
+            return True
+        # Later draft tokens must not hide the initial response transition.
+        for response_index in range(len(window) - len(self._response_open_ids) + 1):
+            if _match_at(window, response_index, self._response_open_ids):
+                response_start = window_start + response_index
+                # The frontend passes output only; the engine includes the prompt.
+                prefix_start = response_start - len(self._generation_prefix_ids)
+                return response_start == 0 or (
+                    prefix_start >= 0
+                    and _match_at(input_ids, prefix_start, self._generation_prefix_ids)
+                )
+        return False
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:
@@ -425,6 +444,24 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._last_streaming_content_token_ids = None
         if not self._thinking_enabled:
             return DeltaMessage(content=delta_text)
+
+        # Only actual control tokens at the start establish response-only output.
+        # Hold a split opener, but leave ordinary quoted marker text untouched.
+        response_prefix = list(current_token_ids[: len(self._response_open_ids)])
+        if (
+            response_prefix
+            and response_prefix == self._response_open_ids[: len(response_prefix)]
+        ):
+            if len(response_prefix) < len(self._response_open_ids):
+                return None
+            response_open = self._response_open_re.match(current_text)
+            if response_open is not None:
+                content = (
+                    delta_text
+                    if len(previous_token_ids) >= len(self._response_open_ids)
+                    else current_text
+                )
+                return DeltaMessage(content=content or None)
 
         # reasoning already ended -> downstream content
         if self._think_close_re.search(previous_text):
