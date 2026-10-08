@@ -389,6 +389,7 @@ def zmq_socket_ctx(
         )
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
+        raise
 
     finally:
         ctx.destroy(linger=linger)

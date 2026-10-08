@@ -17,6 +17,7 @@ from vllm.utils.network_utils import (
     make_zmq_socket,
     split_host_port,
     split_zmq_path,
+    zmq_socket_ctx,
 )
 
 
@@ -203,6 +204,14 @@ def test_make_zmq_socket_ipv6():
     # Clean up
     zsock.close()
     ctx.term()
+
+
+def test_zmq_socket_ctx_propagates_keyboard_interrupt():
+    with (
+        pytest.raises(KeyboardInterrupt, match="terminated"),
+        zmq_socket_ctx("inproc://test-interrupt", zmq.ROUTER, bind=True),
+    ):
+        raise KeyboardInterrupt("terminated")
 
 
 def test_make_zmq_path():
