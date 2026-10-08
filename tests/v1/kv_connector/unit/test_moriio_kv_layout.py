@@ -487,6 +487,7 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
     wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
     wrapper.lock = threading.Lock()
     wrapper._transfer_timeout = 1
+    wrapper.moriio_engine = object()
     global_status = FakeStatus()
     scoped_status = FakeStatus()
     wrapper.transfer_status = [global_status]

@@ -3,6 +3,7 @@
 import threading
 import time
 from collections import OrderedDict, defaultdict
+from math import ceil
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
@@ -58,6 +59,11 @@ try:
     logger.info("MoRIIO is available")
 except ImportError:
     logger.error("MoRIIO is not available")
+
+try:
+    from mori.io import StatusCode
+except ImportError:
+    StatusCode = None
 
 """Write task execution logic for MoRIIO connector."""
 
@@ -691,7 +697,28 @@ class MoRIIOWrapper:
         if not transfers_to_wait:
             return
 
-        self._poll_transfers_until_done(transfers_to_wait)
+        wait_all = getattr(self.moriio_engine, "wait_all", None)
+        if wait_all is None or StatusCode is None:
+            self._poll_transfers_until_done(transfers_to_wait)
+            return
+
+        # Zero means a nonblocking progress call in Mori, not an immediate
+        # deadline. Round up so even sub-millisecond waits remain blocking.
+        timeout_ms = ceil(self._transfer_timeout * 1000)
+        result = wait_all(transfers_to_wait, timeout_ms=timeout_ms)
+        if result != StatusCode.SUCCESS:
+            details = [
+                f"{status.Message()} (code={status.Code()})"
+                for status in transfers_to_wait
+                if status.Failed()
+            ]
+            if not details and result in (StatusCode.INIT, StatusCode.IN_PROGRESS):
+                details.append(
+                    f"RDMA transfer timed out after {self._transfer_timeout:g}s"
+                )
+            raise TransferError(
+                f"MoRIIO batch wait failed ({result}): " + "; ".join(details)
+            )
 
     def _poll_transfers_until_done(self, transfers_to_wait: list[Any]) -> None:
         """Fallback for mori builds without the batched wait.
