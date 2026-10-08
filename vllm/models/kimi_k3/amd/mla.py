@@ -103,6 +103,10 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     ) -> torch.Tensor:
         """Decode-only MLA through one fused AITER launch.
 
+        Inputs must not already be rotated. The one-row ``cos=1``, ``sin=0``
+        table is the NoPE contract. A model with a real embedding applies RoPE
+        in the DSpark epilogue instead of entering this path.
+
         Replaces the fp8 KV-cache write plus the ``[ql_nope | q_pe]`` concat and
         that query's static fp8 quant with a single
         ``fused_qk_rope_concat_and_cache_mla``. On an untouched upstream build
@@ -272,7 +276,14 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # The fused decode path covers only the MQA slice, so it is taken for
         # decode-only batches; anything else falls through to MLAAttention.
         attn_metadata = layer = kv_cache = slot_mapping = None
-        fuse = self._fused_qk_prep and q_dcp_replicated is None
+        # Identity-RoPE fusion is the NoPE path. A real embedding has already
+        # rotated q and k above, and this launch would apply cos=1, sin=0 on
+        # top of that.
+        fuse = (
+            self._fused_qk_prep
+            and self.rotary_emb is None
+            and q_dcp_replicated is None
+        )
         if fuse:
             attn_metadata, layer, kv_cache, slot_mapping = get_attention_context(
                 self.mla_attn.layer_name

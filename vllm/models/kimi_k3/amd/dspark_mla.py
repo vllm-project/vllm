@@ -32,6 +32,7 @@ from vllm.models.kimi_k3.common.dspark_mla import (
 from vllm.models.kimi_k3.common.dspark_mla import (
     K3DSparkModel as _K3DSparkModel,
 )
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from .linear import KimiMLP
 from .mla import KimiK3MultiHeadLatentAttentionWrapper
@@ -45,12 +46,20 @@ __all__ = [
 
 def _make_dspark_mla_attention(
     *,
-    config,
+    config: KimiLinearConfig,
     cache_config,
     quant_config,
     prefix: str,
 ) -> KimiK3MultiHeadLatentAttentionWrapper:
-    """Build DSpark MLA with RoPE and a non-causal decode KV-cache spec."""
+    """Build DSpark MLA with RoPE and a non-causal decode KV-cache spec.
+
+    The projection and YaRN-mscale setup below is duplicated from
+    ``MultiHeadLatentAttention.__init__`` in ``nvidia/mla.py``. Keep it
+    aligned with that constructor: rope-type remapping
+    (``attention_factor == 1.0`` becomes ``deepseek_llama_scaling``, otherwise
+    ``deepseek_yarn``), ``dtype=torch.float32``, ``is_neox_style=False``, and
+    ``disable_tp=True`` on the fused QKV down-proj.
+    """
     hidden_size = config.hidden_size
     num_heads = config.num_attention_heads
     qk_nope_head_dim = config.qk_nope_head_dim
@@ -179,7 +188,7 @@ class K3DSparkDecoderLayer(_K3DSparkDecoderLayer):
         self,
         *,
         vllm_config: VllmConfig,
-        config,
+        config: KimiLinearConfig,
         quant_config,
         prefix: str,
     ):
