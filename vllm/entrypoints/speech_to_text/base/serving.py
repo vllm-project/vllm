@@ -26,10 +26,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.entrypoints.whisper import (
-    generate_chunk_with_gzip_fallback,
-    stt_engine_fallback_enabled,
-)
+from vllm.entrypoints.whisper import generate_chunk_with_gzip_fallback
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
@@ -422,21 +419,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
-    def _whisper_vocab_size(self) -> int:
-        tok = getattr(self, "tokenizer", None)
-        return int(getattr(tok, "vocab_size", None) or 51865)
-
-    def _whisper_gzip_fallback_enabled(self, request, sampling_params) -> bool:
-        # SpeechToTextBaseServing is shared (Voxtral / Qwen ASR / …).
-        # HF generate_with_fallback is Whisper-only.
-        if "whisper" not in getattr(self.model_cls, "__name__", "").lower():
-            return False
-        return stt_engine_fallback_enabled(
-            stream=bool(getattr(request, "stream", False)),
-            is_beam=isinstance(sampling_params, BeamSearchParams),
-            temperature=getattr(request, "temperature", None),
-        )
-
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -551,6 +533,14 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             request_id if len(engine_inputs) == 1 else f"{request_id}-{idx}"
             for idx in range(len(engine_inputs))
         ]
+        req_t = getattr(request, "temperature", None)
+        use_gzip_fallback = (
+            "whisper" in getattr(self.model_cls, "__name__", "").lower()
+            and not bool(getattr(request, "stream", False))
+            and (req_t is None or float(req_t) == 0.0)
+        )
+        tok = getattr(self, "tokenizer", None)
+        whisper_vocab_size = int(getattr(tok, "vocab_size", None) or 51865)
         list_result_generator = []
         try:
             for request_id_item, engine_input in zip(engine_request_ids, engine_inputs):
@@ -575,14 +565,13 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                     )
-                elif self._whisper_gzip_fallback_enabled(request, sampling_params):
+                elif use_gzip_fallback:
                     generator = generate_chunk_with_gzip_fallback(
                         self.engine_client.generate,
                         engine_input,
                         sampling_params,
                         request_id_item,
-                        vocab_size=self._whisper_vocab_size(),
-                        enable_fallback=True,
+                        vocab_size=whisper_vocab_size,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                     )

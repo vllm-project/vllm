@@ -4,10 +4,7 @@
 
 import asyncio
 
-from vllm.entrypoints.whisper import (
-    generate_chunk_with_gzip_fallback,
-    stt_engine_fallback_enabled,
-)
+from vllm.entrypoints.whisper import generate_chunk_with_gzip_fallback
 
 
 class _SP:
@@ -55,7 +52,6 @@ def test_stt_fallback_retries_loop_then_keeps_clean():
                 _SP(),
                 "transcribe-1",
                 vocab_size=51865,
-                enable_fallback=True,
             )
         ]
 
@@ -65,46 +61,3 @@ def test_stt_fallback_retries_loop_then_keeps_clean():
     assert rids[1] == "transcribe-1-fb-1"
     assert len(outs) == 1
     assert outs[0].outputs[0].text == "ok"
-
-
-def test_stt_fallback_skipped_when_disabled():
-    looping = [7, 8, 9, 10] * 80
-    temps: list[float] = []
-
-    async def engine_generate(_prompt, sampling_params, request_id, **_kw):
-        temps.append(float(sampling_params.temperature))
-        yield _Out(looping, "loop", -4.0)
-
-    async def _run():
-        return [
-            out
-            async for out in generate_chunk_with_gzip_fallback(
-                engine_generate,
-                {"prompt": "chunk"},
-                _SP(temperature=0.4),
-                "transcribe-1",
-                vocab_size=51865,
-                enable_fallback=False,
-            )
-        ]
-
-    outs = asyncio.run(_run())
-    assert temps == [0.4]
-    assert outs[0].outputs[0].text == "loop"
-
-
-def test_stt_engine_fallback_enabled_gates():
-    assert stt_engine_fallback_enabled(stream=False, is_beam=False, temperature=0.0)
-    assert stt_engine_fallback_enabled(stream=False, is_beam=False, temperature=None)
-    assert (
-        stt_engine_fallback_enabled(stream=True, is_beam=False, temperature=0.0)
-        is False
-    )
-    assert (
-        stt_engine_fallback_enabled(stream=False, is_beam=True, temperature=0.0)
-        is False
-    )
-    assert (
-        stt_engine_fallback_enabled(stream=False, is_beam=False, temperature=0.2)
-        is False
-    )

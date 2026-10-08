@@ -32,9 +32,10 @@ immediate-EOT completions retry. HF keeps EOS so empty gzip is 0.0.
 
 from __future__ import annotations
 
+import copy
 import math
 import zlib
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 
 from vllm.sampling_params import SamplingParams
 
@@ -79,60 +80,24 @@ def needs_fallback(
     )
 
 
-def completion_avg_logprob(completion) -> float | None:
+def _avg_logprob(completion) -> float | None:
     ids = getattr(completion, "token_ids", None) or []
-    ntok = max(len(ids), 1)
     lp = getattr(completion, "cumulative_logprob", None)
     if lp is None:
         return None
-    return float(lp) / ntok
+    return float(lp) / max(len(ids), 1)
 
 
-def openai_stt_fallback_enabled(temperature: float | None) -> bool:
-    """OpenAI transcription: temperature 0 means gzip/logprob T ladder."""
-    return temperature is None or float(temperature) == 0.0
-
-
-def stt_engine_fallback_enabled(
-    *,
-    stream: bool,
-    is_beam: bool,
-    temperature: float | None,
-) -> bool:
-    """Serving gzip ladder: skip stream (tokens already sent) and beam."""
-    if stream or is_beam:
-        return False
-    return openai_stt_fallback_enabled(temperature)
-
-
-def sampling_params_at_temperature(
+def _sampling_params_at_temperature(
     sampling_params: SamplingParams, temperature: float
 ) -> SamplingParams:
-    """Clone SamplingParams and set T for one fallback attempt (HF copy)."""
-    clone = _clone_sampling_params(sampling_params)
+    clone_fn = getattr(sampling_params, "clone", None)
+    clone = clone_fn() if callable(clone_fn) else copy.copy(sampling_params)
     clone.temperature = float(temperature)
     if temperature > 0:
         top_p = float(getattr(clone, "top_p", 0) or 0)
         clone.top_p = top_p if top_p > 0 else 1.0
     return clone
-
-
-def _clone_sampling_params(sampling_params: SamplingParams) -> SamplingParams:
-    clone = getattr(sampling_params, "clone", None)
-    if callable(clone):
-        return clone()
-    import copy
-
-    return copy.copy(sampling_params)
-
-
-async def _collect_final_request_output(agen: AsyncIterator):
-    final = None
-    async for output in agen:
-        final = output
-        if getattr(output, "finished", True):
-            break
-    return final
 
 
 async def generate_chunk_with_gzip_fallback(
@@ -142,54 +107,33 @@ async def generate_chunk_with_gzip_fallback(
     request_id: str,
     *,
     vocab_size: int,
-    enable_fallback: bool,
     **generate_kwargs,
 ) -> AsyncGenerator:
-    """OpenAI/HF temperature ladder on one STT ``engine_client.generate``.
-
-    Same thresholds as ``WhisperGenerationMixin`` (gzip 1.35, logprob −1.0).
-    Leave ``enable_fallback`` false for streaming (tokens already sent) and
-    beam search (different generate path).
-    """
-    temperatures = (
-        TEMPERATURES if enable_fallback else (float(sampling_params.temperature),)
-    )
-    cr_th = COMPRESSION_RATIO_THRESHOLD if enable_fallback else None
-    lp_th = LOGPROB_THRESHOLD if enable_fallback else None
+    """OpenAI/HF temperature ladder on one STT ``engine_client.generate``."""
     last = None
-    for t_idx, temperature in enumerate(temperatures):
-        sp = sampling_params_at_temperature(sampling_params, temperature)
+    for t_idx, temperature in enumerate(TEMPERATURES):
+        sp = _sampling_params_at_temperature(sampling_params, temperature)
         rid = request_id if t_idx == 0 else f"{request_id}-fb-{t_idx}"
-        last = await _collect_final_request_output(
-            engine_generate(engine_input, sp, rid, **generate_kwargs)
-        )
+        final = None
+        async for output in engine_generate(engine_input, sp, rid, **generate_kwargs):
+            final = output
+            if getattr(output, "finished", True):
+                break
+        last = final
         if last is None or not getattr(last, "outputs", None):
             continue
-        last_attempt = t_idx == len(temperatures) - 1
         completion = last.outputs[0]
         retry = needs_fallback(
             list(completion.token_ids),
             vocab_size,
-            completion_avg_logprob(completion),
-            compression_ratio_threshold=cr_th,
-            logprob_threshold=lp_th,
+            _avg_logprob(completion),
+            compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
+            logprob_threshold=LOGPROB_THRESHOLD,
         )
-        if last_attempt or not retry:
+        if t_idx == len(TEMPERATURES) - 1 or not retry:
             break
     if last is not None:
         yield last
-
-
-def _normalize_temperatures(
-    temperature: float | Sequence[float] | None,
-    sampling_params: SamplingParams | None,
-) -> tuple[float, ...]:
-    if temperature is None:
-        t = getattr(sampling_params, "temperature", None)
-        return (0.0 if t is None else float(t),)
-    if isinstance(temperature, (int, float)):
-        return (float(temperature),)
-    return tuple(float(x) for x in temperature)
 
 
 class WhisperGenerationMixin:
@@ -219,9 +163,17 @@ class WhisperGenerationMixin:
             getter = getattr(self, "get_default_sampling_params", None)
             sampling_params = getter() if callable(getter) else SamplingParams()
 
+        temperatures: tuple[float, ...]
+        if temperature is None:
+            t = getattr(sampling_params, "temperature", None)
+            temperatures = (0.0 if t is None else float(t),)
+        elif isinstance(temperature, (int, float)):
+            temperatures = (float(temperature),)
+        else:
+            temperatures = tuple(float(x) for x in temperature)
+
         prompts_list = prompts if isinstance(prompts, (list, tuple)) else [prompts]
         super_generate = super().generate  # type: ignore[misc]
-        temperatures = _normalize_temperatures(temperature, sampling_params)
         get_tokenizer = getattr(self, "get_tokenizer", None)
         if not callable(get_tokenizer):
             raise AttributeError("WhisperGenerationMixin requires get_tokenizer()")
@@ -234,23 +186,20 @@ class WhisperGenerationMixin:
         cur_prompts = list(prompts_list)
 
         for t_idx, t in enumerate(temperatures):
-            sp = sampling_params_at_temperature(sampling_params, t)
-
+            sp = _sampling_params_at_temperature(sampling_params, t)
             outputs = super_generate(
                 cur_prompts, sampling_params=sp, use_tqdm=use_tqdm, **kwargs
             )
-
             still: list[int] = []
             still_prompts = []
             last = t_idx == len(temperatures) - 1
             for local_i, req_i in enumerate(pending):
                 out = outputs[local_i]
                 completion = out.outputs[0]
-                ids = list(completion.token_ids)
                 retry = needs_fallback(
-                    ids,
+                    list(completion.token_ids),
                     vocab_size,
-                    completion_avg_logprob(completion),
+                    _avg_logprob(completion),
                     compression_ratio_threshold=compression_ratio_threshold,
                     logprob_threshold=logprob_threshold,
                 )

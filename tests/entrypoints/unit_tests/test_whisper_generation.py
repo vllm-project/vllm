@@ -10,7 +10,6 @@ from vllm.entrypoints.whisper import (
     WhisperGenerationMixin,
     compression_ratio,
     needs_fallback,
-    openai_stt_fallback_enabled,
 )
 
 
@@ -154,11 +153,3 @@ def test_mixin_generate_wraps_super_generate():
     )
     assert calls == [0.0]
     assert outs[0].outputs[0].text == "ok"
-
-
-def test_openai_stt_fallback_enabled_only_at_temperature_zero():
-    assert openai_stt_fallback_enabled(None)
-    assert openai_stt_fallback_enabled(0)
-    assert openai_stt_fallback_enabled(0.0)
-    assert openai_stt_fallback_enabled(0.2) is False
-    assert openai_stt_fallback_enabled(1.0) is False
