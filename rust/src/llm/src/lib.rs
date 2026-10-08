@@ -91,7 +91,16 @@ impl Llm {
 
     /// Submit one tokenized generate request and return a per-request output
     /// stream.
-    pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
+    pub async fn generate(&self, mut req: GenerateRequest) -> Result<GenerateOutputStream> {
+        // Clamp the request's stream interval to the frontend-level one, like
+        // Python. Engine-core ignores it; the client batches deliveries by it.
+        let stream_interval = (req.sampling_params.stream_interval)
+            .map_or(self.stream_interval, |interval| {
+                interval.max(self.stream_interval)
+            });
+        req.sampling_params.stream_interval =
+            (stream_interval > NonZeroU32::MIN).then_some(stream_interval);
+
         let prepared = req.prepare(self.randomize_request_id)?;
         let prompt_token_ids = prepared.prompt_token_ids().into();
         let external_request_id = prepared
@@ -109,14 +118,7 @@ impl Llm {
             (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
         let prompt_len = prepared.prompt_token_ids().len() as u32;
 
-        // Clamp to the frontend-level stream interval, like Python.
-        let stream_interval = prepared.stream_interval.map_or(self.stream_interval, |interval| {
-            interval.max(self.stream_interval)
-        });
-        let stream = self
-            .client
-            .call_with_stream_interval(prepared.engine_request, stream_interval)
-            .await?;
+        let stream = self.client.call(prepared.engine_request).await?;
 
         let request_metrics = RequestMetricsTracker::new(
             self.client.model_name().to_string(),

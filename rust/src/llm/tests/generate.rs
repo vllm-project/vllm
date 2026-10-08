@@ -178,7 +178,6 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         reasoning_parser_kwargs: None,
         reasoning_ended: None,
         lora_request: None,
-        stream_interval: None,
     }
 }
 
@@ -376,10 +375,8 @@ async fn generate_merges_outputs_by_stream_interval() {
     let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc)
         .await
         .with_stream_interval(NonZeroU32::new(2).unwrap());
-    let request = GenerateRequest {
-        stream_interval: NonZeroU32::new(3),
-        ..sample_generate_request("req-stream-interval", 7)
-    };
+    let mut request = sample_generate_request("req-stream-interval", 7);
+    request.sampling_params.stream_interval = NonZeroU32::new(3);
     let outputs: Vec<_> = llm
         .generate(request)
         .await

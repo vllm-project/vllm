@@ -66,7 +66,6 @@ pub fn lower_text_request(
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
         trace_headers: None,
-        stream_interval: request.sampling_params.stream_interval,
     };
 
     Ok(PreparedTextRequest {
@@ -120,8 +119,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         vllm_xargs,
-        // Frontend-only: carried on `GenerateRequest` by `lower_text_request`.
-        stream_interval: _,
+        stream_interval,
     } = sampling_params;
 
     validate_logprobs(
@@ -202,6 +200,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
         routed_experts_prompt_start: 0,
+        stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
@@ -681,6 +680,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -734,6 +734,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -909,6 +910,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -980,6 +982,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1044,6 +1047,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1335,6 +1339,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1365,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_text_request_carries_stream_interval_outside_engine_sampling_params() {
+    fn lower_text_request_carries_stream_interval_in_sampling_params() {
         let mut request = sample_request();
         request.sampling_params.stream_interval = NonZeroU32::new(4);
 
@@ -1379,7 +1384,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            prepared.generate_request.stream_interval,
+            prepared.generate_request.sampling_params.stream_interval,
             NonZeroU32::new(4)
         );
     }

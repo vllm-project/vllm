@@ -14,7 +14,7 @@ use std::num::NonZeroU32;
 use std::task::{Context, Poll, ready};
 
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
@@ -105,6 +105,20 @@ impl OutputSender {
                 Delivery::Batch(outputs) => &outputs[0].request_id,
             };
             debug!(request_id, "request output stream receiver dropped");
+        }
+    }
+}
+
+impl Drop for OutputSender {
+    fn drop(&mut self) {
+        // Every path that ends a live request delivers held-back outputs first
+        // (terminal output, `flush`, or `send_error`). Outputs left here are lost.
+        if !self.buffered.is_empty() && !self.tx.is_closed() {
+            warn!(
+                request_id = self.buffered[0].request_id,
+                count = self.buffered.len(),
+                "dropping request output sender with held-back outputs"
+            );
         }
     }
 }

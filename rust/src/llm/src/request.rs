@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
-use std::num::NonZeroU32;
 
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
@@ -62,17 +61,11 @@ pub struct GenerateRequest {
     pub reasoning_ended: Option<bool>,
     /// Optional LoRA adapter request applied to this generation.
     pub lora_request: Option<LoraRequest>,
-    /// Number of newly generated tokens to batch into each streamed output.
-    /// Raised to the frontend-level interval set by
-    /// [`Llm::with_stream_interval`](crate::Llm::with_stream_interval); the
-    /// first and final outputs are always emitted immediately.
-    pub stream_interval: Option<NonZeroU32>,
 }
 
 #[derive(Debug)]
 pub(crate) struct PreparedGenerateRequest {
     pub engine_request: EngineCoreRequest,
-    pub stream_interval: Option<NonZeroU32>,
 }
 
 impl GenerateRequest {
@@ -98,7 +91,6 @@ impl GenerateRequest {
             reasoning_parser_kwargs,
             reasoning_ended,
             lora_request,
-            stream_interval,
         } = self;
 
         let external_request_id = request_id;
@@ -133,7 +125,6 @@ impl GenerateRequest {
                 reasoning_parser_kwargs,
                 abort_immediately: false,
             },
-            stream_interval,
         })
     }
 }
@@ -195,7 +186,6 @@ mod tests {
             }),
             reasoning_ended: None,
             lora_request: None,
-            stream_interval: None,
         }
     }
 
