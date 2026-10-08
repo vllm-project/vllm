@@ -1170,11 +1170,9 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The pass stalled this request: the encoder cache or
-                        # budget is exhausted, or the multi-module MTP prefill
-                        # lookahead reserve consumed it. Requeue it instead of
-                        # stopping here, where one stuck request would starve
-                        # every request queued behind it.
+                        # The request cannot be scheduled.
+                        if request.has_encoder_inputs:                                                                                                                                     
+                            self.encoder_cache_manager.free(request) 
                         skip_request(request_queue)
                         continue
 
