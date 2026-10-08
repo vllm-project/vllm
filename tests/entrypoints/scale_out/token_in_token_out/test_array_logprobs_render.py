@@ -5,6 +5,7 @@ kept as engine rows (ArrayLogprobs): byte-identical to the per-entry
 pydantic path, which every other case still uses."""
 
 import asyncio
+import json
 import threading
 from unittest.mock import MagicMock
 
@@ -176,6 +177,42 @@ def test_special_and_irregular_rows_match_the_per_entry_path(name, k, choices):
     serving = _build_serving_tokens(_mock_engine())
     legacy, fast = _outcome(serving, k, choices)
     assert fast == legacy
+
+
+@pytest.mark.parametrize(
+    "k,row,expected_top",
+    [
+        # Sampled id 7 (engine rank 4) also at slot 1: its entry takes
+        # slot 1's value and rank, and slot 1 is not listed again.
+        (3, [7, 7, 8, 9], [(7, -1.0, 1), (8, -2.0, 2), (9, -3.0, 3)]),
+        # Also at slot k (the last listed slot).
+        (3, [7, 8, 9, 7], [(7, -3.0, 3), (8, -1.0, 1), (9, -2.0, 2)]),
+        # Outside the top-k: listed first with the engine rank, slot k cut.
+        (3, [7, 8, 9, 10], [(7, -0.5, 4), (8, -1.0, 1), (9, -2.0, 2)]),
+        # k=1: one entry, the sampled one.
+        (1, [7, 8], [(7, -0.5, 4)]),
+        (1, [7, 7], [(7, -1.0, 1)]),
+        # k=0: still one top entry (max(k, 1)).
+        (0, [7], [(7, -0.5, 4)]),
+    ],
+)
+def test_sampled_entry_and_top_logprobs_follow_dict_semantics(k, row, expected_top):
+    """The per-entry path builds a dict from the row: the sampled entry is
+    the dict's first key with its last occurrence's value and rank, and
+    top_logprobs are the first max(k, 1) items. Both paths agree, including
+    rank, on these hand-checked rows."""
+    serving = _build_serving_tokens(_mock_engine())
+    ids = np.array([row], dtype=np.int32)
+    lps = np.array([[-0.5, -1.0, -2.0, -3.0][: len(row)]], dtype=np.float32)
+    ranks = np.array([4])
+    legacy, fast = _outcome(serving, k, [([row[0]], [(ids, lps, ranks)])])
+    assert fast == legacy
+    entry = json.loads(fast)["choices"][0]["logprobs"]["content"][0]
+    sampled = expected_top[0]
+    assert (entry["token_id"], entry["logprob"], entry["rank"]) == sampled
+    assert [
+        (e["token_id"], e["logprob"], e["rank"]) for e in entry["top_logprobs"]
+    ] == expected_top
 
 
 def test_aborted_choice_without_tokens():

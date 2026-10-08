@@ -189,6 +189,8 @@ def render_tokens_logprobs(
         ids = token_ids[start : start + _RENDER_BLOCK_ROWS]
         rows = len(ids)
         if num_slots > 2:
+            # Repeated top-k ids: logprob_token_ids may repeat an id, and a
+            # co-batched logprob_token_ids request pads other rows with id 0.
             top = np.sort(ids[:, 1:], axis=1)
             if (top[:, 1:] == top[:, :-1]).any():
                 return None
