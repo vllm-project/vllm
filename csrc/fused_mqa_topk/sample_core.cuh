@@ -30,7 +30,9 @@ static_assert(MQA_HANDOFF_INTERVAL == 32 || MQA_HANDOFF_INTERVAL == 64 ||
 #include <deep_gemm/ptx/utils.cuh>
 #include <deep_gemm/scheduler/sm100_mqa_logits.cuh>
 #include <deep_gemm/scheduler/sm100_paged_mqa_logits.cuh>
-#include "sm100_candidate_scan.cuh"
+#include <cuda_fp16.h>
+#include <cutlass/arch/barrier.h>
+#include <deep_gemm/common/math.cuh>
 
 // Shared SM100 MQA logits core plus contiguous-KV and paged entries
 // Both entries use the same q / sf_q / kv / sf_kv / weights TMA signature
