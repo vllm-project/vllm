@@ -3190,7 +3190,8 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
         [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]], dtype=torch.int32
     )
 
-    plan.ensure_gpu_sources(resident_table, resident_block_size)
+    state_indices = torch.arange(2, dtype=torch.int32)
+    plan.ensure_gpu_sources(resident_table, state_indices, resident_block_size)
 
     assert plan.gpu_row_ids is not None
     unique_hosts = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
@@ -3220,10 +3221,69 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
         check_dtype=False,
     )
 
-    plan.ensure_gpu_sources(torch.zeros_like(resident_table), resident_block_size)
+    plan.ensure_gpu_sources(
+        torch.zeros_like(resident_table), state_indices, resident_block_size
+    )
 
     assert plan.gpu_row_ids is not None
     assert (plan.gpu_row_ids == -1).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_hisparse_prefill_resident_sources_follow_each_resident_group():
+    """Layers of different resident groups share one batch staging plan.
+
+    Each group's layers must stage from that group's resident blocks. Keying
+    the plan's cached resident sources on a per-call batch gather let a later
+    group's gather reuse the freed address of an earlier one, so its layers
+    read the earlier group's block ids.
+    """
+    device = torch.device("cuda")
+    block_size = 4
+    plan = build_hisparse_prefill_staging_plan(
+        torch.tensor([[5, 2]], dtype=torch.int32, device=device),
+        torch.tensor([8], dtype=torch.int32, device=device),
+        block_size,
+        staging_block_capacity=2,
+    )
+    # The prefill runs in request state row 1; one table holds both groups.
+    # Batch gathers of a table this size reuse one freed allocation.
+    max_num_reqs, max_num_pages = 64, 64
+    state_rows = torch.zeros(
+        (max_num_reqs, 2, max_num_pages), dtype=torch.int32, device=device
+    )
+    state_rows[1, 0, :2] = torch.tensor([11, 12])
+    state_rows[1, 1, :2] = torch.tensor([21, 22])
+    request_state_indices = torch.full(
+        (max_num_reqs,), -1, dtype=torch.int32, device=device
+    )
+    request_state_indices[0] = 1
+    runtime = SimpleNamespace(request_state_indices=request_state_indices)
+    caches = []
+    for group in range(2):
+        cache = object.__new__(HiSparseCacheHandle)
+        cache.runtime = runtime
+        cache.view = SimpleNamespace(block_size=block_size)
+        cache.block_table = state_rows[:, group]
+        caches.append(cache)
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.caches = caches
+    metadata = SimpleNamespace(
+        num_decodes=0, prefill=SimpleNamespace(host_staging_plan=plan)
+    )
+    host_ids = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
+
+    for layer_index in (0, 1, 0, 1):
+        index_group._prefill_gather_plan(layer_index, metadata)
+        assert plan.gpu_row_ids is not None
+        gpu_blocks = plan.gpu_row_ids[0].view(-1, block_size)[:, 0] // block_size
+        staged = {
+            host_id: gpu_block
+            for host_id, gpu_block in zip(host_ids, gpu_blocks.tolist())
+            if host_id > 0
+        }
+        first_page, second_page = state_rows[1, layer_index, :2].tolist()
+        assert staged == {5: first_page, 2: second_page}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -3243,7 +3303,11 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         dtype=torch.int32,
         device=device,
     )
-    plan.ensure_gpu_sources(resident_table, resident_block_size)
+    plan.ensure_gpu_sources(
+        resident_table,
+        torch.arange(2, dtype=torch.int32, device=device),
+        resident_block_size,
+    )
 
     num_host_blocks, num_res_blocks = 10, 24
     host_cache = (
@@ -4033,10 +4097,10 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     cache = SimpleNamespace(
         runtime=SimpleNamespace(
             gather_prefill_cache=gather,
+            request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
         view=SimpleNamespace(cache=resident_cache, block_size=1),
         block_table=resident_block_table,
-        batch_block_table=lambda: resident_block_table,
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -4058,8 +4122,9 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     torch.testing.assert_close(request_ids, metadata.req_id_per_token)
     plan.ensure_gpu_sources.assert_called_once()
     args = plan.ensure_gpu_sources.call_args.args
-    torch.testing.assert_close(args[0], resident_block_table)
-    assert args[1] == 1
+    assert args[0] is resident_block_table
+    torch.testing.assert_close(args[1], cache.runtime.request_state_indices)
+    assert args[2] == 1
     assert calls == [(source, plan, resident_cache)]
 
 
@@ -4077,7 +4142,9 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     cache = SimpleNamespace(
         view=SimpleNamespace(cache=resident_cache, block_size=4),
         block_table=torch.tensor([[2, 3]], dtype=torch.int32),
-        batch_block_table=lambda: torch.tensor([[2, 3]], dtype=torch.int32),
+        runtime=SimpleNamespace(
+            request_state_indices=torch.tensor([0], dtype=torch.int32)
+        ),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -4124,8 +4191,9 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     assert args.kwargs["device_row_ids"] is plan.gpu_row_ids
     plan.ensure_gpu_sources.assert_called_once()
     ensure_args = plan.ensure_gpu_sources.call_args.args
-    torch.testing.assert_close(ensure_args[0], cache.block_table)
-    assert ensure_args[1] == 4
+    assert ensure_args[0] is cache.block_table
+    torch.testing.assert_close(ensure_args[1], cache.runtime.request_state_indices)
+    assert ensure_args[2] == 4
 
 
 def test_sparse_impl_observes_repointed_indexer_buffer():

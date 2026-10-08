@@ -501,16 +501,19 @@ class HiSparsePrefillStagingPlan:
 
     def ensure_gpu_sources(
         self,
-        resident_block_table: torch.Tensor,
+        resident_state_rows: torch.Tensor,
+        state_indices: torch.Tensor,
         resident_block_size: int,
     ) -> None:
         """Resolve which staged rows can be served from the resident cache.
 
-        Computed once per plan (the resident block table is shared by every
-        layer in the group); non-null resident pages become miss_mask=0 rows
-        gathered device-to-device by ``gather_prefill_cache``.
+        ``resident_state_rows`` is a resident group's persistent table by
+        request state row and ``state_indices`` holds each staged request's
+        state row. Computed once per plan and resident group (every layer in
+        the group shares the table); non-null resident pages become
+        miss_mask=0 rows gathered device-to-device by ``gather_prefill_cache``.
         """
-        source_key = (resident_block_table.data_ptr(), resident_block_size)
+        source_key = (resident_state_rows.data_ptr(), resident_block_size)
         if self.gpu_source_key == source_key:
             return
         block_size = self.block_size
@@ -521,8 +524,11 @@ class HiSparsePrefillStagingPlan:
         host_ids = self.row_ids[0].view(num_unique, block_size)[:, 0] // block_size
         new_bt = self.block_table.to(torch.int64)
         num_rows, num_cols = new_bt.shape
-        if num_rows == 0 or resident_block_table.shape[0] < num_rows:
+        if num_rows == 0 or state_indices.shape[0] < num_rows:
             return
+        resident_block_table = resident_state_rows.index_select(
+            0, state_indices[:num_rows].clamp(min=0)
+        )
         # One representative (row, col) per unique host block: any request
         # referencing the block holds an equivalent (refcounted) resident view.
         flat_pos = torch.arange(num_rows * num_cols, device=device)
