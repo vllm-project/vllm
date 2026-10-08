@@ -302,8 +302,13 @@ def combine_case(
     with_image: bool,
     replay_starts: list[int] | None = None,
     combine_fn=combine_topk_swa_indices,
+    in_range_topk: bool = False,
 ):
-    """Run combine_topk_swa_indices and return (indices, lens, expected)."""
+    """Run combine_topk_swa_indices and return (indices, lens, expected).
+
+    ``in_range_topk`` draws top-k indices below N, for combiners that drop
+    out-of-range ones.
+    """
     device = torch.device("cuda")
     num_reqs = len(seq_lens)
     replay_starts = replay_starts or [0] * num_reqs
@@ -326,7 +331,11 @@ def combine_case(
     M = N + int(gather_lens.max()) + 8
     gen = torch.Generator(device="cpu").manual_seed(0)
     topk_indices = torch.randint(
-        0, 4096, (num_tokens, max(topk, 1)), generator=gen, dtype=torch.int32
+        0,
+        N if in_range_topk else 4096,
+        (num_tokens, max(topk, 1)),
+        generator=gen,
+        dtype=torch.int32,
     ).to(device)
     topk_indices = topk_indices[:, : max(topk, 1)]
 
@@ -415,24 +424,26 @@ def test_combine_topk_swa_with_image_spans(cfg):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
-def test_v41_combine_topk_swa_stops_at_replay_start(cfg):
+@pytest.mark.parametrize("query_len", [24, 20])
+def test_v41_combine_topk_swa_stops_at_replay_start(cfg, query_len):
     """SWA bounded replay: the gathered buffer starts at replay_start, so the
     window never indexes below it."""
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         combine_topk_swa_indices as combine_v41,
     )
 
-    # Request 0 replays [16, 40): the windows of its first rows would
-    # otherwise reach below 16.
+    # Request 0 replays from 16: a 24-token chunk starts there, a 20-token
+    # chunk leaves only 4 context tokens above it (fewer than the window).
     indices, lens, rows, exp_lens = combine_case(
         cfg["compress_ratio"],
         cfg["topk"],
         seq_lens=[40, 12],
-        query_lens=[24, 12],
+        query_lens=[query_len, 12],
         spans=[[], []],
         with_image=False,
         replay_starts=[16, 0],
         combine_fn=combine_v41,
+        in_range_topk=True,
     )
     assert lens.cpu().tolist() == exp_lens
     assert indices.cpu().tolist() == rows
