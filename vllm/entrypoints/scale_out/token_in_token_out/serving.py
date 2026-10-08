@@ -60,6 +60,7 @@ from .logprobs_render import (
     append_sampled_logprobs,
     render_json_with_fragments,
     render_tokens_logprobs,
+    render_top_k_logprobs,
 )
 from .mm_features import (
     mm_kwargs_from_features,
@@ -577,7 +578,11 @@ class ServingTokens(GenerateBaseServing):
             ):
                 assert out_logprobs is not None, "Did not output logprobs"
                 top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
-                if isinstance(out_logprobs, FlatLogprobs) and not text_mode:
+                if request.return_top_k_logprobs:
+                    rendered = render_top_k_logprobs(
+                        out_logprobs, len(token_ids), sampling_params.logprobs, sampled
+                    )
+                elif isinstance(out_logprobs, FlatLogprobs) and not text_mode:
                     rendered = render_tokens_logprobs(
                         token_ids, out_logprobs, sampling_params.logprobs
                     )
