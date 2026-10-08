@@ -35,7 +35,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - csrc/moe/
+      - csrc/libtorch_stable/moe/
       - csrc/rocm/
       - tests/kernels/moe/
       - vllm/model_executor/layers/fused_moe/
