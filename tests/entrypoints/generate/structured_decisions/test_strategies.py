@@ -10,6 +10,7 @@ from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
 )
 from vllm.entrypoints.generate.structured_decisions.question_types import LABELS
+from vllm.entrypoints.generate.structured_decisions.serving import state_text
 from vllm.entrypoints.generate.structured_decisions.strategies import (
     NextTokenStrategy,
     reply_label_ids,
@@ -38,6 +39,11 @@ def test_route_needs_the_flag():
         register_structured_decisions_api_router(app)
         paths = {getattr(route, "path", None) for route in app.routes}
         assert ("/v1/systemone" in paths) == enabled
+
+
+def test_structured_state_keeps_unicode_in_prompt():
+    state = {"message": "Français 日本語"}
+    assert state_text(state) == '{"message": "Français 日本語"}'
 
 
 @pytest.fixture(scope="module")
