@@ -41,6 +41,10 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.prefill_checkpoint import (
+    GDN_SPLIT_CHECKPOINT_ALIGNMENT,
+    chunk_gated_delta_rule_with_checkpoints,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
@@ -670,13 +674,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._prefill_kernels_warmed_up = False
         self.vllm_config = vllm_config
         # FlashInfer's prefill emits mid-prefill states, so an align-mode
-        # checkpoint needs no split prefill.
+        # checkpoint needs no split prefill. The Triton/FLA and AITER FlyDSL
+        # kernels return only final states, so _forward_core cuts each
+        # checkpointed row at its checkpoint instead.
         self._checkpoint_alignment: int | None = None
-        if (
-            vllm_config.cache_config.mamba_cache_mode == "align"
-            and self.gdn_prefill_backend == "flashinfer"
-        ):
-            self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+        if vllm_config.cache_config.mamba_cache_mode == "align":
+            if self.gdn_prefill_backend == "flashinfer":
+                self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+            elif (
+                self.gdn_prefill_backend in ("triton", "aiter_flydsl")
+                and current_platform.is_cuda_alike()
+                and self.speculative_config is None
+            ):
+                self._checkpoint_alignment = GDN_SPLIT_CHECKPOINT_ALIGNMENT
+        if self._checkpoint_alignment is not None:
             self._max_num_batched_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
@@ -740,6 +751,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return (
             self._checkpoint_alignment is not None
             and get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
+            and (
+                self.gdn_prefill_backend == "flashinfer"
+                # Split rows are validated only with checkpoints on block
+                # boundaries.
+                or self.cache_config.prefix_match_unit
+                in (None, self.cache_config.block_size)
+            )
         )
 
     @functools.cached_property
@@ -1316,7 +1334,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self._prefill_kernels_warmed_up:
             return
         self._prefill_kernels_warmed_up = True
-        if self._exports_checkpoints:
+        if self._exports_checkpoints and self.gdn_prefill_backend == "flashinfer":
             # Size the workspace while profiling; it is locked afterwards.
             current_workspace_manager().get_simultaneous(self._checkpoint_buffer_spec)
 
@@ -1798,7 +1816,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
             plan = attn_metadata.flashinfer_checkpoint_plan
-            if plan is None:
+            checkpoint_split = attn_metadata.checkpoint_split
+            if plan is None and checkpoint_split is None:
+                assert attn_metadata.checkpoint is None, (
+                    "A prefill checkpoint was scheduled but nothing exports it"
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -1816,7 +1838,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=False,
                     aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
                 )
-            else:
+            elif plan is not None:
                 # Only FlashInfer's prefill emits checkpoints.
                 (state_checkpoints,) = current_workspace_manager().get_simultaneous(
                     self._checkpoint_buffer_spec
@@ -1849,6 +1871,36 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     recurrent_state=ssm_state,
                     cu_seqlens=non_spec_query_start_loc,
                     recurrent_rows=plan.rows,
+                )
+            else:
+                assert checkpoint_split is not None
+                assert attn_metadata.checkpoint is not None
+                assert conv_input_non_spec is not None
+                assert non_spec_query_start_loc is not None
+                assert g_non_spec is not None and beta_non_spec is not None
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                    checkpoint_state,
+                ) = chunk_gated_delta_rule_with_checkpoints(
+                    self.chunk_gated_delta_rule,
+                    checkpoint_split,
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                    initial_state,
+                    use_qk_l2norm_in_kernel=False,
+                )
+                self._checkpoint_exporter.export(
+                    attn_metadata.checkpoint,
+                    raw_qkv=conv_input_non_spec,
+                    conv_state=conv_state,
+                    recurrent_checkpoint=checkpoint_state,
+                    recurrent_state=ssm_state,
+                    cu_seqlens=non_spec_query_start_loc,
+                    recurrent_rows=checkpoint_split.rows,
                 )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
