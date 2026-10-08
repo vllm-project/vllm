@@ -270,6 +270,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_COHERE_API: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
+    VLLM_ROCM_MONO_K3: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
@@ -1937,6 +1938,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
         int(os.getenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0"))
     ),
+    # Kimi-K3 decode on MI355X as two persistent FlyDSL launches a layer
+    # (vllm/models/kimi_k3/amd/mono). Default off
+    "VLLM_ROCM_MONO_K3": lambda: bool(int(os.getenv("VLLM_ROCM_MONO_K3", "0"))),
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
