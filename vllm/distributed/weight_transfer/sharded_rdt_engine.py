@@ -467,15 +467,38 @@ class ShardedRDTWeightTransferEngine(
         # check here too and not only where the actor options are set.
         check_ray_rdt_version(init_info.staging_device)
         pool_config = self._configure_ring(init_info)
-        self._num_consumers_override = init_info.num_consumers
-        self._resolve_producers(init_info)
 
-        # A pure dry run: the trainer's gather cache is empty at init, so nothing
-        # can (or does) get pulled -- we only record how each slice is fetched and
-        # where it lands, then restore the model.
-        self._bake(init_info)
-        plan = self._build_static_plan(init_info)
-        self._size_pool(pool_config, plan)
+        # Re-init prepares routing and baked state before the candidate plan
+        # reveals its effective lane count. If the active receive pool rejects
+        # that plan's geometry, restore the previous complete init state rather
+        # than pairing its cached plan with the candidate router and bake.
+        old_num_consumers_override = self._num_consumers_override
+        old_router = self._router
+        old_name_to_plan = self._name_to_plan
+        old_name_to_plan_contents = dict(old_name_to_plan)
+        old_name_meta = self._name_meta
+        old_live_names = self._live_names
+        old_cached_plan = self._cached_plan
+        try:
+            self._num_consumers_override = init_info.num_consumers
+            self._resolve_producers(init_info)
+
+            # A pure dry run: the trainer's gather cache is empty at init, so
+            # nothing can (or does) get pulled -- we only record how each slice
+            # is fetched and where it lands, then restore the model.
+            self._bake(init_info)
+            plan = self._build_static_plan(init_info)
+            self._size_pool(pool_config, plan)
+        except Exception:
+            old_name_to_plan.clear()
+            old_name_to_plan.update(old_name_to_plan_contents)
+            self._num_consumers_override = old_num_consumers_override
+            self._router = old_router
+            self._name_to_plan = old_name_to_plan
+            self._name_meta = old_name_meta
+            self._live_names = old_live_names
+            self._cached_plan = old_cached_plan
+            raise
         self._cached_plan = plan
         # Register ALL NIXL memory now, while the fabric is idle: dma-buf GPUDirect
         # registration concurrent with in-flight RDMA intermittently fails

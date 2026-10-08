@@ -373,6 +373,11 @@ class RdtRouter:
         """Signal the group done at every producer holding any of its names,
         tagged with the sync it belongs to (``None``: untagged)."""
         self._bound()
+        if sync_idx is None:
+            return [
+                self._actors[p].free_group.remote(group_idx)
+                for p in self.group_owners(group_idx)
+            ]
         return [
             self._actors[p].free_group.remote(group_idx, sync_idx)
             for p in self.group_owners(group_idx)

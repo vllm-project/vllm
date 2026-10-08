@@ -271,6 +271,109 @@ class TestPoolReinitialization:
             engine._num_slots,
         ) == values
 
+    def test_rejected_reinit_restores_the_complete_previous_init(self, monkeypatch):
+        engine = _engine(stages_in_flight=2, ring_depth=2, streams=2)
+        self._activate(engine)
+        engine.parallel_config = SimpleNamespace(enable_eplb=False)
+        engine._slot_cv = object()
+        engine._num_consumers_override = 3
+        engine._name_to_plan = {"old": [object()]}
+        engine._name_meta = {"old": ("bfloat16", [4])}
+        engine._live_names = {"old"}
+
+        old_references = (
+            engine._router,
+            engine._name_to_plan,
+            engine._name_meta,
+            engine._live_names,
+            engine._cached_plan,
+            engine._dest_buffers,
+            engine._slot_read_done,
+            engine._slot_queued,
+            engine._slot_done,
+            engine._slot_cv,
+            engine._lane_cursors,
+            engine._targets_cache,
+        )
+        old_baked_values = (
+            dict(engine._name_to_plan),
+            dict(engine._name_meta),
+            set(engine._live_names),
+        )
+        old_pool_values = (
+            engine._pool_geometry,
+            engine._staging_device,
+            engine._stages_in_flight,
+            engine._ring_depth,
+            engine._lanes,
+            engine._buffer_presize,
+        )
+
+        candidate_router = object()
+
+        def resolve_producers(_info):
+            engine._router = candidate_router
+
+        def bake(_info):
+            engine._name_to_plan["candidate"] = [object()]
+            engine._name_meta = {"candidate": ("float32", [8])}
+            engine._live_names = {"candidate"}
+
+        monkeypatch.setattr(engine_module, "check_ray_rdt_version", lambda _mode: None)
+        monkeypatch.setattr(engine, "_resolve_producers", resolve_producers)
+        monkeypatch.setattr(engine, "_bake", bake)
+        monkeypatch.setattr(
+            engine, "_build_static_plan", lambda _info: _plan(streams=1)
+        )
+        monkeypatch.setattr(
+            engine,
+            "_preregister_at_init",
+            lambda: pytest.fail("rejected re-init preregistered buffers"),
+        )
+
+        info = ShardedRDTWeightTransferInitInfo(
+            stages_in_flight=1,
+            num_rdt_buffers=4,
+            num_consumers=9,
+        )
+        with pytest.raises(RuntimeError, match=r"old=.*L=2, K=2.*new=.*L=1, K=4"):
+            engine.init_transfer_engine(info)
+
+        assert all(
+            actual is expected
+            for actual, expected in zip(
+                (
+                    engine._router,
+                    engine._name_to_plan,
+                    engine._name_meta,
+                    engine._live_names,
+                    engine._cached_plan,
+                    engine._dest_buffers,
+                    engine._slot_read_done,
+                    engine._slot_queued,
+                    engine._slot_done,
+                    engine._slot_cv,
+                    engine._lane_cursors,
+                    engine._targets_cache,
+                ),
+                old_references,
+            )
+        )
+        assert (
+            engine._name_to_plan,
+            engine._name_meta,
+            engine._live_names,
+        ) == old_baked_values
+        assert (
+            engine._pool_geometry,
+            engine._staging_device,
+            engine._stages_in_flight,
+            engine._ring_depth,
+            engine._lanes,
+            engine._buffer_presize,
+        ) == old_pool_values
+        assert engine._num_consumers_override == 3
+
     def test_exact_geometry_reuses_every_pool_reference(self):
         engine = _engine(stages_in_flight=2, ring_depth=2, streams=2)
         self._activate(engine)
