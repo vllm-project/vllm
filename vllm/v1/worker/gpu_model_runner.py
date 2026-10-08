@@ -5534,9 +5534,11 @@ class GPUModelRunner(
                 )
 
             if weights_path is not None:
-                # The revision belongs to the model we are reloading away from,
-                # so it must not be carried over to the new path.
+                # The revision and any object-storage `model_weights` source
+                # belong to the model we are reloading away from, so they must
+                # not be carried over to the new path.
                 self.model_config.model = weights_path
+                self.model_config.model_weights = ""
                 self.model_config.revision = None
             weights_iterator = model_loader.get_all_weights(self.model_config, model)
             weights_iterator = cast(
