@@ -3,7 +3,7 @@
 import dataclasses
 from concurrent.futures import Future
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -19,6 +19,11 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputSchedulerConnector,
+    AuxRequestOutput,
+)
+from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -30,15 +35,25 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.diffusion_scheduler import (
+    DiffusionAsyncScheduler,
+    DiffusionScheduler,
+    diffusion_canvas_width,
+)
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
+from vllm.v1.engine.core import EngineCore
+from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -46,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -131,8 +147,45 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
+@pytest.mark.parametrize("max_tokens", [1, 2])
+def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
+    """A prompt-end offset should return empty routing data, not crash."""
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
+    request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector()
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.aux_output_connector_metadata.requests == {
+        request.request_id: request.num_prompt_tokens
+    }
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            aux_output_connector_output={
+                request.request_id: AuxRequestOutput(
+                    request.num_prompt_tokens,
+                    np.empty((0, 1, 1), dtype=np.uint8),
+                )
+            },
+        ),
+    )
+
+    output = outputs[request.client_index].outputs[0]
+    assert output.new_token_ids == [0]
+    assert output.routed_experts.shape == (0, 1, 1)
+
+
 def test_finish_request():
     scheduler = create_scheduler()
+    scheduler.aux_output_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -141,6 +194,7 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+        scheduler.aux_output_connector.request_finished.assert_called_with(request)
 
 
 def test_get_num_unfinished_requests():
@@ -152,6 +206,22 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+def test_max_num_active_seqs_caps_admission():
+    """Admission is capped by max_num_active_seqs, not max_num_seqs."""
+    scheduler = create_scheduler(max_num_seqs=16, max_num_active_seqs=3)
+    requests = create_requests(num_requests=10)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 3
+    assert len(scheduler.running) == 3
+    assert len(scheduler.waiting) == 7
+    # Execution capacity is untouched.
+    assert scheduler.max_num_running_reqs == 16
 
 
 def _bind_hisparse_connector(scheduler):
@@ -210,6 +280,24 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
         assert scheduler.running[i] == request
 
 
+def test_pooling_chunked_prefill_can_finish_at_max_model_len():
+    scheduler = create_scheduler(
+        max_num_seqs=1, max_model_len=8, max_num_batched_tokens=4, runner="pooling"
+    )
+    assert scheduler.max_model_len == 8
+    request = Request(
+        request_id="pool",
+        prompt_token_ids=[1] * 8,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    scheduler.add_request(request)
+
+    scheduler.schedule()
+    # The final chunk must reach max_model_len, not stop one token short.
+    assert scheduler.schedule().num_scheduled_tokens == {"pool": 4}
+
+
 def test_scheduler_stats_route_to_existing_output_client():
     scheduler = create_scheduler()
     request = create_requests(num_requests=1)[0]
@@ -256,7 +344,7 @@ def test_schedule_multimodal_requests():
 
 
 def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
-    """Async scheduling + PP: allow multi-step in-flight scheduling per request"""
+    """Async scheduling + PP: allow multi-step in-flight scheduling per request."""
     scheduler = create_scheduler(async_scheduling=True, pipeline_parallel_size=2)
     (req,) = create_requests(num_requests=1, num_tokens=8)
     scheduler.add_request(req)
@@ -368,6 +456,52 @@ def test_schedule_partial_requests():
     assert output.num_scheduled_tokens[requests[0].request_id] == 1
     assert output.num_scheduled_tokens[requests[1].request_id] == 700
     assert requests[2].request_id not in output.num_scheduled_tokens
+
+
+def test_encoder_only_prompt_longer_than_budget_is_chunked():
+    """The engine switches chunked prefill off for an encoder-only instance,
+    but the token budget must still split its prompt across steps instead of
+    leaving the request waiting forever."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=4096,
+        mm_encoder_only=True,
+    )
+    # EngineCore turns this off after config validation whenever the instance
+    # holds no KV cache, which is every encoder-only instance.
+    scheduler.scheduler_config.enable_chunked_prefill = False
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=2500,
+        mm_positions=[[PlaceholderRange(offset=100, length=600)]],
+    )
+    scheduler.add_request(request)
+
+    def advance(output):
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens[request.request_id] == 1024
+    assert request.request_id in first.scheduled_encoder_inputs
+    advance(first)
+
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens[request.request_id] == 1024
+    advance(second)
+
+    third = scheduler.schedule()
+    assert third.num_scheduled_tokens[request.request_id] == 452
 
 
 @pytest.mark.parametrize("has_running", [True, False])
@@ -574,6 +708,33 @@ def test_throttle_capacity_bound_guard_admits():
     assert "b" in output.num_scheduled_tokens
 
 
+def test_same_step_duplicate_encoder_input_stays_cached():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+    )
+    request = create_requests(
+        1,
+        num_tokens=2000,
+        req_ids=["repeated"],
+        mm_hashes_list=[["image", "image", "image"]],
+        mm_positions=[
+            [PlaceholderRange(offset=offset, length=576) for offset in (0, 600, 1300)]
+        ],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs == {request.request_id: [0]}
+    _model_output(scheduler, output, [[]])
+
+    # The second occurrence is partially consumed; the third is not scheduled.
+    cache = scheduler.encoder_cache_manager
+    assert cache.get_cached_input_ids(request) == {1}
+    assert "image" not in cache.freeable
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(
@@ -700,6 +861,56 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output2.num_scheduled_tokens[requests[2].request_id] == 800 - 224 - 224
 
 
+def test_long_prefill_threshold_ignored_when_alone():
+    """A lone long prefill is not capped by the threshold: it has no other
+    request to starve."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+    )
+    request = create_requests(num_requests=1, num_tokens=2000)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 1024
+
+
+def test_long_prefill_threshold_applies_with_other_requests():
+    """The threshold caps the prefill as soon as another request is queued."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+    )
+    long_req = create_requests(num_requests=1, num_tokens=2000)[0]
+    short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
+    for request in [long_req, short_req]:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_req.request_id] == 400
+    assert output.num_scheduled_tokens[short_req.request_id] == 10
+
+
+def test_long_prefill_threshold_floored_by_fair_share():
+    """With the adaptive flag, the effective threshold never falls below the
+    fair share of the token budget: max_num_batched_tokens / num queued +
+    running requests."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=100,
+        long_prefill_token_threshold_adaptive=True,
+    )
+    long_req = create_requests(num_requests=1, num_tokens=2000)[0]
+    short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
+    for request in [long_req, short_req]:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # 100 is below the fair share (1024 // 2 = 512), so the floor binds.
+    assert output.num_scheduled_tokens[long_req.request_id] == 512
+    assert output.num_scheduled_tokens[short_req.request_id] == 10
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()
@@ -745,8 +956,51 @@ def test_update_from_output_routes_sampling_masks_by_request():
     assert all(out.new_sampling_mask.offsets is None for out in outputs)
 
 
+def test_update_from_output_routes_multi_position_sampling_masks():
+    scheduler = create_scheduler()
+    scheduler.return_sampling_mask = True
+    requests = create_requests(num_requests=2, max_tokens=10)
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1 for req in requests},
+        total_num_scheduled_tokens=2,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[1, 2], [3, 4, 5]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        sampling_masks=SamplingMaskLists(
+            token_ids=np.array([1, 6, 2, 3, 7, 8, 4, 5, 9], dtype=np.int32),
+            offsets=np.array([0, 2, 3, 6, 7, 9]),
+            cu_num_generated_tokens=[0, 2, 5],
+        ),
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
+
+    assert [out.new_sampling_mask.to_nested_list() for out in outputs] == [
+        [[1, 6], [2]],
+        [[3, 7, 8], [4], [5, 9]],
+    ]
+
+
 def test_stop_via_update_from_output():
-    """Test stopping behavior through update_from_output"""
+    """Test stopping behavior through update_from_output."""
     scheduler = create_scheduler(num_speculative_tokens=1)
 
     # Test case 1: Stop on EOS token
@@ -1314,6 +1568,31 @@ def test_preemption_re_records_prefix_cache_query():
     assert stats.preempted_requests == 1
 
 
+def test_preemption_processes_stale_aux_output():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.running.remove(request)
+    scheduler.aux_output_connector = Mock()
+    scheduler._preempt_request(request, 0.0)
+    scheduler.aux_output_connector.request_finished.assert_called_once_with(request)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.aux_output_connector.take_output.assert_called_once_with(request, None)
+
+
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():
     """With prefix caching off there is no local lookup, so admitting a request
     records no phantom miss."""
@@ -1402,6 +1681,7 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -1418,10 +1698,14 @@ def test_scheduler_reset_prefix_cache():
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
     assert not scheduler.reset_prefix_cache()
+    scheduler.aux_output_connector.reset.assert_not_called()
 
-    # Reset prefix cache with reset_running_requests=True. All running requests
-    # Should be pushed back to the waiting queue and kv cache should be freed
+    # Pause completes pending model outputs before the caller resets the scheduler.
+    for request in requests:
+        request.num_in_flight_tokens = 0
+
     assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.aux_output_connector.reset.assert_called_once_with()
 
     # Verify requests moved from running to waiting
     assert len(scheduler.waiting) == len(requests)
@@ -1429,6 +1713,89 @@ def test_scheduler_reset_prefix_cache():
 
     for i, request in enumerate(requests):
         assert scheduler.waiting[i] == request
+
+
+@pytest.mark.parametrize("reset_successful", [False, True])
+def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = Mock()
+    scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=reset_successful)
+
+    assert scheduler.reset_prefix_cache() is reset_successful
+    assert scheduler.aux_output_connector.reset.call_count == int(reset_successful)
+
+
+def test_kv_cache_release_after_keep_pause_preserves_requests():
+    """A completed keep pause permits release and recomputation of live requests."""
+    scheduler = create_scheduler(max_num_seqs=1, enable_prefix_caching=True)
+    running, waiting = create_requests(num_requests=2)
+    for request in (running, waiting):
+        scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[running.request_id],
+            req_id_to_index={running.request_id: 0},
+            sampled_token_ids=[[1]],
+        ),
+    )
+    assert scheduler.kv_cache_manager.get_block_ids(running.request_id)[0]
+
+    core = object.__new__(EngineCore)
+    core.scheduler = scheduler
+    core.model_executor = Mock(is_sleeping=False)
+    core.mm_receiver_cache = None
+    core.batch_queue = None
+
+    assert core.pause_scheduler(mode="keep", clear_cache=False) is None
+    assert scheduler.running == [running]
+    assert list(scheduler.waiting) == [waiting]
+    assert not scheduler.has_requests()
+
+    core.release_kv_cache_memory()
+
+    core.model_executor.discard.assert_called_once_with(("kv_cache",))
+    assert scheduler.requests == {
+        request.request_id: request for request in (running, waiting)
+    }
+    assert not scheduler.running
+    assert list(scheduler.waiting) == [running, waiting]
+    assert running.status == RequestStatus.PREEMPTED
+    assert running.num_computed_tokens == 0
+    assert list(running.output_token_ids) == [1]
+    assert not scheduler.kv_cache_manager.get_block_ids(running.request_id)[0]
+    assert scheduler.schedule().total_num_scheduled_tokens == 0
+
+    assert core.wake_up(tags=["kv_cache"])
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {running.request_id: running.num_tokens}
+
+
+@pytest.mark.parametrize(
+    "sleeping_tags",
+    [{"weights", "kv_cache"}, {"weights"}, {"kv_cache"}],
+    ids=["full-sleep", "weights-only", "kv-only-or-repeated-release"],
+)
+def test_kv_cache_release_rejects_nonresident_memory(sleeping_tags):
+    """Reject release without resetting caches or discarding more memory."""
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    core.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    core.batch_queue = None
+    core._reset_caches = Mock()
+    core.model_executor = object.__new__(UniProcExecutor)
+    core.model_executor.sleeping_tags = sleeping_tags.copy()
+    core.model_executor.collective_rpc = Mock()
+
+    with pytest.raises(
+        RuntimeError, match="requires all executor memory to be resident"
+    ):
+        core.release_kv_cache_memory()
+
+    core._reset_caches.assert_not_called()
+    core.model_executor.collective_rpc.assert_not_called()
+    assert core.model_executor.sleeping_tags == sleeping_tags
 
 
 def test_reset_connector_cache_no_connector_is_no_op_success():
@@ -2038,7 +2405,8 @@ def test_spec_decode_padding_skipped_with_prefill_in_batch():
 
 
 def test_scheduler_stats_waiting_queues():
-    """Test that scheduler stats correctly report waiting and skipped_waiting queues."""
+    """Test that scheduler stats correctly report capacity-bound and blocked
+    waiting requests."""
     # Create scheduler with limited capacity so we can have waiting requests
     scheduler = create_scheduler(max_num_batched_tokens=100)
 
@@ -2051,18 +2419,18 @@ def test_scheduler_stats_waiting_queues():
     for request in all_requests[:3]:
         scheduler.add_request(request)
 
-    # Manually add 2 more to skipped_waiting to simulate constraint-blocked
+    # Add 2 more that are blocked on grammar compilation
     for request in all_requests[3:]:
-        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-        scheduler.skipped_waiting.add_request(request)
+        request.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+        scheduler.add_request(request)
 
     # Schedule - this will schedule 2 requests, leaving 1 in waiting
     output = scheduler.schedule()
 
     # Verify: 2 scheduled, 1 still waiting on capacity, 2 blocked by constraints
     assert len(output.scheduled_new_reqs) == 2
-    assert len(scheduler.waiting) == 1
-    assert len(scheduler.skipped_waiting) == 2
+    assert len(scheduler.waiting) == 3
+    assert len(scheduler.deferred_waiting) == 2
 
     # Call update_from_output() to get frontend-facing stat
     scheduled_req_ids = list(output.num_scheduled_tokens.keys())
@@ -2091,7 +2459,6 @@ def _assert_right_scheduler_output(
     expected_num_scheduled_tokens: int,
 ):
     """Check if SchedulerOutput is correct after remote KV cache hit."""
-
     # We should inject the kv_connector_metadata.
     assert len(output.kv_connector_metadata.requests) == num_requests
 
@@ -2109,7 +2476,6 @@ def _assert_right_kv_cache_manager(
     num_total_blocks: int,
 ):
     """Check whether KVCacheManager is correct after allocate."""
-
     # Make sure the request stats are right.
     EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req in requests:
@@ -2140,7 +2506,6 @@ def _step_until_done(
     model_runner_output: ModelRunnerOutput,
 ):
     """Loop over schedule(), update_from_output() until finished."""
-
     all_finished = False
     _ = scheduler.update_from_output(output, model_runner_output)
     while not all_finished:
@@ -2163,12 +2528,11 @@ def _step_until_done(
 
 
 def _num_waiting_requests(scheduler: Scheduler) -> int:
-    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
+    return len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
 
 
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     """Cycle requests through a KV transfer cycle."""
-
     # Requests should first transition to WAITING_FOR_REMOTE_KVS
     output = scheduler.schedule()
     assert _num_waiting_requests(scheduler) == len(req_ids)
@@ -2207,6 +2571,96 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
         assert req_id in scheduler.finished_recving_kv_req_ids
 
     return initial_ecos
+
+
+def _runner_output(
+    req_ids: list[str], finished_recving: set[str] | None = None
+) -> ModelRunnerOutput:
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[1] for _ in req_ids],
+        kv_connector_output=KVConnectorOutput(finished_recving=finished_recving),
+    )
+
+
+@pytest.mark.parametrize(
+    "load_done_before_pause", [False, True], ids=["load-in-flight", "load-done"]
+)
+def test_pause_new_drains_async_kv_loads(load_done_before_pause: bool):
+    """A PAUSED_NEW (pause mode="wait") drain must finish requests that hold KV
+    blocks for an async load, keep blockless queued requests queued, and leave
+    no blocks behind, so the post-drain cache reset succeeds."""
+    block_size = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=2 * block_size, is_async=True),
+        block_size=block_size,
+    )
+    loading, queued = create_requests(
+        num_requests=2,
+        num_tokens=3 * block_size,
+        max_tokens=2,
+        block_size=block_size,
+        req_ids=["loading", "queued"],
+    )
+    scheduler.add_request(loading)
+    output = scheduler.schedule()
+    assert loading.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    pending_recv = {"loading"}
+    if load_done_before_pause:
+        scheduler.update_from_output(output, _runner_output([], pending_recv))
+        pending_recv = None
+    else:
+        scheduler.update_from_output(output, _runner_output([]))
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    scheduler.add_request(queued)
+
+    num_steps = 0
+    while scheduler.has_requests():
+        num_steps += 1
+        assert num_steps <= 4, "pause drain did not finish"
+        output = scheduler.schedule()
+        assert set(output.num_scheduled_tokens) <= {"loading"}
+        scheduler.update_from_output(
+            output, _runner_output(list(output.num_scheduled_tokens), pending_recv)
+        )
+        pending_recv = None
+
+    # What pause runs once drained; it raises if the load still holds blocks.
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert loading.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert loading.request_id not in scheduler.requests
+    assert list(scheduler.waiting) == [queued]
+    assert queued.status == RequestStatus.WAITING
+
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    scheduler.schedule()
+    assert queued.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_pause_new_ignores_streaming_session_waiting_for_input():
+    """A session idle in WAITING_FOR_STREAMING_REQ cannot progress, so it must
+    not keep a PAUSED_NEW drain from completing."""
+    stop_token = 7
+    scheduler = create_scheduler()
+    (session,) = create_requests(
+        num_requests=1, num_tokens=4, stop_token_ids=[stop_token], req_ids=["s"]
+    )
+    session.resumable = True
+    scheduler.add_request(session)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["s"], req_id_to_index={"s": 0}, sampled_token_ids=[[stop_token]]
+        ),
+    )
+    assert session in scheduler.kv_holding_waiting
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    assert scheduler.get_num_unfinished_requests() == 0
 
 
 @pytest.mark.parametrize(
@@ -2250,13 +2704,89 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
+def test_kv_connector_honors_skip_reading_prefix_cache():
+    """A request that must score every prompt row takes no external hit."""
+    BLOCK_SIZE = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=False),
+        block_size=BLOCK_SIZE,
+    )
+    plain, scoring = create_requests(num_requests=2, num_tokens=BLOCK_SIZE * 4)
+    scoring.sampling_params.prompt_logprobs = 1
+    scoring.skip_reading_prefix_cache = True
+    scheduler.add_request(plain)
+    scheduler.add_request(scoring)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
+    assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
+    block_size = 16
+    num_matched_tokens = 2 * block_size
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(
+            matched_tokens=num_matched_tokens,
+            is_async=is_async,
+        ),
+        block_size=block_size,
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=2 * num_matched_tokens,
+        block_size=block_size,
+    )[0]
+    assert scheduler.connector is not None
+    get_sources = Mock(
+        return_value={CacheHitSource.P2P: block_size, CacheHitSource.HOST: block_size}
+    )
+    update_state = Mock(wraps=scheduler.connector.update_state_after_alloc)
+    calls = Mock()
+    calls.attach_mock(update_state, "allocated")
+    calls.attach_mock(get_sources, "sources")
+    monkeypatch.setattr(scheduler.connector, "update_state_after_alloc", update_state)
+    monkeypatch.setattr(
+        scheduler.connector, "get_external_cache_hit_sources", get_sources
+    )
+
+    scheduler.add_request(request)
+    # A failed allocation is not an admission: nothing is attributed.
+    with patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None):
+        scheduler.schedule()
+    get_sources.assert_not_called()
+    update_state.assert_not_called()
+
+    scheduler.schedule()
+    # Attribution runs once, after the connector has built its load plan.
+    get_sources.assert_called_once_with(request, num_matched_tokens)
+    assert [c[0] for c in calls.mock_calls] == ["allocated", "sources"]
+    connector_stats = scheduler.connector_prefix_cache_stats
+    assert connector_stats is not None
+    assert connector_stats.hits == num_matched_tokens
+    assert connector_stats.hits_by_source == {
+        CacheHitSource.P2P: block_size,
+        CacheHitSource.HOST: block_size,
+    }
+
+    if is_async:
+        # Re-admission after the async load completes is not a new hit.
+        scheduler.make_stats()
+        _step_until_kv_transfer_finished(scheduler, [request.request_id])
+        get_sources.assert_called_once()
+        connector_stats = scheduler.connector_prefix_cache_stats
+        assert connector_stats is not None
+        assert connector_stats.hits_by_source == {}
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
-    """
-    Test whether Scheduler with KVConnector schedules tokens, allocates
+    """Test whether Scheduler with KVConnector schedules tokens, allocates
     memory, and cleans up requests as expected under normal operation.
     """
-
     # Setup Scheduler.
     BLOCK_SIZE = 16
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
@@ -2381,11 +2911,9 @@ def test_kv_connector_basic(is_async: bool):
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize("local_cache_hits", [False, True])
 def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
-    """
-    Verify connector prefix cache metrics are updated
+    """Verify connector prefix cache metrics are updated
     correctly when the scheduler processes requests with KV connector hits.
     """
-
     BLOCK_SIZE = 16
     if local_cache_hits:
         NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2  # 32 tokens
@@ -2501,11 +3029,9 @@ def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
 )
 def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
-    """
-    Test whether scheduler with KVConnector is able to handle
+    """Test whether scheduler with KVConnector is able to handle
     unable to allocate (run out of blocks in allocate_slots().
     """
-
     # Setup Scheduler With Mock External Cache Hit.
     BLOCK_SIZE = 4
     NUM_BLOCKS = 10
@@ -2588,11 +3114,9 @@ def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
 def test_kv_connector_handles_preemption(
     is_async, use_ec_connector, ec_role, use_v2_model_runner
 ):
-    """
-    Test whether scheduler with KVConnector is able to handle
+    """Test whether scheduler with KVConnector is able to handle
     unable to allocate (run out of blocks in allocate_slots().
     """
-
     # Setup Scheduler With Mock External Cache Hit.
     BLOCK_SIZE = 2
     # NOTE: there is 1 null block, so this is 6 blocks.
@@ -2702,7 +3226,7 @@ def test_kv_connector_handles_preemption(
     if is_async:
         waiting_req_ids = [
             req.request_id
-            for req in scheduler.skipped_waiting
+            for req in scheduler.kv_holding_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         ]
         assert len(waiting_req_ids) == 1
@@ -2803,7 +3327,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
 
 def test_memory_leak():
     """Test that we do not have a memory leak."""
-
     scheduler = create_scheduler(enable_prefix_caching=True)
 
     NUM_REQUESTS = 5
@@ -2860,6 +3383,7 @@ def create_scheduler_with_priority(
 
     Returns:
       {class}`Scheduler` instance with priority scheduling
+
     """
     model_config = ModelConfig(
         model=model,
@@ -3565,8 +4089,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 0
     assert len(scheduler.running) == 0
-    assert len(scheduler.waiting) == 0
-    assert len(scheduler.skipped_waiting) == 1
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.deferred_waiting) == 1
 
 
 @pytest.mark.parametrize("async_grammar", [True, False])
@@ -3635,7 +4159,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
 
@@ -3643,10 +4166,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
-    scheduler.structured_output_manager.should_advance.return_value = True
-    scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
-        lambda request, new_token_ids: new_token_ids
-    )
+    scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
@@ -3656,10 +4176,10 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
+    scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = set()
+    scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
-    scheduler.vllm_config.model_config.enable_return_routed_experts = False
-    scheduler.enable_return_routed_experts = False
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
@@ -3695,8 +4215,8 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
-    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
-        request.request_id, [123]
+    scheduler.structured_output_manager.accept_tokens.assert_called_once_with(
+        request, [123]
     )
     assert request.resumable is False
     assert request.status == RequestStatus.FINISHED_ERROR
@@ -3952,7 +4472,7 @@ def _assert_right_ec_connector_metadata(
     output: SchedulerOutput,
     mm_features_list: list[MultiModalFeatureSpec],
 ):
-    """Verify that ECConnector metadata EXACTLY matches the input MM data"""
+    """Verify that ECConnector metadata EXACTLY matches the input MM data."""
     # Get the connector metadata
     metadata = output.ec_connector_metadata
 
@@ -3983,7 +4503,6 @@ def _assert_right_encoder_inputs(
     """Verify that requests/mm_hashes should (not) in scheduled encoder input
     If check_exist is False, this function returns True
     if requests are NOT in encoder inputs"""
-
     # Get the scheduled encoder inputs
     # NOTE: scheduled_encoder_inputs is a dictionary with request id as key
     scheduled_encoder_inputs = output.scheduled_encoder_inputs
@@ -4492,11 +5011,9 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_ec_connector_unable_to_allocate(use_kv_connector):
-    """
-    Test whether scheduler with ECConnector is able to handle
+    """Test whether scheduler with ECConnector is able to handle
     unable to allocate (run out of blocks).
     """
-
     # Setup Scheduler With Mock External Cache Hit.
     BLOCK_SIZE = 4
     NUM_BLOCKS = 10
@@ -4825,8 +5342,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connector):
-    """
-    Scenario:
+    """Scenario:
       - Encoder cache size: 32
       - Request A: 1 feature (12 tokens) → NOT cached remotely.
       - Request B: 3 features (3 x 10 tokens) → ALL cached remotely.
@@ -4993,7 +5509,7 @@ def test_prepend_skipped_requests_order():
         req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler.waiting.remove_requests(expected_waiting_reqs[:2])
     for req in expected_waiting_reqs[:2]:
-        scheduler.skipped_waiting.add_request(req)
+        scheduler.kv_holding_waiting.add_request(req)
 
     # schedule step
     # expect the first 2 waiting to be skipped, the third running,
@@ -5003,21 +5519,18 @@ def test_prepend_skipped_requests_order():
     # pop the third request which is expected to be running
     expected_waiting_reqs.pop(2)
 
-    # verify waiting order is preserved
-    waiting_reqs = list(scheduler.skipped_waiting) + list(scheduler.waiting)
+    # verify waiting order is preserved, with the KV-holding requests first
+    waiting_reqs = list(scheduler.kv_holding_waiting) + list(scheduler.waiting)
     assert waiting_reqs == expected_waiting_reqs
 
 
-def test_remote_kv_promotion_keeps_fcfs_with_grammar_prefix():
+def test_remote_kv_promotion_drains_before_grammar_prefix():
     scheduler = create_scheduler(max_num_seqs=1)
     scheduler.connector = Mock()
     scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
 
     requests = create_requests(num_requests=4)
-    for request in requests:
-        scheduler.add_request(request)
-
-    req_grammar_1, req_grammar_2, req_remote, req_tail = list(scheduler.waiting)
+    req_grammar_1, req_grammar_2, req_remote, req_tail = requests
 
     # simulate two structured-output grammar requests at the waiting head
     # that become ready now.
@@ -5026,31 +5539,28 @@ def test_remote_kv_promotion_keeps_fcfs_with_grammar_prefix():
     req_grammar_2.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
     req_grammar_2.structured_output_request = Mock(grammar=object())
 
-    # simulate a remote-KV request that is ready to be promoted now.
+    # simulate a remote-KV request that is ready to be promoted now. Parked
+    # loads hold KV blocks, so they drain ahead of the grammar requests.
     req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler.waiting.remove_requests([req_grammar_1, req_grammar_2, req_remote])
-    scheduler.skipped_waiting.add_request(req_grammar_1)
-    scheduler.skipped_waiting.add_request(req_grammar_2)
-    scheduler.skipped_waiting.add_request(req_remote)
+    for request in requests:
+        scheduler.add_request(request)
+    assert list(scheduler.kv_holding_waiting) == [req_remote]
     scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
     scheduler._update_waiting_for_remote_kv = Mock()
 
     output = scheduler.schedule()
 
     assert output.scheduled_new_reqs
-    assert output.scheduled_new_reqs[0].req_id == req_grammar_1.request_id
-    waiting_req_ids = [
-        req.request_id
-        for req in list(scheduler.skipped_waiting) + list(scheduler.waiting)
-    ]
+    assert output.scheduled_new_reqs[0].req_id == req_remote.request_id
+    waiting_req_ids = [req.request_id for req in scheduler.waiting]
     assert waiting_req_ids == [
+        req_grammar_1.request_id,
         req_grammar_2.request_id,
-        req_remote.request_id,
         req_tail.request_id,
     ]
 
 
-def test_fcfs_mixed_skipped_waiting_types_keep_order():
+def test_fcfs_mixed_blocked_types_remote_load_drains_first():
     scheduler = create_scheduler(max_num_batched_tokens=20)
     scheduler._update_waiting_for_remote_kv = Mock()
 
@@ -5071,7 +5581,8 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
     for req in (req_grammar, req_remote, req_stream, req_regular, req_tail):
         scheduler.add_request(req)
     scheduler.schedule()
-    assert list(scheduler.skipped_waiting) == [req_grammar, req_remote, req_stream]
+    assert list(scheduler.waiting) == [req_grammar, req_stream, req_tail]
+    assert list(scheduler.kv_holding_waiting) == [req_remote]
 
     scheduler.finish_requests(req_regular.request_id, RequestStatus.FINISHED_ABORTED)
     assert not scheduler.running
@@ -5082,8 +5593,8 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
 
     second_output = scheduler.schedule()
     expected_order = [
-        req_grammar.request_id,
         req_remote.request_id,
+        req_grammar.request_id,
         req_stream.request_id,
         req_tail.request_id,
     ]
@@ -5258,6 +5769,87 @@ def test_scheduler_kv_connector_stats():
         final_stats = next(
             iter(engine_core_outputs.values())
         ).scheduler_stats.kv_connector_stats
+        assert final_stats == expected_data
+
+
+def test_scheduler_ec_connector_stats():
+    """Test worker-side, scheduler-side, and combined EC connector stats."""
+
+    class GenericECConnectorStats(ECConnectorStats):
+        def reset(self):
+            self.data = {}
+
+        def aggregate(self, other: ECConnectorStats) -> ECConnectorStats:
+            self.data.update(other.data)
+            return self
+
+        def reduce(self) -> dict[str, int | float]:
+            return {}
+
+        def is_empty(self) -> bool:
+            return not self.data
+
+    test_cases = (
+        ({"worker": 1}, None, {"worker": 1}),
+        (None, {"scheduler": 2}, {"scheduler": 2}),
+        ({"worker": 1}, {"scheduler": 2}, {"worker": 1, "scheduler": 2}),
+    )
+
+    for worker_data, scheduler_data, expected_data in test_cases:
+        scheduler = create_scheduler()
+        worker_stats = (
+            GenericECConnectorStats(data=worker_data) if worker_data else None
+        )
+        scheduler_stats = (
+            GenericECConnectorStats(data=scheduler_data) if scheduler_data else None
+        )
+        scheduler.ec_connector = Mock()
+        scheduler.ec_connector.take_unavailable_requests.return_value = set()
+        scheduler.ec_connector.get_ec_connector_stats.return_value = (
+            scheduler_stats if worker_stats is None else None
+        )
+
+        def update_connector_output(
+            ec_connector_output: ECConnectorOutput,
+            scheduler=scheduler,
+            scheduler_stats=scheduler_stats,
+        ):
+            scheduler.ec_connector.get_ec_connector_stats.return_value = scheduler_stats
+
+        scheduler.ec_connector.update_connector_output.side_effect = (
+            update_connector_output
+        )
+
+        model_output = ModelRunnerOutput(
+            req_ids=["req_0"],
+            req_id_to_index={"req_0": 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            ec_connector_output=ECConnectorOutput(ec_connector_stats=worker_stats)
+            if worker_stats
+            else None,
+        )
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=None,
+            num_scheduled_tokens={"req_0": 1},
+            total_num_scheduled_tokens=1,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[0],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+        engine_core_outputs = scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+
+        final_stats = next(
+            iter(engine_core_outputs.values())
+        ).scheduler_stats.ec_connector_stats
         assert final_stats == expected_data
 
 
@@ -5775,6 +6367,201 @@ def test_unavailable_encoder_input_fails_the_request_as_retryable():
     assert [o.finish_reason for o in engine_outputs] == [FinishReason.ERROR]
 
 
+def _create_mm_request_with_embedding_positions(
+    request_id: str, identifier: str, is_embed: list[bool]
+) -> Request:
+    return create_requests(
+        num_requests=1,
+        num_tokens=len(is_embed),
+        mm_hashes_list=[[identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=len(is_embed),
+                    is_embed=torch.tensor(is_embed),
+                )
+            ]
+        ],
+        req_ids=[request_id],
+    )[0]
+
+
+def test_encoder_cache_accepts_matching_embed_count():
+    """An actively referenced entry is reused when embedding counts match."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-client-uuid"
+    owner = _create_mm_request_with_embedding_positions(
+        "owner", identifier, [True, True, True, False, False, False]
+    )
+    compatible = _create_mm_request_with_embedding_positions(
+        "compatible", identifier, [True, False, True, False, True, False, False]
+    )
+    scheduler.encoder_cache_manager.allocate(owner, 0)
+    scheduler.add_request(compatible)
+
+    scheduler_output = scheduler.schedule()
+
+    assert compatible.request_id in scheduler_output.num_scheduled_tokens
+    assert compatible.request_id not in scheduler.encoder_cache_mismatch_reqs
+    assert compatible.request_id not in scheduler_output.scheduled_encoder_inputs
+
+
+def test_encoder_cache_rejects_mismatched_embed_count(caplog_vllm):
+    """A completed request's freeable entry rejects an incompatible reuse."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-client-uuid"
+    owner = _create_mm_request_with_embedding_positions(
+        "owner", identifier, [True, True, True, False, False, False]
+    )
+    mismatched = _create_mm_request_with_embedding_positions(
+        "mismatched", identifier, [True, True, True, True, False, False]
+    )
+    scheduler.encoder_cache_manager.allocate(owner, 0)
+    scheduler.encoder_cache_manager.free(owner)
+    freeable_slots_before = scheduler.encoder_cache_manager.num_freeable_slots
+    scheduler.add_request(mismatched)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert mismatched.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert (
+        "multimodal identifier 'reused-client-uuid' holds 3 embeddings"
+        in caplog_vllm.text
+        and "expects 4" in caplog_vllm.text
+    )
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert mismatched.status == RequestStatus.FINISHED_ERROR
+    assert not scheduler.encoder_cache_mismatch_reqs
+    assert mismatched.request_id not in scheduler.requests
+    assert scheduler.encoder_cache_manager.cached[identifier] == set()
+    assert (
+        mismatched.request_id not in scheduler.encoder_cache_manager.request_cached_ids
+    )
+    assert scheduler.encoder_cache_manager.freeable[identifier] == 3
+    assert scheduler.encoder_cache_manager.num_freeable_slots == freeable_slots_before
+    output = outputs[mismatched.client_index].outputs[0]
+    assert output.request_id == mismatched.request_id
+    assert output.finish_reason == FinishReason.ERROR
+
+    healthy = create_requests(num_requests=1, req_ids=["healthy"], num_tokens=6)[0]
+    scheduler.add_request(healthy)
+    next_output = scheduler.schedule()
+    assert healthy.request_id in next_output.num_scheduled_tokens
+
+
+def test_encoder_cache_embed_count_mismatch_restores_prior_hit_state():
+    """A prior hit is released when a later mismatch fails the request."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    manager = scheduler.encoder_cache_manager
+    valid_identifier = "valid-reuse"
+    mismatch_identifier = "mismatched-reuse"
+    valid_owner = _create_mm_request_with_embedding_positions(
+        "valid-owner", valid_identifier, [True, True, False]
+    )
+    mismatch_owner = _create_mm_request_with_embedding_positions(
+        "mismatch-owner", mismatch_identifier, [True, True, True, False]
+    )
+    manager.allocate(valid_owner, 0)
+    manager.free(valid_owner)
+    manager.allocate(mismatch_owner, 0)
+    manager.free(mismatch_owner)
+    freeable_slots_before = manager.num_freeable_slots
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=7,
+        mm_hashes_list=[[valid_identifier, mismatch_identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=3,
+                    is_embed=torch.tensor([True, True, False]),
+                ),
+                PlaceholderRange(
+                    offset=3,
+                    length=4,
+                    is_embed=torch.tensor([True, True, True, True]),
+                ),
+            ]
+        ],
+        req_ids=["partially-mutated"],
+    )[0]
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert request.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert request.request_id in manager.cached[valid_identifier]
+    assert valid_identifier not in manager.freeable
+    assert manager.num_freeable_slots == freeable_slots_before - 2
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.request_id not in scheduler.requests
+    assert request.request_id not in manager.request_cached_ids
+    assert manager.cached[valid_identifier] == set()
+    assert manager.freeable[valid_identifier] == 2
+    assert manager.freeable[mismatch_identifier] == 3
+    assert manager.num_freeable_slots == freeable_slots_before
+    output = outputs[request.client_index].outputs[0]
+    assert output.finish_reason == FinishReason.ERROR
+
+
+def test_encoder_cache_rejects_mismatched_embed_count_within_request():
+    """One request cannot reuse an identifier with a different embed count."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-within-request"
+    request = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        mm_hashes_list=[[identifier, identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=4,
+                    is_embed=torch.tensor([True, True, False, False]),
+                ),
+                PlaceholderRange(
+                    offset=4,
+                    length=4,
+                    is_embed=torch.tensor([True, True, True, False]),
+                ),
+            ]
+        ],
+        req_ids=["mismatched-within-request"],
+    )[0]
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert request.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert identifier not in scheduler.encoder_cache_manager.cached
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert not scheduler.encoder_cache_mismatch_reqs
+    assert request.request_id not in scheduler.requests
+    output = outputs[request.client_index].outputs[0]
+    assert output.request_id == request.request_id
+    assert output.finish_reason == FinishReason.ERROR
+
+
 def test_free_encoder_inputs_defers_for_eagle_lookahead():
     """With EAGLE speculative decoding, the encoder input is retained one extra
     position so the drafter's +1 look-ahead mm-embedding gather (which reads one
@@ -6161,7 +6948,7 @@ def _create_hybrid_mamba_connector_scheduler(
     num_blocks: int = 100,
     supports_divergent_hits: bool = True,
 ) -> Scheduler:
-    """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
+    """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
         model="facebook/opt-125m",
         trust_remote_code=True,
@@ -6182,7 +6969,7 @@ def _create_hybrid_mamba_connector_scheduler(
         cache_config=CacheConfig(
             block_size=block_size,
             enable_prefix_caching=True,
-            mamba_cache_mode="all",
+            mamba_cache_mode="align",
         ),
         kv_transfer_config=KVTransferConfig(
             kv_connector="MockKVConnector",
@@ -6214,7 +7001,7 @@ def _create_hybrid_mamba_connector_scheduler(
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="all",
+                    mamba_cache_mode="align",
                 ),
             ),
         ],
@@ -6228,6 +7015,33 @@ def _create_hybrid_mamba_connector_scheduler(
         hash_block_size=block_size,
         log_stats=True,
     )
+
+
+def _seed_hybrid_prefix(
+    manager: KVCacheManager, num_blocks: int, block_size: int
+) -> tuple[list[int], list[int]]:
+    """Prefill a prefix one block per step so that align-mode Mamba caches
+    the state at every block boundary. Returns the FA and Mamba block ids."""
+    [fill] = create_requests(
+        num_requests=1,
+        num_tokens=num_blocks * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["fill"],
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    assert num_computed == 0
+    mamba_ids = []
+    for i in range(num_blocks):
+        manager.allocate_slots(
+            fill, block_size, new_computed_blocks=computed_blocks if i == 0 else None
+        )
+        fill.num_computed_tokens += block_size
+        fa_ids, group_mamba_ids = manager.get_block_ids(fill.request_id)
+        mamba_ids.append(group_mamba_ids[i])
+    manager.free(fill)
+    return fa_ids, mamba_ids
 
 
 @pytest.mark.parametrize(
@@ -6255,23 +7069,8 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
-    # Seed a 4-block prefix so both groups cache all four boundaries
-    # (mamba cache mode "all" caches every block's state densely).
-    [fill] = create_requests(
-        num_requests=1,
-        num_tokens=4 * block_size,
-        max_tokens=1,
-        same_prompt=True,
-        block_size=block_size,
-        req_ids=["fill"],
-    )
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
-    blocks = manager.allocate_slots(
-        fill, fill.num_tokens, num_computed, computed_blocks
-    )
-    fa_ids = [b.block_id for b in blocks.blocks[0]]
-    mamba_ids = [b.block_id for b in blocks.blocks[1]]
-    manager.free(fill)
+    # Seed a 4-block prefix so both groups cache all four boundaries.
+    fa_ids, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
 
     # Evict the FA tail and the middle mamba states; block 0 (both groups)
     # and the deep mamba state at block 3 survive.
@@ -6295,8 +7094,8 @@ def test_hybrid_per_group_hit_divergence_with_connector(
 
     scheduler.add_request(replay)
     output = scheduler.schedule()
-    num_scheduled = output.num_scheduled_tokens[replay.request_id]
-    assert replay.num_tokens - num_scheduled == expected_num_computed
+    [new_req] = output.scheduled_new_reqs
+    assert new_req.num_computed_tokens == expected_num_computed
 
 
 @pytest.mark.parametrize(
@@ -6331,20 +7130,7 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
     # Seed a 4-block prefix in both groups.
-    [fill] = create_requests(
-        num_requests=1,
-        num_tokens=4 * block_size,
-        max_tokens=1,
-        same_prompt=True,
-        block_size=block_size,
-        req_ids=["fill"],
-    )
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
-    blocks = manager.allocate_slots(
-        fill, fill.num_tokens, num_computed, computed_blocks
-    )
-    mamba_ids = [b.block_id for b in blocks.blocks[1]]
-    manager.free(fill)
+    _, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
 
     # Keep all FA blocks; evict every mamba state but block 0. FA reaches 4
     # blocks, the mamba hit only reaches 1 -> diverged (FA > Mamba).
@@ -6365,8 +7151,8 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
 
     scheduler.add_request(replay)
     output = scheduler.schedule()
-    num_scheduled = output.num_scheduled_tokens[replay.request_id]
-    assert replay.num_tokens - num_scheduled == expected_num_computed
+    [new_req] = output.scheduled_new_reqs
+    assert new_req.num_computed_tokens == expected_num_computed
 
 
 def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
@@ -6534,16 +7320,15 @@ def _decode_ready_request(scheduler):
     return request
 
 
-def test_update_draft_token_ids_strips_ngram_padding(monkeypatch):
-    """ngram_gpu pads unfilled draft slots with -1; update_draft_token_ids must
+def test_update_draft_token_ids_strips_ngram_padding():
+    """ngram_gpu pads unfilled draft slots with -1; manager validation must
     strip them before grammar.validate_tokens (which otherwise raises)."""
     scheduler = create_scheduler(num_speculative_tokens=4)
     request = _decode_ready_request(scheduler)
 
     grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(grammar=grammar)
-    monkeypatch.setattr(
-        scheduler.structured_output_manager, "should_advance", lambda req: True
+    request.structured_output_request = SimpleNamespace(
+        grammar=grammar, reasoning_ended=True
     )
 
     scheduler.update_draft_token_ids(
@@ -6554,16 +7339,15 @@ def test_update_draft_token_ids_strips_ngram_padding(monkeypatch):
     assert request.spec_token_ids == [10, 11]
 
 
-def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
+def test_update_draft_token_ids_in_output_strips_padding():
     """Same guard on the output path; the -1 pad-back for the rejected count
-    is preserved (only the input to validate_tokens is stripped)."""
+    is preserved (only the input to manager validation is stripped)."""
     scheduler = create_scheduler(num_speculative_tokens=4)
     request = _decode_ready_request(scheduler)
 
     grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(grammar=grammar)
-    monkeypatch.setattr(
-        scheduler.structured_output_manager, "should_advance", lambda req: True
+    request.structured_output_request = SimpleNamespace(
+        grammar=grammar, reasoning_ended=True
     )
 
     scheduler_output = SimpleNamespace(
@@ -6584,3 +7368,179 @@ def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
+def test_diffusion_canvas_width_defaults_to_the_served_canvas():
+    def req(extra):
+        return SimpleNamespace(sampling_params=SimpleNamespace(extra_args=extra))
+
+    assert diffusion_canvas_width(req(None), 64) == 64
+    assert diffusion_canvas_width(req({}), 64) == 64
+    assert diffusion_canvas_width(req({"diffusion_canvas_length": 16}), 64) == 16
+    assert diffusion_canvas_width(SimpleNamespace(sampling_params=None), 64) == 64
+
+
+def _diffusion_request(req_id: str, extra_args: dict) -> Request:
+    (request,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=64, req_ids=[req_id]
+    )
+    request.sampling_params.extra_args = extra_args
+    return request
+
+
+@pytest.fixture
+def diffusion_model_runner(monkeypatch):
+    # These CPU tests only exercise scheduling, not Triton kernels.
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+
+def _diffusion_scheduler(async_scheduling: bool = True, **kwargs) -> DiffusionScheduler:
+    scheduler_cls = DiffusionAsyncScheduler if async_scheduling else DiffusionScheduler
+    scheduler = create_scheduler(
+        async_scheduling=async_scheduling,
+        diffusion_canvas_length=8,
+        scheduler_cls=scheduler_cls,
+        **kwargs,
+    )
+    assert isinstance(scheduler, scheduler_cls)
+    return scheduler
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
+    config = create_scheduler(
+        async_scheduling=async_scheduling, diffusion_canvas_length=8
+    ).vllm_config.scheduler_config
+    assert config.get_scheduler_cls() is (
+        DiffusionAsyncScheduler if config.async_scheduling else DiffusionScheduler
+    )
+
+
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_scheduler_narrows_the_canvas_per_request():
+    scheduler = _diffusion_scheduler()
+    wide = _diffusion_request("wide", {})
+    narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
+    scheduler.add_request(wide)
+    scheduler.add_request(narrow)
+
+    # The prefill step lays down the served canvas as placeholders.
+    scheduler.schedule()
+    output = scheduler.schedule()
+    assert output.scheduled_spec_decode_tokens["wide"] == [-1] * 8
+    assert output.scheduled_spec_decode_tokens["narrow"] == [-1] * 4
+    assert output.num_scheduled_tokens["narrow"] == 4
+    assert narrow.num_output_placeholders == 4
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_scheduler_trims_full_width_worker_drafts(
+    structured, async_scheduling
+):
+    """Padded worker drafts must be narrowed before scheduling or grammar validation."""
+    scheduler = _diffusion_scheduler(async_scheduling=async_scheduling)
+    wide = _diffusion_request("wide", {})
+    narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
+    for request in (wide, narrow):
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    _model_output(scheduler, prefill, [[], []])
+
+    if structured:
+        for request in (wide, narrow):
+            request.structured_output_request = SimpleNamespace(
+                grammar=_RecordingGrammar(), reasoning_ended=True
+            )
+    tokens = list(range(8)) if structured else [-1] * 8
+    drafts = DraftTokenIds(["wide", "narrow"], [tokens.copy(), tokens.copy()])
+    if async_scheduling:
+        output = scheduler.schedule()
+        scheduler.update_draft_token_ids_in_output(drafts, output)
+    else:
+        scheduler.update_draft_token_ids(drafts)
+        output = scheduler.schedule()
+
+    assert output.scheduled_spec_decode_tokens == {
+        "wide": tokens,
+        "narrow": tokens[:4],
+    }
+    assert output.num_scheduled_tokens == {"wide": 8, "narrow": 4}
+    if structured:
+        assert wide.structured_output_request.grammar.seen == [tokens]
+        assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
+
+
+@pytest.mark.parametrize(
+    "sampled, expected_status",
+    [
+        pytest.param([], RequestStatus.RUNNING, id="denoising"),
+        pytest.param([1] * 4, RequestStatus.FINISHED_LENGTH_CAPPED, id="final"),
+    ],
+)
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_sync_diffusion_step_commits_only_emitted_tokens(sampled, expected_status):
+    """An empty denoising step reuses the canvas; a completed read emits it."""
+    scheduler = _diffusion_scheduler(async_scheduling=False)
+    request = _diffusion_request(
+        "read", {"diffusion_canvas_length": 4, "diffusion_read_only": True}
+    )
+    request.max_tokens = request.sampling_params.max_tokens = 4
+    scheduler.add_request(request)
+    _model_output(scheduler, scheduler.schedule(), [[]])
+
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [list(range(8))])
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {request.request_id: 4}
+    _model_output(scheduler, output, [sampled])
+
+    assert request.num_computed_tokens == request.num_prompt_tokens + len(sampled)
+    assert list(request.output_token_ids) == sampled
+    assert request.status == expected_status
+
+
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
+    scheduler = _diffusion_scheduler()
+    one = _diffusion_request(
+        "one", {"diffusion_read_only": True, "diffusion_max_steps": 1}
+    )
+    two = _diffusion_request(
+        "two", {"diffusion_read_only": True, "diffusion_max_steps": 2}
+    )
+    # Only reads are deferred. A capped generation keeps its extra async step.
+    gen = _diffusion_request("gen", {"diffusion_max_steps": 1})
+    for request in (one, two, gen):
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"one", "two", "gen"}
+    assert one.num_output_placeholders == 8
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"two", "gen"}
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
+    # The deferral is renewed every call.
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
+
+
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
+    scheduler = _diffusion_scheduler(pipeline_parallel_size=3, use_v2_model_runner=True)
+    read = _diffusion_request(
+        "read", {"diffusion_read_only": True, "diffusion_max_steps": 1}
+    )
+    scheduler.add_request(read)
+
+    scheduler.schedule()
+    assert read.next_decode_eligible_step == 4
+    for _ in range(2):
+        assert "read" not in scheduler.schedule().num_scheduled_tokens
+    assert "read" in scheduler.schedule().num_scheduled_tokens
+    assert read.next_decode_eligible_step == 7
+    # Deferring this step alone would ask for 6. The PP wait to 7 stands.
+    assert "read" not in scheduler.schedule().num_scheduled_tokens
+    assert read.next_decode_eligible_step == 7

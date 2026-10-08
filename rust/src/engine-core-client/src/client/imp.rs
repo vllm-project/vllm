@@ -19,7 +19,7 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
+use crate::metrics::{IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder};
 use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
@@ -46,7 +46,13 @@ pub(crate) struct ClientInner {
     /// Per-tensor byte threshold loaded from env variable
     /// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD` when this inner client is created.
     msgpack_zero_copy_threshold: usize,
-    scheduler_stats_recorder: SchedulerStatsRecorder,
+    /// Whether the connected engines record stats. See
+    /// [`crate::EngineCoreClientConfig::engine_stats_enabled`].
+    engine_stats_enabled: bool,
+    /// Scheduler-stats metric handles, present only when engines record stats
+    /// so that gauges are not exported with values no engine ever reports.
+    scheduler_stats_recorder: Option<SchedulerStatsRecorder>,
+    iteration_metrics: BTreeMap<u32, IterationMetricHandles>,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
@@ -60,16 +66,27 @@ impl ClientInner {
         input_send: RouterSendHalf,
         handle: Handle,
         model_name: String,
+        engine_stats_enabled: bool,
         engines: &[ConnectedEngine],
     ) -> Self {
-        let scheduler_stats_recorder =
-            SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines);
+        let scheduler_stats_recorder = engine_stats_enabled
+            .then(|| SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines));
+        let iteration_metrics = engines
+            .iter()
+            .filter_map(|engine| {
+                let engine = engine.engine_id.engine_index()?;
+                let handles = IterationMetricHandles::new(&METRICS.request, &model_name, engine);
+                Some((engine, handles))
+            })
+            .collect();
         Self {
             input_send,
             handle,
             model_name,
             msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
+            engine_stats_enabled,
             scheduler_stats_recorder,
+            iteration_metrics,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
@@ -402,7 +419,9 @@ pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
-    let mut lora_info = LoraInfoExporter::default();
+    // LoRA phases come from request lifecycle events, which engines only emit
+    // when they record stats.
+    let mut lora_info = inner.engine_stats_enabled.then(LoraInfoExporter::default);
 
     let result: Result<()> = async {
         loop {
@@ -415,6 +434,8 @@ pub(crate) async fn run_output_dispatcher_loop(
 
             match outputs {
                 EngineCoreOutputs::RequestBatch(batch) => {
+                    let has_outputs = !batch.outputs.is_empty();
+                    let mut iteration_tokens = 0_u64;
                     let senders = inner.take_senders_for_outputs(&batch.outputs);
                     for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
@@ -422,6 +443,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                             debug!(request_id, "dropping output for inactive request");
                             continue;
                         };
+
+                        iteration_tokens += output.new_token_ids.len() as u64;
+                        if let Some(prefill) = &output.prefill_stats {
+                            // The engine emits prefill_stats once, on the first output.
+                            iteration_tokens += u64::from(prefill.num_computed_tokens);
+                        }
 
                         let wrapped_output = EngineCoreStreamOutput {
                             engine_index: batch.engine_index,
@@ -431,6 +458,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                         if sender.send(Ok(wrapped_output)).is_err() {
                             debug!(request_id, "request output stream receiver dropped");
                         }
+                    }
+
+                    if has_outputs
+                        && let Some(handles) = inner.iteration_metrics.get(&batch.engine_index)
+                    {
+                        handles.iteration_tokens_total.observe(iteration_tokens as f64);
                     }
 
                     // The sender for normally-finished requests should have already been removed
@@ -451,14 +484,18 @@ pub(crate) async fn run_output_dispatcher_loop(
                                 "dropping scheduler stats for unknown engine"
                             );
                         }
-                        inner.scheduler_stats_recorder.record(batch.engine_index, scheduler_stats);
+                        if let Some(recorder) = &inner.scheduler_stats_recorder {
+                            recorder.record(batch.engine_index, scheduler_stats);
+                        }
                     }
 
                     // The engine's scheduler stats never carry adapter names;
                     // the gauge is derived from the registry's frontend-side
                     // request tracking instead.
-                    let (running, waiting) = inner.lora_adapter_states();
-                    lora_info.update(&METRICS.scheduler, running, waiting);
+                    if let Some(lora_info) = &mut lora_info {
+                        let (running, waiting) = inner.lora_adapter_states();
+                        lora_info.update(&METRICS.scheduler, running, waiting);
+                    }
                 }
                 EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
@@ -506,6 +543,7 @@ mod tests {
             send,
             Handle::current(),
             "test-model".to_string(),
+            true,
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
                 ready_response: default_ready_response(),

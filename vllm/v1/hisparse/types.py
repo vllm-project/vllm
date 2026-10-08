@@ -3,15 +3,20 @@
 
 from dataclasses import dataclass
 
+# Sealed pages this many positions behind the block-table tail stay pinned so
+# a page written by an in-flight step is never handed out under it.
+ACTIVE_TAIL_PAGES = 2
+
 
 @dataclass(frozen=True)
 class SparseKVPageTransfer:
     """Copy one logical KV page between cache-manager and worker-owned tiers."""
 
     transfer_id: int
-    destination_block_id: int
-    source_block_ids: tuple[int, ...]
+    host_block_id: int
+    resident_block_ids: tuple[int, ...]
     after_forward: bool
+    restore: bool = False
 
 
 @dataclass(frozen=True)
