@@ -44,6 +44,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.core.hidden_state_record import (
+    RECORD_ENCODING_EXPANSION,
     RecordLayout,
     get_record_carrier_group,
     get_record_head_bytes,
@@ -148,7 +149,10 @@ class HiddenStateHandoff:
         self.layer_views = list(views.values())
         self.head_bytes = sum(v.shape[-1] for v in self.layer_views)
         assert self.head_bytes == get_record_head_bytes(kv_cache_config, group_id)
-        assert self.tail_tokens * self.head_bytes >= self.record_bytes
+        assert (
+            self.tail_tokens * self.head_bytes
+            >= self.record_bytes * RECORD_ENCODING_EXPANSION
+        )
         self.kernel_block_size = self.block_tables.kernel_block_sizes[group_id]
         if any(v.shape[2] != self.kernel_block_size for v in self.layer_views):
             raise NotImplementedError(
@@ -219,7 +223,10 @@ class HiddenStateHandoff:
             dtype=torch.uint8,
             device=self.device,
         )
-        data[:, : self.record_bytes] = records.reshape(num_reqs, -1).view(torch.uint8)
+        # One nibble per stored byte: finite in any KV cache format.
+        payload = records.reshape(num_reqs, -1).view(torch.uint8)
+        encoded = torch.stack([payload & 0xF, payload >> 4], dim=-1)
+        data[:, : encoded[0].numel()] = encoded.view(num_reqs, -1)
         data = data.view(num_reqs, self.tail_tokens, self.head_bytes)
         start = 0
         for view in self.layer_views:
@@ -238,7 +245,10 @@ class HiddenStateHandoff:
         num_reqs = len(idx_mapping_np)
         blocks, offsets = self._tail_slots(idx_mapping_np, prompt_len_np)
         data = torch.cat([view[blocks, 0, offsets, :] for view in self.layer_views], -1)
-        data = data.view(num_reqs, -1)[:, : self.record_bytes].contiguous()
+        encoded = data.view(num_reqs, -1)[
+            :, : self.record_bytes * RECORD_ENCODING_EXPANSION
+        ].reshape(num_reqs, self.record_bytes, RECORD_ENCODING_EXPANSION)
+        data = encoded[..., 0] | (encoded[..., 1] << 4)
         return data.view(self.dtype).view(
             num_reqs, self.layout.num_slots, self.layout.hidden_size
         )

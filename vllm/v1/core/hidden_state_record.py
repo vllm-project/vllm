@@ -6,7 +6,9 @@ The prefiller (P) hands the decoder (D) a per-request "record" of hidden states
 from the last prompt positions (see ``RecordLayout`` and
 ``vllm.v1.worker.gpu.hidden_state_handoff``). It travels in the request's own
 KV blocks: in the token slots just past the prompt, ``N .. N + tail - 1`` for an
-``N``-token prompt, of one full-attention cache group (the "carrier").
+``N``-token prompt, of one attention cache group (the "carrier"): a
+full-attention group if there is one, else a sliding-window group (whose newest
+blocks, covering the slots past the prompt, are kept and transferred).
 
 Those slots are free on both sides when the record is written and read: P
 writes the record once its last step is done (the request then finishes), and D
@@ -18,8 +20,15 @@ transfers whole blocks carries the record with the KV.
 Each slot holds the record bytes in every KV head (one copy per head), so a
 decoder at a different TP size, which receives a different head slice of each
 block, still finds a whole record in each of its heads.
+
+The slots past the prompt are unused KV as far as attention is concerned, but
+kernels may still load them (masked), and blocks are reused with their contents.
+So each record byte is stored as two bytes holding a nibble each (0x0 - 0xF),
+which read as small finite values in any KV cache format (including FP8 and
+scale bytes), never as NaN or Inf.
 """
 
+import os
 from dataclasses import dataclass
 
 from vllm.config import VllmConfig
@@ -28,13 +37,16 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
-    RSWASpec,
+    SlidingWindowSpec,
     iter_layer_specs,
 )
 
 # Auxiliary hidden-state layers the target captures for an EAGLE3-style
 # drafter when the drafter config names none (models' default).
 _DEFAULT_NUM_AUX_LAYERS = 3
+
+# Stored bytes per record byte (one nibble each; see the module docstring).
+RECORD_ENCODING_EXPANSION = 2
 
 
 @dataclass(frozen=True)
@@ -95,20 +107,31 @@ def get_record_layout(vllm_config: VllmConfig) -> RecordLayout:
 
 
 def get_record_carrier_group(kv_cache_config: KVCacheConfig) -> int:
-    """The transferred full-attention group whose blocks carry the record."""
+    """The transferred attention group whose blocks carry the record: the first
+    full-attention one (incl. MLA and R-SWA), else the first sliding-window
+    one. Its layers must keep one token per cache slot. Ring buffers and
+    compressed caches cannot carry: their slots past the prompt are in use."""
+    candidates: dict[type, int] = {}
     for group_id in kv_cache_config.transfer_group_ids:
         specs = iter_layer_specs(
             kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
         )
-        if all(
-            isinstance(spec, FullAttentionSpec)
-            and not isinstance(spec, RSWASpec)
-            and spec.tokens_per_state == 1
-            for spec in specs
-        ):
-            return group_id
+        for kind in (FullAttentionSpec, SlidingWindowSpec):
+            if all(
+                isinstance(spec, kind) and spec.tokens_per_state == 1 for spec in specs
+            ):
+                candidates.setdefault(kind, group_id)
+    preference: tuple[type, ...] = (FullAttentionSpec, SlidingWindowSpec)
+    if os.environ.get("VLLM_HIDDEN_STATE_RECORD_CARRIER") == "sliding_window":
+        # Testing only: carry the record in a sliding-window group even when a
+        # full-attention group exists.
+        preference = preference[::-1]
+    for preferred in preference:
+        if preferred in candidates:
+            return candidates[preferred]
     raise NotImplementedError(
-        "P/D hidden-state handoff needs a transferred full-attention KV cache group."
+        "P/D hidden-state handoff needs a transferred full-attention or "
+        "sliding-window KV cache group."
     )
 
 
@@ -133,6 +156,7 @@ def get_record_tail_tokens(
         layout.num_slots
         * layout.hidden_size
         * get_dtype_size(vllm_config.model_config.dtype)
+        * RECORD_ENCODING_EXPANSION
     )
     group_id = get_record_carrier_group(kv_cache_config)
     return cdiv(record_bytes, get_record_head_bytes(kv_cache_config, group_id))
