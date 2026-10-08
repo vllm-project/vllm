@@ -935,6 +935,9 @@ class NixlBaseConnectorWorker:
         # page it overlays, so its regions cannot be recovered from spec type.
         self._scratch_region_indices = list[int]()
         self._ple_region_index: int | None = None
+        # Page length of the PLE short-conv state; its region may be shared with
+        # pages of a different (smaller) size, so it cannot use the region's.
+        self._ple_block_len: int | None = None
 
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
@@ -1464,6 +1467,7 @@ class NixlBaseConnectorWorker:
         seen_base_addresses: list[int] = []
         self._ssm_region_indices = []
         self._scratch_region_indices = []
+        self._ple_block_len = None
         self._ple_region_index = None
 
         packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
@@ -1751,6 +1755,7 @@ class NixlBaseConnectorWorker:
                         assert self._is_csa_linear
                         assert self._ple_region_index in (None, region_index)
                         self._ple_region_index = region_index
+                        self._ple_block_len = block_len
                     elif region_index not in self._ssm_region_indices:
                         self._ssm_region_indices.append(region_index)
                 elif (
@@ -1885,6 +1890,7 @@ class NixlBaseConnectorWorker:
             else self.host_buffer_kv_cache_layout,
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
+            ple_block_len=self._ple_block_len,
             attn_backend_name=self.backend_name,
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
@@ -1905,6 +1911,19 @@ class NixlBaseConnectorWorker:
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
+
+    def _ple_page_len(self) -> int:
+        """Transfer length of one PLE state page.
+
+        The PLE page shares its region with the first page of other cache
+        groups (block-outer layout), whose block_len may be smaller; the
+        descriptors must cover the whole PLE page or part of the conv state
+        never reaches the decode side."""
+        assert self._ple_region_index is not None
+        assert self._ple_block_len is not None, (
+            "PLE region registered without its page length"
+        )
+        return self._ple_block_len
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
@@ -1960,7 +1979,7 @@ class NixlBaseConnectorWorker:
             parts.append(self._stack_descs(blk_addrs + conv_size, ssm_size, device_id))
 
         if (region_index := self._ple_region_index) is not None:
-            block_len = self.block_len_per_layer[region_index] * physical_per_logical
+            block_len = self._ple_page_len() * physical_per_logical
             block_stride = (
                 self.block_stride_per_layer[region_index] * physical_per_logical
             )
@@ -2019,11 +2038,12 @@ class NixlBaseConnectorWorker:
 
         if (region_index := self._ple_region_index) is not None:
             local_block_len = (
-                self.block_len_per_layer[region_index]
-                * self._physical_blocks_per_logical_kv_block
+                self._ple_page_len() * self._physical_blocks_per_logical_kv_block
             )
+            # Same NIXL_CONNECTOR_VERSION on both sides, so the field is set.
+            assert nixl_agent_meta.ple_block_len is not None
             remote_block_len = (
-                nixl_agent_meta.block_lens[region_index] * remote_physical_per_logical
+                nixl_agent_meta.ple_block_len * remote_physical_per_logical
             )
             if local_block_len != remote_block_len:
                 raise ValueError(
