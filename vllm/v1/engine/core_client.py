@@ -192,7 +192,13 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
         raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
@@ -301,7 +307,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(
-        self, is_start: bool = True, profile_prefix: str | None = None
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -418,8 +428,19 @@ class InprocClient(EngineCoreClient):
         if self._finalizer.detach() is not None:
             self.engine_core.shutdown()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
-        self.engine_core.profile(is_start, profile_prefix)
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        self.engine_core.profile(
+            is_start,
+            profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+        )
 
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
@@ -1045,8 +1066,20 @@ class SyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
-        self.call_utility("profile", is_start, profile_prefix)
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        self.call_utility(
+            "profile",
+            is_start,
+            profile_prefix,
+            delay_iterations,
+            max_iterations,
+        )
 
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
@@ -1352,6 +1385,23 @@ class AsyncMPClient(MPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
 
+    async def call_utility_all_async(self, method: str, *args) -> list[Any]:
+        # Like the Rust client's call_utility: one result per managed engine.
+        return await asyncio.gather(
+            *[
+                self._call_utility_async(method, *args, engine=engine)
+                for engine in self.core_engines
+            ]
+        )
+
+    async def call_utility_consensus_async(self, method: str, *args) -> Any:
+        results = await self.call_utility_all_async(method, *args)
+        if any(result != results[0] for result in results):
+            raise RuntimeError(
+                f"Engines returned different {method} results: {results}"
+            )
+        return results[0]
+
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity
     ) -> Any:
@@ -1388,12 +1438,22 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("resume_scheduler")
 
     async def is_scheduler_paused_async(self) -> bool:
-        return await self.call_utility_async("is_scheduler_paused")
+        return await self.call_utility_consensus_async("is_scheduler_paused")
 
     async def profile_async(
-        self, is_start: bool = True, profile_prefix: str | None = None
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
     ) -> None:
-        await self.call_utility_async("profile", is_start, profile_prefix)
+        await self.call_utility_async(
+            "profile",
+            is_start,
+            profile_prefix,
+            delay_iterations,
+            max_iterations,
+        )
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
@@ -1401,8 +1461,10 @@ class AsyncMPClient(MPClient):
     async def reset_prefix_cache_async(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        return await self.call_utility_async(
-            "reset_prefix_cache", reset_running_requests, reset_connector
+        return all(
+            await self.call_utility_all_async(
+                "reset_prefix_cache", reset_running_requests, reset_connector
+            )
         )
 
     async def reset_encoder_cache_async(self) -> None:
@@ -1415,10 +1477,10 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("release_kv_cache_memory")
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
-        return await self.call_utility_async("wake_up", tags)
+        return all(await self.call_utility_all_async("wake_up", tags))
 
     async def is_sleeping_async(self) -> bool:
-        return await self.call_utility_async("is_sleeping")
+        return await self.call_utility_consensus_async("is_sleeping")
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
@@ -1435,7 +1497,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("set_weight_version", weight_version)
 
     async def get_weight_version_async(self) -> str:
-        return await self.call_utility_async("get_weight_version")
+        return await self.call_utility_consensus_async("get_weight_version")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
@@ -1464,6 +1526,10 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
+        per_engine = await self.call_utility_all_async("compute_weight_checksums")
+        return [worker for workers in per_engine for worker in workers]
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
@@ -1769,14 +1835,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
-        return (
-            await asyncio.gather(
-                *[
-                    self._call_utility_async(method, *args, engine=engine)
-                    for engine in self.core_engines
-                ]
-            )
-        )[0]
+        return (await self.call_utility_all_async(method, *args))[0]
 
     @staticmethod
     async def process_engine_outputs(self: "AsyncMPClient", outputs: EngineCoreOutputs):
