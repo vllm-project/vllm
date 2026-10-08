@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
@@ -292,6 +295,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             expert_map=None,
             apply_router_weight_on_input=True,
             routed_scaling_factor=1.0,
+            routing_sink=None,
         )
 
         check_accuracy(
@@ -887,3 +891,98 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
             ),
             router_weights=topk_weights,
         )
+
+
+@pytest.mark.parametrize("m", [1, 16])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
+def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_init):
+    """FlashInfer's fused MiniMax2 routing must apply routed_scaling_factor,
+    matching vLLM's own sigmoid+bias top-k routing (MiniMax-M3 uses 2.0)."""
+    e, topk, n, k, scale = 32, 4, 1024, 1024, 2.0
+    block_shape = [1, 32]
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            SimpleNamespace(
+                weight_block_size=block_shape,
+                moe_config=SimpleNamespace(
+                    is_act_and_mul=True, intermediate_size_per_partition=n
+                ),
+                activation=MoEActivation.SILU,
+            ),
+            *_make_mxfp8_moe_weights(e, n, k),
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        quant_config = make_fp8_moe_quant_config(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            w1_scale,
+            w2_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=block_shape,
+        )
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.MiniMax2,
+            max_num_tokens=next_power_of_2(m),
+        )
+
+        def make_kernel(experts_cls) -> mk.FusedMoEKernel:
+            return mk.FusedMoEKernel(
+                maybe_make_prepare_finalize(
+                    moe=moe_config,
+                    quant_config=quant_config,
+                    allow_new_interface=True,
+                    use_monolithic=experts_cls is TrtLlmFp8ExpertsMonolithic,
+                ),
+                experts_cls(moe_config=moe_config, quant_config=quant_config),
+            )
+
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        logits = torch.randn((m, e), device="cuda", dtype=torch.float32)
+        bias = torch.randn(e, device="cuda", dtype=torch.float32) / 10
+        common = dict(
+            w1=w1,
+            w2=w2,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+        fused = make_kernel(TrtLlmFp8ExpertsMonolithic).apply_monolithic(
+            hidden_states=a,
+            router_logits=logits,
+            e_score_correction_bias=bias,
+            routed_scaling_factor=scale,
+            routing_sink=None,
+            **common,
+        )
+        topk_weights, topk_ids = fused_topk_bias(
+            a,
+            logits,
+            scoring_func="sigmoid",
+            e_score_correction_bias=bias,
+            topk=topk,
+            renormalize=True,
+            routed_scaling_factor=scale,
+        )
+        reference = make_kernel(TrtLlmFp8ExpertsModular).apply(
+            hidden_states=a, topk_weights=topk_weights, topk_ids=topk_ids, **common
+        )
+
+    torch.testing.assert_close(fused, reference, atol=2e-2, rtol=2e-2)
