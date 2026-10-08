@@ -76,12 +76,19 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
         )
-        (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
-            (
-                (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
-                torch.uint8,
-            ),
+        # Reserve capacity without retaining a view: a retained view would pin
+        # the old buffer when another user grows the shared workspace.
+        current_workspace_manager().get_simultaneous(self._workspace_spec)
+
+    @property
+    def _workspace_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
+        return ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8)
+
+    def _workspace_buffer(self) -> torch.Tensor:
+        (workspace_buffer,) = current_workspace_manager().get_simultaneous(
+            self._workspace_spec
         )
+        return workspace_buffer
 
     def prepare_metadata(
         self,
@@ -152,7 +159,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             query=q,
             key=k,
             value=v,
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=self._workspace_buffer(),
             seq_lens=self._query_seq_lens,
             max_q_len=self._prefill_metadata.max_query_len,
             max_kv_len=self._prefill_metadata.max_query_len,
@@ -203,7 +210,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             query=q,
             key=k,
             value=v,
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=self._workspace_buffer(),
             seq_lens=chunk.seq_lens,
             max_q_len=chunk.max_query_len,
             max_kv_len=chunk.max_seq_len,
