@@ -1120,10 +1120,7 @@ class HiSparseCacheHandle:
         self.num_decode_tokens = 0
         self.req_id_per_token: torch.Tensor | None = None
         self.host_mirror_required = False
-        self.mirror_from_resident = False
         self.mirror_slot_mapping: torch.Tensor | None = None
-        self.mirror_staging_cache: torch.Tensor | None = None
-        self.mirror_staging_slots: torch.Tensor | None = None
         self.submit_layer_mirror: Callable[[], None] | None = None
         # Speculator layers write their rows after the target forward.
         self.draft_layer = False
@@ -1159,26 +1156,6 @@ class HiSparseCacheHandle:
         if self.decode_batch:
             num_rows = min(num_rows, self.runtime.max_num_reqs)
         return self.view.cache, self.slot_mapping[:num_rows], num_rows
-
-    def mirror_write_target(
-        self, num_rows: int
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        if (
-            not self.host_mirror_required
-            or self.decode_batch
-            or self.mirror_from_resident
-        ):
-            return None
-        cache = self.mirror_staging_cache
-        slots = self.mirror_staging_slots
-        if cache is None or slots is None:
-            raise RuntimeError("HiSparse prefill mirror staging is not bound.")
-        if num_rows > slots.numel():
-            raise RuntimeError(
-                "HiSparse prefill mirror exceeds staging capacity: "
-                f"{num_rows} > {slots.numel()}."
-            )
-        return cache, slots[:num_rows]
 
     def finish_kv_update(self) -> None:
         if self.dummy_batch:
@@ -1242,9 +1219,8 @@ def initialize_hisparse_runtime_buffers(
     cache_handles: list[HiSparseCacheHandle],
     *,
     max_num_reqs: int,
-    max_num_batched_tokens: int,
 ) -> None:
-    """Allocate shared request state and per-layer prefill staging buffers."""
+    """Allocate the request state shared by every HiSparse runtime."""
     assert cache_handles
     resident = cache_handles[0].view
     assert resident is not None
@@ -1252,26 +1228,8 @@ def initialize_hisparse_runtime_buffers(
     request_state_indices = torch.full(
         (max_num_reqs,), -1, dtype=torch.int32, device=device
     )
-    staging_blocks = (
-        max_num_batched_tokens + resident.block_size - 1
-    ) // resident.block_size
-    mirror_staging_caches = torch.empty(
-        (
-            len(cache_handles),
-            staging_blocks,
-            resident.block_size,
-            resident.cache.shape[-1],
-        ),
-        dtype=resident.cache.dtype,
-        device=device,
-    )
-    mirror_staging_slots = torch.arange(
-        max_num_batched_tokens, dtype=torch.int64, device=device
-    )
-    for layer_index, cache_handle in enumerate(cache_handles):
+    for cache_handle in cache_handles:
         cache_handle.runtime.request_state_indices = request_state_indices
-        cache_handle.mirror_staging_cache = mirror_staging_caches[layer_index]
-        cache_handle.mirror_staging_slots = mirror_staging_slots
 
 
 def create_hisparse_cache_handle(
@@ -1325,11 +1283,4 @@ def create_hisparse_cache_handle(
         config.device_buffer_size,
         max_num_reqs,
     )
-    handle = HiSparseCacheHandle(runtime)
-    speculative_config = vllm_config.speculative_config
-    handle.mirror_from_resident = bool(
-        vllm_config.scheduler_config.async_scheduling
-        and speculative_config is not None
-        and speculative_config.uses_draft_kv_cache()
-    )
-    return handle
+    return HiSparseCacheHandle(runtime)
