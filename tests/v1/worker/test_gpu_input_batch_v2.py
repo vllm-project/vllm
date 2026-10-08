@@ -12,7 +12,8 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 
 DEVICE = current_platform.device_type
 
@@ -79,6 +80,39 @@ def test_make_dummy_padding_controls_moe_routing(monkeypatch, is_padding: bool):
 
     assert bool((topk_ids == -1).all()) is is_padding
     assert bool((topk_ids >= 0).all()) is not is_padding
+
+
+def test_dummy_context_preserves_token_padding():
+    """Padded model inputs must stay outside queries and context positions."""
+    num_reqs = 2
+    num_tokens = 6
+    num_tokens_after_padding = 8
+    buffers = InputBuffers(num_reqs, num_tokens_after_padding, torch.device("cpu"))
+    buffers.input_ids.fill_(1)
+    buffers.positions.fill_(1)
+    batch = InputBatch.make_dummy(
+        num_reqs,
+        num_tokens,
+        buffers,
+        is_padding=False,
+        num_tokens_after_padding=num_tokens_after_padding,
+    )
+
+    assert batch.input_ids.tolist() == [0] * num_tokens_after_padding
+    assert batch.positions.tolist() == [0] * num_tokens_after_padding
+    assert (
+        batch.query_start_loc_np.tolist() == batch.query_start_loc.tolist() == [0, 3, 6]
+    )
+    assert batch.is_padding.tolist() == [False] * num_tokens + [True] * 2
+
+    block_tables = BlockTables.__new__(BlockTables)
+    block_tables.input_block_tables = [torch.zeros((num_reqs, 1), dtype=torch.int32)]
+    block_tables.kernel_block_sizes = [16]
+    block_tables.blocks_per_kv_block = [1]
+    set_dummy_context(
+        batch, block_tables, context_len=3, num_kv_blocks=2, max_model_len=16
+    )
+    assert batch.positions.tolist() == [3, 4, 5, 3, 4, 5, 0, 0]
 
 
 def test_prepare_dcp_local_seq_lens_uses_shared_buffer(monkeypatch):

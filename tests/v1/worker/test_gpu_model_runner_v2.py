@@ -9,7 +9,9 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -19,6 +21,11 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    CudaGraphManager,
+)
+from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 
 
@@ -357,3 +364,59 @@ def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer
         assert torch.equal(out, buffer[:4])
     else:
         assert out is hidden_states
+
+
+@pytest.mark.parametrize(
+    ("cg_mode", "num_tokens", "num_tokens_after_padding", "expected_num_tokens"),
+    [
+        pytest.param(CUDAGraphMode.PIECEWISE, 1016, 1024, 1016, id="piecewise"),
+        pytest.param(CUDAGraphMode.FULL, 28, 32, 32, id="full-varlen"),
+    ],
+)
+def test_dummy_dispatch_preserves_piecewise_token_budget(
+    cg_mode: CUDAGraphMode,
+    num_tokens: int,
+    num_tokens_after_padding: int,
+    expected_num_tokens: int,
+):
+    """PIECEWISE preserves correction slots; FULL uses the captured query split."""
+    num_reqs = 8
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=cg_mode,
+        num_tokens=num_tokens_after_padding,
+        num_reqs=num_reqs if cg_mode == CUDAGraphMode.FULL else None,
+        max_query_len=4 if cg_mode == CUDAGraphMode.FULL else None,
+    )
+    manager = CudaGraphManager.__new__(CudaGraphManager)
+    manager._graphs_captured = True
+    manager._lora_dispatch_map = {}
+    manager._candidates = {(num_tokens, 0): [batch_desc]}
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.cudagraph_manager = manager
+    runner.decode_query_len = 4
+    runner.lora_config = None
+    runner.is_encoder_decoder = False
+    runner.pcp_manager = None
+    runner.ubatch_runner = None
+    runner.parallel_config = SimpleNamespace(data_parallel_size=1, data_parallel_rank=0)
+    runner.input_buffers = InputBuffers(
+        num_reqs, num_tokens_after_padding, torch.device("cpu")
+    )
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.total_num_scheduled_tokens = num_tokens
+    scheduler_output.num_scheduled_tokens = {
+        str(i): num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
+        for i in range(num_reqs)
+    }
+
+    class BatchCaptured(Exception):
+        pass
+
+    def capture_batch(batch, _valid_dummy_state_slots):
+        assert batch.num_tokens == expected_num_tokens
+        assert batch.num_tokens_after_padding == num_tokens_after_padding
+        raise BatchCaptured
+
+    runner.prepare_dummy_attn = capture_batch
+    with pytest.raises(BatchCaptured):
+        runner.execute_model(scheduler_output, dummy_run=True)
