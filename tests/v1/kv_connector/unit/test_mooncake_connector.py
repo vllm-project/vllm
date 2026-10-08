@@ -2568,3 +2568,45 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("src", "dst", "expected"),
+    [
+        pytest.param([], [], ([], []), id="empty"),
+        pytest.param([5], [8], ([[5]], [[8]]), id="single-block"),
+        pytest.param([1, 2, 3], [7, 8, 9], ([[1, 2, 3]], [[7, 8, 9]]), id="contiguous"),
+        pytest.param(
+            [1, 3, 4], [7, 8, 9], ([[1], [3, 4]], [[7], [8, 9]]), id="source-gap"
+        ),
+        pytest.param(
+            [1, 2, 3], [7, 9, 10], ([[1], [2, 3]], [[7], [9, 10]]), id="destination-gap"
+        ),
+        pytest.param(
+            [1, 2, 4, 5],
+            [7, 9, 10, 11],
+            ([[1], [2], [4, 5]], [[7], [9], [10, 11]]),
+            id="different-breaks",
+        ),
+        pytest.param(
+            [3, 2, 1], [9, 8, 7], ([[3], [2], [1]], [[9], [8], [7]]), id="descending"
+        ),
+        pytest.param(
+            [1, 1, 2], [7, 8, 9], ([[1], [1, 2]], [[7], [8, 9]]), id="repeated-id"
+        ),
+    ],
+)
+def test_group_concurrent_contiguous(src, dst, expected):
+    original_src, original_dst = src.copy(), dst.copy()
+    assert mooncake_connector.group_concurrent_contiguous(src, dst) == expected
+    assert src == original_src
+    assert dst == original_dst
+
+
+@pytest.mark.parametrize(
+    ("src", "dst"),
+    [([], [1]), ([1], []), ([1, 2, 3], [7, 8, 9, 10]), ([1, 2, 3, 4], [7, 8, 9])],
+)
+def test_group_concurrent_contiguous_rejects_unequal_lengths(src, dst):
+    with pytest.raises(AssertionError, match="must have equal lengths"):
+        mooncake_connector.group_concurrent_contiguous(src, dst)

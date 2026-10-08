@@ -2797,6 +2797,9 @@ def group_concurrent_contiguous(
     src_indices: list[int],
     dst_indices: list[int],
 ) -> tuple[list[list[int]], list[list[int]]]:
+    assert len(src_indices) == len(dst_indices), (
+        "Source and destination block lists must have equal lengths"
+    )
     if not src_indices:
         return [], []
 
