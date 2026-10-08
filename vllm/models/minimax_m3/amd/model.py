@@ -818,6 +818,25 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
+    @property
+    def kv_cache(self) -> torch.Tensor:
+        return self._kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, value: torch.Tensor) -> None:
+        if value is getattr(self, "_kv_cache", None):
+            return
+        owner_ref = getattr(self, "_mono_model_ref", None)
+        if owner_ref is not None and (model := owner_ref()) is not None:
+            from vllm.models.minimax_m3.amd.mono import detach_model_cache
+
+            detach_model_cache(model, value)
+        self._kv_cache = value
+        self.kv_cache_k = torch.tensor([])
+        self.kv_cache_v = torch.tensor([])
+        self._aiter_sparse_pa_cache_data_ptr = 0
+        self._aiter_sparse_pa_block_page_stride = 0
+
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
 
@@ -1373,16 +1392,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         self.config = config
         self._mono: M3Mono | None = None
-        if envs.VLLM_ROCM_USE_ATOM_M3_MONO and not vllm_config.use_v2_model_runner:
-            raise ValueError("MiniMax-M3 ATOM mono requires the V2 model runner")
-        if envs.VLLM_ROCM_USE_ATOM_M3_MONO and (
-            vllm_config.parallel_config.worker_cls
-            != "vllm.models.minimax_m3.amd.mono_worker.M3MonoWorker"
-        ):
-            raise ValueError(
-                "MiniMax-M3 ATOM mono requires --worker-cls "
-                "vllm.models.minimax_m3.amd.mono_worker.M3MonoWorker"
-            )
+        self._mono_config = vllm_config if envs.VLLM_ROCM_USE_ATOM_M3_MONO else None
+        if self._mono_config is not None:
+            from vllm.models.minimax_m3.amd.mono import validate_model_config
+
+            validate_model_config(vllm_config)
 
         self.vocab_size = config.vocab_size
 
@@ -1500,6 +1514,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         # EAGLE3 is not yet compatible with pipeline parallel
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        if self._mono is None and self._mono_config is not None:
+            from vllm.models.minimax_m3.amd.mono import prepare_model
+
+            prepare_model(self, self._mono_config)
         mono = self._mono
         use_mono = mono is not None and mono.begin_forward(hidden_states.shape[0])
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):

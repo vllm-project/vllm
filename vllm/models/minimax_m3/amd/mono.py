@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Bind native M3 tensors and batch metadata to ATOM's opt-in mono library."""
 
+import weakref
 from typing import cast
 
+import torch
 import torch.distributed as dist
 
 from vllm.distributed import get_tp_group
@@ -39,7 +41,7 @@ def _collective_stage(group, name, action):
 class M3Mono:
     layer_ids: list[int]
 
-    def __init__(self, model, config, kv_cache_config):
+    def __init__(self, model, config):
         self.group = get_tp_group().cpu_group
         self.fallback_counts = {}
         self.query_len = 4
@@ -130,20 +132,17 @@ class M3Mono:
             )
             require(len(model.layers) == 60, "expected 60 decoder layers")
             self.layer_ids = list(range(3, 60))
-            names_to_group = {
-                name: i
-                for i, group in enumerate(kv_cache_config.kv_cache_groups)
-                for name in group.layer_names
-            }
-            main_groups = {
-                names_to_group[model.layers[i].self_attn.layer_name] for i in layer_ids
-            }
-            index_groups = {
-                names_to_group[model.layers[i].self_attn.indexer.index_cache.prefix]
-                for i in layer_ids
-            }
+            metadata = get_forward_context().attn_metadata
+            require(isinstance(metadata, dict), "attention metadata is required")
+            first = model.layers[layer_ids[0]].self_attn
             require(
-                len(main_groups) == len(index_groups) == 1,
+                all(
+                    metadata[model.layers[i].self_attn.layer_name]
+                    is metadata[first.layer_name]
+                    and metadata[model.layers[i].self_attn.indexer.index_cache.prefix]
+                    is metadata[first.indexer.index_cache.prefix]
+                    for i in layer_ids
+                ),
                 "sparse main layers and index layers must each share metadata",
             )
 
@@ -229,38 +228,41 @@ class M3Mono:
         )
 
 
-def prepare_model(model, config, kv_cache_config):
-    from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
-
-    group = get_tp_group().cpu_group
-
-    def target():
-        language_model = (
-            model.get_language_model()
-            if hasattr(model, "get_language_model")
-            else model
-        )
-        require(
-            isinstance(language_model.model, MiniMaxM3Model), "unsupported model class"
-        )
-        require(
-            language_model.model._mono is None,
-            "cache reinitialization is unsupported while graphs reference "
-            "mono resources",
-        )
-        return language_model.model
-
-    target_model = _collective_stage(group, "target model", target)
-    target_model._mono = M3Mono(target_model, config, kv_cache_config)
-
-
-def release_model(model):
-    """Release mono-owned IPC only after the runner has drained its graphs."""
-    language_model = (
-        model.get_language_model() if hasattr(model, "get_language_model") else model
+def validate_model_config(config):
+    require(config.use_v2_model_runner, "V2 model runner is required")
+    require(config.weight_transfer_config is None, "weight transfer is unsupported")
+    require(
+        config.cache_config.num_gpu_blocks_override is not None,
+        "set num_gpu_blocks_override to reserve space for lazy mono allocation",
     )
-    target = getattr(language_model, "model", None)
-    adapter = getattr(target, "_mono", None)
-    if target is not None and adapter is not None:
-        adapter.close()
-        target._mono = None
+
+
+def prepare_model(model, config):
+    """Initialize on eager warmup, including temporary profiling caches."""
+    if not isinstance(get_forward_context().attn_metadata, dict):
+        return
+    attentions = [layer.self_attn for layer in model.layers[3:]]
+    if not attentions or any(
+        attn.kv_cache.numel() == 0 or attn.indexer.index_cache.kv_cache.numel() == 0
+        for attn in attentions
+    ):
+        return
+    require(
+        not torch.cuda.is_current_stream_capturing(),
+        "mono must be initialized by an eager forward before graph capture",
+    )
+    model._mono = M3Mono(model, config)
+    for attn in attentions:
+        attn._mono_model_ref = weakref.ref(model)
+
+
+def detach_model_cache(model, replacement):
+    """All TP ranks detach together after graph teardown, before rebinding."""
+    if model._mono is not None:
+        require(
+            replacement.numel() == 0,
+            "detach caches after destroying graphs before binding new storage",
+        )
+        model._mono.close()
+        model._mono = None
+        logger.info("ATOM mono library closed for detached model cache")

@@ -12,14 +12,17 @@ with `prepare_step`, `forward_layer`, and `close`. vLLM supplies native tensors,
 cache views, the existing TP group, and each batch's metadata. ATOM owns weight
 conversion, metadata expansion, compilation, scratch, IPC, graph operations,
 and kernel launch details. Its native runner shares the same sparse execution
-implementation. vLLM keeps model dispatch, auxiliary-state capture, and teardown
-ordering.
+implementation. The model keeps dispatch, auxiliary-state capture, and its
+library lifetime. It uses the ordinary vLLM worker and model runner.
 
-The ROCm model directory provides `M3MonoWorker` through the existing
-`--worker-cls` extension point. Its V2 runner owns mono initialization,
-weight-update guards, and shutdown. The shared GPU worker, model runner,
-and platform code need no mono-specific changes. Enabling the mono flag
-without selecting this worker raises during model construction.
+The first eager forward with bound main/index caches initializes the library,
+including graph warmup. Initial memory profiling without caches stays native.
+Temporary graph-profiling caches get their own library instance; the normal
+cache detach closes it before the final caches are bound. The model attention's
+main-cache setter handles this explicit detach after graph teardown, clears
+native K/V views, and rejects replacement of a live main cache. All TP ranks
+must detach together after destroying their graphs. No GC callback performs
+collectives, and no engine hook or worker selection is added.
 
 The port uses ATOM's shared mono runtime and retains its store-publication,
 per-step mailbox reset/fence, and padded-row expert-reduction fixes. It requires
@@ -43,7 +46,10 @@ BF16 attention weights for fallback, using separate converted copies for mono.
   at most four sequences, prefix caching disabled.
 - Shared-expert fusion enabled; no context/expert parallelism, microbatching,
   LoRA, KV transfer, sleep, or online weight updates. Configured weight transfer
-  and weight reload/reset are rejected before changing weights.
+  is rejected during model construction.
+- Explicit `num_gpu_blocks_override` is required to reserve room for the lazy
+  library allocation; the recorded command uses 1024 blocks. The graph-memory
+  profiling warmup also includes that allocation in its measured footprint.
 - Decode/verification buckets 1, 4, 8, and 16. Prefill, mixed batches, dense
   layers, and unsupported step shapes use native execution.
 
@@ -52,6 +58,18 @@ an error, rather than a successful native retry. Graph teardown precedes peer
 memory release. KV and index allocation remains entirely native; the adapter
 uses static scalar K/V scales and independent index addressing, without a
 shadow cache or dynamic scale sidecar.
+
+Weights must remain fixed after loading. Reset, raw/kernel-format reload, and
+direct tensor writes can bypass model methods and are unsupported; this model
+integration does not claim to intercept them before mutation. A failed reload
+or external weight mutation requires destroying the execution state and
+reconstructing the model, including its graphs and converted weights.
+
+Direct main/index cache rebinding, tensor-storage mutation, and partial cache
+reinitialization outside the normal lifecycle are also unsupported. The main
+cache setter is a lifecycle hook, not a comprehensive mutation guard: index
+cache writes can bypass it. Such changes require destroying and rebuilding the
+execution state; existing graphs must not be reused.
 
 ## Launch the pinned experiment
 
@@ -73,7 +91,6 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ROCM_USE_ATOM_M3_MONO=1
 
 vllm serve "$TARGET_MODEL" \
-    --worker-cls vllm.models.minimax_m3.amd.mono_worker.M3MonoWorker \
     --served-model-name minimax-m3 --host 127.0.0.1 --port 8000 \
     --tensor-parallel-size 4 --pipeline-parallel-size 1 \
     --language-model-only --max-model-len 16384 --max-num-seqs 4 \
@@ -95,8 +112,9 @@ The refactor is validated separately from the earlier October 2 experiment.
 The current checks cover kernel compilation for both cache modes and every
 supported width, the public tensor interface on saved native layers, graph
 replay with changed cache addresses, poisoned padding, collective startup
-failures, and shutdown. ROCm worker tests cover selection, initialization order,
-weight-update guards, and graph-before-IPC teardown.
+failures, and shutdown. Model tests cover unbound caches, cache generations,
+explicit detach, refusal of live main-cache replacement, and capture-time refusal
+of first initialization. They are selected by the AMD basic-model CI job.
 The paired Draft PRs record commands, exact results, and remaining evaluation
 limits for the current revisions.
 
