@@ -334,6 +334,57 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
     assert not output_processor.has_unfinished_requests()
 
 
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE]
+)
+def test_stream_interval_applies_to_all_streaming_output_kinds(
+    output_kind: RequestOutputKind,
+) -> None:
+    """stream_interval batches outputs the same way in DELTA and CUMULATIVE
+    mode: the first token is sent immediately, then one output per interval,
+    plus the final output."""
+    stream_interval, num_tokens = 4, 10
+    output_processor = OutputProcessor(
+        None, log_stats=False, stream_interval=stream_interval
+    )
+    output_processor.add_request(
+        EngineCoreRequest(
+            request_id="request-0-int",
+            external_req_id="request-0",
+            prompt_token_ids=[1, 2, 3],
+            mm_features=None,
+            sampling_params=SamplingParams(
+                detokenize=False, output_kind=output_kind, max_tokens=num_tokens
+            ),
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        ),
+        None,
+    )
+
+    tokens_sent_at = []
+    total_sent = 0
+    for i in range(num_tokens):
+        finish_reason = FinishReason.LENGTH if i == num_tokens - 1 else None
+        engine_output = EngineCoreOutput(
+            "request-0-int", [100 + i], finish_reason=finish_reason
+        )
+        for request_output in output_processor.process_outputs(
+            [engine_output]
+        ).request_outputs:
+            token_ids = request_output.outputs[0].token_ids
+            if output_kind == RequestOutputKind.DELTA:
+                total_sent += len(token_ids)
+            else:
+                total_sent = len(token_ids)
+            tokens_sent_at.append(total_sent)
+
+    assert tokens_sent_at == [1, 5, 9, 10]
+
+
 def _validate_logprobs(
     gen_tokens: dict[str, list[int]],
     gen_logprobs: dict[str, SampleLogprobs | None],
