@@ -66,6 +66,37 @@ MNK_FACTORS = [
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
 
 
+@pytest.mark.parametrize("experts_cls", [CutlassExpertsFp8, CutlassExpertsW4A8Fp8])
+def test_cutlass_permute_scratch_shared_across_layers(monkeypatch, experts_cls):
+    from types import SimpleNamespace
+
+    import vllm.model_executor.layers.fused_moe.experts.cutlass_moe as cutlass
+    import vllm.model_executor.layers.fused_moe.moe_permute_unpermute as permute
+    import vllm.v1.worker.workspace as workspace
+
+    monkeypatch.setattr(
+        workspace,
+        "_manager",
+        workspace.WorkspaceManager(torch.device("cpu"), num_lanes=2),
+    )
+    monkeypatch.setattr(cutlass, "moe_permute_unpermute_supported", lambda: True)
+    factory = lambda **kwargs: object()
+    monkeypatch.setattr(permute, "MoEPermuteScratch", factory)
+    monkeypatch.setattr(cutlass, "MoEPermuteScratch", factory)
+    config = make_dummy_moe_config()
+    first = SimpleNamespace(moe_config=config, _permute_scratch=None)
+    second = SimpleNamespace(moe_config=config, _permute_scratch=None)
+    get_scratch = experts_cls._get_permute_scratch
+
+    scratch = get_scratch(first)
+    assert get_scratch(second) is scratch
+    with workspace.use_workspace_lane(1):
+        other = get_scratch(first)
+        assert other is not scratch
+        assert get_scratch(second) is other
+    assert get_scratch(first) is scratch
+
+
 @pytest.mark.parametrize(
     "experts_cls",
     [
