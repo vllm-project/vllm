@@ -2195,6 +2195,9 @@ class Scheduler(SchedulerInterface):
                 request.resumable = False
                 stopped = True
 
+            if not output_is_stale:
+                self.kv_cache_manager.update_decode_checkpoint_candidates(request)
+
             routed_experts = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
@@ -2717,6 +2720,10 @@ class Scheduler(SchedulerInterface):
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
+        self.kv_cache_manager.finalize_decode_checkpoints(
+            request,
+            keep=request.status == RequestStatus.FINISHED_STOPPED,
+        )
         self._inflight_prefills.discard(request)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
