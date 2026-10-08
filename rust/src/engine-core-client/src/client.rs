@@ -9,7 +9,7 @@ use futures::future::join_all;
 use itertools::Itertools;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
@@ -53,16 +53,15 @@ pub enum TransportMode {
         local_output_address: Option<String>,
     },
 
-    /// The Python supervisor has already chosen the frontend transport
-    /// addresses, and the Rust process only needs to bind them and wait for
-    /// engine registration frames.
+    /// The Python supervisor has already bound the frontend transport
+    /// listeners. Rust adopts them and waits for engine registration frames.
+    /// `EngineCoreClient::connect` consumes each descriptor exactly once;
+    /// copied integer values do not create additional descriptor ownership.
     Bootstrapped {
-        /// Input ROUTER socket address that engines will connect to for
-        /// requests.
-        input_address: String,
-        /// Output PULL socket address that engines will connect to for
-        /// responses.
-        output_address: String,
+        /// Raw input ROUTER listener descriptor inherited from the supervisor.
+        input_listener_fd: i32,
+        /// Raw output PULL listener descriptor inherited from the supervisor.
+        output_listener_fd: i32,
         /// First data-parallel engine rank expected to register on this
         /// transport.
         engine_start_index: u32,
@@ -283,6 +282,9 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
+    /// Whether a profiling session is awaiting an explicit stop. Held across each
+    /// start/stop utility call so a stale stop reply cannot clear a newer session.
+    profile_active: Mutex<bool>,
 
     /// Runtime used to send messages to the engine and drive all background tasks.
     runtime: BackgroundShutdownRuntime,
@@ -333,8 +335,8 @@ impl EngineCoreClient {
             }
 
             TransportMode::Bootstrapped {
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index,
                 engine_count,
                 ready_timeout,
@@ -345,8 +347,8 @@ impl EngineCoreClient {
                 }
 
                 transport::connect_bootstrapped(
-                    input_address,
-                    output_address,
+                    *input_listener_fd,
+                    *output_listener_fd,
                     *engine_start_index,
                     *engine_count,
                     *ready_timeout,
@@ -431,6 +433,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            profile_active: Mutex::new(false),
             runtime,
             output_task,
             dispatcher_task,
@@ -963,14 +966,38 @@ impl EngineCoreClient {
     }
 
     /// Start profiling the engine.
-    pub async fn start_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
-        self.call_utility::<(), _>("profile", (true, profile_prefix)).await?;
+    pub async fn start_profile(
+        &self,
+        profile_prefix: Option<&str>,
+        delay_iterations: Option<u64>,
+        max_iterations: Option<u64>,
+    ) -> Result<()> {
+        let mut active = self.profile_active.lock().await;
+        if *active {
+            return Err(Error::ProfileAlreadyActive);
+        }
+
+        // A cancelled start may still reach the engine, so only a reported
+        // failure clears the session; otherwise a stop is needed.
+        *active = true;
+        if let Err(error) = self
+            .call_utility::<(), _>(
+                "profile",
+                (true, profile_prefix, delay_iterations, max_iterations),
+            )
+            .await
+        {
+            *active = false;
+            return Err(error);
+        }
         Ok(())
     }
 
     /// Stop profiling the engine.
     pub async fn stop_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
+        let mut active = self.profile_active.lock().await;
         self.call_utility::<(), _>("profile", (false, profile_prefix)).await?;
+        *active = false;
         Ok(())
     }
 

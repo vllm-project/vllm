@@ -242,6 +242,12 @@ class AnthropicMessagesRequest(BaseModel):
             "to 256 bit)."
         ),
     )
+    watermarking: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to apply the engine's configured watermark to this request."
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
@@ -379,7 +385,9 @@ class AnthropicCountTokensRequest(BaseModel):
 
     model: str
     messages: list[AnthropicMessage]
+    output_config: AnthropicOutputConfig | None = None
     system: str | list[AnthropicContentBlock] | None = None
+    thinking: AnthropicThinkingConfig | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
 
