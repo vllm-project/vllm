@@ -101,6 +101,11 @@ logger = init_logger(__name__)
 
 _SHARED_REGION_GROUP_ID = -1
 
+# Re-handshake delay bounds for a pull peer whose local metadata keeps getting
+# invalidated, eg due to a persistent RDMA fault.
+_INVALID_PEER_MIN_BACKOFF_S = 1.0
+_INVALID_PEER_MAX_BACKOFF_S = 60.0
+
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
     """Sort transfer regions in model-layer order, then by cache name."""
@@ -340,7 +345,7 @@ class NixlBaseConnectorWorker:
         )
 
         # Per-FA-descriptor replicate flag, in _build_fa_local emission order.
-        fa_desc_replicated = self._fa_desc_replicated(num_fa_descs)
+        fa_desc_replicated = self._fa_desc_replicated(num_fa_descs, block_size_ratio)
         sharded_desc_end = len(src_blocks_data) - (
             self._logical_num_blocks if self._ple_region_index is not None else 0
         )
@@ -383,19 +388,22 @@ class NixlBaseConnectorWorker:
         """
         return tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1)
 
-    def _fa_desc_replicated(self, num_fa_descs: int) -> list[bool]:
-        """Per-FA-descriptor replicate flag, in _build_fa_local emission order
-        (region-major; one desc per block, with K/V packed). Length ``num_fa_descs``.
+    def _fa_desc_replicated(
+        self, num_fa_descs: int, block_size_ratio: int = 1
+    ) -> list[bool]:
+        """Per-FA-descriptor replicate flag, in _build_fa_local emission order:
+        region-major, ``region_num_blocks[i] * block_size_ratio`` descs per
+        region. Length ``num_fa_descs``.
         """
         assert self.transfer_topo is not None
         n_regions = len(self.block_len_per_layer)
         if n_regions == 0 or self.num_regions == 0:
             return [False] * num_fa_descs
-        nblk = num_fa_descs // self.num_regions
+        region_indices = self._transfer_layer_region_indices or range(n_regions)
         flags: list[bool] = []
-        for i in range(n_regions):
-            replicated = self._is_region_replicated(i)
-            flags.extend([replicated] * nblk)
+        for i in region_indices:
+            num_descs = self.region_num_blocks[i] * block_size_ratio
+            flags.extend([self._is_region_replicated(i)] * num_descs)
         assert len(flags) == num_fa_descs, (
             f"FA desc flags {len(flags)} != num_fa_descs {num_fa_descs}"
         )
@@ -682,6 +690,12 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
             dict
         )
+        # Failed reads need a local metadata probe; invalid peers wait for drain.
+        self._failed_remote_engines: set[EngineId] = set()
+        self._invalid_remote_engines: set[EngineId] = set()
+        # Invalid engine -> (backoff, earliest release time). Kept across release
+        # so that repeat invalidations back off.
+        self._invalid_engine_backoff: dict[EngineId, tuple[float, float]] = {}
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
 
@@ -775,9 +789,12 @@ class NixlBaseConnectorWorker:
         self.region_names: list[str] = []
         self.region_num_blocks: list[int] = []
         self._mixed_mem_types = False
+        # True on TP ranks that share a HiSparse host pool with TP rank 0 and
+        # leave its NIXL registration and DRAM reads to rank 0.
+        self._skip_dram_xfer = False
         self._desc_is_dram_by_block_size: dict[int, np.ndarray] = {}
         self._desc_pos_by_block_size: dict[int, np.ndarray] = {}
-        self._dram_src_handles_by_block_size: dict[int, int] = {}
+        self._dram_src_handles_by_block_size: dict[int, int | None] = {}
 
         # PP>1 (push mode): this worker holds a contiguous layer slice and
         # transfers into the matching sub-range of a PP=1 remote's regions.
@@ -814,7 +831,7 @@ class NixlBaseConnectorWorker:
         # Populated dynamically during handshake based on remote configuration.
         # Per-source split handles, keyed by (tp_ratio, remote_block_size).
         self.src_xfer_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
-        self._dram_src_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
+        self._dram_src_handles_by_tp_ratio: dict[tuple[int, int], list[int | None]] = {}
         # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
         self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
 
@@ -1804,12 +1821,15 @@ class NixlBaseConnectorWorker:
         self.num_descs = sum(xfer_region_num_blocks)
 
         self._mixed_mem_types = len(set(region_mem_types)) > 1
+        self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (
                 "Mixed-device KV registration is only supported for MLA "
                 "models without Mamba layers."
             )
         for mem_type in sorted(set(region_mem_types)):
+            if mem_type == "DRAM" and self._skip_dram_xfer:
+                continue
             ranges_for_mem_type = [
                 (start, end - start, device_id, "")
                 for (_, cache_mem_type), (
@@ -2174,18 +2194,16 @@ class NixlBaseConnectorWorker:
             self._desc_pos_by_block_size[block_size] = desc_pos
 
             # DRAM descriptors are registered under CPU device 0.
-            blocks_data = [
-                (addr, length, 0) if is_dram else (addr, length, dev)
-                for (addr, length, dev), is_dram in zip(
-                    blocks_data, desc_is_dram, strict=True
+            blocks_data[desc_is_dram, 2] = 0
+            dram_blocks = blocks_data[dram_idx]
+            vram_blocks = blocks_data[vram_idx]
+            if self._skip_dram_xfer:
+                self._dram_src_handles_by_block_size[block_size] = None
+            else:
+                dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
+                self._dram_src_handles_by_block_size[block_size] = (
+                    self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", dram_descs)
                 )
-            ]
-            dram_blocks = [blocks_data[i] for i in dram_idx]
-            vram_blocks = [blocks_data[i] for i in vram_idx]
-            dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
-            self._dram_src_handles_by_block_size[block_size] = (
-                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", dram_descs)
-            )
             descs = self.nixl_wrapper.get_xfer_descs(vram_blocks, self.nixl_memory_type)
             return (
                 self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs),
@@ -2414,12 +2432,15 @@ class NixlBaseConnectorWorker:
                 if self._mixed_mem_types:
                     handle_data = np.asarray(handle_data, dtype=np.uint64)
                     desc_is_dram = self._desc_is_dram_by_block_size[remote_block_size]
-                    dram_descs = self.nixl_wrapper.get_xfer_descs(
-                        handle_data[desc_is_dram], "DRAM"
-                    )
-                    dram_handle = self.nixl_wrapper.prep_xfer_dlist(
-                        "NIXL_INIT_AGENT", dram_descs
-                    )
+                    if self._skip_dram_xfer:
+                        dram_handle = None
+                    else:
+                        dram_descs = self.nixl_wrapper.get_xfer_descs(
+                            handle_data[desc_is_dram], "DRAM"
+                        )
+                        dram_handle = self.nixl_wrapper.prep_xfer_dlist(
+                            "NIXL_INIT_AGENT", dram_descs
+                        )
                     self._dram_src_handles_by_tp_ratio[split_key].append(dram_handle)
                     handle_data = handle_data[~desc_is_dram]
                 descs = self.nixl_wrapper.get_xfer_descs(
@@ -2878,6 +2899,27 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
+    def _leaves_dram_xfer_to_rank0(self) -> bool:
+        """Whether this rank leaves the DRAM regions' NIXL work to TP rank 0.
+
+        A HiSparse host pool shared by the local TP ranks (one mmap per DP
+        rank) is registered with NIXL and filled by TP rank 0 alone: every
+        rank would otherwise register the same pages on every NIC and READ the
+        same host KV into them. Private pools are unaffected.
+        """
+        if not (
+            self._mixed_mem_types and self.kv_cache_config.hisparse_shared_host_pool
+        ):
+            return False
+        skip = self.tp_rank != 0
+        logger.info(
+            "HiSparse host pool: NIXL DRAM registration and reads on TP rank 0 "
+            "only (tp_rank=%d, skip=%s)",
+            self.tp_rank,
+            skip,
+        )
+        return skip
+
     def _zero_region_blocks(self, block_ids: BlockIds) -> None:
         """Clear clipped physical pages in their owning region only."""
         if not any(block_ids):
@@ -2885,6 +2927,9 @@ class NixlBaseConnectorWorker:
         bases = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
         for region, blocks in enumerate(block_ids):
             if not blocks:
+                continue
+            if self._skip_dram_xfer and self.region_mem_types[region] == "DRAM":
+                # The shared pool is rank 0's to write.
                 continue
             cache = self.device_kv_caches[self.region_names[region]]
             storage = cache.untyped_storage()
@@ -3031,7 +3076,7 @@ class NixlBaseConnectorWorker:
         # Handle timeout to avoid stranding blocks on remote.
         self._reap_expired_send_leases(done_sending)
 
-        self._cleanup_replaced_remote_engines()
+        self._cleanup_remote_engines()
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
@@ -3197,6 +3242,12 @@ class NixlBaseConnectorWorker:
         """
         if record_failed_transfer:
             self.xfer_stats.record_failed_transfer()
+            if (
+                self._TRANSFER_MODE == "pull"
+                and (meta := self._recving_metadata.get(req_id)) is not None
+                and meta.remote is not None
+            ):
+                self._failed_remote_engines.add(meta.remote.engine_id)
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
@@ -3236,6 +3287,9 @@ class NixlBaseConnectorWorker:
             ):
                 continue  # handshake is still pending
 
+            # Refresh the TTL: a heartbeat means the router still paired this P-D,
+            # so requests are still waiting on this engine
+            self._engine_last_active[engine_id] = time.perf_counter()
             # Build the heartbeat message: "HB:req1,req2,..."
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
             for agent_name in self._remote_agents[engine_id].values():
@@ -3586,10 +3640,13 @@ class NixlBaseConnectorWorker:
         prevents us from using background threads, though memory usage is not guaranteed
         to be "optimal" until a new handshake is performed.
 
-        Engines with active transfers or pending handshakes cannot be stale:
+        Engines with active transfers, heartbeats or pending handshakes cannot
+        be stale:
         - Reads stamp _engine_last_active when they are issued, and engines a
           transfer is still reading from are held back explicitly, since the
           stamp is not refreshed while the read runs.
+        - Heartbeats stamp it too, so an engine stays registered while this
+          instance holds requests waiting on it.
         - Pending handshakes don't have an _engine_last_active entry yet
         """
         # NOTE (NickLucche): This does NOT currently prevent OOMing if a huge number
@@ -3638,15 +3695,38 @@ class NixlBaseConnectorWorker:
             engine_id,
         )
 
-    def _cleanup_replaced_remote_engines(self) -> None:
-        """Release replaced pull peers once requests and handshakes have drained."""
+    def _cleanup_remote_engines(self) -> None:
+        """Release replaced or locally invalid pull peers after their reads drain."""
+        # TODO: Also handle push mode, which handshakes in both directions.
         if self._TRANSFER_MODE != "pull":
             return
+        # A background handshake may be loading native metadata with the GIL
+        # released. Defer both probing and cleanup until it has finished.
         with self._handshake_lock:
             if self._handshake_futures:
                 return
             replaced = self._remote_agents.keys() - self._engine_by_address.values()
-        if not replaced:
+        now = time.perf_counter()
+        for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
+            agents = self._remote_agents.get(engine_id, {}).values()
+            try:
+                # No descriptors: query local existence, not peer health.
+                if not all(map(self.nixl_wrapper.check_remote_metadata, agents)):
+                    self._mark_remote_engine_invalid(engine_id, now)
+            except Exception:
+                logger.warning(
+                    "Could not check local NIXL metadata for engine %s.",
+                    engine_id,
+                    exc_info=True,
+                )
+        self._failed_remote_engines.clear()
+        # Invalid peers keep rejecting new reads until their backoff has elapsed.
+        invalid = {
+            engine_id
+            for engine_id in self._invalid_remote_engines
+            if self._invalid_engine_backoff.get(engine_id, (0.0, 0.0))[1] <= now
+        }
+        if not replaced and not invalid:
             return
         # _recving_metadata is only accessed from this (main) thread.
         busy = {
@@ -3654,9 +3734,42 @@ class NixlBaseConnectorWorker:
             for meta in self._recving_metadata.values()
             if meta.remote is not None
         }
-        for engine_id in replaced - busy:
+        # Replaced peers can still serve queued requests. Invalid peers reject
+        # new reads, but must retain descriptors until outstanding handles end.
+        invalid -= self._engines_with_inflight_transfers()
+        for engine_id in (replaced - busy) | invalid:
             self._cleanup_remote_engine(engine_id, log_eviction=False)
-            logger.info("Released NIXL state for replaced remote engine %s.", engine_id)
+            logger.info(
+                "Released NIXL state for replaced or locally invalid remote engine %s.",
+                engine_id,
+            )
+
+    def _mark_remote_engine_invalid(self, engine_id: EngineId, now: float) -> None:
+        """Schedule release of an engine whose local NIXL metadata is gone.
+
+        The first invalidation is released as soon as reads drain. Repeats
+        before the peer has stayed healthy for the max backoff double the
+        delay, during which reads fail fast instead of re-handshaking.
+        """
+        # Forget engines that have stayed healthy long enough.
+        for eid, (_, release_at) in list(self._invalid_engine_backoff.items()):
+            if now - release_at > _INVALID_PEER_MAX_BACKOFF_S:
+                del self._invalid_engine_backoff[eid]
+        prev = self._invalid_engine_backoff.get(engine_id)
+        backoff = 0.0
+        if prev is not None:
+            backoff = min(
+                max(2 * prev[0], _INVALID_PEER_MIN_BACKOFF_S),
+                _INVALID_PEER_MAX_BACKOFF_S,
+            )
+        self._invalid_engine_backoff[engine_id] = (backoff, now + backoff)
+        self._invalid_remote_engines.add(engine_id)
+        logger.warning(
+            "Local NIXL metadata for remote engine %s was invalidated; "
+            "re-handshaking after reads drain%s.",
+            engine_id,
+            f" and a {backoff:.0f}s backoff" if backoff else "",
+        )
 
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
@@ -3664,8 +3777,8 @@ class NixlBaseConnectorWorker:
         """Remove all state for a single remote engine.
 
         Releases NIXL resources (dlist handles, remote agents) and clears
-        all per-engine data structures. Used by TTL eviction, replaced peer
-        cleanup and shutdown.
+        all per-engine data structures. Used by TTL eviction, replaced/invalid
+        peer cleanup and shutdown.
         """
         assert engine_id in self._remote_agents
 
@@ -3680,6 +3793,9 @@ class NixlBaseConnectorWorker:
                     del self._engine_by_address[address]
         for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
+
+        self._failed_remote_engines.discard(engine_id)
+        self._invalid_remote_engines.discard(engine_id)
 
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
@@ -3715,11 +3831,13 @@ class NixlBaseConnectorWorker:
             for handles in self.src_xfer_handles_by_tp_ratio.values():
                 for handle in handles:
                     self.nixl_wrapper.release_dlist_handle(handle)
-            for handles in self._dram_src_handles_by_tp_ratio.values():
-                for handle in handles:
-                    self.nixl_wrapper.release_dlist_handle(handle)
-            for handle in self._dram_src_handles_by_block_size.values():
-                self.nixl_wrapper.release_dlist_handle(handle)
+            for dram_handles in self._dram_src_handles_by_tp_ratio.values():
+                for dram_handle in dram_handles:
+                    if dram_handle is not None:
+                        self.nixl_wrapper.release_dlist_handle(dram_handle)
+            for dram_handle in self._dram_src_handles_by_block_size.values():
+                if dram_handle is not None:
+                    self.nixl_wrapper.release_dlist_handle(dram_handle)
         except Exception:
             logger.exception("NIXL dlist-handle release failed at shutdown.")
         self.src_xfer_handles_by_block_size.clear()
