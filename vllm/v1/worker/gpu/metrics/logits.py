@@ -51,6 +51,11 @@ def _aggregate_num_nans_per_request_kernel(
     result_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """Sum one request's rows from the previous end to its own end.
+
+    Counts [1, 2, 3, 4, 5] with ends [2, 3, 5] yield [3, 3, 9].
+    Counts [1, 2, 3] with ends [2, 2, 3] yield [3, 0, 3].
+    """
     req_idx = tl.program_id(0)
     start = tl.load(
         cumulative_row_ends_ptr + (req_idx - 1) * cumulative_row_ends_stride,
