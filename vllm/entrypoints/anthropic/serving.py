@@ -132,9 +132,12 @@ def _to_anthropic_stop_reason(
 
 
 def _is_json(text: str) -> bool:
+    text = text.strip()
+    if not text:
+        return True
     try:
         json.loads(text)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         return False
     return True
 
