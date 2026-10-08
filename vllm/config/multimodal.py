@@ -427,6 +427,11 @@ class MultiModalConfig:
     This reduces engine startup time but shifts the responsibility to users for
     estimating the peak memory usage of the activation of multimodal encoder and
     embedding cache."""
+    image_pruning_rate: float | None = Field(default=None, ge=0.0, lt=1.0)
+    """Fraction of image tokens to prune from each image via Redundancy-Aware
+    Token Eviction (RATE). Value sits in range [0;1); pruning is enabled when
+    it is greater than 0.
+    """
     video_pruning_rate: float | None = Field(default=None, ge=0.0, lt=1.0)
     """Fraction of video tokens to prune from each video. Value sits in range
     [0;1); pruning is enabled when it is greater than 0. The pruning algorithm
@@ -749,7 +754,12 @@ class MultiModalConfig:
         )
 
     def is_multimodal_pruning_enabled(self):
-        return self.get_video_pruning_spec() is not None
+        return self.is_image_pruning_enabled() or (
+            self.get_video_pruning_spec() is not None
+        )
+
+    def is_image_pruning_enabled(self):
+        return self.image_pruning_rate is not None and self.image_pruning_rate > 0
 
     def get_video_pruning_spec(self) -> tuple[VideoPruningMethod, float] | None:
         """Return `(method, rate)` when video pruning is enabled, else None.
