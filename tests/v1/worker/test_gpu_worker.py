@@ -360,7 +360,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     metadata_handle = _OrderedHandle(log, "meta")
     tensor_handle = _OrderedHandle(log, "tensor")
 
-    def isend_tensor_dict(tensors, all_gather_group=None, all_gather_tensors=None):
+    def isend_tensor_dict(tensors, all_gather_group=None):
         log.append("isend")
         return [metadata_handle, tensor_handle]
 
@@ -378,9 +378,6 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(
-                pass_config=SimpleNamespace(enable_sp=False)
-            ),
             parallel_config=SimpleNamespace(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
