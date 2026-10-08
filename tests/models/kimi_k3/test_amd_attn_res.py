@@ -191,3 +191,102 @@ def test_amd_attn_res_fused_contract(
         original_blocks[:, block_write_idx].copy_(expected_prefix)
     torch.testing.assert_close(blocks, original_blocks, atol=0, rtol=0)
     assert actual.is_contiguous()
+
+
+@pytest.mark.parametrize(
+    "num_tokens,num_blocks,has_delta,write_block",
+    [
+        (0, 0, False, False),
+        (1, 0, True, True),
+        (17, 4, True, True),
+        (320, 8, False, False),
+    ],
+)
+def test_amd_attn_res_fp8_preserves_prefix_and_quantized_output(
+    num_tokens,
+    num_blocks,
+    has_delta,
+    write_block,
+    default_vllm_config,
+):
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    torch.manual_seed(41)
+    hidden_size = 7168
+    prefix = _randn_with_row_padding(num_tokens, hidden_size, padding=7)
+    delta = _randn_with_row_padding(num_tokens, hidden_size) if has_delta else None
+    blocks = _randn_with_row_padding(num_tokens, 9, hidden_size, padding=13)
+    norm = 1 + torch.randn(hidden_size, device="cuda", dtype=torch.bfloat16) * 0.1
+    score = torch.randn_like(norm) / hidden_size**0.5
+    out_norm = 1 + torch.randn_like(norm) * 0.1
+    ref_prefix, ref_blocks = prefix.clone(), blocks.clone()
+    kwargs = dict(
+        num_blocks=num_blocks,
+        block_write_idx=num_blocks if write_block else -1,
+        eps=1e-5,
+        output_norm_eps=1e-5,
+    )
+    reference = attn_res(ref_prefix, delta, ref_blocks, norm, score, out_norm, **kwargs)
+    output, scale = attn_res(
+        prefix,
+        delta,
+        blocks,
+        norm,
+        score,
+        out_norm,
+        quant_dtype=current_platform.fp8_dtype(),
+        **kwargs,
+    )
+    assert output.dtype == current_platform.fp8_dtype()
+    assert scale.shape == (num_tokens, 1)
+    if num_tokens:
+        # Keep reference rounding independent of Inductor's fused quantization.
+        quant = QuantFP8(
+            static=False, group_shape=GroupShape.PER_TOKEN, compile_native=False
+        )
+        ref_output, ref_scale = quant(reference)
+        torch.testing.assert_close(scale, ref_scale, atol=1e-7, rtol=1e-6)
+        # Floating-point fusion can move values at FP8 rounding midpoints.
+        # Bound each change to the adjacent code and bound how often it occurs.
+        code_delta = (
+            output.view(torch.uint8).to(torch.int16)
+            - ref_output.view(torch.uint8).to(torch.int16)
+        ).abs()
+        assert code_delta.max().item() <= 1
+        assert (code_delta != 0).float().mean().item() < 1e-4
+    torch.testing.assert_close(prefix, ref_prefix, atol=0, rtol=0)
+    torch.testing.assert_close(blocks, ref_blocks, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "matching,requires_unquantized", [(True, False), (False, False), (True, True)]
+)
+def test_mla_input_quant_requires_all_consumers(matching, requires_unquantized):
+    from types import SimpleNamespace
+
+    from torch import nn
+
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        expose_input_quant_key,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+    )
+    from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
+
+    attention = object.__new__(KimiK3MultiHeadLatentAttentionWrapper)
+    nn.Module.__init__(attention)
+    attention.indexer = None
+    attention.q_lora_rank = 1536
+    attention.fused_qkv_a_proj = nn.Identity()
+    attention.g_proj = nn.Identity()
+    kernel = SimpleNamespace(input_quant_key=lambda: kFp8DynamicTokenSym)
+    expose_input_quant_key(attention.fused_qkv_a_proj, kernel)
+    if matching:
+        expose_input_quant_key(attention.g_proj, kernel)
+    attention.g_proj.requires_unquantized_input = requires_unquantized
+    actual = attention.get_input_quant_key()
+    assert actual == (
+        kFp8DynamicTokenSym if matching and not requires_unquantized else None
+    )

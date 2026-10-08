@@ -22,6 +22,7 @@ def _attn_res_kernel(
     qk_weight_ptr,
     output_norm_weight_ptr,
     output_ptr,
+    output_scale_ptr,
     stride_prefix_m: tl.constexpr,
     stride_delta_m: tl.constexpr,
     stride_block_m: tl.constexpr,
@@ -35,6 +36,7 @@ def _attn_res_kernel(
     HAS_DELTA: tl.constexpr,
     WRITE_BLOCK: tl.constexpr,
     APPLY_OUTPUT_NORM: tl.constexpr,
+    QUANT_MAX: tl.constexpr,
     BLOCK_L: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -129,6 +131,14 @@ def _attn_res_kernel(
             output_norm_weight_ptr + d_offsets, mask=d_mask, other=0.0
         ).to(tl.float32)
         output = mixed * output_reciprocal_std * output_norm_weight
+    if QUANT_MAX > 0:
+        # Preserve the rounding of the original BF16 output before quantizing.
+        output = output.to(prefix_ptr.dtype.element_ty).to(tl.float32)
+        amax = tl.max(tl.where(d_mask, tl.abs(output), 0.0), axis=0)
+        scale = tl.maximum(amax, 1e-10) * (1.0 / QUANT_MAX)
+        inv_scale = 1.0 / scale
+        output = tl.minimum(tl.maximum(output * inv_scale, -QUANT_MAX), QUANT_MAX)
+        tl.store(output_scale_ptr + row_idx, scale)
     tl.store(
         output_ptr + row_idx * stride_output_m + d_offsets,
         output,
@@ -147,7 +157,9 @@ def attn_res(
     block_write_idx: int,
     eps: float,
     output_norm_eps: float,
-) -> torch.Tensor:
+    *,
+    quant_dtype: torch.dtype | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     num_tokens, hidden_size = prefix.shape
     assert prefix.stride(-1) == 1
     assert delta is None or delta.stride(-1) == 1
@@ -155,9 +167,18 @@ def attn_res(
     assert norm_weight.stride(-1) == 1
     assert qk_weight.stride(-1) == 1
     assert output_norm_weight is None or output_norm_weight.stride(-1) == 1
-    output = prefix.new_empty(prefix.shape)
+    if quant_dtype is not None:
+        assert quant_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    output = torch.empty_like(
+        prefix, dtype=quant_dtype or prefix.dtype, memory_format=torch.contiguous_format
+    )
+    scale = (
+        torch.empty((num_tokens, 1), device=prefix.device, dtype=torch.float32)
+        if quant_dtype is not None
+        else None
+    )
     if num_tokens == 0:
-        return output
+        return output if scale is None else (output, scale)
 
     # Source tiling helps decode, while one-source tiles scale better for prefill.
     if num_tokens >= 256 or num_blocks <= 1:
@@ -172,6 +193,7 @@ def attn_res(
         qk_weight,
         output_norm_weight,
         output,
+        scale,
         prefix.stride(0),
         0 if delta is None else delta.stride(0),
         blocks.stride(0),
@@ -185,9 +207,10 @@ def attn_res(
         HAS_DELTA=delta is not None,
         WRITE_BLOCK=block_write_idx >= 0,
         APPLY_OUTPUT_NORM=output_norm_weight is not None,
+        QUANT_MAX=0.0 if quant_dtype is None else torch.finfo(quant_dtype).max,
         BLOCK_L=block_l,
         BLOCK_D=triton.next_power_of_2(hidden_size),
         num_warps=num_warps,
         num_stages=2,
     )
-    return output
+    return output if scale is None else (output, scale)
