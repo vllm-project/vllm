@@ -53,12 +53,11 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.utils.cake_routes import KDA_DECODE_ROUTE, cake_route_enabled
 from vllm.utils.flashinfer import (
     flashinfer_fused_kda_decode,
+    flashinfer_fused_kda_decode_selects_backend,
     flashinfer_packed_fused_kda_decode,
     flashinfer_recurrent_kda,
-    has_flashinfer_cake_fused_kda_decode,
     has_flashinfer_fused_kda_decode,
     has_flashinfer_packed_fused_kda_decode,
     has_flashinfer_recurrent_kda,
@@ -218,13 +217,33 @@ def is_flashinfer_fused_kda_decode_supported(
     )
 
 
-# Cake fused KDA decode (``fused_kda_decode(..., backend="cake")``, selected by
-# VLLM_CAKE_ROUTES=kda_decode) serves the FlashInfer fused-decode contract
-# above. ``unique_or_null``: the KDA metadata fills CUDA-graph padding rows with
-# NULL_BLOCK_ID (0), the reserved null block no request owns, and every live
-# T=1 row carries its own block, so state indices are non-positive or unique;
-# non-positive rows produce zeros and update no state.
-_CAKE_KDA_STATE_INDICES_MODE = "unique_or_null"
+# State-indices mode handed to FlashInfer's ``fused_kda_decode`` when it
+# selects the kernel itself (``backend="auto"``). The KDA metadata fills
+# CUDA-graph padding rows with NULL_BLOCK_ID (0), the reserved null block no
+# request owns, and every live T=1 row owns its own block, so the state indices
+# are non-positive or unique; FlashInfer treats non-positive rows as the null
+# path (zero output, no state update). ``positive_unique`` would be a false
+# assertion under padding. FlashInfer never verifies this mode on the device,
+# so it must hold for every caller path that reaches the FlashInfer decode.
+_FLASHINFER_KDA_STATE_INDICES_MODE = "unique_or_null"
+
+
+def _flashinfer_kda_decode_kwargs(backend: str) -> dict[str, str]:
+    """Extra ``flashinfer_fused_kda_decode`` kwargs for the resolved KDA decode
+    backend.
+
+    When ``backend`` is ``"flashinfer"`` and the installed FlashInfer
+    ``fused_kda_decode`` accepts ``backend`` / ``state_indices_mode``
+    (FlashInfer >= 0.7.1rc5), pass ``backend="auto"`` and the host-known
+    state-indices mode so FlashInfer selects the kernel itself. Otherwise (the
+    pinned 0.7.0.post1, or another decode backend) the call is unchanged.
+    """
+    if backend != "flashinfer" or not flashinfer_fused_kda_decode_selects_backend():
+        return {}
+    return {
+        "backend": "auto",
+        "state_indices_mode": _FLASHINFER_KDA_STATE_INDICES_MODE,
+    }
 
 
 def is_flashinfer_fused_kda_spec_decode_supported(
@@ -705,31 +724,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             conv_state_dtype,
             recurrent_state_dtype,
         )
-        self.cake_kda_decode = False
-        if cake_route_enabled(KDA_DECODE_ROUTE):
-            # Decided once: the installed FlashInfer must offer the Cake
-            # backend and the layer must fit the fused-decode contract (the
-            # fused decode has no convolution bias; self.conv1d has none).
-            self.cake_kda_decode = (
-                has_flashinfer_cake_fused_kda_decode()
-                and is_flashinfer_fused_kda_decode_supported(
-                    self.local_num_heads,
-                    self.head_dim,
-                    self.conv_size,
-                    self.num_spec,
-                    vllm_config.model_config.dtype,
-                    conv_state_dtype,
-                    recurrent_state_dtype,
-                )
-            )
+        self.flashinfer_kda_decode_kwargs: dict[str, str] = (
+            _flashinfer_kda_decode_kwargs(self.kda_decode_backend)
+        )
+        if self.flashinfer_kda_decode_kwargs:
             logger.info_once(
-                "Cake KDA fused decode route %s (heads=%d, head_dim=%d, "
-                "recurrent state %s, FlashInfer Cake fused decode %s).",
-                "taken" if self.cake_kda_decode else "not admitted",
-                self.local_num_heads,
-                self.head_dim,
-                recurrent_state_dtype,
-                "available" if has_flashinfer_cake_fused_kda_decode() else "missing",
+                "FlashInfer selects the fused KDA decode kernel (%s).",
+                self.flashinfer_kda_decode_kwargs,
             )
         spec_decode_backend = (
             additional_config.get("kda_spec_decode_backend", "auto")
@@ -752,7 +753,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if (
             self.kda_decode_backend != "triton"
             or self.kda_spec_decode_backend == "flashinfer"
-            or self.cake_kda_decode
         ):
             decode_conv1d_weight = torch.empty(
                 3,
@@ -949,18 +949,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         output_gate: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """FlashInfer fused T=1 decode; ``backend="cake"`` with the
-        ``unique_or_null`` state-indices mode when the Cake route is on.
+        """FlashInfer fused T=1 decode.
 
-        FlashInfer validates the layout on the host and raises before any
-        launch when no generated Cake variant matches it.
+        ``self.flashinfer_kda_decode_kwargs`` adds ``backend="auto"`` and the
+        state-indices mode when the installed FlashInfer accepts them, so
+        FlashInfer selects the kernel itself; otherwise the call is unchanged.
         """
-        kwargs: dict[str, str] = {}
-        if self.cake_kda_decode:
-            kwargs = {
-                "backend": "cake",
-                "state_indices_mode": _CAKE_KDA_STATE_INDICES_MODE,
-            }
         flashinfer_fused_kda_decode(
             x=mixed_qkv,
             weight=self.decode_conv1d_weight,
@@ -976,7 +970,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             lower_bound=self.gate_lower_bound,
             norm_eps=self.o_norm.eps,
             output=output,
-            **kwargs,
+            **self.flashinfer_kda_decode_kwargs,
         )
 
     @eager_break_during_capture
@@ -1061,7 +1055,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             return
 
         if (
-            (self.kda_decode_backend != "triton" or self.cake_kda_decode)
+            self.kda_decode_backend != "triton"
             and self.decode_conv1d_weight is not None
             and self.decode_norm_weight is not None
             and not has_spec_decode
@@ -1070,7 +1064,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         ):
             assert non_spec_state_indices_tensor is not None
             state_indices = non_spec_state_indices_tensor[:num_actual_tokens]
-            if self.cake_kda_decode or self.kda_decode_backend == "flashinfer":
+            if self.kda_decode_backend == "flashinfer":
                 self._flashinfer_fused_kda_decode(
                     mixed_qkv,
                     conv_state,

@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable, Iterator
@@ -490,11 +491,9 @@ def has_flashinfer_fused_kda_decode() -> bool:
     )
 
 
-def _fused_kda_decode_has_cake_signature(fn: Callable[..., Any]) -> bool:
-    """``fused_kda_decode`` accepts ``backend`` and ``state_indices_mode``, i.e.
-    the FlashInfer build carries the Cake fused KDA decode backend."""
-    import inspect
-
+def _fused_kda_decode_accepts_backend(fn: Callable[..., Any]) -> bool:
+    """Return whether ``fn`` (FlashInfer's ``fused_kda_decode``) accepts the
+    ``backend`` and ``state_indices_mode`` keyword arguments."""
     try:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
@@ -503,26 +502,14 @@ def _fused_kda_decode_has_cake_signature(fn: Callable[..., Any]) -> bool:
 
 
 @functools.cache
-def has_flashinfer_cake_fused_kda_decode() -> bool:
-    """Return whether FlashInfer fused KDA decode offers ``backend="cake"``."""
+def flashinfer_fused_kda_decode_selects_backend() -> bool:
+    """Return whether FlashInfer's ``fused_kda_decode`` accepts ``backend=`` and
+    ``state_indices_mode=`` (FlashInfer >= 0.7.1rc5; the pinned 0.7.0.post1 does
+    not), so the caller can let FlashInfer select the decode kernel itself."""
     if not has_flashinfer_fused_kda_decode():
         return False
     mod = _get_submodule("flashinfer.kda_decode")
-    return mod is not None and _fused_kda_decode_has_cake_signature(
-        mod.fused_kda_decode
-    )
-
-
-@functools.cache
-def has_flashinfer_cake_kimi_k3_mla() -> bool:
-    """Return whether FlashInfer carries the Cake Kimi-K3 MLA decode backend
-    (``trtllm_batch_decode_with_kv_cache_mla(..., backend="cake")``)."""
-    if not has_flashinfer():
-        return False
-    try:
-        return importlib.util.find_spec("flashinfer.mla.cake_kimi_k3_mla") is not None
-    except (ImportError, ValueError):
-        return False
+    return mod is not None and _fused_kda_decode_accepts_backend(mod.fused_kda_decode)
 
 
 @functools.cache
@@ -1360,9 +1347,8 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_recurrent_kda",
-    "has_flashinfer_cake_fused_kda_decode",
-    "has_flashinfer_cake_kimi_k3_mla",
     "has_flashinfer_fused_kda_decode",
+    "flashinfer_fused_kda_decode_selects_backend",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_bf16_fp4",
     "has_flashinfer_b12x_moe",
