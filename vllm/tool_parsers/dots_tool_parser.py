@@ -80,14 +80,19 @@ class DotsToolParser(ToolParser):
 
     @staticmethod
     def _convert_param_value(value: str, param_type: Any) -> Any:
-        if value.lower() == "null":
-            return None
-
         if isinstance(param_type, list):
+            allows_null = any(
+                isinstance(item, str) and item.lower() == "null" for item in param_type
+            )
             param_type = next((item for item in param_type if item != "null"), "string")
+        else:
+            allows_null = isinstance(param_type, str) and param_type.lower() == "null"
         if not isinstance(param_type, str):
             param_type = str(param_type)
         param_type = param_type.lower()
+
+        if value.lower() == "null":
+            return None if allows_null else value
 
         if param_type in {"string", "str", "text"}:
             return value
@@ -103,7 +108,14 @@ class DotsToolParser(ToolParser):
             except (TypeError, ValueError):
                 return value
         if param_type in {"boolean", "bool"}:
-            return value.lower() in {"true", "1"}
+            lowered = value.lower()
+            if lowered in {"true", "1"}:
+                return True
+            if lowered in {"false", "0"}:
+                return False
+            # Keep invalid boolean text for schema validation instead of
+            # silently reading it as False.
+            return value
 
         try:
             return json.loads(value)
@@ -131,12 +143,21 @@ class DotsToolParser(ToolParser):
             alternatives = schema.get(keyword)
             if not isinstance(alternatives, list):
                 continue
+            nullable = any(
+                isinstance(alternative, dict) and alternative.get("type") == "null"
+                for alternative in alternatives
+            )
             for alternative in alternatives:
                 if isinstance(alternative, dict) and alternative.get("type") == "null":
                     continue
                 resolved = self._resolve_param_type(alternative, defs, depth + 1)
-                if resolved is not None:
+                if resolved is None:
+                    continue
+                if not nullable:
                     return resolved
+                if isinstance(resolved, list):
+                    return resolved if "null" in resolved else [*resolved, "null"]
+                return [resolved, "null"]
         return None
 
     @staticmethod
