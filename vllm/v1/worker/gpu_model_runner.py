@@ -234,6 +234,7 @@ from .utils import (
     allocate_kv_cache,
     bind_kv_cache,
     copy_kv_cache_blocks_inplace,
+    initialize_mamba_checkpoint_builders,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
 )
@@ -7091,6 +7092,7 @@ class GPUModelRunner(
         # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
 
+        attn_groups = [group for groups in self.attn_groups for group in groups]
         # Initialize drafter attention backend
         if self.speculative_config and (
             self.speculative_config.use_eagle()
@@ -7101,6 +7103,10 @@ class GPUModelRunner(
                 EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+            attn_groups.extend(self.drafter.draft_attn_groups)
+        initialize_mamba_checkpoint_builders(
+            attn_groups, kv_cache_config, self.vllm_config
+        )
 
     def _check_and_update_cudagraph_mode(
         self,
