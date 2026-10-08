@@ -184,6 +184,9 @@ class FourierRotaryEmbedding(RotaryEmbedding):
 
         return query, key
 
+    def get_rotation(self, positions: torch.Tensor, dtype: torch.dtype) -> None:
+        return None  # Per-KV-head angles; not a cos/sin table lookup.
+
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         """Load fope weights."""
         world_size = get_tensor_model_parallel_world_size()

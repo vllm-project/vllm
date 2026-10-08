@@ -54,6 +54,7 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
+    from vllm.model_executor.layers.rotary_embedding.base import RopeRotation
 
 logger = init_logger(__name__)
 
@@ -440,6 +441,30 @@ class Attention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         compilation_config = vllm_config.compilation_config
+        pass_config = compilation_config.pass_config
+        supports_rope_kvcache = self.impl.fused_rope_kvcache_q_out_supported()
+        if (
+            pass_config.fuse_rope_kvcache
+            and current_platform.is_cuda()
+            and not supports_rope_kvcache
+        ):
+            logger.warning_once(
+                "fuse_rope_kvcache=True has no effect for the selected %s "
+                "attention backend in this configuration. These layers will "
+                "use unfused RoPE and KV-cache updates.",
+                self.attn_backend.get_name(),
+            )
+        self._fuse_rope_kvcache = bool(
+            pass_config.fuse_rope_kvcache
+            and supports_rope_kvcache
+            and kv_sharing_target_layer_name is None
+            and self.head_size_v == self.head_size
+            and self.kv_cache_torch_dtype == self.dtype
+            and not pass_config.fuse_attn_quant
+        )
+        self.rope_kvcache_fusion_max_token_num = (
+            pass_config.rope_kvcache_fusion_max_token_num
+        )
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -488,13 +513,16 @@ class Attention(nn.Module, AttentionLayerBase):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         # For some alternate attention backends like MLA the attention output
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
+        *,
+        positions: torch.Tensor | None = None,
+        rotary_emb: nn.Module | None = None,
     ) -> torch.Tensor:
         """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
@@ -503,7 +531,36 @@ class Attention(nn.Module, AttentionLayerBase):
         the model runner's `execute_model` method. It is accessed via forward
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
+
+        When `rotary_emb` is given, RoPE is applied to `query` and `key` here,
+        fused with the KV-cache update when the backend supports it.
         """
+        encoded = (
+            self.layer_name
+            if self.use_direct_call
+            else _encode_layer_name(self.layer_name)
+        )
+        if rotary_emb is not None:
+            assert positions is not None and key is not None and value is not None
+            rotation = self._get_fused_rope_rotation(positions, query, rotary_emb)
+            if rotation is None:
+                query, key = rotary_emb(positions, query, key)
+            else:
+                query = query.view(-1, self.num_heads, self.head_size)
+                key = key.view(-1, self.num_kv_heads, self.head_size)
+                value = value.view(-1, self.num_kv_heads, self.head_size_v)
+                query_out = torch.empty_like(
+                    query, memory_format=torch.contiguous_format
+                )
+                op = (
+                    fused_rope_and_unified_kv_cache_update_q_out
+                    if self.use_direct_call
+                    else torch.ops.vllm.fused_rope_and_unified_kv_cache_update_q_out
+                )
+                op(query, key, value, query_out, *rotation, encoded)
+                query = query_out
+                key = value = None
+
         if output_dtype is None:
             output_dtype = query.dtype
         if self.query_quant is not None:
@@ -558,7 +615,6 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             # Skip this if sharing KV cache with an earlier attention layer.
-            encoded = _encode_layer_name(self.layer_name)
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
@@ -577,6 +633,84 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         return output.view(-1, hidden_size)
+
+    def _get_fused_rope_rotation(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        rotary_emb: nn.Module,
+    ) -> "RopeRotation | None":
+        # vLLM drops Dynamo shape guards, so compiled graphs always take the
+        # fused op and it applies the token threshold at runtime.
+        if not self._fuse_rope_kvcache or not (
+            torch.compiler.is_compiling()
+            or query.shape[0] <= self.rope_kvcache_fusion_max_token_num
+        ):
+            return None
+        get_rotation = getattr(rotary_emb, "get_rotation", None)
+        if (
+            get_rotation is None
+            or rotary_emb.head_size != self.head_size
+            or positions.device != query.device
+        ):
+            return None
+        return get_rotation(positions, query.dtype)
+
+    def _rope_and_kv_cache_update_q_out(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        query_out: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor | None,
+    ) -> None:
+        impl = self.impl
+        if (
+            layer_slot_mapping is not None
+            and query.shape[0] <= self.rope_kvcache_fusion_max_token_num
+        ):
+            impl.do_rope_and_kv_cache_update_q_out(
+                self,
+                query,
+                key,
+                value,
+                query_out,
+                positions,
+                cos_sin_cache,
+                is_neox,
+                kv_cache,
+                layer_slot_mapping,
+            )
+            return
+
+        from vllm import _custom_ops
+
+        query_out.copy_(query)
+        key_out = key.clone() if layer_slot_mapping is not None else None
+        _custom_ops.rotary_embedding(
+            positions,
+            query_out,
+            key_out,
+            self.head_size,
+            cos_sin_cache,
+            is_neox,
+        )
+        if key_out is not None:
+            assert layer_slot_mapping is not None
+            assert hasattr(impl, "do_kv_cache_update"), (
+                f"{impl.__class__.__name__} does not support kv cache update"
+            )
+            impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                self,
+                key_out,
+                value,
+                kv_cache,
+                layer_slot_mapping,
+            )
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -679,7 +813,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
 def get_attention_context(
     layer_name: str,
-) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor]:
+) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor | None]:
     """Extract attention context for a given layer.
 
     This helper function extracts the attention metadata, attention layer
@@ -694,10 +828,11 @@ def get_attention_context(
             no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
         - kv_cache: The KV cache tensor for current forward pass
-        - slot_mapping: The slot mapping for this specific layer
+        - slot_mapping: The slot mapping for this specific layer, or None when
+            the current forward does not update its cache
 
-        Note: attn_metadata may be None, but attn_layer and kv_cache are always
-        extracted from the forward context.
+        Note: attn_metadata and slot_mapping may be None, but attn_layer and
+        kv_cache are always extracted from the forward context.
 
     """
     forward_context: ForwardContext = get_forward_context()
@@ -719,6 +854,47 @@ def get_attention_context(
     )
     layer_slot_mapping = slot_mapping.get(layer_name)
     return attn_metadata, attn_layer, kv_cache, layer_slot_mapping
+
+
+def fused_rope_and_unified_kv_cache_update_q_out(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    query_out: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    layer_name: LayerNameType,
+) -> None:
+    """Write rotated Q and update the layer's hidden K/V cache."""
+    layer_name = _resolve_layer_name(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
+    assert layer_slot_mapping is not None or attn_metadata is None, (
+        "Decoder attention metadata requires a per-layer slot mapping."
+    )
+    assert isinstance(attn_layer, Attention), (
+        "Manual RoPE/cache fusion requires a standard Attention layer."
+    )
+    attn_layer._rope_and_kv_cache_update_q_out(
+        query,
+        key,
+        value,
+        query_out,
+        positions,
+        cos_sin_cache,
+        is_neox,
+        kv_cache,
+        layer_slot_mapping,
+    )
+
+
+direct_register_custom_op(
+    op_name="fused_rope_and_unified_kv_cache_update_q_out",
+    op_func=fused_rope_and_unified_kv_cache_update_q_out,
+    mutates_args=["query_out"],
+)
 
 
 def unified_kv_cache_update(
@@ -766,8 +942,8 @@ direct_register_custom_op(
 @maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
+    key: torch.Tensor | None,
+    value: torch.Tensor | None,
     output: torch.Tensor,
     layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,

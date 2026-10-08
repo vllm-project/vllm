@@ -6,7 +6,44 @@ import pytest
 import torch
 
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    LinearScalingRotaryEmbedding,
+    RotaryEmbedding,
+)
+
+
+@pytest.mark.parametrize("scaled", [False, True])
+@pytest.mark.parametrize("is_neox", [False, True])
+def test_rotation_description_matches_partial_rotary_forward(
+    default_vllm_config, scaled: bool, is_neox: bool
+):
+    args = (64, 32, 128, 10000, is_neox)
+    rot = (
+        LinearScalingRotaryEmbedding(*args, scaling_factors=2.0, dtype=torch.float32)
+        if scaled
+        else RotaryEmbedding(*args, dtype=torch.float32)
+    )
+    positions = torch.tensor([5, 0, 9, 2])
+    query = torch.randn(4, 4 * 64, dtype=torch.bfloat16)
+    key = torch.randn(4, 2 * 64, dtype=torch.bfloat16)
+    expected = rot.forward_native(positions, query, key)
+
+    rotation = rot.get_rotation(positions, query.dtype)
+
+    assert rotation is not None
+    assert rotation.positions is positions
+    assert rotation.cos_sin is rot.cos_sin_cache
+    assert rotation.cos_sin.dtype == query.dtype
+    actual = RotaryEmbedding.forward_static(
+        rotation.positions,
+        query,
+        key,
+        rot.head_size,
+        rotation.cos_sin.shape[-1],
+        rotation.cos_sin,
+        rotation.is_neox,
+    )
+    torch.testing.assert_close(actual, expected)
 
 
 def rotary_embedding_opcheck(
