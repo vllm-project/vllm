@@ -1864,7 +1864,7 @@ class Gemma4ForConditionalGeneration(
             dtype=torch.long,
         )
         dummy_gather_indices = torch.zeros(
-            (token_budget,),
+            (token_budget, 2),
             device=device,
             dtype=torch.long,
         )
@@ -1930,17 +1930,16 @@ class Gemma4ForConditionalGeneration(
 
         # ONLY allocate an array of exact size `total_tokens`.
         # DO NOT pad it. The upstream Graph Manager handles the padding securely.
-        gather_indices = torch.zeros((total_tokens,), dtype=torch.long, device=device)
+        # Each row is an (item, token) index into the pooled output.
+        gather_indices = torch.zeros((total_tokens, 2), dtype=torch.long, device=device)
 
         if modality == "image":
             dst_offset = 0
             for i, n_tok in enumerate(per_item_out_tokens):
                 safe_n_tok = min(n_tok, per_item_output)
-                src_start = i * per_item_output
-                src_end = src_start + safe_n_tok
-                gather_indices[dst_offset : dst_offset + safe_n_tok] = torch.arange(
-                    src_start, src_end, dtype=torch.long, device=device
-                )
+                dst = gather_indices[dst_offset : dst_offset + safe_n_tok]
+                dst[:, 0] = i
+                dst[:, 1] = torch.arange(safe_n_tok, dtype=torch.long, device=device)
                 dst_offset += safe_n_tok
         elif modality == "video":
             video_frame_counts = mm_kwargs["video_frame_counts"]
@@ -1955,19 +1954,15 @@ class Gemma4ForConditionalGeneration(
             frame_output_tokens = np_patches // pool_ratio
             safe_frame_output_tokens = min(frame_output_tokens, per_item_output)
 
+            frame_token_ids = torch.arange(
+                safe_frame_output_tokens, dtype=torch.long, device=device
+            )
             dst_offset = 0
-            frame_idx = 0
-            for fc in fc_list:
-                for f in range(fc):
-                    src_start = (frame_idx + f) * per_item_output
-                    src_end = src_start + safe_frame_output_tokens
-                    gather_indices[
-                        dst_offset : dst_offset + safe_frame_output_tokens
-                    ] = torch.arange(
-                        src_start, src_end, dtype=torch.long, device=device
-                    )
-                    dst_offset += safe_frame_output_tokens
-                frame_idx += fc
+            for frame_idx in range(sum(fc_list)):
+                dst = gather_indices[dst_offset : dst_offset + safe_frame_output_tokens]
+                dst[:, 0] = frame_idx
+                dst[:, 1] = frame_token_ids
+                dst_offset += safe_frame_output_tokens
 
         return EncoderCudaGraphReplayBuffers(
             values={
@@ -2016,8 +2011,7 @@ class Gemma4ForConditionalGeneration(
         if getattr(vt.config, "standardize", False):
             pooled_states = (pooled_states - vt.std_bias) * vt.std_scale
 
-        flat_pooled = pooled_states.reshape(-1, pooled_states.shape[-1])
-        gathered_states = flat_pooled[gather_indices]
+        gathered_states = pooled_states[gather_indices[:, 0], gather_indices[:, 1]]
 
         # Cast to the projection layer's dtype to resolve mixed-precision crash
         target_dtype = self.embed_vision.embedding_projection.weight.dtype
