@@ -419,6 +419,9 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
+    # Set by the generate endpoint: keep sample logprobs as engine rows
+    # (vllm.logprobs.ArrayLogprobs) for a FINAL_ONLY request.
+    _array_logprobs: bool = False
 
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None

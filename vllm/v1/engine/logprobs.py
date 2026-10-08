@@ -9,6 +9,7 @@ import numpy as np
 
 from vllm.logger import init_logger
 from vllm.logprobs import (
+    ArrayLogprobs,
     FlatLogprobs,
     PromptLogprobs,
     SampleLogprobs,
@@ -16,6 +17,7 @@ from vllm.logprobs import (
     create_prompt_logprobs,
     create_sample_logprobs,
 )
+from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers.detokenizer_utils import (
     TokenizerLike,
     convert_ids_list_to_tokens,
@@ -35,7 +37,7 @@ class LogprobsProcessor:
     tokenizer: TokenizerLike | None
 
     # Logprobs for this request
-    logprobs: SampleLogprobs | None
+    logprobs: SampleLogprobs | ArrayLogprobs | None
     prompt_logprobs: PromptLogprobs | None
     cumulative_logprob: float | None
     num_logprobs: int | None
@@ -59,7 +61,12 @@ class LogprobsProcessor:
             logprobs=(
                 None
                 if num_logprobs is None
-                else create_sample_logprobs(sampling_params.flat_logprobs)
+                else create_sample_logprobs(
+                    sampling_params.flat_logprobs,
+                    array_logprobs=sampling_params._array_logprobs
+                    and num_logprobs >= 0
+                    and sampling_params.output_kind == RequestOutputKind.FINAL_ONLY,
+                )
             ),
             prompt_logprobs=(
                 None
@@ -85,6 +92,14 @@ class LogprobsProcessor:
         assert self.cumulative_logprob is not None
 
         token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
+        if isinstance(self.logprobs, ArrayLogprobs):
+            num_slots = self.num_logprobs + 1
+            self.logprobs.append_rows(
+                token_ids_lst[:, :num_slots], logprobs_lst[:, :num_slots], ranks_lst
+            )
+            for sampled_token_logprob in logprobs_lst[:, 0].tolist():
+                self.cumulative_logprob += sampled_token_logprob
+            return
 
         for rank_np, logprobs_np, token_ids_np in zip(
             ranks_lst, logprobs_lst, token_ids_lst
@@ -216,7 +231,7 @@ class LogprobsProcessor:
 
     @staticmethod
     def _get_sampled_context_ids(
-        logprobs_source: SampleLogprobs | PromptLogprobs | None,
+        logprobs_source: SampleLogprobs | ArrayLogprobs | PromptLogprobs | None,
         max_context: int = 4,
     ) -> list[int]:
         """Extract recent sampled token IDs from a logprobs source.

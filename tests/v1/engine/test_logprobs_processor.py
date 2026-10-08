@@ -10,19 +10,27 @@ row), the trailing positions are populated with sentinel values
 `num_logprobs + 1` entries so those sentinels never reach the user.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 import torch
 
-from vllm.logprobs import create_sample_logprobs
+from vllm.logprobs import ArrayLogprobs, FlatLogprobs, create_sample_logprobs
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists
 
 
-def _make_processor(num_logprobs: int) -> LogprobsProcessor:
+def _make_processor(
+    num_logprobs: int, array_logprobs: bool = False
+) -> LogprobsProcessor:
     return LogprobsProcessor(
         tokenizer=None,
-        logprobs=create_sample_logprobs(flat_logprobs=False),
+        logprobs=create_sample_logprobs(
+            flat_logprobs=False, array_logprobs=array_logprobs
+        ),
         prompt_logprobs=None,
         cumulative_logprob=0.0,
         num_logprobs=num_logprobs,
@@ -87,3 +95,114 @@ def test_prompt_token_id_logprobs_are_popped_once():
     assert scores is not None
     assert scores.tolist() == [[-0.5, -1.5], [-2.5, -3.5]]
     assert processor.pop_prompt_token_id_logprobs() is None
+
+
+def _engine_steps(seed: int, width: int, num_steps: int) -> list[LogprobsLists]:
+    """Engine steps of 1-3 rows, some repeating the sampled id in the top-k."""
+    rng = np.random.default_rng(seed)
+    steps = []
+    for _ in range(num_steps):
+        rows = int(rng.integers(1, 4))
+        token_ids = rng.integers(0, 1000, (rows, width)).astype(np.int32)
+        dup = (rng.random(rows) < 0.3) & (width > 1)
+        token_ids[dup, -1] = token_ids[dup, 0]
+        logprobs = -rng.random((rows, width)).astype(np.float32) * 10
+        ranks = rng.integers(0, 50, rows).astype(np.int64)
+        steps.append(LogprobsLists(token_ids, logprobs, ranks))
+    return steps
+
+
+@pytest.mark.parametrize("num_logprobs,width", [(0, 1), (3, 4), (3, 6)])
+def test_array_logprobs_match_list_logprobs(num_logprobs, width, monkeypatch):
+    """ArrayLogprobs keeps the engine rows but reads like the list path:
+    same positions (first-occurrence keys, last-occurrence values, ranks),
+    same cumulative logprob, across storage blocks."""
+    monkeypatch.setattr(ArrayLogprobs, "BLOCK_BYTES", 64)
+    expected = _make_processor(num_logprobs)
+    actual = _make_processor(num_logprobs, array_logprobs=True)
+    for step in _engine_steps(0, width, 40):
+        expected._update_sample_logprobs(step)
+        actual._update_sample_logprobs(step)
+
+    assert isinstance(actual.logprobs, ArrayLogprobs)
+    assert actual.logprobs.is_regular
+    assert list(actual.logprobs) == expected.logprobs
+    assert [actual.logprobs[i] for i in range(len(expected.logprobs))] == (
+        expected.logprobs
+    )
+    assert actual.logprobs[-3:] == expected.logprobs[-3:]
+    assert actual.cumulative_logprob == expected.cumulative_logprob
+
+    token_ids, logprobs, ranks = actual.logprobs.arrays()
+    steps = _engine_steps(0, width, 40)
+    assert token_ids.dtype == np.dtype("<i4") and logprobs.dtype == np.dtype("<f4")
+    assert token_ids.flags.c_contiguous and logprobs.flags.c_contiguous
+    np.testing.assert_array_equal(
+        token_ids,
+        np.concatenate([s.logprob_token_ids[:, : num_logprobs + 1] for s in steps]),
+    )
+    np.testing.assert_array_equal(
+        logprobs, np.concatenate([s.logprobs[:, : num_logprobs + 1] for s in steps])
+    )
+    np.testing.assert_array_equal(
+        ranks, np.concatenate([s.sampled_token_ranks for s in steps])
+    )
+
+
+def test_array_logprobs_irregular_rows_fall_back_to_dicts():
+    """A row narrower than the stored ones (a co-batched request replaced the
+    batch's logprob tensors) is kept as a dict, and arrays() is refused."""
+    expected = _make_processor(3)
+    actual = _make_processor(3, array_logprobs=True)
+    steps = _engine_steps(1, 4, 3) + _engine_steps(2, 2, 2) + _engine_steps(3, 4, 2)
+    for step in steps:
+        expected._update_sample_logprobs(step)
+        actual._update_sample_logprobs(step)
+
+    assert isinstance(actual.logprobs, ArrayLogprobs)
+    assert not actual.logprobs.is_regular
+    assert list(actual.logprobs) == expected.logprobs
+    with pytest.raises(ValueError):
+        actual.logprobs.arrays()
+
+
+@pytest.mark.parametrize(
+    "token_ids,ranks",
+    [
+        (np.zeros((2, 2), dtype=np.int32), np.zeros(1, dtype=np.int32)),
+        (np.full((1, 2), 2**31, dtype=np.int64), np.zeros(1, dtype=np.int32)),
+    ],
+)
+def test_array_logprobs_malformed_rows_break_the_request(token_ids, ranks):
+    """Malformed engine rows never raise in the shared output loop: the
+    container is broken and fails when the response reads it."""
+    container = ArrayLogprobs()
+    container.append_rows(token_ids, np.zeros(token_ids.shape, np.float32), ranks)
+    assert container.broken and not container.is_regular
+    with pytest.raises(ValueError):
+        container.arrays()
+    with pytest.raises(ValueError):
+        list(container)
+
+
+@pytest.mark.parametrize(
+    "array_logprobs,logprobs,output_kind,expected",
+    [
+        (True, 2, RequestOutputKind.FINAL_ONLY, ArrayLogprobs),
+        (True, 2, RequestOutputKind.DELTA, FlatLogprobs),
+        (True, -1, RequestOutputKind.FINAL_ONLY, FlatLogprobs),
+        (False, 2, RequestOutputKind.FINAL_ONLY, FlatLogprobs),
+    ],
+)
+def test_array_logprobs_only_for_final_only_top_k(
+    array_logprobs, logprobs, output_kind, expected
+):
+    """The private switch applies only to FINAL_ONLY outputs (no DELTA slices
+    to aggregate) with top-k logprobs."""
+    params = SamplingParams(logprobs=logprobs, flat_logprobs=True)
+    params.output_kind = output_kind
+    params._array_logprobs = array_logprobs
+    processor = LogprobsProcessor.from_new_request(
+        tokenizer=None, request=SimpleNamespace(sampling_params=params)
+    )
+    assert type(processor.logprobs) is expected

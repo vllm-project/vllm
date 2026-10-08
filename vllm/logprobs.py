@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from collections.abc import Iterable, Iterator, MutableSequence
+from collections.abc import Iterable, Iterator, MutableSequence, Sequence
 from dataclasses import dataclass, field
 from typing import overload
+
+import numpy as np
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 # We use dataclass for now because it is used for
@@ -155,6 +161,216 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
             yield self.__getitem__(i)
 
 
+def _fits_int32(values: np.ndarray) -> bool:
+    """Whether an integer array holds only values that int32 represents."""
+    dtype = values.dtype
+    if dtype.kind not in "iu":
+        return False
+    if dtype.itemsize < 4 or (dtype.kind == "i" and dtype.itemsize == 4):
+        return True
+    if values.size == 0:
+        return True
+    info = np.iinfo(np.int32)
+    return info.min <= int(values.min()) and int(values.max()) <= info.max
+
+
+class ArrayLogprobs(Sequence[LogprobsOnePosition]):
+    """Sample logprobs of a request kept as the engine's rows.
+
+    Row ``i`` is the engine row of position ``i``: slot 0 holds the sampled
+    token, slots ``1..k`` the top-k candidates in engine order. Rows are
+    copied into little-endian int32 / float32 / int32 blocks whose capacity
+    grows geometrically up to ``BLOCK_BYTES``, so ``N`` positions create
+    ``O(log N + N * row_bytes / BLOCK_BYTES)`` objects instead of
+    ``O(N * k)``. Candidate tokens are never detokenized and logprobs keep the
+    raw engine values.
+
+    Rows of another width than the first (e.g. when a co-batched request's
+    ``logprob_token_ids`` replaced the batch's logprob tensors) are kept from
+    then on as ``dict[int, Logprob]`` entries, and :attr:`is_regular` becomes
+    False. Any storage failure marks the container :attr:`broken` instead of
+    raising in the shared output processing loop.
+
+    Positions read as ``dict[int, Logprob]`` (``decoded_token`` None), like
+    the list representation, so any consumer works, slowly; the generate
+    endpoint renders from :meth:`arrays` instead. Only used for
+    ``FINAL_ONLY`` outputs: there is no ``extend`` for DELTA aggregation.
+    """
+
+    BLOCK_BYTES = 8 << 20
+
+    def __init__(self) -> None:
+        # Only the first ``_tail_fill`` rows of the last block are used.
+        self._token_ids: list[np.ndarray] = []
+        self._logprobs: list[np.ndarray] = []
+        self._ranks: list[np.ndarray] = []
+        self._tail_fill = 0
+        self._num_rows = 0
+        # Positions after the array rows, once an irregular row was seen.
+        self._irregular: list[LogprobsOnePosition] | None = None
+        self.broken = False
+
+    @property
+    def is_regular(self) -> bool:
+        """Whether every position is stored as an array row."""
+        return self._irregular is None and not self.broken
+
+    @property
+    def num_slots(self) -> int | None:
+        """Slots per array row, or None if no row was stored."""
+        return self._token_ids[0].shape[1] if self._token_ids else None
+
+    def append_rows(
+        self, token_ids: np.ndarray, logprobs: np.ndarray, ranks: np.ndarray
+    ) -> None:
+        """Append ``n`` positions given as ``[n, S]``, ``[n, S]`` and ``[n]``
+        engine arrays (copied). Never raises: a failure marks the container
+        broken, failing only its request when it is rendered."""
+        if self.broken:
+            return
+        try:
+            self._append_rows(token_ids, logprobs, ranks)
+        except Exception:
+            logger.exception("Storing sample logprobs failed; failing the request")
+            self.broken = True
+            self._token_ids, self._logprobs, self._ranks = [], [], []
+            self._irregular = None
+
+    def _append_rows(
+        self, token_ids: np.ndarray, logprobs: np.ndarray, ranks: np.ndarray
+    ) -> None:
+        n = len(ranks)
+        if (
+            token_ids.ndim != 2
+            or logprobs.shape != token_ids.shape
+            or ranks.shape != (n,)
+            or token_ids.shape[0] != n
+        ):
+            raise ValueError(
+                f"Inconsistent logprob rows: token_ids {token_ids.shape}, "
+                f"logprobs {logprobs.shape}, ranks {ranks.shape}"
+            )
+        if not (
+            logprobs.dtype.kind == "f"
+            and logprobs.dtype.itemsize <= 4
+            and _fits_int32(token_ids)
+            and _fits_int32(ranks)
+        ):
+            raise TypeError(
+                f"Unsupported logprob rows: token_ids {token_ids.dtype}, "
+                f"logprobs {logprobs.dtype}, ranks {ranks.dtype}"
+            )
+        if n == 0:
+            return
+        width = token_ids.shape[1]
+        if self._irregular is not None or width != (self.num_slots or width):
+            if self._irregular is None:
+                self._irregular = []
+            self._irregular.extend(
+                _row_dict(token_ids[i], logprobs[i], ranks[i]) for i in range(n)
+            )
+            return
+        pos = 0
+        while pos < n:
+            if not self._ranks or self._tail_fill == len(self._ranks[-1]):
+                self._new_block(n - pos, width)
+            fill = self._tail_fill
+            take = min(n - pos, len(self._ranks[-1]) - fill)
+            self._token_ids[-1][fill : fill + take] = token_ids[pos : pos + take]
+            self._logprobs[-1][fill : fill + take] = logprobs[pos : pos + take]
+            self._ranks[-1][fill : fill + take] = ranks[pos : pos + take]
+            self._tail_fill = fill + take
+            pos += take
+        self._num_rows += n
+
+    def _new_block(self, remaining: int, width: int) -> None:
+        max_rows = max(1, self.BLOCK_BYTES // (width * 8 + 4))
+        previous = len(self._ranks[-1]) if self._ranks else 0
+        rows = max(remaining, min(max_rows, max(1, 2 * previous)))
+        self._token_ids.append(np.empty((rows, width), dtype="<i4"))
+        self._logprobs.append(np.empty((rows, width), dtype="<f4"))
+        self._ranks.append(np.empty((rows,), dtype="<i4"))
+        self._tail_fill = 0
+
+    def arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The rows as contiguous ``(token_ids[N, S], logprobs[N, S],
+        ranks[N])``, little-endian int32 / float32 / int32.
+
+        Blocks are concatenated once and kept as one block afterwards.
+        Raises ValueError unless :attr:`is_regular`.
+        """
+        if not self.is_regular:
+            raise ValueError("Sample logprobs are not stored as regular rows")
+        if not self._token_ids:
+            return (
+                np.empty((0, 0), dtype="<i4"),
+                np.empty((0, 0), dtype="<f4"),
+                np.empty((0,), dtype="<i4"),
+            )
+        if len(self._ranks) > 1 or self._tail_fill != len(self._ranks[0]):
+            fill = self._tail_fill
+            self._token_ids[-1] = self._token_ids[-1][:fill]
+            self._logprobs[-1] = self._logprobs[-1][:fill]
+            self._ranks[-1] = self._ranks[-1][:fill]
+            self._token_ids = [np.concatenate(self._token_ids)]
+            self._logprobs = [np.concatenate(self._logprobs)]
+            self._ranks = [np.concatenate(self._ranks)]
+            self._tail_fill = self._num_rows
+        return self._token_ids[0], self._logprobs[0], self._ranks[0]
+
+    def __len__(self) -> int:
+        """Gets number of positions stored in the container."""
+        if self._irregular is None:
+            return self._num_rows
+        return self._num_rows + len(self._irregular)
+
+    @overload
+    def __getitem__(self, position: int) -> LogprobsOnePosition: ...
+
+    @overload
+    def __getitem__(self, s: slice, /) -> list[LogprobsOnePosition]: ...
+
+    def __getitem__(self, index: int | slice):
+        """Extracts logprobs of a given position or slice."""
+        if self.broken:
+            raise ValueError("Sample logprobs are unavailable: storing them failed")
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        position = range(len(self))[index]
+        if position >= self._num_rows:
+            assert self._irregular is not None
+            return self._irregular[position - self._num_rows]
+        for t, lp, r in zip(self._token_ids, self._logprobs, self._ranks):
+            if position < len(r):
+                return _row_dict(t[position], lp[position], r[position])
+            position -= len(r)
+        raise AssertionError("unreachable")
+
+    def __iter__(self) -> Iterator[LogprobsOnePosition]:
+        """Iterates the positions in order."""
+        if self.broken:
+            raise ValueError("Sample logprobs are unavailable: storing them failed")
+        remaining = self._num_rows
+        for t, lp, r in zip(self._token_ids, self._logprobs, self._ranks):
+            for j in range(min(len(r), remaining)):
+                yield _row_dict(t[j], lp[j], r[j])
+            remaining -= len(r)
+        if self._irregular is not None:
+            yield from self._irregular
+
+
+def _row_dict(
+    token_ids: np.ndarray, logprobs: np.ndarray, rank: np.integer
+) -> LogprobsOnePosition:
+    """An engine row as ``append_logprobs_for_next_position`` stores it."""
+    ids = token_ids.tolist()
+    ranks = itertools.chain((int(rank),), range(1, len(ids)))
+    return {
+        token_id: Logprob(logprob=value, rank=r)
+        for token_id, value, r in zip(ids, logprobs.tolist(), ranks)
+    }
+
+
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = FlatLogprobs | list[LogprobsOnePosition | None]
@@ -170,8 +386,12 @@ def create_prompt_logprobs(flat_logprobs: bool) -> PromptLogprobs:
     return logprobs
 
 
-def create_sample_logprobs(flat_logprobs: bool) -> SampleLogprobs:
+def create_sample_logprobs(
+    flat_logprobs: bool, array_logprobs: bool = False
+) -> SampleLogprobs | ArrayLogprobs:
     """Creates a container to store decode logprobs for a request."""
+    if array_logprobs:
+        return ArrayLogprobs()
     return FlatLogprobs() if flat_logprobs else []
 
 
