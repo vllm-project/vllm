@@ -318,11 +318,7 @@ def test_attention_quant_pattern(
 ):
     """Test AttentionStaticQuantPattern fusion pass."""
     if backend == AttentionBackendEnum.FLASHINFER and (
-        not (
-            current_platform.is_device_capability((10, 0))
-            or current_platform.is_device_capability((10, 7))
-        )
-        or not has_flashinfer()
+        not (current_platform.is_device_capability_family(100)) or not has_flashinfer()
     ):
         # This also captures the FP4 case
         pytest.skip("FlashInfer attn fusion requires SM100/SM107 and flashinfer")
