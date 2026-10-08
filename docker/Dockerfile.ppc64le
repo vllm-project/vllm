@@ -61,11 +61,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     export CPLUS_INCLUDE_PATH=/usr/local/include:$CPLUS_INCLUDE_PATH && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/OpenBLAS/lib/:/usr/local/lib64:/usr/local/lib && \
     export LIBGOMP=/opt/rh/gcc-toolset-14/root/usr/lib/gcc/ppc64le-redhat-linux/14/libgomp.so && \
-
     export CMAKE_LIBRARY_PATH=$(dirname $LIBGOMP):${CMAKE_LIBRARY_PATH} && \
     export LIBRARY_PATH=$(dirname $LIBGOMP):${LIBRARY_PATH} && \
     export LD_LIBRARY_PATH=$(dirname $LIBGOMP):${LD_LIBRARY_PATH} && \
-
     echo "LIBGOMP=${LIBGOMP}" && \
     find /root/.cache/uv -name "*.whl" && \
     SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION" uv build \
@@ -97,7 +95,6 @@ ENV PKG_CONFIG_PATH=${PCP_DIR}/usr/lib64/pkgconfig:/usr/local/lib/pkgconfig/
 ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 ENV LD_LIBRARY_PATH=${PCP_DIR}/usr/lib64:${PCP_DIR}/usr/lib:${VIRTUAL_ENV}/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/lib64:/usr/lib64:/usr/lib
 ENV UV_LINK_MODE=copy
-ARG VLLM_VERSION="0.22.1"
 ARG UV_EXTRA_INDEX_URL="https://wheels.developerfirst.ibm.com/ppc64le/linux/+simple/"
 ENV UV_EXTRA_INDEX_URL=${UV_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY=first-match
@@ -115,10 +112,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && source /opt/rh/gcc-toolset-14/enable \
     && microdnf update -y \
     && microdnf clean all
-
-# The `lscpu` command was added as a requirement in part of https://github.com/vllm-project/vllm/pull/21032, so installing it.
-RUN microdnf install --nodocs -y util-linux && \
-    microdnf clean all
 
 COPY --from=builder-base /usr/lib64/libprotobuf.so.25 /usr/lib64/
 COPY --from=builder-base /usr/lib64/libprotobuf.so.25.0.0 /usr/lib64/
@@ -156,3 +149,4 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 USER 2000
 
 ENTRYPOINT ["vllm", "serve"]
+

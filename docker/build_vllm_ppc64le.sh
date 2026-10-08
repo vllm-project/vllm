@@ -38,36 +38,34 @@ try_install_from_devpi() {
 ########################################
 cd "$REPO_ROOT"
 TORCH_VERSION=${TORCH_VERSION:-$(grep -E '^torch==.+==\s*"ppc64le"' requirements/cpu.txt | grep -Eo '\b[0-9\.]+\b' || true)}
-TORCH_VERSION=${TORCH_VERSION:-2.11.0}
-TORCHAUDIO_VERSION="${TORCH_VERSION}"
-TORCH_MAJOR_MINOR=$(echo "${TORCH_VERSION}" | cut -d. -f1,2)
+TORCH_VERSION=${TORCH_VERSION:-2.13.0}
 
-case "${TORCH_MAJOR_MINOR}" in
-    2.13)
-        TORCHVISION_VERSION="0.28.0"
-        TORCHAUDIO_VERSION="2.11.0"
-        ;;
-    2.12)
-        TORCHVISION_VERSION="0.27.0"
-        ;;
-    2.11)
-        TORCHVISION_VERSION="0.26.0"
-        ;;
-    2.10)
-        TORCHVISION_VERSION="0.25.0"
-        ;;
-    2.9)
-        TORCHVISION_VERSION="0.24.0"
-        ;;
-    *)
-        echo "ERROR: Unsupported torch version: ${TORCH_VERSION}"
-        exit 1
-        ;;
-esac
+# Parse version parts
+TORCH_MAJOR=$(echo "${TORCH_VERSION}" | cut -d. -f1)
+TORCH_MINOR=$(echo "${TORCH_VERSION}" | cut -d. -f2)
+TORCH_PATCH=$(echo "${TORCH_VERSION}" | cut -d. -f3 | cut -d+ -f1)
+TORCH_PATCH=${TORCH_PATCH:-0}
+
+# 1. Calculate torchvision (always minor + 15)
+VISION_MINOR=$((TORCH_MINOR + 15))
+TORCHVISION_VERSION="0.${VISION_MINOR}.${TORCH_PATCH}"
+
+# 2. Calculate torchaudio (minor - 2 for >= 2.13, otherwise same as torch)
+if [ "${TORCH_MAJOR}" -eq 2 ] && [ "${TORCH_MINOR}" -ge 13 ]; then
+    AUDIO_MINOR=$((TORCH_MINOR - 2))
+    TORCHAUDIO_VERSION="${TORCH_MAJOR}.${AUDIO_MINOR}.${TORCH_PATCH}"
+else
+    TORCHAUDIO_VERSION="${TORCH_VERSION}"
+fi
 
 export TORCH_VERSION
 export TORCHVISION_VERSION
 export TORCHAUDIO_VERSION
+
+echo "Resolved PyTorch versions:"
+echo "  torch:       ${TORCH_VERSION}"
+echo "  torchvision: ${TORCHVISION_VERSION}"
+echo "  torchaudio:  ${TORCHAUDIO_VERSION}"
 
 OPENCV_REQUIREMENT=$(grep -E '^opencv-python-headless[[:space:]]*(==|>=|<=|~=)' \
     requirements/common.txt |
@@ -468,3 +466,4 @@ export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/
 uv pip install -r requirements/common.txt \
                -r requirements/cpu.txt \
                -r requirements/build/cpu.txt --index-strategy unsafe-best-match
+
