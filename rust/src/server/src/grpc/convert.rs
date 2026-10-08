@@ -161,10 +161,7 @@ fn build_sampling_params(
         ..SamplingParams::default()
     };
 
-    // RandomSampling: for every remaining sampling field the protobuf default (`0`)
-    // is treated as "unset" and leaves the resolved value to the lowering
-    // stage, which falls back to the model-provided default or a
-    // neutral/disabled value otherwise.
+    // Preserve explicit values; omitted fields inherit model defaults during lowering.
     if let Some(s) = sampling {
         // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
         // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
@@ -174,15 +171,9 @@ fn build_sampling_params(
                 "num_sequences > 1 is not supported",
             ));
         }
-        if s.top_k != 0 {
-            params.top_k = Some(s.top_k);
-        }
-        if s.top_p != 0.0 {
-            params.top_p = Some(s.top_p);
-        }
-        if s.min_p != 0.0 {
-            params.min_p = Some(s.min_p);
-        }
+        params.top_k = s.top_k;
+        params.top_p = s.top_p;
+        params.min_p = s.min_p;
         params.seed = s.seed;
     }
 
@@ -787,6 +778,52 @@ mod tests {
                 (params.logprobs, params.logprob_token_ids),
                 (expected_count, expected_ids)
             );
+        }
+    }
+
+    #[test]
+    fn grpc_sampling_preserves_explicit_values_and_model_defaults_through_lowering() {
+        for ((top_k, top_p, min_p), expected) in [
+            ((None, None, None), (8, 0.9, 0.2)),
+            ((Some(0), Some(1.0), Some(0.0)), (0, 1.0, 0.0)),
+            ((Some(50), Some(0.8), Some(0.1)), (50, 0.8, 0.1)),
+        ] {
+            let request = pb::GenerateRequest {
+                temperature: Some(0.7),
+                sampling: Some(pb::RandomSampling {
+                    top_k,
+                    top_p,
+                    min_p,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+                let engine = vllm_text::lower_text_request(
+                    text,
+                    vec![1],
+                    SamplingHints {
+                        default_top_k: Some(8),
+                        default_top_p: Some(0.9),
+                        default_min_p: Some(0.2),
+                        ..Default::default()
+                    },
+                    SamplingLimits {
+                        max_model_len: 256,
+                        max_logprobs: 20,
+                        model_vocab_size: 512,
+                        tokenizer_vocab_size: 512,
+                    },
+                    &TestTokenizer::new(),
+                )
+                .unwrap()
+                .generate_request;
+                let params = engine.sampling_params;
+                assert_eq!((params.top_k, params.top_p, params.min_p), expected);
+            }
         }
     }
 

@@ -876,7 +876,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block are intentionally skipped.
         """
         hash_block_size = self.block_pool.hash_block_size
-        boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
+        # A resend matches at most `prompt_len - 1` tokens, but EAGLE lookups
+        # read the whole prompt before dropping a hash unit.
+        token_limit = (
+            request.num_prompt_tokens
+            if self.use_eagle
+            else request.num_prompt_tokens - 1
+        )
+        boundary_tokens = token_limit // hash_block_size * hash_block_size
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
             return
         if boundary_tokens % self.block_size == 0:
@@ -1788,7 +1795,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # is kept, so `prefill_end` skips reserving blocks for the others.
             checkpoint_position = get_mamba_prefill_checkpoint_position(
                 num_tokens,
-                self.block_pool.hash_block_size,
+                self.cache_hit_alignment_tokens,
                 self.drop_eagle_checkpoint_block,
             )
             if not self._needs_internal_checkpoint(
@@ -2073,20 +2080,29 @@ class MambaManager(SingleTypeKVCacheManager):
                 checkpoint_position
                 == get_mamba_prefill_checkpoint_position(
                     request.num_prompt_tokens,
-                    hash_block_size,
+                    self.cache_hit_alignment_tokens,
                     self.drop_eagle_checkpoint_block,
                 )
             )
+            is_retained_checkpoint = False
+            if checkpoint_position % self.block_size == 0:
+                block_idx = checkpoint_position // self.block_size - 1
+                retained = self.reachable_block_mask(
+                    block_idx,
+                    block_idx + 1,
+                    self.cache_hit_alignment_tokens,
+                    self.kv_cache_spec,
+                    self.drop_eagle_checkpoint_block,
+                    retention_interval=retention_interval,
+                )
+                is_retained_checkpoint = retained is None or retained[0]
             if (
-                retention_interval == 0
-                and num_tokens < request.num_prompt_tokens
-                and not is_prompt_checkpoint
+                not is_prompt_checkpoint
+                and not is_retained_checkpoint
                 and checkpoint_position != request.shared_prefix_boundary
             ):
-                # retention_interval == 0 keeps this transient checkpoint
-                # request-local. The slot may carry a hash from this step's
-                # full-block pass; that must go too, since the checkpoint
-                # state is about to overwrite the block.
+                # The transient state overwrites this slot, so neither it nor
+                # the full-block hash registered earlier this step is reusable.
                 self.block_pool._maybe_evict_cached_block(checkpoint_block)
                 return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
@@ -2099,21 +2115,13 @@ class MambaManager(SingleTypeKVCacheManager):
                 block_size=self.block_size,
                 replace_existing_hashes=True,
             )
-        if self.block_size == hash_block_size:
+        if num_tokens <= 0 or num_tokens % hash_block_size != 0:
             return None
-        if num_tokens % self.block_size == 0:
-            return None
-        if num_tokens % hash_block_size != 0:
-            return None
-        latest_prompt_hash_boundary = (
-            request.num_prompt_tokens // hash_block_size
-        ) * hash_block_size
-        if self.drop_eagle_checkpoint_block:
-            # Eagle groups match one hash unit past the candidate and drop it,
-            # so register the tail one unit lower.
-            latest_prompt_hash_boundary = max(
-                latest_prompt_hash_boundary - hash_block_size, 0
-            )
+        latest_prompt_hash_boundary = get_mamba_prefill_checkpoint_position(
+            request.num_prompt_tokens,
+            hash_block_size,
+            self.drop_eagle_checkpoint_block,
+        )
         # The junction is the other position a sibling resumes at: where one was
         # observed to stop, and where the scheduler already ends a chunk. Bounded
         # to the prompt chunk being computed -- during decode the target is the
@@ -2126,7 +2134,7 @@ class MambaManager(SingleTypeKVCacheManager):
         ):
             return None
 
-        block_idx = num_tokens // self.block_size
+        block_idx = cdiv(num_tokens, self.block_size) - 1
         blocks = self.req_to_blocks[request.request_id]
         if block_idx >= len(blocks):
             return None
@@ -2141,7 +2149,7 @@ class MambaManager(SingleTypeKVCacheManager):
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
-        if partial_hash is not None:
+        if partial_hash is not None and num_tokens % self.block_size:
             self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
             self.num_cached_block[request.request_id] = block_idx
             # Producer of this partial tail: the boundary state currently lives

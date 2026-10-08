@@ -2573,6 +2573,96 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     return initial_ecos
 
 
+def _runner_output(
+    req_ids: list[str], finished_recving: set[str] | None = None
+) -> ModelRunnerOutput:
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[1] for _ in req_ids],
+        kv_connector_output=KVConnectorOutput(finished_recving=finished_recving),
+    )
+
+
+@pytest.mark.parametrize(
+    "load_done_before_pause", [False, True], ids=["load-in-flight", "load-done"]
+)
+def test_pause_new_drains_async_kv_loads(load_done_before_pause: bool):
+    """A PAUSED_NEW (pause mode="wait") drain must finish requests that hold KV
+    blocks for an async load, keep blockless queued requests queued, and leave
+    no blocks behind, so the post-drain cache reset succeeds."""
+    block_size = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=2 * block_size, is_async=True),
+        block_size=block_size,
+    )
+    loading, queued = create_requests(
+        num_requests=2,
+        num_tokens=3 * block_size,
+        max_tokens=2,
+        block_size=block_size,
+        req_ids=["loading", "queued"],
+    )
+    scheduler.add_request(loading)
+    output = scheduler.schedule()
+    assert loading.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    pending_recv = {"loading"}
+    if load_done_before_pause:
+        scheduler.update_from_output(output, _runner_output([], pending_recv))
+        pending_recv = None
+    else:
+        scheduler.update_from_output(output, _runner_output([]))
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    scheduler.add_request(queued)
+
+    num_steps = 0
+    while scheduler.has_requests():
+        num_steps += 1
+        assert num_steps <= 4, "pause drain did not finish"
+        output = scheduler.schedule()
+        assert set(output.num_scheduled_tokens) <= {"loading"}
+        scheduler.update_from_output(
+            output, _runner_output(list(output.num_scheduled_tokens), pending_recv)
+        )
+        pending_recv = None
+
+    # What pause runs once drained; it raises if the load still holds blocks.
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert loading.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert loading.request_id not in scheduler.requests
+    assert list(scheduler.waiting) == [queued]
+    assert queued.status == RequestStatus.WAITING
+
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    scheduler.schedule()
+    assert queued.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_pause_new_ignores_streaming_session_waiting_for_input():
+    """A session idle in WAITING_FOR_STREAMING_REQ cannot progress, so it must
+    not keep a PAUSED_NEW drain from completing."""
+    stop_token = 7
+    scheduler = create_scheduler()
+    (session,) = create_requests(
+        num_requests=1, num_tokens=4, stop_token_ids=[stop_token], req_ids=["s"]
+    )
+    session.resumable = True
+    scheduler.add_request(session)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["s"], req_id_to_index={"s": 0}, sampled_token_ids=[[stop_token]]
+        ),
+    )
+    assert session in scheduler.kv_holding_waiting
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    assert scheduler.get_num_unfinished_requests() == 0
+
+
 @pytest.mark.parametrize(
     ("load_modes", "expected_has_sync_loads"),
     [
