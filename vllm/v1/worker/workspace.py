@@ -139,7 +139,8 @@ class WorkspaceManager:
         AssertionError.
 
         Keys must identify the resource type and configuration. Callers must not
-        resize or replace tensor storage held by a cached resource. Uses of the
+        resize or replace tensor storage held by a cached resource once the
+        manager is locked. Uses of the
         same resource must not overlap; include the CUDA stream in the key when
         streams can execute concurrently.
 
