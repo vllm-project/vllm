@@ -231,6 +231,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)"
   device: h200_35gb
   key: entrypoints-integration-pooling
+  automatic_shard: true
   timeout_in_minutes: 75
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
