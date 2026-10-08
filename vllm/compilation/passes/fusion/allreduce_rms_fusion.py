@@ -1660,17 +1660,8 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                     )
                 )
 
-            # Gemma variants keep the raw weight and apply (1 + weight) inside
-            # the kernel, so their pattern is the generic AR+RMS subgraph plus
-            # the weight-side add -- they must beat the generic AR+RMS-only
-            # variants below, which would otherwise match first and bake the
-            # pre-added weight in at the activation dtype.
-            #
-            # They still register after the quant-fused variants: the fused
-            # AR+RMS+quant op has no gemma_norm mode, so a Gemma graph with a
-            # trailing quant has to keep folding (1 + weight) outside the
-            # kernel. Registering Gemma first would let the AR+RMS-only match
-            # consume the all_reduce and strand that quant.
+            # Must stay above the non-Gemma AR+RMS patterns below, which would
+            # otherwise match first.
             self.register(
                 AiterAllreduceFusedGemmaRMSNormPattern(
                     epsilon,
