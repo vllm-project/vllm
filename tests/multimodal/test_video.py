@@ -13,7 +13,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
-from transformers import AutoVideoProcessor
+from transformers import AutoVideoProcessor, Qwen3VLVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
@@ -35,6 +35,7 @@ from vllm.multimodal.video import (
     get_video_loader_backend_for_processor,
 )
 from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
+from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
 from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
     PyNvVideoCodecDecoderSlot,
@@ -728,6 +729,36 @@ def test_cosmos3_edge_uses_qwen3_vl_video_backend():
 
     assert backend == "qwen3_vl"
     assert isinstance(VIDEO_LOADER_REGISTRY.load(backend), Qwen3VLVideoBackend)
+
+
+def test_qwen3_vl_unknown_source_fps_matches_hf(
+    dummy_video_path, monkeypatch: pytest.MonkeyPatch
+):
+    """An unknown source fps (reported as 0) samples like HF's fps=None, and
+    the metadata carries the fps HF assumes, which the frame timestamps use."""
+    get_video_metadata = OpenCVVideoBackendMixin.get_video_metadata
+
+    def unknown_fps(cap) -> VideoSourceMetadata:
+        return get_video_metadata(cap)._replace(original_fps=0.0, duration=0.0)
+
+    monkeypatch.setattr(
+        OpenCVVideoBackendMixin, "get_video_metadata", staticmethod(unknown_fps)
+    )
+    _, metadata = Qwen3VLVideoBackend.load_bytes(
+        dummy_video_path.read_bytes(), fps=2, backend="opencv"
+    )
+
+    total_frames = metadata["total_num_frames"]
+    hf_metadata = VideoMetadata(total_num_frames=total_frames, fps=None)
+    hf_indices = Qwen3VLVideoProcessor().sample_frames(hf_metadata, fps=2).tolist()
+    assert metadata["frames_indices"] == hf_indices
+    assert metadata["fps"] == hf_metadata.fps
+
+    source = VideoSourceMetadata(total_frames, original_fps=0.0, duration=0.0)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+    assert (
+        Qwen3VLVideoBackend.compute_frames_index_to_sample(source, target) == hf_indices
+    )
 
 
 @pytest.mark.parametrize(
