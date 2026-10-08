@@ -49,5 +49,4 @@ async def create_structured_decision(
 
 
 def register_structured_decisions_api_router(app: FastAPI):
-    if getattr(app.state.args, "enable_structured_decisions", False):
-        app.include_router(router)
+    app.include_router(router)
