@@ -4,7 +4,8 @@ import argparse
 import contextlib
 
 import vllm
-from vllm import envs
+from vllm import EngineArgs, envs
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.utils import launch_core_engines
@@ -21,20 +22,13 @@ logger = init_logger(__name__)
 
 
 def _run_rust_frontend(
+    rust_frontend_path: str,
     args: argparse.Namespace,
+    vllm_config: VllmConfig,
+    engine_args: EngineArgs,
     exit_stack: contextlib.ExitStack,
+    num_api_servers: int = 1,
 ):
-    rust_frontend_path = (
-        envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
-    )
-    num_api_servers: int = args.api_server_count
-
-    assert not args.headless
-    assert num_api_servers == 1, (
-        "VLLM_RUST_FRONTEND_PATH does not support api_server_count > 1"
-    )
-    assert rust_frontend_path is not None
-
     set_signal_handler()
 
     listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
@@ -48,14 +42,6 @@ def _run_rust_frontend(
         grpc_host = "127.0.0.1" if args.uds else (args.host or "")
         grpc_sock = create_server_socket((grpc_host, args.grpc_port), reuse_port=False)
         exit_stack.callback(cleanup_listen_socket, grpc_sock)
-
-    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
-    propagate_flash_late_interaction(args, engine_args)
-    engine_args._api_process_count = num_api_servers
-    engine_args._api_process_rank = -1
-
-    usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
@@ -132,7 +118,6 @@ def _run_rust_frontend(
         api_server_manager.shutdown(timeout=to_timeout(setup_utils.shutdown_by))
 
     exit_stack.callback(_api_server_manager_shutdown)
-    exit_stack.callback(set_timeout, vllm_config)
 
     wait_for_completion_or_failure(
         api_server_manager=api_server_manager,
@@ -142,11 +127,39 @@ def _run_rust_frontend(
 
 
 def run_rust_frontend(args: argparse.Namespace):
+    rust_frontend_path = (
+        envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
+    )
+    num_api_servers: int = args.api_server_count
+
+    assert not args.headless
+    assert num_api_servers == 1, (
+        "VLLM_RUST_FRONTEND_PATH does not support api_server_count > 1"
+    )
+    assert rust_frontend_path is not None
+
+    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    propagate_flash_late_interaction(args, engine_args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
+    usage_context = UsageContext.OPENAI_API_SERVER
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
     with contextlib.ExitStack() as exit_stack:
         try:
-            _run_rust_frontend(args, exit_stack)
+            _run_rust_frontend(
+                rust_frontend_path,
+                args,
+                vllm_config,
+                engine_args,
+                exit_stack,
+                num_api_servers,
+            )
         except KeyboardInterrupt:
             logger.info_once("[shutdown] API server: interrupted by user.")
+            exit_stack.callback(set_timeout, vllm_config)
         except Exception:
             logger.exception("[shutdown] API server: unexpected error during shutdown")
+            exit_stack.callback(set_timeout, vllm_config)
             raise
