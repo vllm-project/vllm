@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _qkv_slice_by_head(num_tokens, num_q_heads, num_kv_heads, head_dim):
-    """q viewed per-head from a fused QKV projection, as Qwen3-style QK-norm does."""
+    """Q viewed per-head from a fused QKV projection, as Qwen3-style QK-norm does."""
     q_size, kv_size = num_q_heads * head_dim, num_kv_heads * head_dim
     qkv = torch.empty(num_tokens, q_size + 2 * kv_size)
     q = qkv.split([q_size, kv_size, kv_size], dim=-1)[0]

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 
 use crate::protocol::structured_outputs::StructuredOutputsParams;
+use crate::protocol::tensor::WireNdArray;
 
 fn default_top_p() -> f32 {
     1.0
@@ -101,6 +102,11 @@ pub struct EngineCoreSamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
+    /// `[num_rows, num_ids]` candidate token IDs per scored causal prompt row,
+    /// `-1` padding shorter rows.
+    pub prompt_logprob_token_ids: Option<WireNdArray>,
+    /// First causal prompt row to score; `None` scores from the first row.
+    pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling.
     pub min_p: f32,
     /// Frequency penalty applied by the sampler.
@@ -171,6 +177,8 @@ impl EngineCoreSamplingParams {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,

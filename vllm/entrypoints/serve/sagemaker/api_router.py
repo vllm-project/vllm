@@ -92,7 +92,7 @@ def _attach_router(
     @router.get("/ping", response_class=Response)
     @sagemaker_standards.register_ping_handler
     async def ping(raw_request: Request) -> Response:
-        """Ping check. Endpoint required for SageMaker"""
+        """Ping check. Endpoint required for SageMaker."""
         return await health(raw_request)
 
     @router.post(

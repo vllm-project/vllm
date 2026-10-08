@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 import ray
 import torch
@@ -33,7 +33,6 @@ from torch.multiprocessing.reductions import (
     rebuild_cuda_tensor,
     reduce_tensor,
 )
-from typing_extensions import Self
 
 from vllm.distributed.weight_transfer.base import (
     ParamMeta,
@@ -534,6 +533,7 @@ class _RDTProducerServer:
         Raises:
             RuntimeError: two consumers of one sharing group disagree on the
                 chunks they pull from this producer.
+
         """
         sg = self._share_group(consumer_id)
         if plan_digest is not None:
@@ -681,6 +681,7 @@ class _RDTProducerServer:
 
         Raises:
             ValueError: ``seq`` was not supplied.
+
         """
         needed = sorted({n for n, _ in specs})
         if self._served_names is not None:
@@ -1023,6 +1024,7 @@ class ShardedRDTTrainerWeightTransferEngine(
 
         Raises:
             RuntimeError: called before ``trainer_init`` cached the server names.
+
         """
         if self._server_names is None:
             raise RuntimeError(

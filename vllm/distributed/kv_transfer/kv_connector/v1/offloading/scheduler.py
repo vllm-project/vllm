@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain, islice
@@ -56,6 +57,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -156,7 +158,7 @@ def resolve_mamba_align_size(
     """Scan all KV cache groups in *spec* and return the single mamba alignment
     size, or None if no group requires mamba alignment.
 
-    For MambaSpec groups in "align" or "all" cache mode the hit window must be
+    For MambaSpec groups in "align" cache mode the hit window must be
     rounded down to a multiple of the offloaded chunk size. Asserts that all
     such groups agree on the same value.
     """
@@ -164,10 +166,7 @@ def resolve_mamba_align_size(
     for group in spec.config.groups:
         tokens_per_block = group.tokens_per_block
         kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
-        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode in (
-            "align",
-            "all",
-        ):
+        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
             tokens_per_chunk = tokens_per_block * spec.blocks_per_chunk
             assert mamba_align_size is None or mamba_align_size == tokens_per_chunk
             mamba_align_size = tokens_per_chunk
@@ -378,6 +377,9 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
+    # Loaded attention keys cover their token positions. Recurrent state
+    # supports the whole reused external prefix.
+    load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
 
@@ -553,6 +555,7 @@ def _create_req_context(req: Request) -> ReqContext:
     return ReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
+        kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
     )
 
@@ -589,8 +592,9 @@ class OffloadingConnectorScheduler:
         sliding_window_groups.sort(key=_sliding_window_sort_key, reverse=True)
 
         # used by _lookup
+        self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
-        self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
+        self._lookup_groups = self._full_attention_groups + self._sliding_window_groups
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
@@ -750,8 +754,7 @@ class OffloadingConnectorScheduler:
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
     ) -> int | None:
-        """
-        Find how many tokens beyond num_locally_computed_tokens can be loaded.
+        """Find how many tokens beyond num_locally_computed_tokens can be loaded.
 
         Iterates full-attention groups first (prefix lookup), then sliding-window
         groups (suffix lookup). Each group may tighten max_hit_size_tokens, which
@@ -1039,14 +1042,15 @@ class OffloadingConnectorScheduler:
         num_computed_tokens: int,
         max_num_new_tokens: int | None = None,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded beyond the
+        """Get number of new tokens that can be loaded beyond the
         num_computed_tokens.
 
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
+            max_num_new_tokens (int | None): cap on the number of tokens that
+                may be loaded beyond `num_computed_tokens`, if any.
 
         Returns:
             A tuple with the following elements:
@@ -1057,6 +1061,7 @@ class OffloadingConnectorScheduler:
                   should query for this request again later.
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
+
         """
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
@@ -1091,6 +1096,53 @@ class OffloadingConnectorScheduler:
 
         return num_hit_tokens, bool(num_hit_tokens)
 
+    def get_external_cache_hit_sources(
+        self,
+        request: Request,
+        num_external_tokens: int,
+    ) -> dict[CacheHitSource, int]:
+        """Split the accepted external hit by the tier each loaded key came from.
+
+        Attention keys cover only their loaded token ranges; recurrent state
+        covers the whole reused prefix. Overlaps report the outermost tier.
+        Uncovered tokens, including omitted sliding-window history, are
+        ``external_unspecified``.
+        """
+        sources: dict[CacheHitSource, int] = {}
+        if num_external_tokens == 0:
+            return sources
+        req_status = self._req_status[request.request_id]
+        start = req_status.num_locally_computed_tokens
+        end = start + num_external_tokens
+
+        events: list[tuple[int, int, CacheHitSource]] = [
+            (end, 0, CacheHitSource.EXTERNAL_UNSPECIFIED)
+        ]
+        for lo, hi, key in req_status.load_key_ranges:
+            lo, hi = max(start, lo), min(end, hi)
+            if lo >= hi:
+                continue
+            source = CacheHitSource(
+                self.manager.get_load_source(key, req_status.req_context)
+            )
+            events.extend(((lo, 1, source), (hi, -1, source)))
+
+        # Sweep endpoints instead of rescanning every range for each interval.
+        active: Counter[CacheHitSource] = Counter()
+        position = start
+        for boundary, delta, source in sorted(events):
+            if boundary > position:
+                tiers = [tier for tier, count in active.items() if count > 0]
+                tier = (
+                    CacheHitSource.outermost(tiers)
+                    if tiers
+                    else CacheHitSource.EXTERNAL_UNSPECIFIED
+                )
+                sources[tier] = sources.get(tier, 0) + boundary - position
+            active[source] += delta
+            position = boundary
+        return sources
+
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
@@ -1106,6 +1158,7 @@ class OffloadingConnectorScheduler:
             assert partial_tail_boundary == num_cached_tokens
 
         keys_to_load: list[OffloadKey] = []
+        req_status.load_key_ranges.clear()
         dst_block_ids: list[int] = []
         # per group
         group_sizes: list[int] = []
@@ -1158,9 +1211,9 @@ class OffloadingConnectorScheduler:
                 )
                 end_chunk_idx = num_chunks - (partial_tail_boundary is not None)
                 assert len(offload_keys) >= end_chunk_idx
-                keys_to_load.extend(offload_keys[start_chunk_idx:end_chunk_idx])
+                group_keys_to_load = offload_keys[start_chunk_idx:end_chunk_idx]
                 if partial_tail_boundary is not None:
-                    keys_to_load.append(
+                    group_keys_to_load.append(
                         self._make_boundary_key(
                             request,
                             group_config.group_idx,
@@ -1168,6 +1221,24 @@ class OffloadingConnectorScheduler:
                             req_status.req_context,
                         )
                     )
+                keys_to_load.extend(group_keys_to_load)
+                if isinstance(group_config.kv_cache_spec, MambaSpec):
+                    req_status.load_key_ranges.extend(
+                        (num_locally_computed_tokens, num_cached_tokens, key)
+                        for key in group_keys_to_load
+                    )
+                else:
+                    for chunk_idx, key in enumerate(
+                        group_keys_to_load, start_chunk_idx
+                    ):
+                        range_start = max(
+                            load_start_gpu_block_idx * tokens_per_block,
+                            chunk_idx * tokens_per_chunk,
+                        )
+                        range_end = min(
+                            num_cached_tokens, (chunk_idx + 1) * tokens_per_chunk
+                        )
+                        req_status.load_key_ranges.append((range_start, range_end, key))
 
             dst_block_ids.extend(
                 block.block_id
@@ -1208,10 +1279,7 @@ class OffloadingConnectorScheduler:
         req_status.partial_tail_boundary = None
 
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
-        """
-        Update request states from the Scheduler's output.
-        """
-
+        """Update request states from the Scheduler's output."""
         # new_block_ids_end[req_id][i] = end of pre-existing block_ids for
         # the i-th sliding window group (before this step's extend).
         # Used to detect sliding window blocks that got re-allocated.
@@ -1840,12 +1908,12 @@ class OffloadingConnectorScheduler:
         return bool(self._jobs) or self.manager.has_pending_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        """
-        Update KVConnector state from worker-side connectors output.
+        """Update KVConnector state from worker-side connectors output.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
+
         """
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, OffloadingWorkerMetadata):
@@ -1938,8 +2006,7 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called when a request has finished, before its blocks are freed.
+        """Called when a request has finished, before its blocks are freed.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -1947,6 +2014,7 @@ class OffloadingConnectorScheduler:
             get_finished().
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
+
         """
         req_status = self._req_status.get(request.request_id)
 
@@ -1985,12 +2053,12 @@ class OffloadingConnectorScheduler:
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
+
         """
         yield from self._events_tracker.take_events(self.manager.take_events())
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
-
         # reset_cache cannot be called in the middle of a schedule step
         assert not self._current_batch_load_jobs
         assert not self._current_batch_jobs_to_flush

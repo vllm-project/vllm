@@ -57,6 +57,8 @@ logger = init_logger(__name__)
 class _ChunkedPromptAggregator:
     weighted_sum: torch.Tensor | None = None
     total_weight: int = 0
+    num_chunks: int = 0
+    all_chunks_l2_normalized: bool = True
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
@@ -140,13 +142,16 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 )
 
             prompt_token_ids = cast(list[int], token_ids)
+            cache_salt = cast(str | None, engine_input["prompts"].get("cache_salt"))
 
             for chunk_idx, chunk_tokens in enumerate(
                 chunk_list(prompt_token_ids, max_model_len)
             ):
                 chunked_engine_inputs.append(
                     PoolingEngineInput(
-                        prompts=tokens_input(prompt_token_ids=chunk_tokens),
+                        prompts=tokens_input(
+                            prompt_token_ids=chunk_tokens, cache_salt=cache_salt
+                        ),
                         params=engine_input["params"],
                         lora_requests=engine_input["lora_requests"],
                         priorities=engine_input["priorities"],
@@ -204,7 +209,17 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
             weight = len(result.prompt_token_ids)
             embedding_data = result.outputs.data
-            weighted_embedding = embedding_data.to(dtype=torch.float32) * weight
+            float_embedding = embedding_data.to(dtype=torch.float32)
+            if ctx.pooling_params.use_activation:
+                # Custom activations need not L2-normalize; allow BF16 rounding.
+                embedding_norm = torch.linalg.vector_norm(float_embedding)
+                aggregator.all_chunks_l2_normalized &= torch.allclose(
+                    embedding_norm,
+                    torch.ones_like(embedding_norm),
+                    rtol=1e-2,
+                    atol=1e-5,
+                )
+            weighted_embedding = float_embedding * weight
 
             if aggregator.weighted_sum is None:
                 # First chunk
@@ -214,6 +229,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 aggregator.weighted_sum += weighted_embedding
 
             aggregator.total_weight += weight
+            aggregator.num_chunks += 1
 
         if ctx.original_engine_inputs is None:
             raise ValueError("Original engine inputs not available")
@@ -239,6 +255,14 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 ):
                     # Compute final mean embedding
                     final_embedding = weighted_sum / total_weight
+                    if (
+                        ctx.pooling_params.use_activation
+                        and aggregator.num_chunks > 1
+                        and aggregator.all_chunks_l2_normalized
+                    ):
+                        final_embedding = torch.nn.functional.normalize(
+                            final_embedding, dim=-1
+                        )
 
                     # Create a PoolingRequestOutput
                     # for the aggregated result

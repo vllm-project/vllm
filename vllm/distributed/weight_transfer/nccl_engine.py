@@ -5,10 +5,9 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
 import torch
-from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -113,8 +112,7 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class NCCLWeightTransferEngine(
     WeightTransferEngine[NCCLWeightTransferInitInfo, NCCLWeightTransferUpdateInfo]
 ):
-    """
-    Weight transfer engine using NCCL for communication between trainer and workers.
+    """Weight transfer engine using NCCL for communication between trainer and workers.
 
     This implementation uses NCCL broadcast operations to transfer dense
     checkpoint-format weights from the trainer (rank 0) to all inference workers
@@ -142,14 +140,14 @@ class NCCLWeightTransferEngine(
         self.packed_num_buffers = DEFAULT_PACKED_NUM_BUFFERS
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
-        """
-        Initialize NCCL process group with the trainer and record the
+        """Initialize NCCL process group with the trainer and record the
         trainer-supplied wire params so the worker decodes exactly as the
         trainer encodes.
 
         Args:
             init_info: NCCL initialization info containing master address, port,
                       rank offset, world size, and the packed wire params
+
         """
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
@@ -175,8 +173,7 @@ class NCCLWeightTransferEngine(
         finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
-        """
-        Receive weights from trainer via NCCL broadcast.
+        """Receive weights from trainer via NCCL broadcast.
 
         Whether to use packed broadcasting (and the buffer geometry) is read
         from `self.packed` / `self.packed_*`, set at the init handshake from the
@@ -186,6 +183,7 @@ class NCCLWeightTransferEngine(
         Args:
             update_info: NCCL update info containing parameter names, dtypes,
                         and shapes
+
         """
         if self.model_update_group is None:
             raise RuntimeError(

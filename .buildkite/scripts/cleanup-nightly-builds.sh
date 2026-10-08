@@ -56,8 +56,8 @@ get_all_tags() {
         set -x
         
         # Get both last_updated timestamp and tag name, separated by |
-        # Exclude nightly-dev tags from cleanup
-        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | select(.name | startswith("nightly-dev") | not) | "\(.last_updated)|\(.name)"')
+        # Exclude mutable architecture tags and nightly-dev tags from cleanup
+        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | select(.name != ($prefix + "x86_64") and .name != ($prefix + "aarch64")) | select(.name | startswith("nightly-dev") | not) | "\(.last_updated)|\(.name)"')
         
         if [ -z "$tags" ]; then
             break

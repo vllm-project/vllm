@@ -32,8 +32,10 @@ from vllm.models.deepseek_v41.common.ops import (
 )
 from vllm.models.deepseek_v41.common.ops.fused_layout import (
     WV_GROUP_SIZE,
-    permute_wo_a_,
-    permute_wq_b_,
+    o_fused_chunk_permutation,
+    o_fused_permutation,
+    permute_on_load,
+    q_fused_permutation,
 )
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v41.sparse_mla import (
@@ -182,7 +184,13 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 "wo_a group."
             )
         self.n_wv_group = self.padded_heads // WV_GROUP_SIZE
-        self._fused_layouts_ready = False
+        q_perm = q_fused_permutation(self.n_local_heads, self.head_dim)
+        permute_on_load(self.wq_b.weight, q_perm, dim=0)
+        permute_on_load(self.wq_b.weight_scale, q_perm, dim=0)
+        o_perm = o_fused_permutation(WV_GROUP_SIZE, self.head_dim)
+        permute_on_load(self.wo_a.weight, o_perm, dim=1)
+        o_chunk_perm = o_fused_chunk_permutation(WV_GROUP_SIZE, self.head_dim)
+        permute_on_load(self.wo_a.weight_scale, o_chunk_perm, dim=1)
 
     # ---- interface contract ------------------------------------------------
 
@@ -225,26 +233,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             z,
             recipe=self._einsum_recipe,
         )
-        return self.wo_b(z.flatten(1))
-
-    # ---- weights -----------------------------------------------------------
-
-    def finalize_loaded_weights(self) -> None:
-        """Permute wq_b rows / wo_a columns into the kernel's layouts.
-
-        Idempotent: a second post-load pass must not permute twice.
-        """
-        if self._fused_layouts_ready:
-            return
-        permute_wq_b_(
-            self.wq_b.weight.data, self.wq_b.weight_scale.data, self.n_local_heads
-        )
-        permute_wo_a_(
-            self.wo_a.weight.data,
-            self.wo_a.weight_scale.data,
-            self.n_local_heads // self.n_local_groups,
-        )
-        self._fused_layouts_ready = True
+        return self._wo_b_proj(z.flatten(1))
 
     # ---- forward -----------------------------------------------------------
 
@@ -255,11 +244,6 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         positions: torch.Tensor,
         output: QuantizedActivation,
     ) -> None:
-        if not self._fused_layouts_ready:
-            raise RuntimeError(
-                f"{self.prefix}: wq_b / wo_a were never permuted for the mega "
-                "attention kernel; refusing to run with mismatched layouts."
-            )
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:
             # Warmup dummy run: reserve the prefill workspace, produce zeros.
@@ -311,7 +295,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         else:
             assert self.topk_indices_buffer is not None
             top_k = self.topk_indices_buffer.shape[-1]
-        combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
+        combined_topk = round_up(top_k + self.window_size, 128)
         current_workspace_manager().get_simultaneous(
             ((self.PREFILL_CHUNK_SIZE, m, q.shape[-1]), torch.bfloat16),
             ((self.max_num_batched_tokens, combined_topk), torch.int32),
@@ -411,7 +395,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
+        combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_n, chunk_m in chunk_plan:
             chunk_size = chunk_end - chunk_start
             kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
@@ -422,7 +406,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             if not swa_only:
                 assert flashmla_metadata is not None
                 dequantize_and_gather_k_cache(
-                    kv_ws[:chunk_size],
+                    kv_ws[:chunk_size, :chunk_n],
                     self._compressed_kv_cache(),
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,
@@ -457,21 +441,6 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 chunk_m,
                 chunk_n,
                 out=(idx_ws[: qe - qs], lens_ws[: qe - qs]),
-                left_visible=(
-                    swa_metadata.prefill_left_visible[
-                        num_decode_tokens + qs : num_decode_tokens + qe
-                    ]
-                    if swa_metadata.prefill_left_visible is not None
-                    else None
-                ),
-                right_visible=(
-                    swa_metadata.prefill_right_visible[
-                        num_decode_tokens + qs : num_decode_tokens + qe
-                    ]
-                    if swa_metadata.prefill_right_visible is not None
-                    else None
-                ),
-                max_image_tokens=self.max_image_tokens,
             )
             chunk_out = _token_slice(out, token_base + qs, token_base + qe)
             # Mega attention over the gathered non-paged bf16 KV (RoPE already

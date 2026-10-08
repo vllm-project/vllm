@@ -19,10 +19,9 @@ DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-80}
 CACHE_MAX_AGE=${CACHE_MAX_AGE:-24h}
 
 # Reclaim disk only when the host is under pressure, aging out anything unused
-# for less than CACHE_MAX_AGE so hot layers survive -- same `--filter
-# until=<N>h` pattern the TPU CI scripts already rely on. `docker buildx
-# prune --max-used-space` is a no-op on this host's `docker` driver (BuildKit
-# embedded in dockerd never enforces the size cap), so we don't use it.
+# for less than CACHE_MAX_AGE so hot layers survive (`--filter until=<N>h`).
+# `docker buildx prune --max-used-space` is a no-op on this host's `docker`
+# driver (BuildKit embedded in dockerd never enforces the size cap), so we don't use it.
 prune_if_disk_pressure() {
     local docker_root disk_usage
     docker_root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
@@ -99,7 +98,7 @@ rm -f "$build_log"
 OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|OfflineModeIsEnabled)|Invalid repository ID or local directory specified|Cannot find any model weights with'
 run_test() {
     local hf_offline=$1
-    docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface -v ~/.cache/vllm:/root/.cache/vllm --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" --shm-size=4g "$IMAGE_NAME" \
+    docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface -v ~/.cache/vllm:/root/.cache/vllm --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" -e TERM=xterm-256color -e PY_COLORS=1 -e FORCE_COLOR=1 -e CLICOLOR_FORCE=1 --shm-size=4g "$IMAGE_NAME" \
         timeout "$TIMEOUT_VAL" bash -c "set -euox pipefail; echo \"--- Print packages\"; pip list; echo \"--- Running tests\"; ${TEST_COMMAND}"
 }
 

@@ -1,0 +1,438 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import asyncio
+import math
+import os
+
+import pytest
+import torch
+
+import vllm.device_allocator.cumem as cumem
+import vllm.envs as envs
+from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.platforms import current_platform
+from vllm.utils.mem_constants import GiB_bytes
+
+from ....utils import (
+    create_new_process_for_each_test,
+    multi_gpu_marks,
+    multi_gpu_test,
+    requires_fp8,
+)
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.parametrize(
+    "model",
+    [
+        # sleep mode with safetensors
+        "hmellor/tiny-random-LlamaForCausalLM",
+        # sleep mode with pytorch checkpoint
+        "facebook/opt-125m",
+    ],
+)
+def test_end_to_end(model: str):
+    free, total = torch.accelerator.get_memory_info()
+    used_bytes_baseline = total - free  # in case other process is running
+    llm = LLM(model, enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
+    # which is difficult to measure in the test. therefore, we only
+    # test sleep level 1 here.
+    llm.sleep(level=1)
+
+    free_gpu_bytes_after_sleep, total = torch.accelerator.get_memory_info()
+    used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
+    # now the memory usage is mostly cudagraph memory pool,
+    # and it should be less than the model weights (1B model, 2GiB weights)
+
+    # NOTE: In V1, the memory buffer for logits (max_num_reqs x vocab_size)
+    # is captured but cannot be releasesd from PyTorch due to a known bug,
+    # therefore high memory usage after `llm.sleep` is called is expected.
+    # FIXME(youkaichao & ywang96): Fix memory buffer issue with sleep mode
+    # in V1.
+    assert used_bytes < 7 * GiB_bytes
+
+    llm.wake_up()
+    output2 = llm.generate(prompt, sampling_params)
+    # cmp output
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+    llm.sleep(level=1)
+    llm.wake_up(tags=["weights"])
+
+    free_gpu_bytes_wake_up_w, total = torch.accelerator.get_memory_info()
+    used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
+
+    # should just reallocate memory for weights (1B model, ~2GiB weights)
+    assert used_bytes < 10 * GiB_bytes
+
+    # now allocate kv cache memory
+    llm.wake_up(tags=["kv_cache"])
+    output3 = llm.generate(prompt, sampling_params)
+
+    # cmp output
+    assert output[0].outputs[0].text == output3[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
+def test_deep_sleep(gpu_memory_cleared):
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    free, total = torch.accelerator.get_memory_info()
+    used_bytes_baseline = total - free  # in case other process is running
+    llm = LLM(model, enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    # Put the engine to deep sleep
+    llm.sleep(level=2)
+
+    free_gpu_bytes_after_sleep, total = torch.accelerator.get_memory_info()
+    used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
+    assert used_bytes < 3 * GiB_bytes
+
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+    free_gpu_bytes_wake_up_w, total = torch.accelerator.get_memory_info()
+    used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
+    assert used_bytes < 4 * GiB_bytes
+
+    # now allocate kv cache and cuda graph memory
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+
+    # cmp output
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
+def test_deep_sleep_lora(gpu_memory_cleared):
+    """Level-2 sleep/wake/reload with enable_lora=True.
+
+    LoRA wrapping moves parameters under base_layer and adds LoRA
+    stacked tensors that are plain attributes, not restored by the
+    reload machinery — reload must forward checkpoint weights through
+    the wrappers and reset the LoRA state afterwards.
+    """
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(
+        model,
+        enable_sleep_mode=True,
+        enable_lora=True,
+        max_lora_rank=8,
+        enforce_eager=True,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    # Level-2 sleep discards all GPU memory
+    llm.sleep(level=2)
+
+    # Reload weights from checkpoint
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+    # Multiple cycles should not accumulate corruption
+    for _ in range(3):
+        llm.sleep(level=2)
+        llm.wake_up(tags=["weights"])
+        llm.collective_rpc("reload_weights")
+        llm.wake_up(tags=["kv_cache"])
+    output3 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output3[0].outputs[0].text
+
+
+def _lora_logits_mapping_present(model) -> bool:
+    from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
+
+    return any(
+        isinstance(m, LogitsProcessorWithLoRA)
+        and m.sharded_to_full_mapping_gpu is not None
+        for m in model.modules()
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+def test_deep_sleep_lora_tp2(monkeypatch):
+    """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
+
+    With TP > 1 the LoRA logits processor carries
+    ``sharded_to_full_mapping_gpu``, a permanent index mapping used to
+    reorder gathered logits. Like the LoRA stacked tensors it is a plain
+    attribute allocated in the sleep-mode pool, so level-2 sleep destroys
+    its contents — it must be restored after reload.
+    """
+    # Needed for apply_model to reach the multiproc TP workers below.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(
+        model,
+        enable_sleep_mode=True,
+        enable_lora=True,
+        max_lora_rank=8,
+        tensor_parallel_size=2,
+        enforce_eager=True,
+    )
+
+    # Guard against this test silently not exercising the TP>1 reindex
+    # path (e.g. if lm_head wrapping conditions change).
+    assert all(llm.apply_model(_lora_logits_mapping_present))
+
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+def _cudagraph_bytes(worker) -> int:
+    data = cumem.CuMemAllocator.get_instance().pointer_to_data.values()
+    return sum(d.handle[1] for d in data if d.tag == "cudagraph")
+
+
+def _custom_ar_active(worker) -> bool:
+    from vllm.distributed.parallel_state import get_tp_group
+
+    ca_comm = get_tp_group().device_communicator.ca_comm
+    return ca_comm is not None and not ca_comm.disabled
+
+
+@pytest.mark.parametrize(
+    ("mode", "breakable", "tp", "offload"),
+    [
+        ("FULL", False, 1, True),
+        ("PIECEWISE", False, 1, True),
+        ("PIECEWISE", True, 1, True),
+        pytest.param(
+            "FULL_AND_PIECEWISE", False, 2, True, marks=multi_gpu_marks(num_gpus=2)
+        ),
+        ("FULL_AND_PIECEWISE", False, 1, False),
+    ],
+    ids=["full", "piecewise", "breakable", "custom-ar-tp2", "off-by-default"],
+)
+@create_new_process_for_each_test()
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
+    """Each capture site uses the pool, exact across sleeps; TP=2 needs
+    unregistered custom AR; off changes nothing."""
+    for name, value in [
+        ("VLLM_USE_V2_MODEL_RUNNER", "1"),
+        ("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0"),
+        ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
+        ("VLLM_ALLREDUCE_USE_FLASHINFER", "0"),
+        ("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"),
+    ]:
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("NCCL_GRAPH_REGISTER", raising=False)
+    llm = LLM(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        enable_sleep_mode=True,
+        sleep_mode_offload_cudagraph=offload,
+        tensor_parallel_size=tp,
+        compilation_config={
+            "cudagraph_mode": mode,
+            "pass_config": {"fuse_allreduce_rms": False},
+        },
+    )
+    graph_bytes = llm.collective_rpc(_cudagraph_bytes)
+    assert os.environ.get("NCCL_GRAPH_REGISTER") == ("0" if offload else None)
+    assert all(graph_bytes) if offload else not any(graph_bytes)
+    if not offload:
+        return
+    if tp > 1 and not all(llm.collective_rpc(_custom_ar_active)):
+        pytest.skip("Custom allreduce is unavailable on these GPUs")
+    prompt, params = "How are you?", SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, params)[0].outputs[0].text
+    for level in (1, 2):
+        llm.sleep(level=level)
+        llm.wake_up(tags=["weights"])
+        if level == 2:
+            llm.collective_rpc("reload_weights")
+        llm.wake_up(tags=["kv_cache"])
+        assert llm.generate(prompt, params)[0].outputs[0].text == expected
+
+
+@create_new_process_for_each_test()
+def test_deep_sleep_async(gpu_memory_cleared):
+    async def test():
+        model = "hmellor/tiny-random-LlamaForCausalLM"
+        free, total = torch.accelerator.get_memory_info()
+        used_bytes_baseline = total - free  # in case other process is running
+        engine_args = AsyncEngineArgs(
+            model=model,
+            enable_sleep_mode=True,
+        )
+
+        llm = AsyncLLMEngine.from_engine_args(engine_args)
+        prompt = "How are you?"
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        outputs = llm.generate(prompt, sampling_params, request_id="test_request_id1")
+        async for output in outputs:
+            pass
+
+        # Put the engine to deep sleep
+        await llm.sleep(level=2)
+
+        await llm.wake_up(tags=["weights"])
+        await llm.collective_rpc("reload_weights")
+        free_gpu_bytes_wake_up_w, total = torch.accelerator.get_memory_info()
+        used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
+        assert used_bytes < 4 * GiB_bytes
+
+        # now allocate kv cache and cuda graph memory
+        await llm.wake_up(tags=["kv_cache"])
+        outputs2 = llm.generate(prompt, sampling_params, request_id="test_request_id2")
+        async for output2 in outputs2:
+            pass
+
+        # cmp output
+        assert output.outputs[0].text == output2.outputs[0].text
+
+    asyncio.run(test())
+
+
+def _load_weights(worker) -> None:
+    # Not reload_weights(): its layerwise finalize re-derives the KV scales.
+    model = worker.model_runner.get_model()
+    loader = get_model_loader(worker.load_config)
+    model.load_weights(loader.get_all_weights(worker.model_config, model))
+
+
+def _attn_kv_scales(model) -> dict[str, list[float]]:
+    return {
+        f"{name}.{attr}": getattr(module, attr).flatten().tolist()
+        for name, module in model.named_modules()
+        for attr in ("_q_scale", "_k_scale", "_v_scale")
+        if isinstance(getattr(module, attr, None), torch.Tensor)
+    }
+
+
+@requires_fp8
+@create_new_process_for_each_test()
+def test_deep_sleep_compressed_tensors_kv_scales(
+    monkeypatch: pytest.MonkeyPatch, gpu_memory_cleared
+):
+    """KV scales must survive level-2 sleep plus a weights reload (else NaN)."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = LLM(
+        "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor",
+        enable_sleep_mode=True,
+        kv_cache_dtype="fp8",
+        enforce_eager=True,
+        gpu_memory_utilization=0.6,
+    )
+    sampling_params = SamplingParams(temperature=0, max_tokens=10, logprobs=0)
+    scales = llm.apply_model(_attn_kv_scales)[0]
+    assert any(v != 1.0 for values in scales.values() for v in values)
+    expected = llm.generate("How are you?", sampling_params)[0].outputs[0]
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc(_load_weights)
+    llm.wake_up(tags=["kv_cache"])
+
+    assert llm.apply_model(_attn_kv_scales)[0] == scales
+    actual = llm.generate("How are you?", sampling_params)[0].outputs[0]
+    assert actual.token_ids == expected.token_ids
+    logprobs = [
+        [lp[t].logprob for lp, t in zip(o.logprobs, o.token_ids)]
+        for o in (expected, actual)
+    ]
+    assert all(math.isfinite(x) for x in logprobs[1])
+    assert logprobs[0] == logprobs[1]
+
+
+@requires_fp8
+def test_deep_sleep_fp8_kvcache_mrv1(
+    monkeypatch: pytest.MonkeyPatch, gpu_memory_cleared
+):
+    # Regression test for https://github.com/vllm-project/vllm/pull/28783.
+    # In particular, verify that MRV1 does not rely on post_kv_cache_wake_up()
+    # to restore correct output after level-2 sleep.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
+
+    model = "Qwen/Qwen2-0.5B"
+    used_bytes_baseline = current_platform.get_current_memory_usage()
+
+    llm = LLM(model, enable_sleep_mode=True, kv_cache_dtype="fp8")
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    # Put the engine to deep sleep
+    llm.sleep(level=2)
+
+    used_bytes = current_platform.get_current_memory_usage() - used_bytes_baseline
+
+    # Rocm uses more memory for CudaGraphs, so we add 2 GiB more for the threshold
+    rocm_extra_mem_bytes = 2 * GiB_bytes if current_platform.is_rocm() else 0
+    mem_threshold_after_sleep = 3 * GiB_bytes + rocm_extra_mem_bytes
+    assert used_bytes < mem_threshold_after_sleep
+
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+
+    used_bytes = current_platform.get_current_memory_usage() - used_bytes_baseline
+    mem_threshold_after_wake_up = 4 * GiB_bytes + rocm_extra_mem_bytes
+    assert used_bytes < mem_threshold_after_wake_up
+
+    # now allocate kv cache and cuda graph memory
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+
+    # cmp output
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@requires_fp8
+def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+
+    llm = LLM(
+        "Qwen/Qwen2-0.5B",
+        enable_sleep_mode=True,
+        kv_cache_dtype="fp8",
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, sampling_params)
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+
+    original_create_and_map = cumem.create_and_map
+
+    def create_and_map_with_poison(handle) -> None:
+        original_create_and_map(handle)
+        _, size, ptr, _ = handle
+        cumem.libcudart.cudaMemset(ptr, 0xA5, size)
+
+    monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
+
+    # New requests must overwrite undefined remapped KV bytes before reading them.
+    llm.wake_up(tags=["kv_cache"])
+    actual = llm.generate(prompt, sampling_params)
+
+    assert expected[0].outputs[0].text == actual[0].outputs[0].text
