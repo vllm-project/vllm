@@ -30,7 +30,7 @@ When open a Github issue about the CPU backend, please add `[CPU Backend]` in th
 
 ## Requirements
 
-- Python: 3.10 -- 3.13
+- Python: 3.11 -- 3.14
 
 === "Intel/AMD x86"
 
@@ -240,6 +240,9 @@ On an AMD Zen 4 / Zen 5 CPU, install the CPU wheel with the `zen` extra so vLLM 
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 uv pip install "vllm[zen]" --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index --torch-backend cpu
 ```
+
+!!! warning
+    `zentorch` is not supported with vLLM 0.27.0 and 0.27.1.
 
 vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, look for the platform-selection line in the server's startup logs:
 

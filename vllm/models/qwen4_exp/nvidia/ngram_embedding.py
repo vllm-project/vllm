@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import regex as re
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
@@ -15,9 +16,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -27,7 +25,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
-from .ops.ple import ple_ngram_ids
+from ..common.ops.ple import ple_ngram_ids
 from .ple_pageable import (
     MappedTable,
     discover_table_layout,
