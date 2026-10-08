@@ -42,16 +42,49 @@ def get_num_nans(logits: torch.Tensor) -> torch.Tensor:
     return num_nans
 
 
+@triton.jit
+def _aggregate_num_nans_per_request_kernel(
+    num_nans_ptr,
+    num_nans_stride,
+    cumulative_row_ends_ptr,
+    cumulative_row_ends_stride,
+    result_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    start = tl.load(
+        cumulative_row_ends_ptr + (req_idx - 1) * cumulative_row_ends_stride,
+        mask=req_idx > 0,
+        other=0,
+    )
+    end = tl.load(cumulative_row_ends_ptr + req_idx * cumulative_row_ends_stride)
+    total = 0
+    for offset in range(start, end, BLOCK_SIZE):
+        rows = offset + tl.arange(0, BLOCK_SIZE)
+        counts = tl.load(
+            num_nans_ptr + rows * num_nans_stride, mask=rows < end, other=0
+        )
+        total += tl.sum(counts)
+    tl.store(result_ptr + req_idx, total)
+
+
 def aggregate_num_nans_per_request(
     num_nans: torch.Tensor,
     cumulative_row_ends: torch.Tensor,
 ) -> torch.Tensor:
     """Aggregate per-logit-row counts for speculative requests on device."""
-    prefix_sum = torch.zeros(
-        num_nans.shape[0] + 1, dtype=num_nans.dtype, device=num_nans.device
+    result = torch.empty(
+        cumulative_row_ends.numel(), dtype=num_nans.dtype, device=num_nans.device
     )
-    torch.cumsum(num_nans, dim=0, out=prefix_sum[1:])
-
-    row_starts = torch.zeros_like(cumulative_row_ends)
-    row_starts[1:] = cumulative_row_ends[:-1]
-    return prefix_sum[cumulative_row_ends] - prefix_sum[row_starts]
+    if result.numel() == 0:
+        return result
+    _aggregate_num_nans_per_request_kernel[(cumulative_row_ends.numel(),)](
+        num_nans,
+        num_nans.stride(0),
+        cumulative_row_ends,
+        cumulative_row_ends.stride(0),
+        result,
+        BLOCK_SIZE=32,
+        num_warps=1,
+    )
+    return result
