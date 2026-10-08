@@ -12,10 +12,6 @@ from vllm.platforms import current_platform
     [
         pytest.param(
             "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-            marks=[
-                pytest.mark.core_model,
-                pytest.mark.cpu_model,
-            ],
         ),
         pytest.param(
             "jason9693/Qwen2.5-1.5B-apeach",
@@ -58,8 +54,6 @@ def test_models(
         )
 
 
-@pytest.mark.core_model
-@pytest.mark.cpu_model
 def test_distilbert_sentiment_direction(vllm_runner) -> None:
     """Verify that the SST-2 model assigns higher probability to the correct
     sentiment label: label 1 = POSITIVE, label 0 = NEGATIVE."""
