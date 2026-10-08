@@ -241,7 +241,10 @@ def test_amd_attn_res_fp8_preserves_prefix_and_quantized_output(
     assert output.dtype == current_platform.fp8_dtype()
     assert scale.shape == (num_tokens, 1)
     if num_tokens:
-        quant = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
+        # Keep reference rounding independent of Inductor's fused quantization.
+        quant = QuantFP8(
+            static=False, group_shape=GroupShape.PER_TOKEN, compile_native=False
+        )
         ref_output, ref_scale = quant(reference)
         torch.testing.assert_close(scale, ref_scale, atol=1e-7, rtol=1e-6)
         # Floating-point fusion can move values at FP8 rounding midpoints.
