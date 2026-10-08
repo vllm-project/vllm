@@ -28,7 +28,7 @@ from vllm.model_executor.layers.pooler.tokwise.methods import (
     get_tok_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise.poolers import TokenPooler
-from vllm.pooling_params import PoolingParams
+from vllm.pooling_params import LateChunkingParams, PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata, PoolingStates
 
@@ -623,7 +623,9 @@ def test_late_chunk_pool_matches_fp32_means_before_projection_and_normalization(
     head = TokenEmbeddingPoolerHead(head_dtype, projector, PoolerNormalize())
     pooler = TokenPooler(TestAllPool._make_all_pool(), head)
     params = PoolingParams(
-        task="token_embed", late_chunk_size=chunk_size, use_activation=True
+        task="token_embed",
+        late_chunking_params=LateChunkingParams(chunk_size=chunk_size),
+        use_activation=True,
     )
     metadata = _make_metadata([7], pooling_params=[params])
     actual = pooler(hidden, metadata)[0]
@@ -639,7 +641,11 @@ def test_late_chunk_pool_reduces_before_nonlinear_projector():
     hidden = torch.tensor([[2.0, 0.0], [0.0, 1.0]])
     projector = torch.nn.Tanh()
     head = TokenEmbeddingPoolerHead(projector=projector, activation=PoolerNormalize())
-    params = PoolingParams(task="token_embed", late_chunk_size=2, use_activation=True)
+    params = PoolingParams(
+        task="token_embed",
+        late_chunking_params=LateChunkingParams(chunk_size=2),
+        use_activation=True,
+    )
     actual = head.forward_chunk(hidden, params)
     expected = torch.nn.functional.normalize(projector(hidden.mean(0, keepdim=True)))
     wrong_order = torch.nn.functional.normalize(projector(hidden).mean(0, keepdim=True))
@@ -650,9 +656,13 @@ def test_late_chunk_pool_reduces_before_nonlinear_projector():
 def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage():
     hidden = torch.arange(36, dtype=torch.float32).reshape(9, 4)
     params = [
-        PoolingParams(task="token_embed", late_chunk_size=2),
+        PoolingParams(
+            task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=2)
+        ),
         PoolingParams(task="token_embed"),
-        PoolingParams(task="token_embed", late_chunk_size=1),
+        PoolingParams(
+            task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=1)
+        ),
     ]
     pooler = TokenPooler(
         TestAllPool._make_all_pool(async_scheduling=True), TokenEmbeddingPoolerHead()
@@ -672,7 +682,11 @@ def test_late_chunk_pool_waits_for_complete_states():
     pooler = TokenPooler(
         TestAllPool._make_all_pool(chunked=True), TokenEmbeddingPoolerHead()
     )
-    params = [PoolingParams(task="token_embed", late_chunk_size=3)]
+    params = [
+        PoolingParams(
+            task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=3)
+        )
+    ]
     first = _make_metadata(
         [4], pooling_params=params, num_scheduled_tokens=[2], seq_lens=[2]
     )

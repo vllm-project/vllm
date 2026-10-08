@@ -9,6 +9,7 @@ from tests.models.utils import check_embeddings_close
 from vllm import LLM, PoolingParams, PoolingRequestOutput
 from vllm.config import PoolerConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.pooling_params import LateChunkingParams
 from vllm.tasks import PoolingTask
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -114,7 +115,9 @@ def test_nomic_late_chunking_offline(vllm_runner, monkeypatch, use_v2_runner):
                 sizes = [1, 3, 2, 128, 4, None][: len(texts)]
                 params = [
                     PoolingParams(
-                        late_chunk_size=c,
+                        late_chunking_params=LateChunkingParams(chunk_size=c)
+                        if c is not None
+                        else None,
                         use_activation=normalize,
                         skip_reading_prefix_cache=False,
                     )
@@ -196,7 +199,9 @@ def test_nomic_late_chunking_offline(vllm_runner, monkeypatch, use_v2_runner):
                     text,
                     pooling_task="token_embed",
                     use_tqdm=False,
-                    pooling_params=PoolingParams(late_chunk_size=3),
+                    pooling_params=PoolingParams(
+                        late_chunking_params=LateChunkingParams(chunk_size=3)
+                    ),
                     tokenization_kwargs=kwargs,
                 )
         # Rejections must leave the instance usable, with no retained chunk ranges.

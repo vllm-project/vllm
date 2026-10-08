@@ -97,8 +97,8 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         if pooled_data is None:
             return None
 
-        if pooling_param.late_chunk_size is not None:
-            means = _mean_pool_chunks(pooled_data, pooling_param.late_chunk_size)
+        if (late_chunking := pooling_param.late_chunking_params) is not None:
+            means = _mean_pool_chunks(pooled_data, late_chunking.chunk_size)
             pooled_data = (
                 means.to(pooled_data.dtype) if self.head_dtype is None else means
             )

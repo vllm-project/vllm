@@ -22,6 +22,7 @@ from vllm.outputs import (
     PoolingRequestOutput,
     RequestError,
 )
+from vllm.pooling_params import LateChunkingParams
 from vllm.renderers import TokenizeParams
 
 
@@ -61,7 +62,9 @@ def _late_chunk_context(prompts="a b", **kwargs):
         lora_request=None,
         priorities=None,
         prompts=prompts,
-        pooling_params=PoolingParams(late_chunk_size=2),
+        pooling_params=PoolingParams(
+            late_chunking_params=LateChunkingParams(chunk_size=2)
+        ),
     )
 
 
@@ -177,7 +180,10 @@ def _mock_chunk_tiling_engine(outputs):
     requests = [
         {
             "prompts": {"type": "token", "prompt_token_ids": [1, 2]},
-            "params": PoolingParams(task="token_embed", late_chunk_size=2),
+            "params": PoolingParams(
+                task="token_embed",
+                late_chunking_params=LateChunkingParams(chunk_size=2),
+            ),
             "lora_requests": None,
             "priorities": 0,
             "late_chunking": LateChunkingMetadata(

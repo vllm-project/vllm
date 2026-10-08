@@ -224,10 +224,10 @@ class PoolingIOProcessor:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
                 raise VLLMValidationError(msg)
 
-        if any(param.late_chunk_size is not None for param in params_seq) and (
+        if any(param.late_chunking_params is not None for param in params_seq) and (
             ctx.tokenization_kwargs or {}
         ).get("padding") not in (None, False, "do_not_pad"):
-            raise VLLMValidationError("late_chunk_size does not support input padding")
+            raise VLLMValidationError("Late chunking does not support input padding")
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -261,7 +261,8 @@ class PoolingIOProcessor:
         | EncodeChatRenderParams
         | ScoringRenderParams,
     ) -> PoolingEngineInput:
-        chunk_size = render_params["params"].late_chunk_size
+        late_chunking = render_params["params"].late_chunking_params
+        chunk_size = late_chunking.chunk_size if late_chunking is not None else None
         text = None
         if chunk_size is not None:
             text, tok_params = prepare_late_chunking_input(
@@ -301,7 +302,7 @@ class PoolingIOProcessor:
             prompt = engine_input[0]
             assert text is not None
             if prompt["type"] != "token":
-                raise VLLMValidationError("late_chunk_size requires tokenized text")
+                raise VLLMValidationError("Late chunking requires tokenized text")
             result["late_chunking"] = build_late_chunking_metadata(
                 text,
                 len(prompt["prompt_token_ids"]),
