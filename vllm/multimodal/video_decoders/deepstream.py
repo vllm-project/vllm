@@ -25,6 +25,14 @@ def decode_deepstream(
     from nvidia.deepstream_videodecode import probe_metadata
 
     total_frames, original_fps, duration, _width, _height, codec = probe_metadata(data)
+    if total_frames <= 0 or original_fps <= 0:
+        # Invalid probe output; raise 400 instead of crashing downstream.
+        raise ValueError(
+            "DeepStream backend could not probe video metadata "
+            f"(frames={total_frames}, fps={original_fps}). "
+            "The container may use a trailing moov box or fragmented MP4 "
+            "layout, which the DeepStream push-mode probe cannot parse."
+        )
     check_frame_pixel_limit(_width, _height)
     source = loader_cls._prepare_source(
         VideoSourceMetadata(total_frames, original_fps, duration)

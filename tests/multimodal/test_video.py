@@ -35,6 +35,7 @@ from vllm.multimodal.video import (
     get_video_loader_backend_for_processor,
 )
 from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
+from vllm.multimodal.video_decoders.deepstream import decode_deepstream
 from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
     PyNvVideoCodecDecoderSlot,
@@ -1782,3 +1783,63 @@ def test_glm5next_read_frames_dense_walk_matches_stock(tmp_path):
         assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
     # One initial seek, then pure walking -- no re-seek churn.
     assert cap.seeks == 1
+
+
+# ============================================================================
+# DeepStream Backend Tests
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "probe_result",
+    [
+        (0, 0.0, 0.0, 0, 0, ""),  # trailing moov
+        (0, 30.0, 0.0, 1280, 720, "h264"),  # zero frames
+        (1800, 0.0, 60.0, 1280, 720, "h264"),  # unknown fps
+    ],
+)
+def test_deepstream_rejects_unprobed_video(
+    probe_result: tuple, monkeypatch: pytest.MonkeyPatch
+):
+    """Unparseable probe output must raise ValueError (HTTP 400), not crash."""
+    import nvidia.deepstream_videodecode as ds
+
+    monkeypatch.setattr(ds, "probe_metadata", lambda _data: probe_result)
+    target = VideoTargetMetadata(num_frames=-1, fps=1, max_duration=-1)
+    with pytest.raises(ValueError, match="could not probe video metadata"):
+        decode_deepstream(Qwen3VLVideoBackend, b"fake-bytes", target, {})
+
+
+def test_deepstream_valid_probe_reaches_decoder(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import nvidia.deepstream_videodecode as ds
+
+    captured: dict = {}
+
+    def fake_decode_indices(cls, data, frame_indices, source, **kwargs):
+        captured["indices"] = frame_indices
+        captured["source"] = source
+        frames = np.zeros((len(frame_indices), 8, 8, 3), dtype=np.uint8)
+        return frames, frame_indices
+
+    monkeypatch.setattr(
+        ds, "probe_metadata", lambda _data: (1800, 30.0, 60.0, 1280, 720, "h264")
+    )
+    from vllm.multimodal.video_decoders.deepstream import (
+        DeepStreamVideoBackendMixin,
+    )
+
+    monkeypatch.setattr(
+        DeepStreamVideoBackendMixin, "decode_indices", classmethod(fake_decode_indices)
+    )
+    target = VideoTargetMetadata(num_frames=-1, fps=1, max_duration=-1)
+    frames, source, frame_idx, valid = decode_deepstream(
+        Qwen3VLVideoBackend, b"fake-bytes", target, {}
+    )
+    assert source.total_frames_num == 1800
+    assert source.original_fps == 30.0
+    assert len(frame_idx) == 60
+    assert frames.shape[0] == 60
+    assert valid == frame_idx
+    assert captured["indices"] == frame_idx
