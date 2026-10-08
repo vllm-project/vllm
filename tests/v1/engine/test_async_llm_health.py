@@ -459,12 +459,9 @@ def test_engine_core_broadcasts_busy_and_throttles_progress(
         core.output_queue.get_nowait()
 
     now = 2.1
-    regular_output = EngineCoreOutputs()
-    core._maybe_publish_ready_progress({0: regular_output})
+    core._maybe_publish_ready_progress()
     _, output = core.output_queue.get_nowait()
     assert output.ready_progress_seq == 1
-    assert regular_output.ready_progress_seq == 1
-    assert regular_output.ready_state == EngineCoreReadyState.BUSY
 
     core.is_sleeping.return_value = True
     core._maybe_publish_ready_progress()

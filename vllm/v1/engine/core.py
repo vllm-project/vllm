@@ -1599,7 +1599,7 @@ class EngineCoreProc(EngineCore):
             # Only connector cleanup or pending KV pushes remain; that is not
             # stalled generation.
             self._record_ready_progress()
-        self._maybe_publish_ready_progress(outputs)
+        self._maybe_publish_ready_progress()
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
@@ -1614,12 +1614,7 @@ class EngineCoreProc(EngineCore):
 
         return model_executed
 
-    def _maybe_publish_ready_progress(
-        self,
-        outputs: dict[int, EngineCoreOutputs] | None = None,
-        *,
-        force: bool = False,
-    ) -> None:
+    def _maybe_publish_ready_progress(self, *, force: bool = False) -> None:
         now = time.monotonic()
         ready_state = self.get_ready_state()
         state_changed = ready_state != self._last_ready_published_state
@@ -1631,12 +1626,6 @@ class EngineCoreProc(EngineCore):
         )
         if not force and not state_changed and not publish_progress:
             return
-
-        if outputs:
-            for output in outputs.values():
-                output.ready_progress_seq = self._ready_progress_seq
-                output.ready_state = ready_state
-                output.ready_operation = self._ready_operation
 
         self.output_queue.put_nowait(
             (
