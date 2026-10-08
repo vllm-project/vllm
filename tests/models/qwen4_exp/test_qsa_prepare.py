@@ -49,8 +49,8 @@ def _make_block_table(block_counts):
 
 
 def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> None:
-    # e4m3 is sign-magnitude, so within a sign the uint8 code order matches the
-    # value order and one ulp is one code step. The two paths' intermediates
+    # e4m3 and e5m2 are sign-magnitude, so within a sign the uint8 code order
+    # matches the value order and one ulp is one code step. The two paths' intermediates
     # differ in the pooling accumulation order, which at denormal magnitudes
     # (absolute grid step 2^-9) shows up as up to 2 code steps.
     code_diff = (
@@ -60,15 +60,18 @@ def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> N
     assert bool(((code_diff <= 1) | (abs_diff <= 2**-8)).all())
 
 
-def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
-    """Random main-attention arguments with a paged cache in vLLM's layout."""
+def _make_main_inputs(num_tokens: int, fp8_dtype: torch.dtype | None) -> dict:
+    """Random main-attention arguments with a paged cache in vLLM's layout.
+
+    fp8_dtype selects an fp8 (e4m3/e5m2) cache viewed from uint8 storage.
+    """
     num_blocks = num_tokens // MAIN_PAGE + 2
     cache = torch.zeros(
         num_blocks,
         MAIN_HK,
         MAIN_PAGE,
         2 * MAIN_D,
-        dtype=torch.uint8 if fp8_cache else torch.bfloat16,
+        dtype=torch.bfloat16 if fp8_dtype is None else torch.uint8,
         device="cuda",
     ).transpose(1, 2)
     slots = torch.randperm(num_blocks * MAIN_PAGE, device="cuda")[:num_tokens]
@@ -85,7 +88,7 @@ def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
         main_q_norm_weight=norm_weights[0],
         main_k_norm_weight=norm_weights[1],
         main_eps=EPS,
-        main_kv_cache=cache.view(torch.float8_e4m3fn) if fp8_cache else cache,
+        main_kv_cache=cache if fp8_dtype is None else cache.view(fp8_dtype),
         main_slot_mapping=slots,
         main_k_scale=0.5,
         main_v_scale=2.0,
@@ -118,7 +121,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         norm_beta=1.0,
     )
     kv_cache = main["main_kv_cache"]
-    fp8_cache = kv_cache.dtype == torch.float8_e4m3fn
+    fp8_cache = kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
     cache = torch.zeros_like(kv_cache.view(torch.uint8) if fp8_cache else kv_cache)
     key_cache, value_cache = cache.split(MAIN_D, dim=-1)
     reshape_and_cache_flash(
@@ -127,21 +130,31 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         key_cache,
         value_cache,
         main["main_slot_mapping"],
-        "fp8" if fp8_cache else "auto",
+        {torch.float8_e4m3fn: "fp8", torch.float8_e5m2: "fp8_e5m2"}.get(
+            kv_cache.dtype, "auto"
+        ),
         torch.tensor(main["main_k_scale"], device="cuda"),
         torch.tensor(main["main_v_scale"], device="cuda"),
     )
     torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
     assert torch.equal(gate_out.flatten(1), gate)
     if fp8_cache:
-        assert_fp8_within_one_ulp(kv_cache, cache.view(torch.float8_e4m3fn))
+        assert_fp8_within_one_ulp(kv_cache, cache.view(kv_cache.dtype))
     else:
         torch.testing.assert_close(kv_cache, cache, rtol=RTOL, atol=ATOL)
 
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize(
+    "indexer_dtype,main_fp8_dtype",
+    [
+        pytest.param(torch.bfloat16, None, id="bf16"),
+        pytest.param(torch.float8_e4m3fn, torch.float8_e4m3fn, id="fp8"),
+        # fp8_e5m2 main cache (SM80+) with a BF16 indexer.
+        pytest.param(torch.bfloat16, torch.float8_e5m2, id="e5m2-main"),
+    ],
+)
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [
@@ -166,6 +179,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 )
 def test_qsa_fused_prepare_matches_unfused(
     indexer_dtype,
+    main_fp8_dtype,
     mrope,
     is_2d_positions,
     cache_rope_positions,
@@ -328,7 +342,7 @@ def test_qsa_fused_prepare_matches_unfused(
 
     fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
     # The main-attention cache follows the recipe's pairing with the indexer.
-    main = _make_main_inputs(num_tokens, indexer_dtype == torch.float8_e4m3fn)
+    main = _make_main_inputs(num_tokens, main_fp8_dtype)
     main_q_out, main_gate_out = qsa_prepare(
         projected_qk[:, : HQ * D],
         projected_qk[:, HQ * D :],
