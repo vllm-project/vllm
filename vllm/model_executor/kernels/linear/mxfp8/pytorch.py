@@ -16,6 +16,7 @@ from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 _E8M0 = torch.float8_e8m0fnu
 
+
 class TorchMxFp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 W8A8 GEMM using the native ``torch._scaled_mm`` dispatch.
 
@@ -79,9 +80,7 @@ class TorchMxFp8LinearKernel(Mxfp8LinearKernel):
             N, K = weight.shape
             mat_b = weight.t()
             input_2d = x.reshape(-1, K)
-            x_fp8, x_scale = mxfp8_e4m3_quantize(
-                input_2d, is_sf_swizzled_layout=True
-            )
+            x_fp8, x_scale = mxfp8_e4m3_quantize(input_2d, is_sf_swizzled_layout=True)
             x_scale = x_scale.view(_E8M0)
 
         out = torch._scaled_mm(
