@@ -31,6 +31,10 @@ VERSIONED = re.compile(
     r'\(?\s*=?\s*"([45]\.\d+(?:\.\d+)?)[^"]*"'
     r"|[Tt]ransformers\s*(?:v|[<>]=?\s*)([45]\.\d+(?:\.\d+)?|4)\b"
 )
+READS_VERSION = re.compile(
+    r"transformers import __version__|transformers\.__version__"
+    r"|version\([\"']transformers[\"']\)|TRANSFORMERS_VERSION|check_version\("
+)
 
 
 def section(title: str) -> None:
@@ -73,14 +77,20 @@ def vendored_processors() -> None:
 
 
 def version_gates() -> None:
+    files = sorted([*ROOT.glob("vllm/**/*.py"), *ROOT.glob("tests/**/*.py")])
     section(f"Version-gated code at or below {FLOOR} (review each)")
-    for path in sorted([*ROOT.glob("vllm/**/*.py"), *ROOT.glob("tests/**/*.py")]):
+    for path in files:
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             for match in VERSIONED.finditer(line):
                 version = Version(match.group(1) or match.group(2))
                 if version <= FLOOR:
                     print(f"- {path.relative_to(ROOT)}:{lineno}: {line.strip()}")
                     break
+    section("Code that reads the installed Transformers version (review each)")
+    for path in files:
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if READS_VERSION.search(line):
+                print(f"- {path.relative_to(ROOT)}:{lineno}: {line.strip()}")
 
 
 if __name__ == "__main__":

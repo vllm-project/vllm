@@ -46,7 +46,8 @@ It lists:
 - vendored configs whose `model_type` upstream now owns;
 - `_CONFIG_REGISTRY` overrides of upstream types;
 - registered processors that collide with upstream class names or models;
-- version-gated code at or below the floor.
+- version-gated code at or below the floor;
+- code that reads the installed Transformers version, whatever its threshold.
 
 It finds candidates by name only. Every hit still needs a verdict.
 
@@ -142,7 +143,14 @@ vLLM derives, vanish.
 
 Version gates from the inventory need a decision:
 
-- **Code** only reachable below the floor is deleted.
+- **Code** only reachable below the floor is deleted. This covers:
+    - comparisons against `TRANSFORMERS_VERSION`;
+    - branches labelled `# Transformers < X`;
+    - fallbacks for fields that upstream configs now always set, e.g.
+    `mlp_layer_types`, `per_layer_config` or legacy `layer_types` names.
+
+  A `skipif` whose condition is now always true becomes an unconditional
+  `skip` with the same reason.
 - **`min_transformers_version`** at or below the floor is removed.
 - **`max_transformers_version`** below the floor means CI never tests that
   model; report it rather than deleting it silently.
