@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::io;
+use std::os::fd::IntoRawFd;
+use std::os::unix::net::UnixListener;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -2230,10 +2232,14 @@ async fn control_aggregates_multi_engine_capacity() {
         ready_1.world_size = 12;
         ready_1.data_parallel_rank = start_rank + 1;
 
+        let listener_fd = |address: &str| {
+            let path = address.strip_prefix("ipc://").expect("IPC test endpoint");
+            UnixListener::bind(path).expect("bind inherited test listener").into_raw_fd()
+        };
         let client_config = EngineCoreClientConfig {
             transport_mode: TransportMode::Bootstrapped {
-                input_address: input_address.clone(),
-                output_address: output_address.clone(),
+                input_listener_fd: listener_fd(&input_address),
+                output_listener_fd: listener_fd(&output_address),
                 engine_start_index: start_rank,
                 engine_count: 2,
                 data_parallel_size: global_size,
