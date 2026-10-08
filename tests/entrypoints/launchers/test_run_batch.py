@@ -1310,6 +1310,7 @@ def test_unwritable_output_file_is_rejected_before_engine_start(tmp_path):
 
     validate_run_batch_args(args(str(tmp_path / "out.jsonl")))
     validate_run_batch_args(args("https://example.com/out.jsonl"))
+    validate_run_batch_args(args("HTTPS://example.com/out.jsonl"))
 
 
 def _chat_requests(n: int) -> list[dict]:

@@ -353,7 +353,7 @@ class BatchProgressTracker:
 
 
 def is_url(path_or_url: str) -> bool:
-    return path_or_url.startswith(("http://", "https://"))
+    return urlparse(path_or_url).scheme in ("http", "https")
 
 
 def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
