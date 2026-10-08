@@ -115,29 +115,7 @@ static inline auto maybe_make_cute_layout(
 }
 
 //
-//  Torch Type to Cutlass Type (equivalent_cutlass_type)
-//
-
-template <typename T>
-struct equivalent_cutlass_type {
-  using type = T;
-};
-
-template <typename T>
-using equivalent_cutlass_type_t = typename equivalent_cutlass_type<T>::type;
-
-template <>
-struct equivalent_cutlass_type<torch::headeronly::Half> {
-  using type = cutlass::half_t;
-};
-
-template <>
-struct equivalent_cutlass_type<torch::headeronly::BFloat16> {
-  using type = cutlass::bfloat16_t;
-};
-
-//
-// equivalent_scalar_t (basically inverse of equivalent_cutlass_type)
+// Cutlass Type to Torch Type (equivalent_scalar_type)
 //
 
 // Return a `torch::headeronly::CppTypeToScalarType<T>` compatible type, i.e.

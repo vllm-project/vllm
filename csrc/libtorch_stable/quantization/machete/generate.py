@@ -496,7 +496,8 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
 
 
 def generate():
-    # See csrc/quantization/machete/Readme.md, the Codegeneration for more info
+    # See csrc/libtorch_stable/quantization/machete/Readme.md, the
+    # Codegeneration for more info
     # about how this works
     SCRIPT_DIR = os.path.dirname(__file__)
 

@@ -5,11 +5,11 @@
 
 #include <cmath>
 
-// This header is shared between _C and _C_stable_libtorch targets.
+// This header is shared between _rocm_C and _C_stable_libtorch targets.
 // torch_utils.h provides get_device_prop(). We need to pass USE_CUDA
 // to the .so to expose some of the shims used by torch_utils.h. For now
-// this is only done for _C_stable_libtorch and not for _C, so we use the
-// non stable at::cuda::getCurrentDeviceProperties for _C for now.
+// this is only done for _C_stable_libtorch and not for _rocm_C, so we use
+// the non stable at::cuda::getCurrentDeviceProperties for _rocm_C for now.
 #ifdef TORCH_TARGET_VERSION
   #include "libtorch_stable/torch_utils.h"
 #else

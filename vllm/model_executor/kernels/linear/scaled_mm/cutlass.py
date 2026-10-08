@@ -104,8 +104,9 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # azp_adj is the AZP adjustment term, used to account for weights.
         # It does not depend on scales or azp, so it is the same for
         # static and dynamic quantization.
-        # For more details, see csrc/quantization/w8a8/cutlass/Epilogues.md
-        # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
+        # For more details, see
+        # csrc/libtorch_stable/quantization/w8a8/cutlass/Epilogues.md
+        # https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/quantization/w8a8/cutlass/Epilogues.md
         if not config.input_symmetric:
             weight = getattr(layer, w_q_name)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)

@@ -2,7 +2,6 @@
 
 #include <torch/headeronly/util/shim_utils.h>
 
-#include "libtorch_stable/cuda_utils.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
 

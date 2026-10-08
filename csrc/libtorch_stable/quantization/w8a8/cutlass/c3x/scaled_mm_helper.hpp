@@ -1,6 +1,6 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
-#include "libtorch_stable/cuda_utils.h"
+#include "core/utils.hpp"
 #include "libtorch_stable/cutlass_extensions/common.hpp"
 
 template <typename Fp8Func, typename Int8Func, typename BlockwiseFunc>
@@ -41,14 +41,12 @@ void dispatch_scaled_mm(torch::stable::Tensor& c,
     STD_TORCH_CHECK(b_scales.dim() == 2, "b scale must be 2d tensor.");
     int32_t version_num = get_sm_version_num();
     if (version_num >= 90) {
-      STD_TORCH_CHECK(
-          a.size(0) == a_scales.size(0) &&
-              cuda_utils::ceil_div(a.size(1), int64_t(128)) == a_scales.size(1),
-          "a_scale_group_shape must be [1, 128].");
-      STD_TORCH_CHECK(
-          cuda_utils::ceil_div(b.size(0), int64_t(128)) == b_scales.size(0) &&
-              cuda_utils::ceil_div(b.size(1), int64_t(128)) == b_scales.size(1),
-          "b_scale_group_shape must be [128, 128].");
+      STD_TORCH_CHECK(a.size(0) == a_scales.size(0) &&
+                          div_ceil(a.size(1), int64_t(128)) == a_scales.size(1),
+                      "a_scale_group_shape must be [1, 128].");
+      STD_TORCH_CHECK(div_ceil(b.size(0), int64_t(128)) == b_scales.size(0) &&
+                          div_ceil(b.size(1), int64_t(128)) == b_scales.size(1),
+                      "b_scale_group_shape must be [128, 128].");
     }
 
     STD_TORCH_CHECK(!bias, "Bias not yet supported blockwise scaled_mm");

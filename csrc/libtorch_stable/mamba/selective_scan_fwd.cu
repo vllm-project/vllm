@@ -14,7 +14,7 @@
 #endif
 
 #include "selective_scan.h"
-#include "static_switch.h"
+#include "../dispatch_utils.h"
 
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,
@@ -398,9 +398,9 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     // kIsVariableB, kIsVariableC and kHasZ are all set to True to reduce binary size
     constexpr bool kIsVariableB = true;
     constexpr bool kIsVariableC = true;
-    BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-        BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-            BOOL_SWITCH(params.query_start_loc_ptr != nullptr , kVarlen, [&] {
+    VLLM_STABLE_DISPATCH_BOOL(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
+        VLLM_STABLE_DISPATCH_BOOL(params.z_ptr != nullptr , kHasZ, [&] {
+            VLLM_STABLE_DISPATCH_BOOL(params.query_start_loc_ptr != nullptr , kVarlen, [&] {
                 using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kVarlen, input_t, weight_t, state_t>;
                 constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
                 dim3 grid(params.batch, params.dim / kNRows);
