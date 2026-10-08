@@ -741,8 +741,6 @@ class DelegatingParser(Parser):
                 extract_required_tool_call_streaming(
                     previous_text=previous_text,
                     current_text=current_text,
-                    delta_text=delta_text,
-                    function_name_returned=function_name_returned,
                     tool_call_idx=tool_call_idx,
                     tool_call_id_type=tool_call_id_type,
                 )
@@ -952,12 +950,13 @@ class DelegatingParser(Parser):
                 elif not delta_message.reasoning:
                     delta_message.reasoning = reasoning_from_this_batch
 
-            if (
-                delta_message
-                and delta_message.tool_calls
-                and delta_message.tool_calls[0].id is not None
-            ):
-                state.history_tool_call_cnt += 1
+            if delta_message and delta_message.tool_calls:
+                # A delta may start several tool calls at once (e.g. the
+                # "required" path when one delta completes more than one
+                # call), so count every id rather than only the first.
+                state.history_tool_call_cnt += sum(
+                    tc.id is not None for tc in delta_message.tool_calls
+                )
 
         # No phase active: pass through as content.
         # Skip when reasoning just ended in this delta — the engine already
