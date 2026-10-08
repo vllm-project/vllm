@@ -21,7 +21,12 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.func_utils import supports_kw
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.utils.import_utils import (
+    check_moonep_system_support,
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+)
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -44,6 +49,20 @@ if has_flashinfer_nvlink_one_sided():
 logger = init_logger(__name__)
 
 
+class PassThroughAll2AllManager(All2AllManagerBase):
+    """Placeholder for ``all2all_backend="passthrough"``.
+
+    The MoE backend dispatches and combines itself, so there is no all2all to
+    manage.
+    """
+
+    def get_handle(self, kwargs):
+        raise RuntimeError(
+            "passthrough has no all2all handle: dispatch and combine run "
+            "inside the MoE backend."
+        )
+
+
 class AgRsAll2AllManager(All2AllManagerBase):
     """An implementation of all2all communication based on
     all-gather (dispatch) and reduce-scatter (combine).
@@ -51,11 +70,17 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self.use_ep = get_current_vllm_config().parallel_config.enable_expert_parallel
 
     def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
         if is_sequence_parallel:
             return get_ep_group()
         if self.dp_world_size > 1:
+            if self.use_ep and get_pcp_group().world_size > 1:
+                assert self.tp_group.world_size == 1, (
+                    "DP+PCP with TP>1 requires sequence-parallel MoE inputs"
+                )
+                return get_ep_group()
             return get_dp_group()
         return get_pcp_group()
 
@@ -67,6 +92,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert dp_metadata is not None
         sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
         assert sizes is not None
+        assert len(sizes) == comm_group.world_size
         return sizes
 
     def dispatch_router_logits(
@@ -144,6 +170,42 @@ class AgRsAll2AllManager(All2AllManagerBase):
         )
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states
+
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(shape[0] // dist_group.world_size, dist_group)
+        if sum(sizes) != shape[0] or any(size != sizes[0] for size in sizes):
+            return None
+        device_communicator = dist_group.device_communicator
+        if device_communicator is None:
+            return None
+        return device_communicator.get_symmetric_memory_buffer(
+            "moe_ag_rs_combine", shape, dtype, device
+        )
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(
+            hidden_states.shape[0] // dist_group.world_size,
+            dist_group,
+        )
+        return dist_group.reduce_scatterv_into_output(
+            hidden_states,
+            output,
+            dim=0,
+            sizes=sizes,
+        )
 
     def destroy(self):
         pass
@@ -709,6 +771,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
     rank: int
     world_size: int
+    low_precision_combine: bool = False
 
     def __init__(self, cpu_group):
         assert has_flashinfer_nvlink_one_sided(), (
@@ -729,6 +792,27 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.top_k = 0
         self.num_experts = 0
         self._combine_supports_output = False
+        self.low_precision_combine = self._resolve_low_precision_combine()
+
+    def _resolve_low_precision_combine(self) -> bool:
+        """Whether to use the low-precision combine: requested via the env var
+        and supported by the installed FlashInfer.
+        """
+        if not envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE:
+            return False
+        try:
+            supported = supports_kw(
+                MoeAlltoAll.combine, "use_low_precision", allow_var_kwargs=False
+            )
+        except (TypeError, ValueError):
+            supported = False
+        if not supported:
+            logger.warning_once(
+                "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE is set, but the "
+                "installed FlashInfer MoeAlltoAll.combine() does not accept "
+                "`use_low_precision`. Falling back to a BF16 combine."
+            )
+        return supported
 
     def initialize(
         self,
@@ -746,7 +830,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )
-        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        # Sized from the bf16 payload passed to combine(), which is what the
+        # kernel checks this region against. Low-precision transport quantizes
+        # on write, so it does not shrink the requirement.
+        combine_payload_size_per_token = hidden_size * 2
         needed_workspace_size = moe_a2a_get_workspace_size_per_rank(
             ep_size=self.world_size,
             max_num_tokens=max_num_tokens,
@@ -862,8 +949,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
                 payload=payload,
                 runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
                 output=output,
+                use_low_precision=self.low_precision_combine,
             )
         else:
+            # FlashInfer < 0.6.16 has neither `output` nor `use_low_precision`.
             combined_output = self.moe_alltoall.combine(
                 payload=payload,
                 runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
@@ -919,6 +1008,11 @@ class MoriAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
+        if get_current_vllm_config().kernel_config.moe_backend == "aiter_mega_moe":
+            # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
+            # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
+            heap_size = os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "8G")
+            logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
         mori.shmem.shmem_torch_process_group_init("mori")
 
     def _make_all2all_kwargs(
@@ -1053,7 +1147,9 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         if os.environ.get("EP_DISABLE_GIN", "0") != "0":
             return
 
-        gin_type = query_nccl_gin_type(group)
+        gin_type = query_nccl_gin_type(
+            group, railed=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
+        )
         if gin_type is None:
             raise RuntimeError(
                 "DeepEPv2 communicator properties query failed; "
@@ -1088,6 +1184,74 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
 
     def max_sms_used(self) -> int | None:
         return self._num_sms
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+            self.handle_cache._cache.clear()
+
+
+class MoonEPAll2AllManager(All2AllManagerBase):
+    """All2All communication based on MoonEP
+    (https://github.com/MoonshotAI/MoonEP).
+
+    MoonEP keeps token loads perfectly balanced across EP ranks by planning
+    a small number of dynamically redundant experts online and prefetching
+    their weights before expert compute. Every rank receives exactly
+    S x K token slots regardless of router skew, so all communication and
+    compute shapes are static.
+
+    Requires NVLink symmetric-memory / multicast capable topologies
+    (single node NVSwitch, e.g. H100/H200/B200/GB300 class).
+    """
+
+    def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
+        check_moonep_system_support()
+        super().__init__(cpu_group, tcp_store_group)
+        self._device_group = device_group
+        self.handle_cache = Cache()
+
+    def _make_buffer_kwargs(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_topk: int,
+        num_global_experts: int,
+        num_prefetch_slots: int,
+        token_padding: int,
+        num_sms: int,
+    ) -> dict:
+        return dict(
+            S=max_num_tokens_per_dp_rank,
+            H=token_hidden_size,
+            K=num_topk,
+            E=num_global_experts,
+            num_ep_ranks=self.world_size,
+            num_sms=num_sms,
+            token_padding=token_padding,
+            B=num_prefetch_slots,
+            group=self._device_group
+            if self._device_group is not None
+            else self.cpu_group,
+            explicitly_destroy=True,
+        )
+
+    def get_handle(self, kwargs):
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
+            MoonEPBufferPool,
+        )
+
+        buffer_kwargs = self._make_buffer_kwargs(**kwargs)
+        logger.debug("MoonEP all2all args %s", buffer_kwargs)
+
+        def make_pool(**kw):
+            return MoonEPBufferPool(kw, max_tokens_per_rank=kw["S"])
+
+        handle: MoonEPBufferPool = self.handle_cache.get_or_create(
+            buffer_kwargs, make_pool
+        )
+        return handle
 
     def destroy(self):
         with self.handle_cache._lock:

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import IntEnum
+from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -777,26 +778,6 @@ def moe_gptq_gemm_rdna3(
         mul_topk_weight,
         output_topk,
     )
-
-
-if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
-
-    @register_fake("_C::allspark_w8a16_gemm")
-    def _allspark_w8a16_gemm_fake(
-        a: torch.Tensor,
-        b_qweight: torch.Tensor,
-        b_scales: torch.Tensor,
-        b_qzeros: torch.Tensor | None,
-        n: torch.SymInt,
-        group_size: torch.SymInt,
-        sm_count: torch.SymInt,
-        sm_version: torch.SymInt,
-        CUBLAS_M_THRESHOLD: torch.SymInt,
-        has_zp: bool,
-        n32k16_reorder: bool,
-    ) -> torch.Tensor:
-        m = a.size(0)
-        return torch.empty((m, n), device=a.device, dtype=a.dtype)
 
 
 # cutlass
@@ -1958,90 +1939,6 @@ def scaled_fp8_quant(
     return output, scale
 
 
-# gptq allspark
-def allspark_repack_weight(
-    qweight: torch.Tensor,
-    scale: torch.Tensor,
-    zero_point: torch.Tensor | None = None,
-    has_zp: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Rearrange qweight, scale, and zero_point(if asymmetric) to n32k16 format
-    for Ampere W8A16 Fused Gemm kernel
-
-    Args:
-        qweight: uint8 weight tensor, original k x n format.
-        scale: fp16/bf16 weight scale tensor, 1 x n format.
-        zero_point: fp16/bf16 weight zero_point tensor, 1 x n format.
-            Must be provided for asymmetric quantization.
-        has_zp: if use symmetric quantization, has_zp = False.
-            if use asymmetric quantization, has_zp = True.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] :
-            rearranged weight, scale, and optionally zero_point.
-
-    """
-    K = qweight.shape[0]
-    N = qweight.shape[1]
-    N_32align = (N + 32 - 1) // 32 * 32
-
-    qweight_reorder = torch.empty(
-        (N_32align, K), device=qweight.device, dtype=qweight.dtype
-    )
-    scale_reorder = torch.empty((1, N_32align), device=scale.device, dtype=scale.dtype)
-    zero_point_reorder = None
-    if has_zp:
-        assert zero_point is not None, (
-            "zero_point must be provided for asymmetric quantization."
-        )
-        zero_point_reorder = torch.empty(
-            (1, N_32align), device=zero_point.device, dtype=zero_point.dtype
-        )
-
-    torch.ops._C.rearrange_kn_weight_as_n32k16_order(
-        qweight,
-        scale,
-        zero_point,
-        has_zp,
-        qweight_reorder,
-        scale_reorder,
-        zero_point_reorder,
-        K,
-        N,
-        N_32align,
-    )
-
-    return qweight_reorder, scale_reorder, zero_point_reorder
-
-
-def allspark_w8a16_gemm(
-    a: torch.Tensor,
-    b_qweight: torch.Tensor,
-    b_scales: torch.Tensor,
-    b_qzeros: torch.Tensor | None,
-    n: int,
-    group_size: int,
-    sm_count: int,
-    sm_version: int,
-    CUBLAS_M_THRESHOLD: int,
-    has_zp: bool,
-    n32k16_reorder: bool,
-) -> torch.Tensor:
-    return torch.ops._C.allspark_w8a16_gemm(
-        a,
-        b_qweight,
-        b_scales,
-        b_qzeros,
-        n,
-        group_size,
-        sm_count,
-        sm_version,
-        CUBLAS_M_THRESHOLD,
-        has_zp,
-        n32k16_reorder,
-    )
-
-
 # int8
 def scaled_int8_quant(
     input: torch.Tensor,
@@ -2319,7 +2216,21 @@ def moe_align_block_size(
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
     expert_map: torch.Tensor | None = None,
+    scatter_idx: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        if scatter_idx is not None:
+            raise NotImplementedError("scatter_idx is not supported on XPU")
+        torch.ops._moe_C.moe_align_block_size(
+            topk_ids,
+            num_experts,
+            block_size,
+            sorted_token_ids,
+            experts_ids,
+            num_tokens_post_pad,
+            expert_map,
+        )
+        return
     torch.ops._moe_C.moe_align_block_size(
         topk_ids,
         num_experts,
@@ -2328,6 +2239,7 @@ def moe_align_block_size(
         experts_ids,
         num_tokens_post_pad,
         expert_map,
+        scatter_idx,
     )
 
 
@@ -2723,6 +2635,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     skip_index_branch: bool = False,
     q_fp8_out: torch.Tensor | None = None,
     q_fp8_scale: float = 1.0,
+    kv_k_scale: torch.Tensor | None = None,
+    kv_v_scale: torch.Tensor | None = None,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2746,7 +2660,14 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     attention's flat TMA descriptor.
 
     If ``q_fp8_out`` is given, the same normalized q is also written in FP8
-    E4M3 using ``q_fp8_scale`` as its dequantization scale.
+    E4M3 using ``q_fp8_scale`` as its dequantization scale. Without ``q_out``,
+    q is then written only in FP8 and the q slice of ``qkv`` is left as is.
+
+    ``kv_cache_dtype="nvfp4"`` quantizes k/v into the packed HND
+    ``[num_blocks, 2 * num_kv_heads, block_size, 72]`` uint8 cache using the
+    device dequantization scales ``kv_k_scale``/``kv_v_scale``. Slot
+    ``2 * head + side`` (K = 0, V = 1) holds that head's E2M1 data followed by
+    its E4M3 block scales, so every head is one contiguous run of the page.
 
     When ``skip_index_branch`` is true, sparse rows still keep their packed
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
@@ -2777,6 +2698,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         skip_index_branch,
         q_fp8_out,
         q_fp8_scale,
+        kv_k_scale,
+        kv_v_scale,
     )
 
 
@@ -3295,6 +3218,26 @@ def mnnvl_lamport_reduce_scatter(
     )
 
 
+def mnnvl_multimem_reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    local_buffer: int,
+    multicast_buffer: int,
+    stage_sz_bytes: int,
+    block_limit: int,
+) -> None:
+    torch.ops._C_custom_ar.mnnvl_multimem_reduce_scatter(
+        fa,
+        inp,
+        out,
+        local_buffer,
+        multicast_buffer,
+        stage_sz_bytes,
+        block_limit,
+    )
+
+
 def dispose(fa: int) -> None:
     torch.ops._C_custom_ar.dispose(fa)
 
@@ -3432,6 +3375,7 @@ class CPUQuantMethod(IntEnum):
     FP8_W8A16 = 2
     INT4_W4A8 = 3
     MXFP4 = 4
+    FP8_W8A8 = 5
 
 
 if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
@@ -3470,6 +3414,7 @@ def fused_experts_cpu(
     alpha: float | None = None,
     limit: float | None = None,
     is_vnni: bool = True,
+    a1_scale: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3483,6 +3428,7 @@ def fused_experts_cpu(
         w2_scale,
         w1_zero,
         w2_zero,
+        a1_scale,
         block_size,
         w1_bias,
         w2_bias,
@@ -3609,6 +3555,46 @@ def fp8_scaled_mm_cpu(
 ) -> torch.Tensor:
     return torch.ops._C.fp8_scaled_mm_cpu(
         mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
+
+
+# FP8 W8A8 CPU kernels
+@cache
+def cpu_has_amx_fp8() -> bool:
+    """Whether this CPU has native AMX-FP8 MMA support."""
+    if not hasattr(torch.ops._C, "cpu_has_amx_fp8"):
+        return False
+    return bool(torch.ops._C.cpu_has_amx_fp8())
+
+
+if hasattr(torch.ops._C, "fp8_scaled_mm_with_quant"):
+
+    @register_fake("_C::fp8_scaled_mm_with_quant")
+    def fp8_scaled_mm_with_quant_fake(
+        act: torch.Tensor,
+        act_scales: torch.Tensor | None,
+        channelwise: bool,
+        weight: torch.Tensor,
+        weight_scales: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        M = act.reshape(-1, act.size(-1)).size(0)
+        N = weight.size(0) * weight.size(-1)
+        return torch.empty((M, N), dtype=output_dtype, device=act.device)
+
+
+def fp8_scaled_mm_with_quant(
+    act: torch.Tensor,
+    act_scales: torch.Tensor | None,
+    channelwise: bool,
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    bias: torch.Tensor | None,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_with_quant(
+        act, act_scales, channelwise, weight, weight_scales, bias, output_dtype
     )
 
 
@@ -3739,7 +3725,7 @@ def causal_conv1d_fwd_cpu(
     cache_indices: torch.Tensor | None,
     has_initial_state: torch.Tensor | None,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_fwd_cpu(
         x,
@@ -3751,7 +3737,7 @@ def causal_conv1d_fwd_cpu(
         has_initial_state,
         silu_activation,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -3762,7 +3748,7 @@ def causal_conv1d_update_cpu(
     bias: torch.Tensor | None,
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
-    is_vnni: bool,
+    is_weight_packed: bool,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
@@ -3774,7 +3760,7 @@ def causal_conv1d_update_cpu(
         num_accepted_tokens,
         conv_state_indices,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -4507,18 +4493,23 @@ def cpu_gemm_wna16(
     pack_factor: int,
     isa_hint: str,
 ) -> torch.Tensor:
-    output = torch.empty((input.size(0), scales.size(1)), dtype=input.dtype)
+    # Match int4_scaled_mm_cpu: flatten >2-D activations to [M, K] for the
+    # C++ kernel, then restore the original leading dims on the output.
+    x_shape = input.shape
+    x_2d = input.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else input
+    out = torch.empty((x_2d.size(0), scales.size(1)), dtype=input.dtype)
     torch.ops._C.cpu_gemm_wna16(
-        input,
+        x_2d,
         q_weight,
-        output,
+        out,
         scales,
         zeros,
         bias,
         pack_factor,
         isa_hint,
     )
-    return output
+    out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+    return out
 
 
 def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
