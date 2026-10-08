@@ -37,6 +37,9 @@ logger = init_logger(__name__)
 # A worker with more connections than another leaves a pending connection to
 # the less loaded one, rechecking every 1 ms, for up to 5 ms (it may be busy).
 _ACCEPT_DEFER_CHECKS = 5
+# The load of a worker that is not accepting (also the initial value of the
+# shared array), so it is never the least loaded.
+_NOT_ACCEPTING = 2**31 - 1
 
 
 class NoSignalServer(uvicorn.Server):
@@ -82,6 +85,8 @@ class NoSignalServer(uvicorn.Server):
         # With no sockets uvicorn starts no asyncio server; _accept serves
         # them with uvicorn's protocol instead.
         await super().startup(sockets=[])
+        if not self.started:  # lifespan startup failed (uvicorn < 0.50)
+            return
         self._publish_load()
         for sock in sockets:
             sock.listen(self.config.backlog)
@@ -142,8 +147,14 @@ class NoSignalServer(uvicorn.Server):
             self._publish_load()
 
     async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
-        for task in list(self._accept_tasks):
+        # Before super() closes the listening sockets.
+        tasks = list(self._accept_tasks)
+        for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.peer_loads is not None:
+            loads, index = self.peer_loads
+            loads[index] = _NOT_ACCEPTING
         await super().shutdown(sockets)
 
 

@@ -61,7 +61,8 @@ async def _get(port: int, requests: int = 1, ssl_ctx=None) -> list[bytes]:
 
 async def _serve(sock, requests, loads=None, **config_kwargs):
     config = uvicorn.Config(_app(), lifespan="on", log_level="warning", **config_kwargs)
-    server = NoSignalServer(config, peer_loads=(loads or [0], 0))
+    loads = loads if loads is not None else [0]
+    server = NoSignalServer(config, peer_loads=(loads, 0))
     task = asyncio.create_task(server.serve(sockets=[sock]))
     while not server.started:
         assert not task.done(), task.result()
@@ -71,9 +72,11 @@ async def _serve(sock, requests, loads=None, **config_kwargs):
     finally:
         server.should_exit = True
         await asyncio.wait_for(task, TIMEOUT_S)
-        # The listener is closed and nothing is left accepting.
+        # The listener is closed, nothing is left accepting, and peers no
+        # longer see this worker as a target.
         assert sock.fileno() == -1
         assert not server._accept_tasks
+        assert loads[0] == 2**31 - 1
 
 
 def _run(coro, loop_impl):
