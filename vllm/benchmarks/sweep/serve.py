@@ -161,16 +161,24 @@ def _get_comb_run_path(base_path: Path, run_number: int | None):
     return base_path / f"run={run_number}.json"
 
 
+def _comb_has_pending_runs(base_path: Path, num_runs: int):
+    return not all(
+        _get_comb_run_path(base_path, run_number).exists()
+        for run_number in range(num_runs)
+    )
+
+
 def _comb_needs_server(
     serve_comb: ParameterSweepItem,
     bench_combs: ParameterSweep,
     experiment_dir: Path,
+    num_runs: int,
 ):
     for bench_comb in bench_combs:
         base_path = _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
         if not _get_comb_run_path(base_path, run_number=None).exists():
             return True
-        if any(base_path.glob("run=*.failure.json")):
+        if _comb_has_pending_runs(base_path, num_runs):
             return True
 
     return False
@@ -184,10 +192,11 @@ def server_ctx(
     serve_comb: ParameterSweepItem,
     bench_params: ParameterSweep,
     experiment_dir: Path,
+    num_runs: int,
     dry_run: bool,
     server_ready_timeout: int = 300,
 ):
-    if not _comb_needs_server(serve_comb, bench_params, experiment_dir):
+    if not _comb_needs_server(serve_comb, bench_params, experiment_dir, num_runs):
         return contextlib.nullcontext()
 
     return run_server(
@@ -277,12 +286,7 @@ def run_comb(
             failure_path.unlink(missing_ok=True)
         return run_data
 
-    has_pending_runs = not all(
-        _get_comb_run_path(base_path, run_number).exists()
-        for run_number in range(num_runs)
-    )
-
-    if warmup_num_prompts > 0 and has_pending_runs:
+    if warmup_num_prompts > 0 and _comb_has_pending_runs(base_path, num_runs):
         warmup_path = base_path / "warmup.json"
         if server is not None:
             # A warmup from a previous invocation did not warm up this server
@@ -343,6 +347,7 @@ def run_combs(
                 serve_comb=serve_comb,
                 bench_params=bench_params,
                 experiment_dir=experiment_dir,
+                num_runs=num_runs,
                 dry_run=dry_run,
                 server_ready_timeout=server_ready_timeout,
             ) as server:

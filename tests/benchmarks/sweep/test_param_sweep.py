@@ -428,40 +428,60 @@ def test_run_comb_resume_warms_up_restarted_server(
     assert server.ran == expected
 
 
-def test_run_combs_resume_retries_recorded_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
-    """A run recorded by `--continue-on-error` is retried by the next invocation
-    instead of raising for its missing result file."""
-    first, resumed = _StubServer(failing=("run=1.json",)), _StubServer()
-    servers = [first, resumed]
-
+def _patch_run_server(monkeypatch: pytest.MonkeyPatch, servers: list[_StubServer]):
     @contextlib.contextmanager
     def fake_run_server(*args, **kwargs):
         yield servers.pop(0)
 
     monkeypatch.setattr(sweep_serve, "run_server", fake_run_server)
 
-    def run_combs(continue_on_error: bool):
-        return sweep_serve.run_combs(
-            [],
-            [],
-            [],
-            show_stdout=False,
-            server_ready_timeout=1,
-            serve_params=ParameterSweep.from_records([{}]),
-            bench_params=ParameterSweep.from_records([{"num_prompts": 100}]),
-            link_vars=[],
-            experiment_dir=tmp_path,
-            num_runs=3,
-            warmup_num_prompts=0,
-            dry_run=False,
-            continue_on_error=continue_on_error,
-        )
 
-    assert list(run_combs(continue_on_error=True)["run_number"]) == [0, 2]
+def _run_combs(experiment_dir: Path, *, num_runs: int, continue_on_error: bool):
+    return sweep_serve.run_combs(
+        [],
+        [],
+        [],
+        show_stdout=False,
+        server_ready_timeout=1,
+        serve_params=ParameterSweep.from_records([{}]),
+        bench_params=ParameterSweep.from_records([{"num_prompts": 100}]),
+        link_vars=[],
+        experiment_dir=experiment_dir,
+        num_runs=num_runs,
+        warmup_num_prompts=0,
+        dry_run=False,
+        continue_on_error=continue_on_error,
+    )
+
+
+def test_run_combs_resume_retries_recorded_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A run recorded by `--continue-on-error` is retried by the next invocation
+    instead of raising for its missing result file."""
+    resumed = _StubServer()
+    _patch_run_server(monkeypatch, [_StubServer(failing=("run=1.json",)), resumed])
+
+    first_data = _run_combs(tmp_path, num_runs=3, continue_on_error=True)
+    assert list(first_data["run_number"]) == [0, 2]
     assert len(list(tmp_path.rglob("run=1.failure.json"))) == 1
 
-    assert list(run_combs(continue_on_error=False)["run_number"]) == [0, 1, 2]
+    resumed_data = _run_combs(tmp_path, num_runs=3, continue_on_error=False)
+    assert list(resumed_data["run_number"]) == [0, 1, 2]
     assert resumed.ran == ["run=1.json"]
     assert not list(tmp_path.rglob("*.failure.json"))
+
+
+def test_run_combs_resume_ignores_failure_outside_requested_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Resuming with a smaller `--num-runs` reuses the existing results instead
+    of starting a server for a failed run that is no longer requested."""
+    servers = [_StubServer(failing=("run=2.json",)), _StubServer()]
+    _patch_run_server(monkeypatch, servers)
+
+    _run_combs(tmp_path, num_runs=3, continue_on_error=True)
+    resumed_data = _run_combs(tmp_path, num_runs=2, continue_on_error=False)
+
+    assert list(resumed_data["run_number"]) == [0, 1]
+    assert len(servers) == 1
