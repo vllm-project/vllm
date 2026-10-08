@@ -747,12 +747,13 @@ async def test_dp_pause_wait_mode_drains_in_flight():
             prompt=DP_PAUSE_PROMPT,
             params=SamplingParams(max_tokens=64),
         )
+        # Wait for the first output, so drain has something to observe: a
+        # request still queued holds no blocks and is not waited on.
+        out = await asyncio.wait_for(collector.get(), timeout=30)
         await engine.pause_generation(mode="wait")
         assert await engine.is_paused()
-        while True:
+        while not out.finished:
             out = await asyncio.wait_for(collector.get(), timeout=30)
-            if out.finished:
-                break
 
         await engine.resume_generation()
         async for out in engine.generate(
