@@ -265,7 +265,7 @@ struct FakeMultimodalBackend {
 
 impl TextBackend for FakeMultimodalBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID))
+        Arc::new(TestTokenizer::new().with_regular_token("<image>", QWEN_IMAGE_TOKEN_ID))
     }
 
     fn model_id(&self) -> &str {
@@ -314,7 +314,7 @@ fn multimodal_backend_with_limits(
     ));
     fs::write(
         &config_path,
-        r#"{"model_type":"qwen2_vl","image_token_id":151655}"#,
+        r#"{"model_type":"qwen2_vl","image_token_id":151655,"vision_token_id":151655}"#,
     )
     .expect("write qwen test config");
     let model_info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
@@ -324,7 +324,7 @@ fn multimodal_backend_with_limits(
             config: Some(&config_path),
             ..Default::default()
         },
-        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
+        Arc::new(TestTokenizer::new().with_regular_token("<image>", QWEN_IMAGE_TOKEN_ID)),
         limit_mm_per_prompt,
     )
     .expect("load multimodal info")

@@ -61,7 +61,7 @@ indexmap = "2.13.0"
 indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "f0985ef65967615db2c79279aa07818499301bfd", default-features = false, features = ["native-tls"] }
+llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "f0985ef65967615db2c79279aa07818499301bfd", default-features = false }
 mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
 minijinja-contrib = { version = "2.24", features = ["pycompat"] }
@@ -176,3 +176,9 @@ tokenizers = { opt-level = 3 }
 [profile.release]
 lto = "thin"
 panic = "abort"
+
+# Temporary local override: llm-multimodal's vllm-dev-rebase branch is not
+# pushed yet. Once it lands upstream, point the dependency at that branch/rev
+# and delete this section.
+[patch."https://github.com/smg-project/llm-multimodal"]
+llm-multimodal = { path = "/home/mozf/llm-multimodal-internal" }

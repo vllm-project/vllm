@@ -17,13 +17,12 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use itertools::{Either, izip};
-use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
     ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
     PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
-    VisionPreprocessingContext,
+    VisionPreprocessingContext, VisionProcessorRegistry,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -136,18 +135,23 @@ impl MultimodalModelContext {
         REGISTRY.lookup(&self.metadata())
     }
 
-    /// Build a vision preprocessor for one loaded model and modality.
+    /// Resolve a vision preprocessor for one loaded model and modality.
+    ///
+    /// Processors are stateless and looked up from the shared registry by
+    /// model id / model_type; the preprocessor config travels per call. The
+    /// spec's modality limits keep the old factory's UnsupportedModality ->
+    /// None semantics for modalities the model does not declare.
     fn resolve_vision_processor(
         &self,
         model_spec: &'static dyn ModelProcessorSpec,
-        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
-    ) -> Result<Option<Arc<dyn VisionPreProcessor>>> {
-        match model_spec.vision_processor(&self.metadata(), preprocessor_config, modality) {
-            Ok(processor) => Ok(Some(Arc::from(processor))),
-            Err(ModelRegistryError::UnsupportedModality { .. }) => Ok(None),
-            Err(error) => Err(error.into()),
+    ) -> Result<Option<&'static dyn VisionPreProcessor>> {
+        if !model_spec.modality_limits(&self.metadata())?.contains_key(&modality) {
+            return Ok(None);
         }
+        static REGISTRY: LazyLock<VisionProcessorRegistry> =
+            LazyLock::new(VisionProcessorRegistry::with_defaults);
+        Ok(REGISTRY.find(&self.model_id, self.model_type.as_deref()))
     }
 
     /// Resolve an audio preprocessor for one loaded model.
@@ -156,7 +160,7 @@ impl MultimodalModelContext {
         model_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: &PreProcessorConfig,
     ) -> Option<Arc<dyn AudioPreProcessor>> {
-        model_spec.audio_processor(&self.metadata(), preprocessor_config).map(Arc::from)
+        model_spec.audio_processor(&self.config, preprocessor_config).map(Arc::from)
     }
 }
 
@@ -250,13 +254,16 @@ impl ResolvedPlaceholder {
     }
 }
 
-/// Model-owned vision preprocessor plus resolved placeholder tokens and
+/// Registry vision preprocessor plus resolved placeholder tokens and
 /// the model's shared tensor-layout spec.
 #[derive(Clone)]
 struct VisionModalitySupport {
     spec: ResolvedMultimodalSpec,
     placeholder: ResolvedPlaceholder,
-    processor: Arc<dyn VisionPreProcessor>,
+    processor: &'static dyn VisionPreProcessor,
+    /// The modality's preprocessor config, passed to the stateless processor
+    /// on every call.
+    config: PreProcessorConfig,
 }
 
 /// Model-owned audio preprocessor plus the resolved model contract for its output.
@@ -311,6 +318,27 @@ fn load_preprocessor_config(
         multimodal!("failed to parse {processor_section} from processor_config.json: {error}")
     })?;
     Ok(Some(config))
+}
+
+/// Merge the model spec's checkpoint-owned processor kwargs into a
+/// preprocessor config's `extra` map without overwriting existing keys.
+///
+/// Most specs declare an empty object here; Nemotron-H Omni surfaces its
+/// config.json downsample ratio and patch limits this way so the stateless
+/// vision processor can resolve them per call.
+fn merge_processor_kwargs(
+    spec: &'static dyn ModelProcessorSpec,
+    context: &MultimodalModelContext,
+    config: &mut PreProcessorConfig,
+) -> Result<()> {
+    let kwargs = spec.processor_kwargs(&context.metadata())?;
+    let Some(kwargs) = kwargs.as_object() else {
+        return Ok(());
+    };
+    for (key, value) in kwargs {
+        config.extra.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    Ok(())
 }
 
 /// Request-scoped fetched media, split per modality with tracker UUID
@@ -398,10 +426,14 @@ impl MultimodalModelInfo {
     /// preprocessor configs.
     fn from_loaded(
         context: MultimodalModelContext,
-        preprocessor_config: PreProcessorConfig,
-        video_preprocessor_config: PreProcessorConfig,
+        mut preprocessor_config: PreProcessorConfig,
+        mut video_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
+        if let Some(spec) = context.resolve_model_spec() {
+            merge_processor_kwargs(spec, &context, &mut preprocessor_config)?;
+            merge_processor_kwargs(spec, &context, &mut video_preprocessor_config)?;
+        }
         let (image, video) = Self::resolve_vision_lanes(
             &context,
             preprocessor_config.clone(),
@@ -478,13 +510,14 @@ impl MultimodalModelInfo {
             };
 
         let image = if let Some(placeholder) = resolve_placeholder(Modality::Image) {
-            context
-                .resolve_vision_processor(raw_spec, &preprocessor_config, Modality::Image)?
-                .map(|processor| VisionModalitySupport {
+            context.resolve_vision_processor(raw_spec, Modality::Image)?.map(|processor| {
+                VisionModalitySupport {
                     spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Image),
                     placeholder,
                     processor,
-                })
+                    config: preprocessor_config,
+                }
+            })
         } else {
             None
         };
@@ -501,17 +534,14 @@ impl MultimodalModelInfo {
                 );
                 None
             } else {
-                context
-                    .resolve_vision_processor(
-                        raw_spec,
-                        &video_preprocessor_config,
-                        Modality::Video,
-                    )?
-                    .map(|processor| VisionModalitySupport {
+                context.resolve_vision_processor(raw_spec, Modality::Video)?.map(|processor| {
+                    VisionModalitySupport {
                         spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Video),
                         placeholder,
                         processor,
-                    })
+                        config: video_preprocessor_config,
+                    }
+                })
             }
         } else {
             None
@@ -682,10 +712,13 @@ fn extract_media_parts(
                 url: image_url.clone(),
                 detail: *detail,
                 uuid: uuid.clone(),
+                max_long_side_pixel: None,
             }),
             ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
                 url: video_url.clone(),
                 uuid: uuid.clone(),
+                fps: None,
+                max_long_side_pixel: None,
             }),
             ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
                 url: input_audio_data_url(data, format.as_deref())?,
@@ -1127,11 +1160,35 @@ mod tests {
                 "args": {"min_num_patches": 1024, "max_num_patches": 13312}
             }
         });
-        let info = test_info("nemotron_h_omni", config, tokenizer);
+        // The stateless processor resolves patch size and normalization from
+        // the per-call preprocessor config (preprocessor_config.json); the
+        // checkpoint-only patch limits and downsample ratio reach it through
+        // the spec's processor kwargs, merged into `extra` at load time.
+        let preprocessor_config = PreProcessorConfig::from_value(serde_json::json!({
+            "patch_size": 16,
+            "image_mean": [0.0, 0.0, 0.0],
+            "image_std": [1.0, 1.0, 1.0]
+        }))
+        .unwrap();
+        let context = MultimodalModelContext {
+            model_id: "nemotron_h_omni-test".to_string(),
+            model_type: Some("nemotron_h_omni".to_string()),
+            config,
+            tokenizer: TokenizerResolver(Arc::new(tokenizer)),
+        };
+        let info = MultimodalModelInfo::from_loaded(
+            context,
+            preprocessor_config,
+            PreProcessorConfig::default(),
+            HashMap::new(),
+        )
+        .unwrap()
+        .expect("nemotron_h_omni multimodal support");
         let media = MediaContentPart::ImageUrl {
             url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
             detail: None,
             uuid: None,
+            max_long_side_pixel: None,
         };
         let mut prompt = vec![11; 100];
         prompt.push(1018);
@@ -1324,6 +1381,7 @@ mod tests {
             url: "https://example.com/image.png".to_string(),
             detail: None,
             uuid: None,
+            max_long_side_pixel: None,
         }
     }
 
