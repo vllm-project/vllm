@@ -401,10 +401,11 @@ class AttentionGroup:
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
-        # Token caches are written through manager-block slot mappings, so only
-        # compressed caches (written from their block table) can be mapped.
+        # Token and pooled caches are written through manager-block slot
+        # mappings, so only compressed caches (written from their block table)
+        # can be mapped.
         if (
-            spec.tokens_per_state == 1
+            spec.tokens_per_state <= 1
             or kv_cache.shape[1] != 1
             or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))
         ):
