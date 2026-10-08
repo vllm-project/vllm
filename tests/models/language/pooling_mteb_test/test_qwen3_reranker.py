@@ -33,14 +33,6 @@ RERANK_MODELS = [
         is_chunked_prefill_supported=True,
         mteb_score=0.33459,
         mteb_tol=1e-2,
-        enable_test=True,
-    ),
-    RerankModelInfo(
-        "Qwen/Qwen3-Reranker-4B",
-        architecture="Qwen3ForSequenceClassification",
-        chat_template_name="qwen3_reranker.jinja",
-        hf_overrides=qwen3_reranker_hf_overrides,
-        enable_test=False,
     ),
 ]
 

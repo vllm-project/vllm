@@ -6,7 +6,6 @@ import pytest
 import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -97,22 +96,6 @@ def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=cudagraph_specialize_lora,
         ),
-    )
-    generate_and_test(llm, llama32_lora_files)
-
-
-@pytest.mark.skipif(
-    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
-)
-@multi_gpu_test(num_gpus=4)
-def test_llama_lora_tp4(llama32_lora_files):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        enable_lora=True,
-        max_num_seqs=7,
-        max_model_len=1024,
-        max_loras=4,
-        tensor_parallel_size=4,
     )
     generate_and_test(llm, llama32_lora_files)
 

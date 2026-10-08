@@ -31,14 +31,6 @@ RERANK_MODELS = [
         chat_template_name="mxbai_rerank_v2.jinja",
         mteb_score=0.33651,
         mteb_tol=1e-2,
-        enable_test=True,
-    ),
-    RerankModelInfo(
-        "mixedbread-ai/mxbai-rerank-large-v2",
-        architecture="Qwen2ForSequenceClassification",
-        hf_overrides=mxbai_rerank_hf_overrides,
-        chat_template_name="mxbai_rerank_v2.jinja",
-        enable_test=False,
     ),
 ]
 

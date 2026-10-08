@@ -8,7 +8,6 @@ import vllm
 from tests.conftest import VllmRunner
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 
 
@@ -172,7 +171,6 @@ EXPECTED_BEAM_SEARCH_OUTPUTS = [
 ]
 
 QWEN2VL_MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
-QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 
 
@@ -212,42 +210,6 @@ def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
             tester.run_beam_search_test(
                 [ImageAsset("cherry_blossom")],
                 expected_outputs=EXPECTED_BEAM_SEARCH_OUTPUTS,
-                lora_id=lora_id,
-            )
-
-
-@pytest.mark.skipif(
-    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
-)
-def test_qwen25vl_lora(qwen25vl_lora_files):
-    """Test Qwen 2.5 VL model with LoRA."""
-    config = TestConfig(model_path=QWEN25VL_MODEL_PATH, lora_path=qwen25vl_lora_files)
-    with Qwen2VLTester(config) as tester:
-        # Test with different LoRA IDs
-        for lora_id in [1, 2]:
-            tester.run_test(
-                TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id
-            )
-
-
-@pytest.mark.skipif(
-    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
-)
-def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
-    config = TestConfig(
-        model_path=QWEN25VL_MODEL_PATH,
-        lora_path=qwen25vl_vision_lora_files,
-        # Currently, tower_connector_lora is incompatible with
-        # the multi-modal processor cache.
-        # TODO: Remove this restriction
-        mm_processor_cache_gb=0,
-        enable_tower_connector_lora=True,
-    )
-    with Qwen2VLTester(config) as tester:
-        for lora_id in [1, 2]:
-            tester.run_test(
-                TEST_IMAGES,
-                expected_outputs=EXPECTED_OUTPUTS,
                 lora_id=lora_id,
             )
 

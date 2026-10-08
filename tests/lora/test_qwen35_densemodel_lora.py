@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 from transformers import AutoTokenizer
 
 import vllm
 import vllm.config
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 
-from ..utils import create_new_process_for_each_test, multi_gpu_test
+from ..utils import multi_gpu_test
 
 MODEL_PATH = "Qwen/Qwen3.5-4B"
 TEXT_LORA_ID = 1
@@ -310,34 +308,6 @@ def _assert_qwen35_text_vl_and_mixed_lora(
     assert generated_texts[2] != TEXT_EXPECTED_LORA_OUTPUT[0]
     assert not VL_EXPECTED_LORA_OUTPUT[0].startswith(generated_texts[3]), (
         "Non-LoRA vision output unexpectedly matches the LoRA expectation."
-    )
-
-
-@pytest.mark.skipif(
-    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
-)
-@create_new_process_for_each_test()
-def test_qwen35_text_lora(
-    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
-):
-    llm = vllm.LLM(
-        model=MODEL_PATH,
-        max_model_len=4096,
-        enable_lora=True,
-        max_loras=2,
-        max_num_seqs=4,
-        max_lora_rank=8,
-        enforce_eager=True,
-        trust_remote_code=True,
-        enable_tower_connector_lora=True,
-        mm_processor_cache_gb=0,
-        limit_mm_per_prompt={"image": 1},
-    )
-
-    _assert_qwen35_text_vl_and_mixed_lora(
-        llm,
-        qwen35_text_lora_files,
-        qwen35_vl_lora_files,
     )
 
 

@@ -45,15 +45,7 @@ from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
 
-MODELS = [
-    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
-    # The checkpoint below was removed from the HF.
-    # TODO: add a small replacement checkpoint.
-    pytest.param(
-        "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
-        marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
-    ),
-]
+MODELS = ["neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV"]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")

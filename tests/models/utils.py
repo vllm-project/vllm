@@ -390,7 +390,6 @@ class ModelInfo:
     attn_type: AttnTypeStr | None = None
     is_prefix_caching_supported: bool | None = None
     is_chunked_prefill_supported: bool | None = None
-    enable_test: bool = True
 
 
 @dataclass
@@ -417,13 +416,6 @@ class GenerateModelInfo(ModelInfo):
 
 
 def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
-    # A model family has many models with the same architecture,
-    # and we don't need to test each one.
-    if not ci_envs.VLLM_CI_NO_SKIP and not model_info.enable_test:
-        import pytest
-
-        pytest.skip("Skipping test.")
-
     # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype

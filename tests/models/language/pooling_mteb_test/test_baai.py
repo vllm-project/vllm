@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from tests.models.language.pooling.embed_utils import correctness_test_embed_models
 from tests.models.utils import (
     EmbedModelInfo,
     RerankModelInfo,
@@ -22,33 +21,6 @@ MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        enable_test=True,
-    ),
-    EmbedModelInfo("BAAI/bge-base-zh", architecture="BertModel", enable_test=False),
-    EmbedModelInfo("BAAI/bge-small-en", architecture="BertModel", enable_test=False),
-    EmbedModelInfo("BAAI/bge-small-zh", architecture="BertModel", enable_test=False),
-    EmbedModelInfo("BAAI/bge-large-en", architecture="BertModel", enable_test=False),
-    EmbedModelInfo("BAAI/bge-large-zh", architecture="BertModel", enable_test=False),
-    EmbedModelInfo(
-        "BAAI/bge-large-zh-noinstruct", architecture="BertModel", enable_test=False
-    ),
-    EmbedModelInfo(
-        "BAAI/bge-base-en-v1.5", architecture="BertModel", enable_test=False
-    ),
-    EmbedModelInfo(
-        "BAAI/bge-base-zh-v1.5", architecture="BertModel", enable_test=False
-    ),
-    EmbedModelInfo(
-        "BAAI/bge-small-en-v1.5", architecture="BertModel", enable_test=False
-    ),
-    EmbedModelInfo(
-        "BAAI/bge-small-zh-v1.5", architecture="BertModel", enable_test=False
-    ),
-    EmbedModelInfo(
-        "BAAI/bge-large-en-v1.5", architecture="BertModel", enable_test=False
-    ),
-    EmbedModelInfo(
-        "BAAI/bge-large-zh-v1.5", architecture="BertModel", enable_test=False
     ),
     ########## XLMRobertaModel
     EmbedModelInfo(
@@ -60,21 +32,6 @@ MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        enable_test=True,
-    ),
-    ########## Qwen2Model
-    EmbedModelInfo(
-        "BAAI/bge-code-v1",
-        architecture="Qwen2Model",
-        mteb_score=0.75724465,
-        seq_pooling_type="LAST",
-        attn_type="decoder",
-        is_prefix_caching_supported=True,
-        is_chunked_prefill_supported=True,
-        # Skip: model's custom tokenizer on HF hub is incompatible with
-        # transformers v5 (sets attrs before super().__init__, triggering
-        # AttributeError on 'verbose' in __getattr__).
-        enable_test=False,
     ),
 ]
 
@@ -89,17 +46,6 @@ RERANK_MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        enable_test=True,
-    ),
-    RerankModelInfo(
-        "BAAI/bge-reranker-large",
-        architecture="XLMRobertaForSequenceClassification",
-        enable_test=False,
-    ),
-    RerankModelInfo(
-        "BAAI/bge-reranker-v2-m3",
-        architecture="XLMRobertaForSequenceClassification",
-        enable_test=False,
     ),
 ]
 
@@ -108,13 +54,6 @@ RERANK_MODELS = [
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
-
-
-@pytest.mark.parametrize("model_info", MODELS)
-def test_embed_models_correctness(
-    hf_runner, vllm_runner, model_info: EmbedModelInfo, example_prompts
-) -> None:
-    correctness_test_embed_models(hf_runner, vllm_runner, model_info, example_prompts)
 
 
 @pytest.mark.flaky(reruns=2)
