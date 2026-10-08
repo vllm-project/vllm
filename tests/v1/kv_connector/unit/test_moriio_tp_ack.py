@@ -460,6 +460,80 @@ def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid
     assert worker.get_block_ids_with_load_errors() == expected_invalid
 
 
+@pytest.mark.parametrize(
+    "states,elapsed,has_mamba,error",
+    [
+        (["failed", "pending"], 1, True, "failed"),
+        (["pending", "failed"], 1, True, "failed"),
+        (["pending"], 121, True, "timed out"),
+        (["done", "done"], 121, True, None),
+        (["pending"], 120, True, None),
+        (["failed", "pending"], 1, False, None),
+    ],
+)
+def test_read_completion_preserves_hybrid_blocks_on_error(
+    monkeypatch, states, elapsed, has_mamba, error
+):
+    class Status:
+        def __init__(self, state):
+            self.state = state
+
+        def Succeeded(self):
+            return self.state == "done"
+
+        def Failed(self):
+            return self.state == "failed"
+
+        def Message(self):
+            return self.state
+
+        def Code(self):
+            return self.state
+
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.time.monotonic",
+        lambda: 1000.0,
+    )
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = False
+    worker.mode = MoRIIOMode.READ
+    worker.world_size = 8
+    worker._has_mamba = has_mamba
+    worker.moriio_config = SimpleNamespace(recv_abort_timeout=120.0)
+    worker.moriio_wrapper = MoRIIOWrapper()
+    notifications = []
+    monkeypatch.setattr(
+        worker.moriio_wrapper,
+        "send_notify",
+        lambda *args, **kwargs: notifications.append((args, kwargs)),
+    )
+    worker._recving_transfers = {"req": {"layer": [Status(state) for state in states]}}
+    worker._recving_transfers_callback_addr = {"req": ("host", "7000", "tx")}
+    worker._recving_transfers_start = {"req": 1000.0 - elapsed}
+    worker._recving_local_blocks = {"req": [7, 8]}
+    worker._invalid_block_ids = set()
+
+    if error is not None:
+        with pytest.raises(TransferError, match=error):
+            worker.get_finished()
+        assert notifications == []
+        assert "req" in worker._recving_transfers
+        assert worker._recving_transfers_callback_addr == {
+            "req": ("host", "7000", "tx")
+        }
+        assert worker._recving_transfers_start == {"req": 1000.0 - elapsed}
+        assert worker._recving_local_blocks == {"req": [7, 8]}
+        assert worker.get_block_ids_with_load_errors() == set()
+    else:
+        assert worker.get_finished() == (set(), set())
+        completed = states == ["done", "done"] or not has_mamba
+        assert len(notifications) == int(completed)
+        assert bool(worker._recving_transfers) is not completed
+        assert worker.get_block_ids_with_load_errors() == (
+            set() if has_mamba else {7, 8}
+        )
+
+
 def test_hybrid_step_barrier_fails_closed(monkeypatch):
     class FailingWrapper:
         def waiting_for_transfer_complete(self, _statuses):
