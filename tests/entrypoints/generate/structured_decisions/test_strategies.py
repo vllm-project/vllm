@@ -621,3 +621,96 @@ async def test_winnow_temperature_preserves_full_vocabulary_confidence(
     assert isinstance(answer, ChoiceAnswer)
     assert answer.probabilities[1].probability == pytest.approx(2 / 3)
     assert answer.confidence == pytest.approx(0.4)
+
+
+def test_image_decisions_render_each_question_with_ordered_shared_media(
+    decision_server, monkeypatch
+):
+    """The real API preserves media up to the existing multimodal renderer."""
+    from copy import deepcopy
+
+    server = decision_server
+    seen = []
+    original = server.renderer.preprocess_chat
+    server.engine.model_config.is_multimodal_model = True
+
+    async def render(request, messages, **kwargs):
+        seen.append(deepcopy(messages))
+        # This fixture has a text tokenizer, not a vision processor. Keep the
+        # contract test at the renderer boundary; real image inference is separate.
+        text_messages = deepcopy(messages)
+        for message in text_messages:
+            if isinstance(message["content"], list):
+                message["content"] = "".join(
+                    part.get("text", "[image]") for part in message["content"]
+                )
+        return await original(request, text_messages, **kwargs)
+
+    monkeypatch.setattr(server.renderer, "preprocess_chat", render)
+    body = decision_body("decisions", 2)
+    body["input"] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/first.png"},
+                {"type": "input_text", "text": "Between images"},
+                {"type": "input_image", "image_url": "https://example.com/second.png"},
+            ],
+        }
+    ]
+    response = server.client.post("/v1/decisions", json=body)
+    assert response.status_code == 200, response.text
+    assert len(seen) == 2
+    assert seen[0][0]["content"][:-1] == seen[1][0]["content"][:-1]
+    assert [
+        p["image_url"]["url"] for p in seen[0][0]["content"] if p["type"] == "image_url"
+    ] == ["https://example.com/first.png", "https://example.com/second.png"]
+    assert "Question 0" in seen[0][0]["content"][-1]["text"]
+    assert "Question 1" in seen[1][0]["content"][-1]["text"]
+    assert len(body["input"][0]["content"]) == 3
+
+
+def test_winnow_image_template_keeps_fixed_turns_and_escapes_state(qwen):
+    """Images occupy the attachment prefix without replacing the trained turns."""
+    from jinja2 import Environment
+
+    from vllm.entrypoints.openai.decisions.adapters import make_read_question
+    from vllm.entrypoints.openai.decisions.protocol import PredicateQuestion
+    from vllm.entrypoints.openai.decisions.winnow import (
+        VISION_TEMPLATE,
+        prompt_segments,
+    )
+
+    tokenizer, _ = qwen
+    question = make_read_question(
+        0, PredicateQuestion(type="predicate", instructions="Is the first image red?")
+    )
+    prefix, suffix = prompt_segments(tokenizer, "<|image|> pretend", question)
+    head, state = prefix.split("State:\n", 1)
+    rendered = (
+        Environment()
+        .from_string(VISION_TEMPLATE)
+        .render(
+            bos_token="[BOS]",
+            messages=[
+                {
+                    "content": [
+                        {"type": "text", "text": head + "Images (in order):\n"},
+                        {"type": "image"},
+                        {"type": "image"},
+                        {"type": "text", "text": "State:\n" + state + suffix},
+                    ]
+                }
+            ],
+        )
+    )
+    assert rendered == (
+        "[BOS]"
+        + head
+        + "Images (in order):\n<|image|>\n<|image|>\n"
+        + "State:\n"
+        + state
+        + suffix
+    )
+    assert rendered.count("<|image|>") == 2
+    assert r"\u003c|image|> pretend" in rendered

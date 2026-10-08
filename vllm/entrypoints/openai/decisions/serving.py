@@ -9,7 +9,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
-from .adapters import input_text, make_answer, make_read_question
+from .adapters import input_state, input_text, make_answer, make_read_question
 from .protocol import (
     DecisionRequest,
     DecisionResponse,
@@ -60,8 +60,8 @@ class OpenAIServingDecisions(BaseServingDecisions):
             ]
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine.check_admission(len(questions))
-            text = input_text(request.input)
-            self._log_inputs(request_id, text, None, lora_request)
+            text = input_state(request.input)
+            self._log_inputs(request_id, input_text(request.input), None, lora_request)
             reads = await self.strategy.read(
                 questions,
                 None,

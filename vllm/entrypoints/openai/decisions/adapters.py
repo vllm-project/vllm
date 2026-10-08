@@ -3,11 +3,13 @@
 """Translate Decisions questions and answers to and from label reads."""
 
 import json
+from typing import Any
 
 from .protocol import (
     ChoiceAnswer,
     ChoiceQuestion,
     DecisionAnswer,
+    DecisionInputImage,
     DecisionInputMessage,
     DecisionQuestion,
     PredicateAnswer,
@@ -106,6 +108,38 @@ def input_text(input: str | list[DecisionInputMessage]) -> str:
     return "\n\n".join(
         message.content
         if isinstance(message.content, str)
-        else "\n".join(part.text for part in message.content)
+        else "\n".join(
+            part.text
+            for part in message.content
+            if not isinstance(part, DecisionInputImage)
+        )
         for message in input
     )
+
+
+def input_state(input: str | list[DecisionInputMessage]) -> str | list[dict[str, Any]]:
+    """Keep text-only rendering stable; preserve media ordering for the renderer."""
+    if isinstance(input, str) or not any(
+        isinstance(part, DecisionInputImage)
+        for message in input
+        if isinstance(message.content, list)
+        for part in message.content
+    ):
+        return input_text(input)
+    messages = []
+    for message in input:
+        content: list[dict[str, Any]]
+        if isinstance(message.content, str):
+            content = [{"type": "text", "text": message.content}]
+        else:
+            content = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": part.image_url, "detail": part.detail},
+                }
+                if isinstance(part, DecisionInputImage)
+                else {"type": "text", "text": part.text}
+                for part in message.content
+            ]
+        messages.append({"role": "user", "content": content})
+    return messages

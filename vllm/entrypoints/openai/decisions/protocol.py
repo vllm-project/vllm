@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """OpenAI Decisions API request and response models."""
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import ConfigDict, Field, StrictBool, StrictStr, model_validator
 
@@ -22,26 +22,24 @@ class DecisionInputText(DecisionModel):
     text: InputText
 
 
+class DecisionInputImage(DecisionModel):
+    type: Literal["input_image"]
+    image_url: Annotated[
+        StrictStr,
+        Field(max_length=20971520, pattern=r"^(https?://|data:image/).+"),
+    ]
+    detail: Literal["auto", "low", "high"] = "auto"
+
+
+DecisionInputPart = Annotated[
+    DecisionInputText | DecisionInputImage, Field(discriminator="type")
+]
+
+
 class DecisionInputMessage(DecisionModel):
     role: Literal["user"]
-    content: InputText | Annotated[list[DecisionInputText], Field(max_length=16384)]
+    content: InputText | Annotated[list[DecisionInputPart], Field(max_length=16384)]
     type: Literal["message"] = "message"
-
-    @model_validator(mode="before")
-    @classmethod
-    def reject_images(cls, data: Any) -> Any:
-        if (
-            isinstance(data, dict)
-            and isinstance(data.get("content"), list)
-            and any(
-                isinstance(part, dict) and part.get("type") == "input_image"
-                for part in data["content"]
-            )
-        ):
-            raise ValueError(
-                "Decisions supports text input only; images are not supported"
-            )
-        return data
 
 
 class QuestionBase(DecisionModel):

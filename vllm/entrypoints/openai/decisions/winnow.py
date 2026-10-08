@@ -7,10 +7,11 @@ import math
 
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.inputs import tokens_input
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import SamplingParams
 
 from .question_types import LABELS, StructuredDecisionError, label_softmax
-from .strategies import DecisionLimits, QuestionRead, ReadStrategy
+from .strategies import DecisionLimits, QuestionRead, ReadPromptRequest, ReadStrategy
 
 SYSTEM = (
     "You answer classification questions using the supplied state. "
@@ -25,7 +26,7 @@ def data_text(value):
     ).replace("<", r"\u003c")
 
 
-def prompt_tokens(tokenizer, state, question):
+def prompt_segments(tokenizer, state, question):
     """Encode one independent question after an identical state prefix."""
     prefix = (
         "<|turn>system\n"
@@ -56,11 +57,25 @@ def prompt_tokens(tokenizer, state, question):
     ):
         suffix += "<|channel>thought\n<channel|>"
     suffix += "Answer:\n"
+    return prefix, suffix
+
+
+def prompt_tokens(tokenizer, state, question):
+    prefix, suffix = prompt_segments(tokenizer, state, question)
     return (
         [tokenizer.bos_token_id]
         + tokenizer.encode(prefix, add_special_tokens=False)
         + tokenizer.encode(suffix, add_special_tokens=False)
     )
+
+
+VISION_TEMPLATE = (
+    "{{ bos_token }}{% for message in messages %}"
+    "{% for part in message['content'] %}"
+    "{% if part['type'] == 'image' %}{{ '<|image|>\\n' }}"
+    "{% elif part['type'] == 'text' %}{{ part['text'] }}{% endif %}"
+    "{% endfor %}{% endfor %}"
+)
 
 
 class WinnowStrategy(ReadStrategy):
@@ -109,6 +124,26 @@ class WinnowStrategy(ReadStrategy):
             raise StructuredDecisionError(
                 "Winnow uses a fixed trained prompt; chat overrides are unsupported"
             )
+        images = []
+        if not isinstance(state, str):
+            if not self.context.engine_client.model_config.is_multimodal_model:
+                raise StructuredDecisionError(
+                    "This text-only Winnow export does not support image input"
+                )
+            images = [
+                part
+                for message in state
+                for part in message["content"]
+                if part["type"] == "image_url"
+            ]
+            state = "\n\n".join(
+                "\n".join(
+                    part["text"]
+                    for part in message["content"]
+                    if part["type"] == "text"
+                )
+                for message in state
+            )
         if self.state_format == "json":
             try:
                 state = json.loads(state)
@@ -116,11 +151,37 @@ class WinnowStrategy(ReadStrategy):
                 raise StructuredDecisionError(
                     "Winnow input must contain valid JSON"
                 ) from exc
-        prompts = [prompt_tokens(self.tokenizer, state, q) for q in questions]
+        engine_inputs = []
+        if images:
+            for q in questions:
+                prefix, suffix = prompt_segments(self.tokenizer, state, q)
+                head, body = prefix.split("State:\n", 1)
+                content = [dict(type="text", text=head + "Images (in order):\n")]
+                content.extend(images)
+                content.append(dict(type="text", text="State:\n" + body + suffix))
+                _, (engine_input,) = await self.context.online_renderer.preprocess_chat(
+                    ReadPromptRequest(),
+                    [{"role": "user", "content": content}],
+                    default_template=VISION_TEMPLATE,
+                    default_template_content_format="openai",
+                    default_template_kwargs={},
+                )
+                engine_inputs.append(engine_input)
+            prompts = [
+                list(
+                    extract_prompt_components(
+                        self.context.engine_client.model_config, p
+                    ).token_ids
+                    or []
+                )
+                for p in engine_inputs
+            ]
+        else:
+            prompts = [prompt_tokens(self.tokenizer, state, q) for q in questions]
+            engine_inputs = [tokens_input(p) for p in prompts]
         maximum = self.context.engine_client.model_config.max_model_len
         if any(len(prompt) + 1 > maximum for prompt in prompts):
             raise StructuredDecisionError("Winnow decision exceeds the model context")
-        engine_inputs = [tokens_input(p) for p in prompts]
         if cache_salt is not None:
             for engine_input in engine_inputs:
                 engine_input["cache_salt"] = cache_salt

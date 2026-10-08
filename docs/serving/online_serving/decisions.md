@@ -105,3 +105,36 @@ and send a JSON document as the `input` string. The strategy parses that documen
 before applying Winnow's canonical state serialization. This preserves object
 and array states when comparing against Ollaya. The default `text` mode treats
 input literally. Invalid JSON in `json` mode fails before inference.
+
+### Image input (stacked vision change)
+
+For a supported vision-language model, `/v1/decisions` accepts ordered user
+content with `input_text` and `input_image` parts. Image URLs use the existing
+vLLM multimodal renderer and its media restrictions and processor cache.
+
+```json
+{
+  "model": "vision-decision-model",
+  "input": [{"role": "user", "content": [
+    {"type": "input_text", "text": "Inspect the image."},
+    {"type": "input_image", "image_url": "https://example.org/image.png"}
+  ]}],
+  "questions": [{"type": "predicate", "instructions": "Is a vehicle visible?"}]
+}
+```
+
+Each question retains the same ordered image/state prefix and its own question
+suffix. Model-specific processors expand image placeholders before inference;
+image metadata stays in the engine input. Context limits apply to the expanded
+input. Text-only models reject image requests.
+
+Winnow image input requires a native `Gemma4ForConditionalGeneration` export
+with the matching vision tower and projector. A text-only
+`Gemma4ForCausalLM` export cannot gain vision support by changing its architecture
+name. Winnow uses its fixed trained turns and image-attachment prefix through the
+Gemma multimodal renderer, rather than the generic decision chat prompt.
+
+Implementation validation is in progress. CPU tests cover schema, ordered media
+at the renderer boundary, fixed Winnow image formatting and text regressions.
+These tests do not establish real image accuracy or quantized vision support;
+actual model and precision validation must accompany any support claim.
