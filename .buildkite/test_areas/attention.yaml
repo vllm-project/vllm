@@ -62,3 +62,17 @@ steps:
       commands:
       - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
       - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":nvidia: (DGX) Spark FlashInfer NVFP4 XQA"
+  key: flashinfer-nvfp4-xqa-dgx-spark
+  timeout_in_minutes: 30
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - vllm/v1/attention/backends/flashinfer.py
+  - tests/v1/attention/test_attention_backends.py
+  commands:
+  - pytest -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness
