@@ -1,6 +1,6 @@
 # GDN/KDA measurements
 
-**FE1454 results:** [New GB200 TTFT and KDA CPU/kernel comparison](native_additive_results.md), with [all repeats and audits](native_additive_results.json). GLM is complete; Kimi is queued. The sections below retain the earlier FE1418/FI6078 measurements and do not describe the FE1454 implementation.
+**FE1454 results:** [New GB200 TTFT and KDA CPU/kernel comparison](native_additive_results.md), with [all repeats and audits](native_additive_results.json). GLM and Kimi are complete; all 540 GPU traces passed the audit. The sections below retain the earlier FE1418/FI6078 measurements and do not describe the FE1454 implementation.
 
 ## Earlier FE1418/FI6078 full-serving measurements
 
