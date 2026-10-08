@@ -42,7 +42,12 @@ class LateChunkingParams(
     omit_defaults=True,  # type: ignore[call-arg]
     array_like=True,
 ):  # type: ignore[call-arg]
-    """Fixed-length mean pooling before the token embedding head."""
+    """Fixed-length mean pooling before the token embedding head.
+
+    Requests recompute all prompt tokens, bypassing prefix cache reads.
+    Special tokens count toward chunk boundaries and are included in chunk means,
+    including the BOS token normally filtered from BGE-M3 token embeddings.
+    """
 
     chunk_size: int
     metadata: LateChunkingMetadata | None = None
@@ -117,21 +122,9 @@ class PoolingParams(
             self.late_chunking_params.verify()
             if self.task != "token_embed":
                 raise VLLMValidationError("Late chunking requires token_embed")
-            if not supports_late_chunking(model_config):
+            if self.late_interaction_params is not None:
                 raise VLLMValidationError(
-                    "Late chunking requires a dense NomicBertModel with "
-                    "MEAN sequence pooling and ALL token pooling"
-                )
-            pooler_config = model_config.pooler_config
-            assert pooler_config is not None
-            if (
-                self.dimensions is not None
-                or pooler_config.dimensions is not None
-                or self.late_interaction_params is not None
-            ):
-                raise VLLMValidationError(
-                    "Late chunking does not support dimension reduction, "
-                    "late-interaction scoring"
+                    "Late chunking cannot be combined with late-interaction scoring"
                 )
 
         # plugin task uses io_processor.parse_data to verify inputs,
@@ -151,6 +144,11 @@ class PoolingParams(
         self._merge_default_parameters(model_config)
         self._set_default_parameters(model_config)
         self._verify_valid_parameters()
+        if self.late_chunking_params is not None:
+            if self.step_tag_id is not None:
+                raise VLLMValidationError("Late chunking requires all token rows")
+            # KV cache hits omit hidden states needed for complete chunk means.
+            self.skip_reading_prefix_cache = True
 
     def _merge_default_parameters(self, model_config: ModelConfig) -> None:
         pooler_config = model_config.pooler_config
@@ -283,18 +281,3 @@ class PoolingParams(
                 "For pooling output_kind has to be FINAL_ONLY, "
                 f"got {self.output_kind!r}"
             )
-
-
-def supports_late_chunking(model_config: ModelConfig) -> bool:
-    """Only enable the initial, validated mean-pooling/head contract."""
-    pooler_config = model_config.pooler_config
-    return (
-        model_config.architecture == "NomicBertModel"
-        and model_config.model_impl != "transformers"
-        and not model_config.is_matryoshka
-        and not getattr(model_config.hf_config, "num_experts", 0)
-        and pooler_config is not None
-        and pooler_config.seq_pooling_type == "MEAN"
-        and pooler_config.tok_pooling_type == "ALL"
-        and not pooler_config.enable_chunked_processing
-    )

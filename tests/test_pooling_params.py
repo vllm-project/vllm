@@ -241,14 +241,14 @@ def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
     params.verify(model_config)
     assert params.skip_reading_prefix_cache is True
     assert params.use_activation is True
-    # With caching disabled by the frontend, this override is harmless.
+    # Chunk means must include cached prefixes even when the user opts into reads.
     explicit_cache_flag = PoolingParams(
         task="token_embed",
         late_chunking_params=LateChunkingParams(chunk_size=3),
         skip_reading_prefix_cache=False,
     )
     explicit_cache_flag.verify(model_config)
-    assert explicit_cache_flag.skip_reading_prefix_cache is False
+    assert explicit_cache_flag.skip_reading_prefix_cache is True
     params.late_chunking_params.metadata = LateChunkingMetadata(
         chunk_size=3, input_tokens=3, chunks=[LateChunk((0, 3), (0, 2))]
     )
@@ -290,7 +290,7 @@ def test_late_chunking_rejects_other_tasks(task):
         {"num_experts": 8},
     ],
 )
-def test_late_chunking_rejects_unverified_model_contracts(override):
+def test_late_chunking_does_not_restrict_model_identity(override):
     model_config = _late_chunking_model_config()
     for key, value in override.items():
         target = (
@@ -301,16 +301,35 @@ def test_late_chunking_rejects_unverified_model_contracts(override):
             else model_config
         )
         setattr(target, key, value)
-    with pytest.raises(VLLMValidationError, match="dense NomicBertModel"):
-        PoolingParams(
-            task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=2)
-        ).verify(model_config)
+    PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=2)
+    ).verify(model_config)
 
 
-def test_late_chunking_rejects_dimension_reduction():
-    with pytest.raises(VLLMValidationError, match="does not support"):
-        PoolingParams(
-            task="token_embed",
-            late_chunking_params=LateChunkingParams(chunk_size=2),
-            dimensions=4,
-        ).verify(_late_chunking_model_config())
+def test_late_chunking_uses_existing_dimension_validation():
+    config = MockMatryoshkaModelConfig(
+        pooler_config=PoolerConfig(tok_pooling_type="ALL", use_activation=False),
+    )
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(2), dimensions=4
+    )
+    params.verify(config)
+    assert params.dimensions == 4
+    assert params.use_activation is False
+    params.dimensions = config.embedding_size + 1
+    with pytest.raises(VLLMValidationError, match="dimensions in range"):
+        params.verify(config)
+
+
+@pytest.mark.parametrize("from_config", [False, True])
+def test_late_chunking_rejects_token_filtering_after_resolving_defaults(from_config):
+    config = MockModelConfig(pooler_config=PoolerConfig(tok_pooling_type="STEP"))
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(2)
+    )
+    if from_config:
+        config.pooler_config.step_tag_id = 42
+    else:
+        params.step_tag_id = 42
+    with pytest.raises(VLLMValidationError, match="all token rows"):
+        params.verify(config)
