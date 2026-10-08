@@ -5,7 +5,11 @@ from copy import deepcopy
 
 import pytest
 import regex as re
-from openai.types.responses import FunctionTool, ToolChoiceFunction, WebSearchTool
+from openai.types.responses import (
+    FunctionTool,
+    ToolChoiceFunction,
+    WebSearchTool,
+)
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -13,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
@@ -581,3 +586,70 @@ class TestForcedNamedToolChoiceEmptyParams:
         choice = ToolChoiceFunction(type="function", name="ping")
         schema = get_json_schema_from_tools(choice, [tool])
         assert schema == {"type": "object", "properties": {}}
+
+
+class TestForcedFunctionShortNameAlias:
+    """Forced choices must use the selected function's parameter schema."""
+
+    PARAMS = {"type": "object", "properties": {"x": {"type": "integer"}}}
+
+    @pytest.mark.parametrize("plain_first", [True, False])
+    @pytest.mark.parametrize(
+        "namespace,function_name,choice_name",
+        [
+            ("math", "add", "add"),
+            ("math", "add", "math__add"),
+            ("math", "vector__add", "vector__add"),
+            ("math__vector", "vector__add", "vector__add"),
+        ],
+    )
+    def test_namespace_schema_is_not_shadowed(
+        self, plain_first, namespace, function_name, choice_name
+    ):
+        tools = [
+            {
+                "type": "function",
+                "name": "other__add",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"y": {"type": "string"}},
+                },
+            },
+            {
+                "type": "namespace",
+                "name": namespace,
+                "description": "math tools",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": function_name,
+                        "parameters": self.PARAMS,
+                    }
+                ],
+            },
+        ]
+        if not plain_first:
+            tools.reverse()
+        request = ResponsesRequest.model_validate(
+            {
+                "model": "test-model",
+                "input": "Add the numbers.",
+                "tools": tools,
+                "tool_choice": {"type": "function", "name": choice_name},
+            }
+        )
+        assert (
+            get_json_schema_from_tools(request.tool_choice, request.tools)
+            == self.PARAMS
+        )
+
+    def test_plain_function_double_underscore_name_has_no_phantom_alias(self):
+        tool = FunctionTool(type="function", name="math__add", parameters=self.PARAMS)
+        choice = ToolChoiceFunction(type="function", name="add")
+        with pytest.raises(ValueError, match="has not been passed in `tools`"):
+            get_json_schema_from_tools(choice, [tool])
+
+    def test_plain_function_full_name_still_resolves(self):
+        tool = FunctionTool(type="function", name="math__add", parameters=self.PARAMS)
+        choice = ToolChoiceFunction(type="function", name="math__add")
+        assert get_json_schema_from_tools(choice, [tool]) == self.PARAMS
