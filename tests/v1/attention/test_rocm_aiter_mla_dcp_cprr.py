@@ -142,6 +142,13 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
 
     def init_common_builder(self, *args, **kwargs):
         self.num_heads = gathered_heads // DCP
+        self.q_data_type = torch.bfloat16
+        self.mla_dims = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
         self.dcp_world_size = DCP
         self.reorder_batch_threshold = 5
 
