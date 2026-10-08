@@ -757,17 +757,7 @@ def test_worker_rejects_incompatible_mamba_specs_before_registration():
         worker.register_kv_caches({"kda.0": object(), "kda.1": object()})
 
 
-def test_register_kv_caches_allows_hybrid_divergent_block_len():
-    """GLM-5.2 / MiniMax HMA: divergent per-layer block_len is allowed."""
-    Geom = moriio_layout.LayerTransferGeometry
-    caches = {
-        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
-        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
-    }
-    geoms = {
-        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
-        "layer1": Geom(4, 16, 9216, 576, 9216, None, None, 1, 1, False),
-    }
+def _make_register_worker(caches, geoms):
     worker = _FakeWorker(
         mode=MoRIIOMode.READ,
         _transfer_layer_names=set(caches),
@@ -802,12 +792,62 @@ def test_register_kv_caches_allows_hybrid_divergent_block_len():
     worker._iter_layer_registration_regions = lambda n: [
         (caches[n], caches[n].nbytes)
     ]
-    worker._moriio_handshake_listener = lambda _m, ready_event, *_a, **_k: ready_event.set()
+    worker._moriio_handshake_listener = (
+        lambda _m, ready_event, *_a, **_k: ready_event.set()
+    )
+    return worker
 
+
+def test_register_kv_caches_allows_hybrid_divergent_block_len():
+    """GLM-5.2 / MiniMax HMA: divergent per-layer block_len is allowed."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    # Same tokens-per-block (16); different bytes-per-block (2112 vs 9216).
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 16, 9216, 576, 9216, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms)
     worker.register_kv_caches(caches)
 
     assert worker.block_lens == {"layer0": 2112, "layer1": 9216}
     assert worker.block_len == 9216
+
+
+def test_register_kv_caches_rejects_divergent_block_size():
+    """block_size (tokens/page) must stay uniform even if block_len matches."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 32, 2112, 66, 2112, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms)
+    with pytest.raises(ValueError, match="block size mismatch"):
+        worker.register_kv_caches(caches)
+
+
+def test_register_kv_caches_rejects_divergent_block_size_even_if_block_len_differs():
+    """Both differing must still raise — do not allow via block_len mismatch."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    # Previously buggy: size+len both differ → registration continued.
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 32, 9216, 288, 9216, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms)
+    with pytest.raises(ValueError, match="block size mismatch"):
+        worker.register_kv_caches(caches)
 
 
 # --------------------------------------------------------------------------

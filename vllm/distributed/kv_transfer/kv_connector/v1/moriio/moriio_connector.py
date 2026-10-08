@@ -2450,25 +2450,16 @@ class MoRIIOConnectorWorker:
                     base_addr_idx += 1
                 continue
             geometry = self._get_layer_transfer_geometry(layer_name)
-            # HMA / hybrid models (e.g. GLM-5.2 DSA, MiniMax) can advertise
-            # different per-layer block_size / block_len. Transfers already use
-            # per-layer geometry; do not hard-fail on a single page default.
+            # Tokens-per-block (block_size) must stay uniform for the peer page
+            # handshake. HMA / hybrid models (e.g. GLM-5.2 DSA, MiniMax) may
+            # still differ in per-layer block_len (bytes); transfers already
+            # size RDMA from per-layer geometry, so only allow that divergence.
             if geometry.block_size != self.block_size:
-                if geometry.block_len == self.block_len:
-                    raise ValueError(
-                        "MoRIIO KV cache block size mismatch for layer "
-                        f"{layer_name}: {geometry.block_size} != {self.block_size}"
-                    )
-                logger.info(
-                    "MoRIIO HMA per-layer geometry for %s: block_size=%d "
-                    "block_len=%d (page block_size=%d block_len=%d); continuing.",
-                    layer_name,
-                    geometry.block_size,
-                    geometry.block_len,
-                    self.block_size,
-                    self.block_len,
+                raise ValueError(
+                    "MoRIIO KV cache block size mismatch for layer "
+                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
                 )
-            elif geometry.block_len != self.block_len:
+            if geometry.block_len != self.block_len:
                 logger.info(
                     "MoRIIO HMA per-layer block_len for %s: %d "
                     "(page/default %d); continuing with per-layer sizes.",
