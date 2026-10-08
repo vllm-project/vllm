@@ -94,6 +94,22 @@ def _maybe_set_cuda_compatibility_path():
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
 
 
+def _run_torch_rocm_sdk_init(torch_root: str) -> None:
+    """Run the ROCm SDK preload that 'import torch' runs first on TheRock wheels,
+    so libtorch_cpu.so's dependencies resolve to the wheel's ROCm libraries."""
+    init_path = os.path.join(torch_root, "_rocm_init.py")
+    if not os.path.exists(init_path):
+        return
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_vllm_torch_rocm_init", init_path)
+    if spec is None or spec.loader is None:
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.initialize()
+
+
 def _maybe_promote_torch_symbols_for_rocm():
     """Put libtorch_cpu.so in the global symbol scope on ROCm, for GPU profiling.
 
@@ -120,6 +136,7 @@ def _maybe_promote_torch_symbols_for_rocm():
         torch_root = _get_torch_root()
         if not torch_root:
             return
+        _run_torch_rocm_sdk_init(torch_root)
         lib = os.path.join(torch_root, "lib", "libtorch_cpu.so")
         if not os.path.exists(lib):
             return
