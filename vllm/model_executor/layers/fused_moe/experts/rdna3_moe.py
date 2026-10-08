@@ -203,8 +203,11 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         gate_up_out = scratch[: rows * gate_up].view(rows, gate_up)
         act_out = scratch[rows * gate_up : rows * (gate_up + act_n)].view(rows, act_n)
 
-        # BLOCK_SIZE_M=1 for decode (no padding waste), 4 for prefill.
-        block_size_m = 1 if M <= 4 else 4
+        # BLOCK_SIZE_M=1 for decode (no padding waste, no alignment kernels),
+        # 4 for prefill. Decode with speculative tokens reaches 24 rows (6
+        # sequences x 4); there block 1 is still faster: TP4 MTP k=3, step
+        # 35.4 -> 33.9 ms at 4 users and 44.1 -> 41.2 ms at 6.
+        block_size_m = 1 if M <= 24 else 4
         if block_size_m == 1 and expert_map is None:
             sorted_token_ids, num_tokens_post_padded = _identity_routing(
                 rows, hidden_states.device
