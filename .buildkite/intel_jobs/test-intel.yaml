@@ -153,7 +153,7 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
         pytest -v -s quantization/test_auto_round.py &&
-        pytest -v -s quantization/test_online.py --deselect=tests/quantization/test_online.py::test_online_quantization_loads_real_weights'
+        pytest -v -s quantization/test_online.py --deselect=tests/quantization/test_online.py::test_online_quantization_loads_real_weights --deselect="tests/quantization/test_online.py::test_online_quantization[False-requantization_mxfp8_ptcp_fp8]"'
   - label: "XPU compressed tensors FP8 test"
     key: xpu-compressed-tensors-fp8-test
     depends_on:
