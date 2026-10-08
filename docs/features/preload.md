@@ -61,22 +61,26 @@ Normally the first serving engine pays for the pass, and on a large MoE model it
 dominates what is left of the startup time once the weights come from the
 daemon.
 
-To pay it at preload time instead, pass `--preload-autotune`. Once every daemon
-is serving, `vllm preload` runs one throwaway engine against them that
-autotunes and JIT-compiles, writes the cache, then exits:
+Unless FlashInfer autotune is disabled (`--no-enable-flashinfer-autotune`),
+`vllm preload` pays it at preload time: each daemon runs the autotune pass in
+place — profiling dummy runs against the shard it already holds — after
+loading and before binding its socket, then writes the cache:
 
 ```bash
-vllm preload --model /path/to/model --tensor-parallel-size 4 --preload-autotune
+vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
-That engine is an ordinary engine, so it needs the GPU memory budget a real one
-does and takes as long as a cold start minus loading the weights. Give
-`vllm preload` the same engine flags you give `vllm serve`, and run both with
-the same cache directory: the cache is keyed by the configuration hash, so an
-engine whose flags differ tunes again. `--load-format` and
-`--gpu-memory-utilization` are not part of the hash, which is why the warmup
-engine and `vllm serve --load-format ipc_cache` share it. A failed warmup is
-reported but not fatal, since the daemons keep serving the weights they hold.
+In-place tuning spawns no extra process and loads nothing twice: the daemon
+reuses the weights it already holds, so the pass costs only transient
+activation memory. It also runs only the autotune pass — CUDA graph capture
+does not persist to disk, and the per-machine JIT/compile caches are paid by
+the first real engine. Give `vllm preload` the same engine
+flags you give `vllm serve`, and run both with the same cache directory: the
+cache is keyed by the configuration hash, so an engine whose flags differ tunes
+again. `--load-format` and `--gpu-memory-utilization` are not part of the hash,
+which is why the daemons and `vllm serve --load-format ipc_cache` share it. A
+failed tuning pass is reported but not fatal, since the daemons keep serving
+the weights they hold.
 
 ## How it works
 
@@ -192,11 +196,13 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
 - **Platform**: CUDA and ROCm only; other platforms raise
   `UnsupportedPlatformForIPCError` even when `fallback` is enabled, since it
   is a permanent misconfiguration rather than a transient daemon outage.
-- **Parallelism**: tensor, expert and data parallelism are supported;
-  launching the daemon with pipeline parallelism is rejected.
-- **Autotune preloading**: `--preload-autotune` runs one local engine, so it
-  supports neither `--nnodes > 1` nor `--data-parallel-size > 1`; those
-  deployments let their first engine tune and fill the cache instead.
+- **Parallelism**: tensor, expert, pipeline and data parallelism are
+  supported, including across nodes.
+- **Autotune preloading**: tuning runs across the daemon's world group,
+  including across nodes and DP ranks. With model-based speculative decoding
+  the target daemons skip it (the draft model lives in the draft daemon
+  group), so those deployments' first engine tunes and fills the cache
+  instead.
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise

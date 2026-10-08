@@ -99,6 +99,10 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_cache.autotune import (
+    build_tuning_runner,
+    replicate_engine_cache_config,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
@@ -116,7 +120,9 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     format_daemon_role,
     is_draft_model_cacheable,
 )
+from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -235,6 +241,56 @@ class WeightCacheDaemon:
             dp_rank=dp_rank,
             is_draft=is_draft,
         )
+
+    def warmup(self) -> None:
+        """Run the FlashInfer autotune pass against the cached model."""
+        vllm_config = self.vllm_config
+        # Mirrors the gate in the engine's kernel warmup.
+        if vllm_config.kernel_config.enable_flashinfer_autotune is False:
+            return
+        if not (has_flashinfer() and current_platform.has_device_capability(90)):
+            return
+        try:
+            runner = build_tuning_runner(
+                vllm_config,
+                self.model,
+                self.local_rank,
+                is_draft=self.is_draft,
+                model_config=self.model_config,
+            )
+            drafter = getattr(runner, "drafter", None)
+            if drafter is not None and hasattr(drafter, "load_model"):
+                # The draft model lives in the draft daemon group, so this
+                # process cannot run the drafter's dummy passes. Engines tune
+                # themselves instead.
+                logger.info(
+                    "Weight cache %s daemon rank %d skips in-daemon FlashInfer "
+                    "autotune: speculative decoding's draft model is held by "
+                    "the draft daemons",
+                    self.role,
+                    self.global_rank,
+                )
+                return
+            replicate_engine_cache_config(vllm_config, runner)
+            flashinfer_autotune(runner)
+            logger.info(
+                "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
+                "configs are in the on-disk autotune cache",
+                self.role,
+                self.global_rank,
+            )
+        except Exception:
+            logger.exception(
+                "FlashInfer autotune failed in the weight cache %s daemon "
+                "rank %d; engines will run it themselves",
+                self.role,
+                self.global_rank,
+            )
+        finally:
+            # Free the runner and the dummy-run activations; the daemon's
+            # weights are untouched.
+            gc.collect()
+            torch.accelerator.empty_cache()
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
@@ -457,6 +513,7 @@ def _run_daemon(
         pp_rank,
     )
     daemon.load_model()
+    daemon.warmup()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
     )

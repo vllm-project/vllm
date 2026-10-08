@@ -7,18 +7,19 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
-import argparse
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+import regex as re
 
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
@@ -82,6 +83,21 @@ class WeightCacheDaemon:
                 f"Weight cache daemon is not ready: HTTP {error.code}"
             ) from error
 
+    def wait_until_ready(self, timeout_s: float = 900) -> None:
+        """Poll until READY (which covers the autotune tuners) or the preload
+        process dies."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                self.check_health()
+                return
+            except (AssertionError, urllib.error.URLError):
+                if time.monotonic() > deadline:
+                    raise
+                if self._proc is not None and self._proc.poll() is not None:
+                    raise AssertionError("vllm preload exited before ready") from None
+                time.sleep(2)
+
     def _stop(self) -> None:
         assert self._proc is not None
         self._proc.terminate()
@@ -100,6 +116,10 @@ class ModelCase:
     images: list | None = None
     llm_kwargs: dict[str, Any] = field(default_factory=dict)
     daemon_args: list[str] = field(default_factory=list)
+    # Additionally assert the daemons tune in place before serving and write
+    # the on-disk FlashInfer autotune cache, and the restart engine reuses it
+    # (needs SM90+/FlashInfer).
+    check_flashinfer_cache: bool = False
 
 
 def generate(
@@ -158,6 +178,9 @@ K3_CASE = ModelCase(
         max_model_len=4096,
     ),
     daemon_args=["--trust-remote-code"],
+    # Kimi K3 has tunable FlashInfer ops (a dense model like Qwen2.5 tunes
+    # nothing and upstream never writes the cache file for it).
+    check_flashinfer_cache=True,
 )
 
 # Qwen3.5-0.8B ships one MTP layer in the target checkpoint, so method="mtp"
@@ -187,18 +210,38 @@ QWEN_MTP_CASE = ModelCase(
     [QWEN_CASE, K3_CASE, QWEN_MTP_CASE],
     ids=["qwen3.5", "kimi-k3", "qwen3.5-mtp"],
 )
-def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
+def test_ipc_cache_cold_start_and_warm_restart(
+    vllm_runner, case: ModelCase, tmp_path, monkeypatch, capfd
+):
     """Cold start falls back to disk; warm restarts load weights via CUDA IPC.
 
     All runs must produce outputs identical to a default-loader baseline. The
     warm runs disable the disk fallback, so they only pass if the weights
     really came from the daemon — for the MTP case, both the target's and the
     draft's daemon groups.
+
+    Cases with ``check_flashinfer_cache`` additionally cover in-daemon
+    autotune (default-on with `--enable-flashinfer-autotune`): each daemon
+    tunes before binding its socket and must write the on-disk FlashInfer
+    autotune cache, and the restart engine must load tactics from it instead
+    of re-profiling. The daemon's cache file is keyed with the
+    OPENAI_API_SERVER batch defaults while these engines run under LLM_CLASS,
+    so they never hit the daemon's file by design; reuse is proven against
+    the file the earlier in-process engines wrote.
     """
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
+    if case.check_flashinfer_cache:
+        from vllm.utils.flashinfer import has_flashinfer
+
+        if not (has_flashinfer() and current_platform.has_device_capability(90)):
+            pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
+        # Isolate the on-disk autotune cache. The engines are in-process
+        # (envs read lazily); the daemon subprocesses spawn later and
+        # inherit it.
+        monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
 
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
@@ -213,15 +256,40 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
         cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
 
+    if case.check_flashinfer_cache:
+        # The baseline engine already wrote its own (LLM_CLASS-keyed) table.
+        engine_cache_files = set(tmp_path.rglob("autotune_configs*.json"))
+
     with WeightCacheDaemon(
         case.model,
         tp_size=1,
         extra_args=case.daemon_args,
     ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
-        d.check_health()
+        d.wait_until_ready()
+        if case.check_flashinfer_cache:
+            # Each daemon tunes before its ready report; exactly one new file
+            # (their OPENAI_API_SERVER-keyed table) must appear.
+            tuner_files = set(tmp_path.rglob("autotune_configs*.json"))
+            tuner_files -= engine_cache_files
+            assert len(tuner_files) == 1, (
+                f"expected the tuner's tuned table, got {tuner_files}"
+            )
         # Warm restart: a second engine lifetime against the same daemon.
+        if case.check_flashinfer_cache:
+            capfd.readouterr()  # drain: the assertion reads the increment
         restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        if case.check_flashinfer_cache:
+            # The restart's EngineCore subprocess inherits pytest's fds; the
+            # flashinfer autotuner logs "[Autotuner]: Loaded N configs from
+            # <path>" (INFO, not once-deduplicated) on a disk cache hit.
+            out = capfd.readouterr()
+            m = re.search(
+                r"\[Autotuner\]: Loaded (\d+) configs from", out.out + out.err
+            )
+            assert m and int(m.group(1)) > 0, (
+                "restart engine did not load the on-disk autotune cache"
+            )
 
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs
@@ -372,52 +440,143 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     assert loader.get_external_weight_memory(None) == 0
 
 
-def _boot_warmup_engine(monkeypatch, **preload_engine_args):
-    """Run the --preload-autotune engine entrypoint without booting an engine.
+def test_daemon_builds_model_under_its_config(monkeypatch):
+    """The daemon holds exactly one config -- the launcher hands it the
+    serving-equivalent tuning config when warmup is on -- and builds the
+    model under it: AOT compile ranges and the static layer registries are
+    fixed at construction from the then-current config."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
 
-    Returns:
-        The EngineArgs it would boot with and the from_engine_args kwargs.
+    import vllm.model_executor.model_loader.weight_cache.daemon as daemon_mod
 
-    """
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.entrypoints.cli.preload import _run_warmup_engine
-    from vllm.v1.engine.llm_engine import LLMEngine
+    def fake_replace(cfg, **overrides):
+        return SimpleNamespace(**{**vars(cfg), **overrides})
 
-    booted: dict[str, Any] = {}
+    monkeypatch.setattr(daemon_mod, "replace", fake_replace)
+    monkeypatch.setattr(
+        daemon_mod.WeightCacheKey, "from_model_config", lambda *a, **k: None
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1
+        ),
+        model_config=SimpleNamespace(),
+    )
+    daemon = daemon_mod.WeightCacheDaemon(config, 0, 0, "tcp://localhost:1")
 
-    def from_engine_args(cls, engine_args, **kwargs):
-        booted.update(engine_args=engine_args, **kwargs)
+    built_under = []
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake_set_current(config, **kwargs):
+        built_under.append(config)
+        yield
+
+    monkeypatch.setattr(daemon_mod, "set_current_vllm_config", fake_set_current)
+    monkeypatch.setattr("torch.accelerator.set_device_index", lambda i: None)
+    monkeypatch.setattr("torch.accelerator.empty_cache", lambda: None)
+    monkeypatch.setattr("torch.accelerator.memory_allocated", lambda: 0)
+    monkeypatch.setattr("torch.accelerator.memory_reserved", lambda: 0)
+    monkeypatch.setattr(daemon_mod, "init_distributed_environment", lambda **k: None)
+    monkeypatch.setattr(
+        daemon_mod, "ensure_model_parallel_initialized", lambda *a: None
+    )
+    monkeypatch.setattr(daemon_mod.WeightCacheDaemon, "get_model", lambda self: Mock())
+    daemon.load_model()
+    assert built_under == [daemon.vllm_config]
+
+
+def test_draft_daemon_builds_the_draft_from_the_target_config(monkeypatch):
+    """A draft daemon builds the draft with the target's VllmConfig, like the
+    engine does; only the ModelConfig differs. (The runner-side strip for
+    tuning is covered in test_flashinfer_autotune_warmup.py.)"""
+    from types import SimpleNamespace
+
+    import vllm.model_executor.model_loader.weight_cache.daemon as daemon_mod
+
+    def fake_replace(cfg, **overrides):
+        return SimpleNamespace(**{**vars(cfg), **overrides})
+
+    monkeypatch.setattr(daemon_mod, "replace", fake_replace)
+    monkeypatch.setattr(
+        daemon_mod.WeightCacheKey, "from_model_config", lambda *a, **k: None
+    )
+    draft_model_config = SimpleNamespace(name="draft")
+    spec = SimpleNamespace(draft_model_config=draft_model_config)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1
+        ),
+        model_config=SimpleNamespace(name="target"),
+        speculative_config=spec,
+    )
+    daemon = daemon_mod.WeightCacheDaemon(
+        config, 0, 0, "tcp://localhost:1", is_draft=True
+    )
+
+    assert daemon.model_config is draft_model_config
+    assert daemon.vllm_config.speculative_config is spec
+
+
+def test_run_daemon_warms_up_between_load_and_serve(monkeypatch):
+    """The tuned configs must be on disk before the socket is bound: an
+    engine starting right at readiness already finds them. warmup() is always
+    called; its gate lives inside the method."""
+    from unittest.mock import Mock
+
+    import vllm.model_executor.model_loader.weight_cache.daemon as daemon_mod
+
+    calls = []
+
+    class FakeDaemon:
+        role = "target"
+        global_rank = 0
+
+        def __init__(self, *args):
+            pass
+
+        def load_model(self):
+            calls.append("load_model")
+
+        def warmup(self):
+            calls.append("warmup")
+
+        def serve_forever(self, ready_callback=None):
+            calls.append("serve")
+            ready_callback()
+
+    monkeypatch.setattr(daemon_mod, "WeightCacheDaemon", FakeDaemon)
+    ready_queue = Mock()
+    daemon_mod._run_daemon(0, 0, object(), "tcp://localhost:1", None, ready_queue)
+
+    assert calls == ["load_model", "warmup", "serve"]
+    ready_queue.put.assert_called_once_with(("target", 0))
+
+
+def test_warmup_is_a_noop_when_flashinfer_autotune_is_off(monkeypatch):
+    """warmup() is always on the lifecycle path; with
+    --no-enable-flashinfer-autotune it must not build a runner."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.model_executor.model_loader.weight_cache.daemon as daemon_mod
+
+    daemon = daemon_mod.WeightCacheDaemon.__new__(daemon_mod.WeightCacheDaemon)
+    daemon.vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(enable_flashinfer_autotune=False)
+    )
+    daemon.role = "target"
+    daemon.global_rank = 0
+    daemon.local_rank = 0
+    daemon.is_draft = False
+    daemon.model = Mock()
+    daemon.model_config = None
 
     monkeypatch.setattr(
-        EngineArgs,
-        "from_cli_args",
-        classmethod(lambda cls, args: EngineArgs(model="m", **preload_engine_args)),
+        daemon_mod,
+        "build_tuning_runner",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("runner built")),
     )
-    monkeypatch.setattr(LLMEngine, "from_engine_args", classmethod(from_engine_args))
-    _run_warmup_engine(argparse.Namespace(), socket_dir="/run/vllm")
-    return booted.pop("engine_args"), booted
-
-
-def test_preload_warmup_engine_resolves_defaults_like_vllm_serve(monkeypatch):
-    """The on-disk autotune cache is keyed by the config hash, which covers
-    the batch defaults that depend on the usage context; booted under a
-    different context than `vllm serve`, the warmup engine's cache would
-    never be hit."""
-    from vllm.usage.usage_lib import UsageContext
-
-    _, kwargs = _boot_warmup_engine(monkeypatch)
-    assert kwargs["usage_context"] == UsageContext.OPENAI_API_SERVER
-
-
-def test_preload_warmup_engine_drops_the_daemon_loader_config(monkeypatch):
-    """Preload's loader config is for the daemons' disk loader; handed to the
-    warmup engine's IPC loader, its unknown keys would fail the warmup."""
-    engine_args, _ = _boot_warmup_engine(
-        monkeypatch, model_loader_extra_config={"enable_multithread_load": True}
-    )
-    assert engine_args.load_format == "ipc_cache"
-    assert engine_args.model_loader_extra_config == {
-        "socket_dir": "/run/vllm",
-        "mode": "zero_copy",
-        "fallback": False,
-    }
+    daemon.warmup()  # no runner built, no raise
