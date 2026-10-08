@@ -225,10 +225,6 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         # when the attention prefix is already present locally.
         return self.mode == MoRIIOMode.READ and self._transfers_mamba_state
 
-    @property
-    def requires_full_step_completion(self) -> bool:
-        return self.mode == MoRIIOMode.READ
-
     def __init__(
         self,
         vllm_config: VllmConfig,

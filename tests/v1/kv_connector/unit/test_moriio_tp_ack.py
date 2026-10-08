@@ -48,14 +48,6 @@ def test_read_matches_only_requests_with_pending_remote_prefill(params, expected
     assert scheduler.get_num_new_matched_tokens(request, 0) == expected
 
 
-@pytest.mark.parametrize("mode", [MoRIIOMode.READ, MoRIIOMode.WRITE])
-def test_read_requires_completion_of_draft_kv_writes(mode):
-    connector = MoRIIOConnector.__new__(MoRIIOConnector)
-    connector.mode = mode
-
-    assert connector.requires_full_step_completion is (mode == MoRIIOMode.READ)
-
-
 def _unaligned_cpu_backing():
     raw = bytearray(12288)
     original = torch.frombuffer(raw, dtype=torch.uint8)

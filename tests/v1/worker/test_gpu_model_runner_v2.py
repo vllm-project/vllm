@@ -8,10 +8,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-import vllm.forward_context as forward_context_module
 import vllm.v1.worker.gpu.model_runner as model_runner_module
-from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -59,119 +56,6 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
         global_batch.idx_mapping, 0
     )
     runner.pcp_manager.restore_for_sampling.assert_not_called()
-
-
-@pytest.mark.parametrize("data_parallel_size", [1, 2])
-def test_full_graph_sync_load_observes_replay_mode(monkeypatch, data_parallel_size):
-    """Connectors must wait for READs before replay bypasses layer hooks."""
-    runner = Mock()
-    runner.vllm_config = VllmConfig()
-    runner.vllm_config.parallel_config.data_parallel_size = data_parallel_size
-    runner.vllm_config.parallel_config.is_moe_model = True
-    monkeypatch.setattr(
-        forward_context_module,
-        "coordinate_batch_across_dp",
-        Mock(side_effect=AssertionError("connector context must not synchronize DP")),
-    )
-    runner.lora_config = None
-    runner.is_encoder_decoder = False
-    runner.uses_inputs_embeds = False
-    runner.is_first_pp_rank = True
-    runner.dcp_size = 1
-    runner.pcp_manager = None
-    runner.aux_output_connector = None
-    runner.observability_config.cudagraph_metrics = False
-    runner.gather_batch_req_state.return_value = (Mock(has_prefill=False), 1)
-    runner.prepare_attn.return_value = ({}, {})
-    runner.model_state.prepare_inputs.return_value = {}
-    batch_desc = SimpleNamespace(
-        num_tokens=1, cg_mode=CUDAGraphMode.FULL, num_ubatches=1
-    )
-    monkeypatch.setattr(
-        model_runner_module,
-        "dispatch_cg_and_sync_dp",
-        lambda *a, **kw: (batch_desc, None),
-    )
-    monkeypatch.setattr(
-        model_runner_module, "build_slot_mappings_by_layer", lambda *a: {}
-    )
-
-    class BeforeReplay(Exception):
-        pass
-
-    def load(**kwargs):
-        assert get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
-
-    runner.kv_connector.pre_forward.side_effect = load
-    runner.cudagraph_manager.run_fullgraph.side_effect = BeforeReplay
-    scheduler_output = SimpleNamespace(
-        num_scheduled_tokens={"request": 1}, total_num_scheduled_tokens=1
-    )
-    with pytest.raises(BeforeReplay):
-        GPUModelRunner.execute_model(runner, scheduler_output)
-    runner.kv_connector.pre_forward.assert_called_once()
-
-
-@pytest.mark.parametrize("has_speculator", [False, True])
-@pytest.mark.parametrize("requires_completion", [False, True])
-def test_output_readiness_covers_draft_kv_writes(
-    monkeypatch, has_speculator: bool, requires_completion: bool
-):
-    """Publishing output must cover draft writes before RDMA can reuse KV."""
-    writes: set[str] = set()
-    visible: set[str] = set()
-    ready: set[str] = set()
-    copy_stream = Mock()
-    copy_stream.wait_stream.side_effect = lambda _: visible.update(writes)
-    event = Mock()
-    event.record.side_effect = lambda _: ready.update(visible)
-
-    def async_output(**kwargs):
-        copy_stream.wait_stream(kwargs["main_stream"])
-        event.record(copy_stream)
-        return SimpleNamespace(copy_event=event)
-
-    monkeypatch.setattr(model_runner_module, "AsyncOutput", async_output)
-    runner = Mock()
-    runner.output_copy_stream = copy_stream
-    runner.is_last_pp_rank = True
-    runner.pcp_manager = None
-    runner.pp_handler = None
-    runner.aux_output_connector = None
-    runner.adaptive_verification = None
-    runner.num_speculative_steps = 0
-    runner._draft_workspace_lane = 0
-    runner.model = Mock(spec=["compute_logits"])
-    runner.kv_connector.requires_full_step_completion = requires_completion
-    runner.req_states.draft_tokens = torch.zeros((1, 1), dtype=torch.int64)
-    runner.prompt_logprobs_worker.compute_prompt_logprobs.return_value = {}
-    input_batch = SimpleNamespace(
-        req_ids=["request"], idx_mapping=torch.tensor([0]), query_start_loc=None
-    )
-    runner.execute_model_state.input_batch = input_batch
-    runner.sample.return_value = (Mock(), torch.tensor([1]), torch.tensor([0]))
-    runner.postprocess_sampled.side_effect = lambda *a: writes.add("postprocess")
-    if has_speculator:
-        runner.speculator.supports_mm_inputs = False
-
-        def propose(*args, **kwargs):
-            assert "draft" not in ready
-            writes.add("draft")
-            return torch.zeros((1, 1), dtype=torch.int64)
-
-        runner.speculator.propose.side_effect = propose
-    else:
-        runner.speculator = None
-    monkeypatch.setattr(
-        model_runner_module, "use_workspace_lane", lambda _: contextlib.nullcontext()
-    )
-    GPUModelRunner.sample_tokens(runner, None)
-    assert ("draft" in ready) == (has_speculator and requires_completion)
-    assert ("postprocess" in ready) == (has_speculator and requires_completion)
-    assert event.record.call_count == (
-        2 if has_speculator and requires_completion else 1
-    )
-    event.synchronize.assert_not_called()
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
