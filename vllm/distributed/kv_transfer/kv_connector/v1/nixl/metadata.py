@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.hidden_state_record import get_record_producer_pp_size
 
 logger = init_logger(__name__)
 
@@ -200,10 +201,12 @@ def compute_nixl_compatibility_hash(
         # push (WRITE) and pull (READ) connectors are protocol-incompatible
         "transfer_mode": transfer_mode,
         # The hidden-state record rides in the KV blocks past the prompt, and
-        # it changes where both sides stop the prefill.
+        # it changes where both sides stop the prefill. Its layers depend on
+        # the prefiller's pipeline-parallel size, which both sides must agree on.
         "hidden_state_handoff": (
             vllm_config.kv_transfer_config is not None
             and vllm_config.kv_transfer_config.hidden_state_handoff
+            and get_record_producer_pp_size(vllm_config)
         ),
     }
 

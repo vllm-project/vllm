@@ -1507,10 +1507,11 @@ class KVCacheConfig:
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
     hidden_state_record_layers: tuple[tuple[str, int], ...] = ()
-    """P/D hidden-state handoff: the layers of the cache group carrying the
-    record, each with the bytes one KV head of one token slot holds (see
-    vllm.v1.core.hidden_state_record). Resolved from the per-layer specs, which
-    the scheduler's config does not keep. Empty when the handoff is off."""
+    """P/D hidden-state handoff: the layers holding the record (the carrier
+    group's, on the prefiller's last pipeline stage), each with the bytes one
+    KV head of one token slot holds (see vllm.v1.core.hidden_state_record).
+    Resolved from every worker's per-layer specs, which the scheduler's config
+    does not keep. Empty when the handoff is off."""
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:

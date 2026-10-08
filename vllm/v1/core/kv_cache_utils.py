@@ -2943,12 +2943,11 @@ def get_kv_cache_configs(
 
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is not None and kv_transfer_config.hidden_state_handoff:
-        from vllm.v1.core.hidden_state_record import get_record_layers
+        from vllm.v1.core.hidden_state_record import resolve_record_layers
 
+        record_layers = resolve_record_layers(vllm_config, kv_cache_configs)
         for kv_cache_config in kv_cache_configs:
-            kv_cache_config.hidden_state_record_layers = get_record_layers(
-                kv_cache_config
-            )
+            kv_cache_config.hidden_state_record_layers = record_layers
 
     return kv_cache_configs
 

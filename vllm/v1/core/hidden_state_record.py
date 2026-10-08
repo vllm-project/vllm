@@ -136,26 +136,80 @@ def get_record_carrier_group(kv_cache_config: KVCacheConfig) -> int:
     )
 
 
-def get_record_layers(kv_cache_config: KVCacheConfig) -> tuple[tuple[str, int], ...]:
-    """The carrier group's layers, each with the bytes one KV head of one token
-    slot holds. Resolved into the config from the per-layer specs when the
-    engine builds it (the scheduler's copy keeps one spec per group)."""
-    if kv_cache_config.hidden_state_record_layers:
-        return kv_cache_config.hidden_state_record_layers
+def _group_record_layers(kv_cache_config: KVCacheConfig) -> dict[str, int]:
+    """The carrier group's layers in ``kv_cache_config`` with the bytes one KV
+    head of one token slot holds."""
     group = kv_cache_config.kv_cache_groups[get_record_carrier_group(kv_cache_config)]
     spec = group.kv_cache_spec
-
-    return tuple(
-        (
-            name,
-            (
-                spec.kv_cache_specs[name]
-                if isinstance(spec, UniformTypeKVCacheSpecs)
-                else spec
-            ).state_content_size_bytes,
-        )
+    return {
+        name: (
+            spec.kv_cache_specs[name]
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else spec
+        ).state_content_size_bytes
         for name in group.layer_names
+    }
+
+
+def _layer_index(layer_name: str) -> int | None:
+    """A layer's index in the model, or None if its name has no single one."""
+    indices = [int(part) for part in layer_name.split(".") if part.isdigit()]
+    return indices[0] if len(indices) == 1 else None
+
+
+def get_record_producer_pp_size(vllm_config: VllmConfig) -> int:
+    """The prefiller's pipeline-parallel size: this instance's own on P; on D,
+    ``kv_connector_extra_config["hidden_state_handoff_producer_pp_size"]``
+    (default 1). The prefiller keeps the records on its last stage, which has
+    the hidden states."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
+    if kv_transfer_config.is_kv_producer:
+        return vllm_config.parallel_config.pipeline_parallel_size
+    return int(
+        kv_transfer_config.get_from_extra_config(
+            "hidden_state_handoff_producer_pp_size", 1
+        )
     )
+
+
+def resolve_record_layers(
+    vllm_config: VllmConfig, kv_cache_configs: list[KVCacheConfig]
+) -> tuple[tuple[str, int], ...]:
+    """The layers holding the record, resolved from the per-layer specs of every
+    worker (pipeline stage): the carrier group's layers on the prefiller's last
+    stage (all of them without PP), in model order, each with the bytes one KV
+    head of one token slot holds."""
+    layers: dict[str, int] = {}
+    for kv_cache_config in kv_cache_configs:
+        layers.update(_group_record_layers(kv_cache_config))
+    pp_size = get_record_producer_pp_size(vllm_config)
+    if pp_size > 1:
+        from vllm.distributed.utils import get_pp_indices
+
+        num_layers = vllm_config.model_config.get_total_num_hidden_layers()
+        start, end = get_pp_indices(num_layers, pp_size - 1, pp_size)
+        layers = {
+            name: size
+            for name, size in layers.items()
+            if (index := _layer_index(name)) is not None and start <= index < end
+        }
+        if not layers:
+            raise NotImplementedError(
+                "P/D hidden-state handoff needs a carrier-group layer on the "
+                "prefiller's last pipeline stage."
+            )
+    return tuple(sorted(layers.items(), key=lambda item: _layer_index(item[0]) or 0))
+
+
+def get_record_layers(kv_cache_config: KVCacheConfig) -> tuple[tuple[str, int], ...]:
+    """The layers holding the record, each with the bytes one KV head of one
+    token slot holds (see ``resolve_record_layers``, which the engine resolves
+    into the config; the scheduler's copy keeps one spec per group)."""
+    if kv_cache_config.hidden_state_record_layers:
+        return kv_cache_config.hidden_state_record_layers
+    # A config not built by the engine (e.g. in tests): no PP.
+    return tuple(_group_record_layers(kv_cache_config).items())
 
 
 def get_record_tail_tokens(
