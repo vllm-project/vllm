@@ -1312,6 +1312,7 @@ def test_lookahead_block_hashes_supports_all_eagle_methods(method: str):
         SimpleNamespace(
             cache_config=SimpleNamespace(enable_prefix_caching=True),
             speculative_config=speculative_config,
+            num_prefill_lookahead_tokens=1,
             kv_transfer_config=None,
             kv_events_config=None,
         ),
@@ -1325,6 +1326,7 @@ def test_lookahead_block_hashes_supports_all_eagle_methods(method: str):
     [
         {"enable_prefix_caching": False},
         {"method": "ngram"},
+        {"num_prefill_lookahead_tokens": 2},
     ],
 )
 def test_lookahead_block_hashes_preserves_unsupported_fallbacks(
@@ -1343,6 +1345,9 @@ def test_lookahead_block_hashes_preserves_unsupported_fallbacks(
                 enable_prefix_caching=config_override.get("enable_prefix_caching", True)
             ),
             speculative_config=speculative_config,
+            num_prefill_lookahead_tokens=config_override.get(
+                "num_prefill_lookahead_tokens", 1
+            ),
             kv_transfer_config=config_override.get("kv_transfer_config"),
             kv_events_config=SimpleNamespace(
                 enable_kv_cache_events=config_override.get(
@@ -1374,6 +1379,7 @@ def test_lookahead_block_hashes_supports_cache_integrations(
                 enable_prefix_caching=config_override.get("enable_prefix_caching", True)
             ),
             speculative_config=speculative_config,
+            num_prefill_lookahead_tokens=1,
             kv_transfer_config=config_override.get("kv_transfer_config"),
             kv_events_config=SimpleNamespace(
                 enable_kv_cache_events=config_override.get(
@@ -1399,6 +1405,7 @@ def test_lookahead_block_hashes_requires_connector_support():
         SimpleNamespace(
             cache_config=SimpleNamespace(enable_prefix_caching=True),
             speculative_config=speculative_config,
+            num_prefill_lookahead_tokens=1,
             kv_transfer_config=object(),
         ),
     )
