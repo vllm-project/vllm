@@ -1465,9 +1465,6 @@ class DiffusionSampler:
         # since it mutates is_encoder_phase (commit→False, converge→True).
         is_committing = states.is_encoder_phase[decode_slots].clone()
 
-        # Read-only slots on their capped last step: the soft embed computed
-        # now would feed a step that never runs. Single-step reads are the
-        # cap-1 case of the same rule.
         sc_skip = set(states.single_step_slots)
         if states.read_only_slots:
             for s in decode_slots_np.tolist():
