@@ -549,8 +549,6 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=tpu.py
-      - files~=_tpu
-      - files~=tpu_
       - files~=/tpu/
   actions:
     label:
@@ -564,8 +562,6 @@ pull_request_rules:
     - label != stale
     - and:
       - -files~=tpu.py
-      - -files~=_tpu
-      - -files~=tpu_
       - -files~=/tpu/
   actions:
     label:
