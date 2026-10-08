@@ -49,7 +49,7 @@ def _model_runner(runner: VllmRunner):
 def _assert_fault_tolerance_config(runner: VllmRunner) -> None:
     config = runner.llm.llm_engine.vllm_config
     assert config.use_v2_model_runner
-    assert config.fault_tolerance_config.enable_nan_fault_tolerance
+    assert config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance
     assert config.observability_config.enable_detect_nans_in_logits
     assert _model_runner(runner).kv_cache_config.needs_kv_cache_zeroing
 
