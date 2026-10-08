@@ -806,12 +806,28 @@ def test_truncate_mamba_request_noop_for_single_token_prompt():
 # --------------------------------------------------------------------------
 # get_num_new_matched_tokens  (hybrid N-1 accounting)
 # --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "params,expected",
+    [
+        (None, (0, False)),
+        ({}, (0, False)),
+        ({"do_remote_prefill": False}, (0, False)),
+        ({"do_remote_prefill": True}, (31, False)),
+    ],
+)
+def test_read_matches_only_requests_with_pending_remote_prefill(params, expected):
+    scheduler = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ)
+    request = SimpleNamespace(num_prompt_tokens=32, kv_transfer_params=params)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+
+
 def test_get_num_new_matched_tokens_read_recomputes_last_token():
     sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ, _has_mamba=True)
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
     # READ always recomputes the final token locally: N-1 - computed.
@@ -848,7 +864,9 @@ def test_get_num_new_matched_tokens_supports_embeds_only_prompts(
         num_prompt_tokens=10,
         prompt_token_ids=None,
         prompt_embeds=object(),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True}
+        if mode == MoRIIOMode.READ
+        else None,
     )
 
     assert sched.get_num_new_matched_tokens(req, num_computed_tokens) == (

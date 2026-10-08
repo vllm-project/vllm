@@ -774,6 +774,10 @@ class MoRIIOConnectorScheduler:
             # no recurrent-state accounting to do.
             return num_external_tokens, True
 
+        params = request.kv_transfer_params
+        if not params or not params.get("do_remote_prefill"):
+            return 0, False
+
         # READ mode always recomputes the last token locally on the decoder.
         #
         # The second element declares who waits for the KV, not whether it has
