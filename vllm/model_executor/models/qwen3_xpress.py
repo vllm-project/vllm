@@ -59,9 +59,7 @@ class XPressRefinerHead(nn.Module):
         self._scratch: dict | None = None
         self._fused_buf: dict | None = None
 
-    def _scratch_buffers(
-        self, dtype: torch.dtype, device: torch.device, vocab: int
-    ) -> dict:
+    def _scratch_buffers(self, dtype: torch.dtype, device: torch.device) -> dict:
         """Buffers for the fused Jacobi passes, allocated once at max_num_reqs.
 
         Not allocated in the constructor: the dtype and device a head ends up
@@ -72,13 +70,13 @@ class XPressRefinerHead(nn.Module):
         if self._scratch is None:
             B = self.block_size
             rows = self.max_num_reqs * (B - 1)
-            nvb = (vocab + 4095) // 4096
+            nvb = (self.vocab_size + 4095) // 4096
             self._scratch = {
                 "lat": torch.empty(
                     self.max_num_reqs, B - 1, self.rank, dtype=dtype, device=device
                 ),
-                "bias": torch.empty(rows, vocab, dtype=dtype, device=device),
-                "base": torch.empty(rows, vocab, dtype=dtype, device=device),
+                "bias": torch.empty(rows, self.vocab_size, dtype=dtype, device=device),
+                "base": torch.empty(rows, self.vocab_size, dtype=dtype, device=device),
                 "ov": torch.empty(rows, nvb, dtype=torch.float32, device=device),
                 "oi": torch.empty(rows, nvb, dtype=torch.int64, device=device),
             }
@@ -147,7 +145,6 @@ class XPressRefinerHead(nn.Module):
             # full-vocabulary argmax. Gathered once per draft step, never rescored
             # between passes, which is what keeps the per-pass [r, V] read away.
             c = min(self.topc, v)
-            c = min(self.topc, v)
             slots = base_logits_full[:, 1:, :]
             # _topk routes to flashinfer's kernel when it is available, which is
             # about twice torch.topk's speed and is the largest fixed cost of this
@@ -184,7 +181,7 @@ class XPressRefinerHead(nn.Module):
                 )
             return blk[:, 1:]
 
-        sc = self._scratch_buffers(base_logits_full.dtype, base_logits_full.device, v)
+        sc = self._scratch_buffers(base_logits_full.dtype, base_logits_full.device)
         lat, bias = sc["lat"][:N], sc["bias"][:rows]
         base, ov, oi = sc["base"][:rows], sc["ov"][:rows], sc["oi"][:rows]
         base.copy_(base_logits_full[:, 1:, :].reshape(rows, v))
