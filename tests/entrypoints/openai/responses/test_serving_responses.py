@@ -34,6 +34,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
 
 import vllm.envs as envs
+from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -64,8 +65,9 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
+from vllm.logprobs import Logprob as SampleLogprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser.harmony import Segment
+from vllm.parser.harmony import ChunkResult, HarmonyParser, Segment
 from vllm.renderers import TokenizeParams
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
@@ -124,14 +126,6 @@ def test_serialize_message_pydantic_model_returns_dict() -> None:
     assert isinstance(serialized, dict)
     assert serialized["type"] == "raw_message_tokens"
     assert serialized["message"] == "hello"
-
-
-@pytest.fixture
-def mock_serving_responses():
-    """Create a mock OpenAIServingResponses instance."""
-    serving_responses = MagicMock(spec=OpenAIServingResponses)
-    serving_responses.tool_server = MagicMock(spec=ToolServer)
-    return serving_responses
 
 
 @pytest.fixture
@@ -299,6 +293,102 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
     assert preprocess_kwargs["default_template_content_format"] == "string"
     assert preprocess_kwargs["default_template_kwargs"]["server_default"] == "kept"
     assert preprocess_kwargs["default_template_kwargs"]["request_default"] == "kept"
+
+
+_REUSED_IDS = [10, 20, 30]
+_IMAGE_PART = {
+    "type": "input_image",
+    "image_url": "https://example.com/a.png",
+    "detail": "auto",
+}
+
+
+async def _render_responses_with_reuse(request, previous_messages=None):
+    online_renderer = OnlineRenderer(
+        model_config=MockModelConfig(),
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    render_chat = AsyncMock(return_value=([[]], [tokens_input([1, 2])]))
+    online_renderer.renderer.render_chat_async = render_chat
+
+    result = await online_renderer.render_responses(
+        request, previous_messages=previous_messages
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    return render_chat, result.engine_input
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [_REUSED_IDS, [1.5]])
+@pytest.mark.parametrize(
+    "request_input",
+    [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "look"}, _IMAGE_PART],
+            }
+        ],
+        [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shot",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [_IMAGE_PART],
+            },
+        ],
+    ],
+    ids=["input_image", "tool_output_image"],
+)
+async def test_responses_kv_transfer_prompt_token_ids_ignored_with_non_text_input(
+    request_input, ids
+):
+    request = ResponsesRequest(
+        input=request_input,
+        kv_transfer_params={"do_remote_prefill": True, "prompt_token_ids": ids},
+    )
+
+    render_chat, _ = await _render_responses_with_reuse(request)
+
+    render_chat.assert_awaited_once()
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+async def test_responses_kv_transfer_prompt_token_ids_ignored_with_media_in_history():
+    request = ResponsesRequest(
+        input="next", kv_transfer_params={"prompt_token_ids": _REUSED_IDS}
+    )
+
+    render_chat, _ = await _render_responses_with_reuse(
+        request, previous_messages=[{"role": "user", "content": [_IMAGE_PART]}]
+    )
+
+    render_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_kv_transfer_prompt_token_ids_kept_with_text_input():
+    request = ResponsesRequest(
+        input=[
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"role": "assistant", "content": "ok"},
+        ],
+        kv_transfer_params={"prompt_token_ids": _REUSED_IDS},
+    )
+
+    _, engine_input = await _render_responses_with_reuse(request)
+
+    assert engine_input["prompt_token_ids"] == _REUSED_IDS
 
 
 @pytest.mark.asyncio
@@ -748,6 +838,7 @@ class TestInitializeToolSessions:
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
                 self._messages = []
+                self.request = None
                 self._needs_tool_call = True
 
             def append_output(self, output) -> None:
@@ -803,6 +894,53 @@ class TestInitializeToolSessions:
         )
         assert followup_engine_input.get("cache_salt") == "request-salt"
         assert followup_engine_input["prompt_token_ids"] == [3, 4]
+
+    @pytest.mark.asyncio
+    async def test_harmony_tool_followup_respects_max_output_tokens(
+        self, serving_responses_instance
+    ):
+        class ToolCallingHarmonyContext(HarmonyContext):
+            def __init__(self, request):
+                self._messages = []
+                self.request = request
+                self._needs_tool_call = True
+
+            def append_output(self, output) -> None:
+                pass
+
+            def need_builtin_tool_call(self) -> bool:
+                return self._needs_tool_call
+
+            async def call_tool(self):
+                self._needs_tool_call = False
+                return []
+
+            def append_tool_output(self, output) -> None:
+                pass
+
+        max_tokens_per_turn = []
+
+        async def generate_output(engine_input, sampling_params, *args, **kwargs):
+            max_tokens_per_turn.append(sampling_params.max_tokens)
+            yield MagicMock()
+
+        serving_responses_instance.engine_client.generate.side_effect = generate_output
+        serving_responses_instance.online_renderer.render_responses_harmony_messages = (
+            MagicMock(return_value=tokens_input([1, 2, 3]))
+        )
+        context = ToolCallingHarmonyContext(
+            ResponsesRequest(input="test", max_output_tokens=10)
+        )
+
+        async for _ in serving_responses_instance._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=SamplingParams(max_tokens=10),
+            context=context,
+        ):
+            pass
+
+        assert max_tokens_per_turn == [10, 10]
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
@@ -912,24 +1050,19 @@ class TestValidateGeneratorInput:
         assert isinstance(result, ErrorResponse)
 
 
-@pytest.mark.asyncio
-async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
-    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+class _Qwen3FakeTokenizer:
+    def __init__(self):
+        self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
 
-    class FakeTokenizer:
-        def __init__(self):
-            self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
+    def get_vocab(self):
+        return self._vocab
 
-        def get_vocab(self):
-            return self._vocab
+    def decode(self, token_ids):
+        id_to_token = {v: k for k, v in self._vocab.items()}
+        return "".join(id_to_token.get(token_id, "x") for token_id in token_ids)
 
-        def decode(self, token_ids):
-            id_to_token = {v: k for k, v in self._vocab.items()}
-            return "".join(id_to_token.get(token_id, "x") for token_id in token_ids)
 
-    # Force non-harmony, SimpleContext path
-    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
-
+def _make_qwen3_serving() -> tuple[OpenAIServingResponses, _Qwen3FakeTokenizer]:
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.hf_config.model_type = "test"
@@ -939,21 +1072,66 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     engine_client.input_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
-    tokenizer = FakeTokenizer()
+    tokenizer = _Qwen3FakeTokenizer()
     engine_client.renderer.get_tokenizer.return_value = tokenizer
-
-    models = MagicMock()
 
     serving = OpenAIServingResponses(
         engine_client=engine_client,
-        models=models,
+        models=MagicMock(),
         online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser="qwen3",
     )
+    return serving, tokenizer
 
+
+def _make_text_request_output(text: str, token_ids: list[int]) -> RequestOutput:
+    return RequestOutput(
+        request_id="req",
+        prompt="hi",
+        prompt_token_ids=[7, 8],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=token_ids,
+                cumulative_logprob=0.0,
+                logprobs=None,
+                finish_reason="stop",
+                stop_reason=None,
+            )
+        ],
+        finished=True,
+        num_cached_tokens=0,
+        num_cache_creation_tokens=3,
+    )
+
+
+async def _run_full_generator(serving, request, context, tokenizer):
+    async def dummy_result_generator():
+        yield None
+
+    return await serving.responses_full_generator(
+        request=request,
+        sampling_params=SamplingParams(max_tokens=16),
+        result_generator=dummy_result_generator(),
+        context=context,
+        model_name="test-model",
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(request_id="req"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
+    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+    # Force non-harmony, SimpleContext path
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+    serving, tokenizer = _make_qwen3_serving()
     request = ResponsesRequest(input="hi", tools=[], stream=False)
     response_parser = serving._make_response_parser(
         request,
@@ -963,43 +1141,12 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
 
     # Build a SimpleContext with thinking tokens in the output.
     context = SimpleContext(response_parser=response_parser)
-    token_ids = [1, 10, 2, 20]  # <think> 10 </think> 20 -> reasoning token count = 1
-    completion = CompletionOutput(
-        index=0,
-        text="<think>reason</think>final",
-        token_ids=token_ids,
-        cumulative_logprob=0.0,
-        logprobs=None,
-        finish_reason="stop",
-        stop_reason=None,
+    # <think> 10 </think> 20 -> reasoning token count = 1
+    context.append_output(
+        _make_text_request_output("<think>reason</think>final", [1, 10, 2, 20])
     )
-    req_output = RequestOutput(
-        request_id="req",
-        prompt="hi",
-        prompt_token_ids=[7, 8],
-        prompt_logprobs=None,
-        outputs=[completion],
-        finished=True,
-        num_cached_tokens=0,
-        num_cache_creation_tokens=3,
-    )
-    context.append_output(req_output)
 
-    async def dummy_result_generator():
-        yield None
-
-    sampling_params = SamplingParams(max_tokens=16)
-    metadata = RequestResponseMetadata(request_id="req")
-
-    response = await serving.responses_full_generator(
-        request=request,
-        sampling_params=sampling_params,
-        result_generator=dummy_result_generator(),
-        context=context,
-        model_name="test-model",
-        tokenizer=tokenizer,
-        request_metadata=metadata,
-    )
+    response = await _run_full_generator(serving, request, context, tokenizer)
 
     assert response.usage.output_tokens_details.reasoning_tokens == 1
     assert response.usage.input_tokens_details.cache_write_tokens == 3
@@ -1302,6 +1449,7 @@ def _make_simple_context_with_output(
 def _make_serving_instance(
     *,
     reasoning_parser: str = "",
+    tool_parser: str | None = None,
     enable_per_request_metrics: bool = False,
 ) -> OpenAIServingResponses:
     engine_client = MagicMock()
@@ -1322,6 +1470,8 @@ def _make_serving_instance(
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser=reasoning_parser,
+        enable_auto_tools=tool_parser is not None,
+        tool_parser=tool_parser,
         enable_per_request_metrics=enable_per_request_metrics,
     )
 
@@ -1920,3 +2070,194 @@ class TestAutoToolStreaming:
         assert len(function_done) == 1
         assert function_done[0].item.name == "get_weather"
         assert function_done[0].item.arguments == tool_args
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
+    """response.completed must carry the streamed items (same ids,
+    call_id, logprobs) rather than a reparse of the full output."""
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+    serving = _make_serving_instance_with_reasoning()
+    call = DeltaToolCall(
+        id="chatcmpl-tool-parser-id",
+        index=0,
+        function=DeltaFunctionCall(name="get_weather", arguments="{}"),
+    )
+    response_parser = _mock_parser_with_reasoning(
+        serving,
+        [
+            DeltaMessage(reasoning="think"),
+            DeltaMessage(content="Hi"),
+            DeltaMessage(tool_calls=[call]),
+        ],
+    )
+    response_parser.count_reasoning_tokens = MagicMock(return_value=1)
+    context = SimpleContext(response_parser=response_parser)
+
+    async def result_generator():
+        for token_id, text in [(10, "think"), (20, "Hi"), (30, "call")]:
+            output = _make_request_output(text, [token_id])
+            output.outputs[0].logprobs = [
+                {token_id: SampleLogprob(logprob=-0.5, decoded_token=text)}
+            ]
+            context.append_output(output)
+            yield context
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=ResponsesRequest(
+                input="hi",
+                include=["message.output_text.logprobs"],
+                stream=True,
+                store=False,
+            ),
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
+    assert events[-1].response.output == streamed
+    _, message, function_call = streamed
+    assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
+    assert function_call.call_id == "chatcmpl-tool-parser-id"
+
+
+def _harmony_msg(channel: str, text: str, recipient: str | None = None):
+    msg = OpenAIHarmonyMessage.from_role_and_content(Role.ASSISTANT, text)
+    msg = msg.with_channel(channel)
+    return msg.with_recipient(recipient) if recipient else msg
+
+
+def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
+    """Segments the parser yields for one message: a content delta (absent
+    for a zero-delta message), then the completed message."""
+    delta = [Segment(msg.channel, msg.recipient, msg.content[0].text)]
+    completed = Segment(msg.channel, msg.recipient, "", completed_message=msg)
+    return (delta if streamed else []) + [completed]
+
+
+async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
+    serving = _make_serving_instance()
+    serving.use_harmony = True
+    parser = MagicMock(spec=HarmonyParser)
+    parser.process_chunk.side_effect = [
+        ChunkResult(segments=segments, reasoning_token_count=0)
+        for segments in segment_chunks
+    ]
+    context = HarmonyContext([], [], frozenset({"get_weather"}), parser)
+
+    async def result_generator():
+        for token_id in range(len(segment_chunks)):
+            context.append_output(_make_request_output("", [token_id]))
+            yield context
+
+    return [
+        event
+        async for event in serving.responses_stream_generator(
+            request=ResponsesRequest(input="hi", stream=True, store=False),
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_completed_response_reuses_streamed_ids():
+    """response.completed must carry the id and call_id each item was streamed
+    with, not ones minted when the harmony messages are converted again."""
+    messages = [
+        _harmony_msg("analysis", "think"),
+        _harmony_msg("commentary", '{"city": "Paris"}', "functions.get_weather"),
+        _harmony_msg("final", "Sunny"),
+    ]
+
+    events = await _harmony_stream_events([_harmony_segments(msg) for msg in messages])
+
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
+    output = events[-1].response.output
+    assert [item.type for item in output] == ["reasoning", "function_call", "message"]
+    assert [item.id for item in output] == [item.id for item in streamed]
+    assert output[1].call_id == streamed[1].call_id
+    assert output[2].content[0].text == "Sunny"
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_unstreamed_item_keeps_own_id():
+    """An item with no done event (zero-delta) must not take the streamed id
+    of a later item of the same type."""
+    unstreamed = _harmony_msg("analysis", "skipped")
+    reasoning = _harmony_msg("analysis", "think")
+
+    events = await _harmony_stream_events(
+        [_harmony_segments(unstreamed, streamed=False), _harmony_segments(reasoning)]
+    )
+
+    (streamed,) = [e.item for e in events if e.type == "response.output_item.done"]
+    first, second = events[-1].response.output
+    assert first.content[0].text == "skipped"
+    assert first.id != streamed.id
+    assert second.id == streamed.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("parallel_tool_calls", "num_calls"), [(False, 1), (None, 3)])
+async def test_streaming_parallel_tool_calls(
+    monkeypatch, parallel_tool_calls, num_calls
+):
+    """parallel_tool_calls=False keeps only the first call even when the grammar
+    does not limit the model; None keeps every call."""
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+    serving = _make_serving_instance(tool_parser="hermes")
+    request = ResponsesRequest(
+        input="hi",
+        tools=[{"type": "function", "name": "get_weather", "parameters": {}}],
+        parallel_tool_calls=parallel_tool_calls,
+        stream=True,
+    )
+    context = SimpleContext(
+        response_parser=serving._make_response_parser(request, MagicMock(), {})
+    )
+    args = [f'{{"city": "{city}"}}' for city in ("Paris", "Berlin", "Tokyo")]
+
+    async def result_generator():
+        for i, arg in enumerate(args):
+            text = f'<tool_call>\n{{"name": "get_weather", "arguments": {arg}}}'
+            context.append_output(_make_request_output(f"{text}\n</tool_call>\n", [i]))
+            yield context
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=64),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    assert [
+        event.output_index
+        for event in events
+        if event.type == "response.output_item.added"
+    ] == list(range(num_calls))
+    assert all(getattr(event, "output_index", 0) < num_calls for event in events)
+    assert [
+        event.item.arguments
+        for event in events
+        if event.type == "response.output_item.done"
+    ] == args[:num_calls]
+    assert [item.arguments for item in events[-1].response.output] == args[:num_calls]
