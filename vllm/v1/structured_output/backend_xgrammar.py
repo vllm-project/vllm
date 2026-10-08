@@ -318,9 +318,8 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             # propertyNames + maxLength is unsupported by xgrammar
             # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/960
             property_names = obj.get("propertyNames")
-            if (
-                isinstance(property_names, dict)
-                and _has_pattern_and_length_bounds(property_names)
+            if isinstance(property_names, dict) and _has_pattern_and_length_bounds(
+                property_names
             ):
                 return True
             # propertyNames + patternProperties is unsupported by xgrammar
@@ -340,9 +339,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # in xgrammar
         # See tests on this in test_backend_xgrammar.py
         # unsupported_patternProperties_combinations
-        if "object" in schema_types and isinstance(
-            obj.get("patternProperties"), dict
-        ):
+        if "object" in schema_types and isinstance(obj.get("patternProperties"), dict):
             # patternProperties + properties is unsupported by xgrammar
             # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/964
             if "properties" in obj:
