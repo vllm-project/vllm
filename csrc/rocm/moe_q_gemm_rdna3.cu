@@ -57,6 +57,26 @@ __forceinline__ __device__ bf16_t tzero<bf16_t>() {
   return __float2bfloat16(0.0f);
 }
 
+__forceinline__ __device__ float tf(half x) { return __half2float(x); }
+__forceinline__ __device__ float tf(bf16_t x) { return __bfloat162float(x); }
+template <typename T>
+__forceinline__ __device__ T ft(float x);
+template <>
+__forceinline__ __device__ half ft<half>(float x) {
+  return __float2half_rn(x);
+}
+template <>
+__forceinline__ __device__ bf16_t ft<bf16_t>(float x) {
+  return __float2bfloat16(x);
+}
+
+// SiLU(g) * u rounded like silu_and_mul: SiLU to T, then the product to T.
+template <typename T>
+__forceinline__ __device__ T silu_mul(T g, T u) {
+  const float gf = tf(g);
+  return ft<T>(tf(ft<T>(gf / (1.0f + __expf(-gf)))) * tf(u));
+}
+
 __forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
                                                    half2 v23) {
   unsigned long long* addr_u = reinterpret_cast<unsigned long long*>(addr);
@@ -139,7 +159,9 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     const int expert_zeros_stride,   // groups * (N/8)
     const bool mul_topk_weight,
     const int output_topk,    // >0: reduce output by token_id/output_topk
-    const int zero_offset) {  // 1 for GPTQ v1 zeros, 0 for v2
+    const int zero_offset,    // 1 for GPTQ v1 zeros, 0 for v2
+    const int a_stride,       // row stride of a
+    const bool a_silu_mul) {  // a is [gate | up]: load SiLU(gate) * up
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
   const int offset_n = blockIdx.y * BLOCK_KN_SIZE * 4;
@@ -182,7 +204,8 @@ __global__ void moe_gemm_q4_kernel_rdna3(
         int token_row = token_id / top_k;
         T av;
         if (token_row < size_m) {
-          av = a[(int64_t)token_row * size_k + offset_k + t];
+          const T* a_row = a + (int64_t)token_row * a_stride + offset_k + t;
+          av = a_silu_mul ? silu_mul(a_row[0], a_row[size_k]) : a_row[0];
         } else {
           av = tzero<T>();
         }
@@ -314,7 +337,7 @@ __global__ void moe_gemm_q4_kernel_rdna3(
           int token_row = token_id / top_k;
           if (token_row < size_m) {
             const uint32_t* a_words = reinterpret_cast<const uint32_t*>(
-                a + (int64_t)token_row * size_k + offset_k + a_off);
+                a + (int64_t)token_row * a_stride + offset_k + a_off);
             a_pack.u[0] = a_words[0];
             a_pack.u[1] = a_words[1];
             a_pack.u[2] = a_words[2];
@@ -477,7 +500,7 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     const T*, T*, const uint32_t*, const T*, const uint32_t*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const int, const int,
-    const bool, const int, const int) {}
+    const bool, const int, const int, const int, const bool) {}
 
 #endif  // __HIP__RDNA3__ || !__HIP_DEVICE_COMPILE__
 
@@ -493,7 +516,8 @@ void launch_moe_gemm_q4(
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
     int size_n, int size_k, int groups, int top_k, int expert_weight_stride,
     int expert_scales_stride, int expert_zeros_stride, bool mul_topk_weight,
-    int output_topk, int zero_offset, cudaStream_t stream) {
+    int output_topk, int zero_offset, int a_stride, bool a_silu_mul,
+    cudaStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid(num_token_blocks,
             (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
@@ -503,7 +527,7 @@ void launch_moe_gemm_q4(
       a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
       expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups, top_k,
       expert_weight_stride, expert_scales_stride, expert_zeros_stride,
-      mul_topk_weight, output_topk, zero_offset);
+      mul_topk_weight, output_topk, zero_offset, a_stride, a_silu_mul);
 }
 
 template <typename T>
@@ -514,8 +538,8 @@ void dispatch_moe_gemm_q4(
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
     int size_n, int size_k, int groups, int top_k, int block_size_m,
     int expert_weight_stride, int expert_scales_stride, int expert_zeros_stride,
-    bool mul_topk_weight, int output_topk, int zero_offset,
-    cudaStream_t stream) {
+    bool mul_topk_weight, int output_topk, int zero_offset, int a_stride,
+    bool a_silu_mul, cudaStream_t stream) {
   // Dispatch to template instantiation based on block_size_m
   switch (block_size_m) {
     case 1:
@@ -523,28 +547,32 @@ void dispatch_moe_gemm_q4(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset, stream);
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
+          a_stride, a_silu_mul, stream);
       break;
     case 2:
       launch_moe_gemm_q4<T, 2>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset, stream);
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
+          a_stride, a_silu_mul, stream);
       break;
     case 4:
       launch_moe_gemm_q4<T, 4>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset, stream);
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
+          a_stride, a_silu_mul, stream);
       break;
     case 8:
       launch_moe_gemm_q4<T, 8>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset, stream);
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
+          a_stride, a_silu_mul, stream);
       break;
     default:
       TORCH_CHECK(false,
@@ -603,7 +631,16 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   int size_m = (int)a.size(0);
-  int size_k = (int)a.size(1);
+  // a may be the [gate | up] output of the first GEMM, twice the weights' K:
+  // the kernel then applies SiLU-and-mul as it loads it.
+  int size_k = (int)b_q_weight.size(1) * 8;
+  const bool a_silu_mul = a.size(1) == 2 * size_k;
+  TORCH_CHECK(a.size(1) == size_k || a_silu_mul,
+              "a must have K or 2*K columns, K = ", size_k);
+  TORCH_CHECK(a.stride(1) == 1, "a must be contiguous in its last dim");
+  TORCH_CHECK(
+      !a_silu_mul || a.scalar_type() == torch::kHalf || block_size_m > 1,
+      "SiLU-and-mul on load needs fp16 or block_size_m > 1");
   int size_n = (int)b_q_weight.size(2);
   int groups = (int)b_scales.size(1);
   TORCH_CHECK(size_k % (groups * 32) == 0,
@@ -634,7 +671,8 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
         num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks, size_m,
         size_n, size_k, groups, (int)top_k, (int)block_size_m,
         expert_weight_stride, expert_scales_stride, expert_zeros_stride,
-        mul_topk_weight, (int)output_topk, use_v2_format ? 0 : 1, stream);
+        mul_topk_weight, (int)output_topk, use_v2_format ? 0 : 1,
+        (int)a.stride(0), a_silu_mul, stream);
   };
 
   if (a.scalar_type() == torch::kHalf) {
