@@ -13,6 +13,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
+from .op import make_tensor_descriptor
 from .utils import check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -52,23 +53,19 @@ def chunk_local_cumsum_scalar_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
     if HEAD_FIRST:
-        p_s = tl.make_block_ptr(
-            s + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,)
-        )
-        p_o = tl.make_block_ptr(
-            o + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,)
-        )
+        o_s = bos * H + i_h * T + o_t
     else:
-        p_s = tl.make_block_ptr(s + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        o_s = (bos + o_t) * H + i_h
     # [BT]
-    b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
+    b_s = tl.load(s + o_s, mask=m_t, other=0).to(tl.float32)
     b_o = tl.cumsum(b_s, axis=0)
     if REVERSE:
         b_z = tl.sum(b_s, axis=0)
         b_o = -b_o + b_z[None] + b_s
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+    tl.store(o + o_s, b_o.to(o.dtype.element_ty), mask=m_t)
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -118,43 +115,15 @@ def chunk_local_cumsum_vector_kernel(
         m_s = tl.where(o_i[:, None] >= o_i[None, :], 1.0, 0.0)
 
     if HEAD_FIRST:
-        p_s = tl.make_block_ptr(
-            s + (bos * H + i_h * T) * S,
-            (T, S),
-            (S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
-        p_o = tl.make_block_ptr(
-            o + (bos * H + i_h * T) * S,
-            (T, S),
-            (S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
+        desc_s = make_tensor_descriptor(s + (bos * H + i_h * T) * S, [T, S], [S, 1], [BT, BS])
+        desc_o = make_tensor_descriptor(o + (bos * H + i_h * T) * S, [T, S], [S, 1], [BT, BS])
     else:
-        p_s = tl.make_block_ptr(
-            s + (bos * H + i_h) * S,
-            (T, S),
-            (H * S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
-        p_o = tl.make_block_ptr(
-            o + (bos * H + i_h) * S,
-            (T, S),
-            (H * S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
+        desc_s = make_tensor_descriptor(s + (bos * H + i_h) * S, [T, S], [H * S, 1], [BT, BS])
+        desc_o = make_tensor_descriptor(o + (bos * H + i_h) * S, [T, S], [H * S, 1], [BT, BS])
     # [BT, BS]
-    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_s = desc_s.load([i_t * BT, i_s * BS]).to(tl.float32)
     b_o = tl.dot(m_s, b_s, allow_tf32=False)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    desc_o.store([i_t * BT, i_s * BS], b_o.to(desc_o.dtype))
 
 
 def chunk_local_cumsum_scalar(

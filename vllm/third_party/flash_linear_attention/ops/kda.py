@@ -21,7 +21,7 @@ from .cumsum import chunk_local_cumsum
 from .fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel
 from .index import prepare_chunk_indices
 from .l2norm import l2norm_fwd
-from .op import exp2, log
+from .op import exp2, log, make_tensor_descriptor
 from .solve_tril import solve_tril
 from .utils import FLA_CHUNK_SIZE, is_amd
 
@@ -183,22 +183,20 @@ def layer_norm_gated_fwd_kernel(
     o_d = tl.arange(0, BD)
     m_d = o_d < D
 
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+
+    desc_x = make_tensor_descriptor(x, [T, D], [D, 1], [BT, BD])
+    b_x = desc_x.load([i_t * BT, 0]).to(tl.float32)
     if HAS_RESIDUAL:
-        p_res = tl.make_block_ptr(
-            residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-        )
-        b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
+        desc_res = make_tensor_descriptor(residual, [T, D], [D, 1], [BT, BD])
+        b_x += desc_res.load([i_t * BT, 0]).to(tl.float32)
     if STORE_RESIDUAL_OUT:
-        p_res_out = tl.make_block_ptr(
-            residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-        )
-        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), boundary_check=(0, 1))
+        desc_res_out = make_tensor_descriptor(residual_out, [T, D], [D, 1], [BT, BD])
+        desc_res_out.store([i_t * BT, 0], b_x.to(desc_res_out.dtype))
     if not IS_RMS_NORM:
         b_mean = tl.sum(b_x, axis=1) / D
-        p_mean = tl.make_block_ptr(mean, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty), boundary_check=(0,))
+        tl.store(mean + o_t, b_mean.to(mean.dtype.element_ty), mask=m_t)
         b_xbar = tl.where(m_d[None, :], b_x - b_mean[:, None], 0.0)
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     else:
@@ -206,8 +204,7 @@ def layer_norm_gated_fwd_kernel(
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
-    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    tl.store(rstd + o_t, b_rstd.to(rstd.dtype.element_ty), mask=m_t)
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
@@ -223,7 +220,6 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y + b_b[None, :]
 
     # swish/sigmoid output gate
-    o_t = i_t * BT + tl.arange(0, BT)
     o_g = (o_t // H) * g_stride_n + (o_t % H) * D
     b_g = tl.load(
         g + o_g[:, None] + o_d[None, :],
@@ -236,8 +232,8 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y * tl.sigmoid(b_g)
 
     # Write output
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+    desc_y = make_tensor_descriptor(y, [T, D], [D, 1], [BT, BD])
+    desc_y.store([i_t * BT, 0], b_y.to(desc_y.dtype))
 
 
 @triton.heuristics(
