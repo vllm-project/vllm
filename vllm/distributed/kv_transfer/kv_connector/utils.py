@@ -400,6 +400,8 @@ def get_current_attn_backends_and_specs(
         for name, layer in layers.items():
             spec = specs.get(name, group.kv_cache_spec)
             if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
+                layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+                assert layout.is_block_outermost, "Compressed caches must be packed"
                 continue
             if not isinstance(spec, AttentionSpec):
                 spec = None
