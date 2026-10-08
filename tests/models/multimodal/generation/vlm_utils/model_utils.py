@@ -1063,8 +1063,59 @@ def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def gemma3n_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for Gemma 3n."""
+
+    def generate_greedy_logprobs_limit(
+        prompts,
+        max_tokens,
+        num_logprobs,
+        images=None,
+        audios=None,
+        videos=None,
+        use_cache=True,
+        tokenization_kwargs=None,
+        **kwargs,
+    ):
+        # Gemma 3n keeps one hidden state per altup branch, so the logprobs cannot
+        # be rebuilt from them; take the scores the model itself produced.
+        all_inputs = hf_model.get_inputs(
+            prompts,
+            images=images,
+            videos=videos,
+            audios=audios,
+            tokenization_kwargs=tokenization_kwargs,
+        )
+        outputs = []
+        for inputs in all_inputs:
+            generate_kwargs = dict(kwargs)
+            generate_kwargs.setdefault("tokenizer", hf_model.tokenizer)
+            output = hf_model.model.generate(
+                **hf_model.wrap_device(inputs),
+                use_cache=use_cache,
+                do_sample=False,
+                max_new_tokens=max_tokens,
+                output_scores=True,
+                return_dict_in_generate=True,
+                **generate_kwargs,
+            )
+            logprobs = []
+            for step in output.scores:
+                topk = torch.log_softmax(step[0].float(), dim=-1).topk(num_logprobs)
+                logprobs.append(dict(zip(topk.indices.tolist(), topk.values.tolist())))
+            output_ids = output.sequences[0][-len(logprobs) :].tolist()
+            outputs.append(
+                (output_ids, hf_model.tokenizer.decode(output_ids), logprobs)
+            )
+        return outputs
+
+    hf_model.generate_greedy_logprobs_limit = generate_greedy_logprobs_limit
+    return hf_model
+
+
 def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches and returns an instance of the HfRunner to use for GLM4.1V."""
+    """Patches an HfRunner to take pre-sampled video frames, for any model whose
+    processor would otherwise resample them."""
     hf_processor = hf_model.processor
 
     def processor(*args, videos=None, **kwargs):

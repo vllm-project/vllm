@@ -19,7 +19,7 @@ vLLM also supports model implementations that are available in Transformers. We 
 
 Currently, the Transformers modeling backend works for the following:
 
-- Modalities: embedding models, language models, vision-language models and audio-language models
+- Modalities: embedding models, language models, vision-language models, audio-language models and omni models
 - Architectures: encoder-only, decoder-only, mixture-of-experts
 - Attention types: full attention and/or sliding attention
 
