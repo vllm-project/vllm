@@ -17,6 +17,10 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTensorSym,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_aiter, has_deep_ep, has_deep_gemm
@@ -1105,26 +1109,6 @@ def test_aiter_moe_token_padding_garbage_rows(
 
     garbage_rows = _TOKEN_PADDING_GARBAGE_MODES[garbage_mode]
 
-    # fp8_tensor_token falls back to AITER's dynamic per-tensor activation
-    # quant (rocm_aiter_moe.py ignores per_act_token_quant when weights are
-    # per-tensor), whose scale is a max-abs reduction over the whole batch --
-    # a real inf garbage row poisons every real row's scale too. Upstream
-    # bug: https://github.com/ROCm/aiter/issues/6275.
-    is_fp8_tensor_token = (
-        quant_config is not None
-        and not quant_config.per_out_ch_quant
-        and quant_config.per_act_token_quant
-        and quant_config.block_shape is None
-    )
-    if is_fp8_tensor_token and any(
-        v in (float("inf"), float("-inf")) for v in garbage_rows.values()
-    ):
-        pytest.skip(
-            "Batch-wide dynamic per-tensor quant scale is poisoned by a "
-            "real inf garbage row. See "
-            "https://github.com/ROCm/aiter/issues/6275."
-        )
-
     # Reuses 4b's already-confirmed 128-aligned ("padded") K/N -- these are
     # known to work across all 5 quant schemes here, including AITER's
     # block-quant kernel (which 4b's _PADDING_K_UNPADDED/_PADDING_N_UNPADDED
@@ -1146,6 +1130,21 @@ def test_aiter_moe_token_padding_garbage_rows(
     assert config.fe_supports_quant_scheme(), (
         f"AiterExperts does not support quant scheme {quant_config}."
     )
+
+    # This (weight, activation) pair is AiterExperts's real per-tensor
+    # dynamic-activation-quant scheme -- its batch-wide max-abs scale is
+    # poisoned by a real inf garbage row. Upstream bug:
+    # https://github.com/ROCm/aiter/issues/6275.
+    if (
+        quant_config is not None
+        and config.fp8_quant_key_pair() == (kFp8StaticTensorSym, kFp8DynamicTensorSym)
+        and any(v in (float("inf"), float("-inf")) for v in garbage_rows.values())
+    ):
+        pytest.skip(
+            "Batch-wide dynamic per-tensor quant scale is poisoned by a "
+            "real inf garbage row. See "
+            "https://github.com/ROCm/aiter/issues/6275."
+        )
 
     weights = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()
