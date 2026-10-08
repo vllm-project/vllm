@@ -34,18 +34,12 @@ logger = init_logger(__name__)
 def _validate_decode_checkpoints(
     retention_interval: int | None,
     enable_caching: bool,
-    use_eagle: bool,
     scheduler_block_size: int,
     kv_cache_config: KVCacheConfig,
 ) -> None:
     if not enable_caching:
         raise ValueError(
             "enable_mamba_decode_checkpoint requires prefix caching to be enabled."
-        )
-    if use_eagle:
-        raise ValueError(
-            "enable_mamba_decode_checkpoint is not compatible with hidden-state "
-            "speculative decoding."
         )
     if retention_interval != 0:
         raise ValueError(
@@ -438,11 +432,28 @@ class KVCacheCoordinator(ABC):
         _validate_decode_checkpoints(
             self.retention_interval,
             self.block_pool.enable_caching,
-            bool(self.eagle_group_ids),
             self.scheduler_block_size,
             self.kv_cache_config,
         )
         self.retain_decode_checkpoints = True
+        # Under EAGLE the newest checkpoint may lack its drop proof at finish,
+        # so also keep the one before it.
+        for manager in self.single_type_managers:
+            if isinstance(manager, MambaManager):
+                manager.max_decode_checkpoints = 2 if self.eagle_group_ids else 1
+
+    def eagle_drop_unit(self, manager: SingleTypeKVCacheManager) -> int:
+        """Tokens an EAGLE group matches past a hit before dropping them."""
+        # DCP/PCP shard each block's KV across ranks, so the manager's
+        # effective block size may exceed the spec's.
+        hash_block_size = self.block_pool.hash_block_size
+        if (
+            self.enable_partial_hash_hits
+            and manager.supports_fine_grained_hash_lookup
+            and manager.block_size > hash_block_size
+        ):
+            return hash_block_size
+        return manager.block_size
 
     def update_decode_checkpoint_candidates(
         self, request: Request, materialized_tokens: int
@@ -456,18 +467,74 @@ class KVCacheCoordinator(ABC):
     def finalize_decode_checkpoints(
         self, request: Request, materialized_tokens: int, keep: bool
     ) -> None:
-        """Publish stopped-finish candidates, or discard their private pins."""
+        """Publish the deepest reachable candidate, then release every pin."""
+        boundary = None
         managers = iter(self.single_type_managers)
         try:
+            if keep:
+                boundary = self._select_decode_checkpoint(request, materialized_tokens)
             for manager in managers:
-                manager.finalize_decode_checkpoints(request, materialized_tokens, keep)
+                manager.finalize_decode_checkpoints(request, boundary)
         finally:
             # A manager releases its own pins in a finally block. If promotion
             # raises, discard candidates belonging to groups not yet visited.
             for manager in managers:
-                manager.finalize_decode_checkpoints(
-                    request, materialized_tokens, keep=False
-                )
+                manager.finalize_decode_checkpoints(request, None)
+
+    def _select_decode_checkpoint(
+        self, request: Request, materialized_tokens: int
+    ) -> int | None:
+        candidates = [
+            set(manager.decode_checkpoint_boundaries(request.request_id))
+            for manager in self.single_type_managers
+            if isinstance(manager, MambaManager)
+        ]
+        if not candidates:
+            return None
+        for boundary in sorted(set.intersection(*candidates), reverse=True):
+            if boundary <= materialized_tokens and self._prove_eagle_drop(
+                request, boundary, materialized_tokens
+            ):
+                return boundary
+        return None
+
+    def _prove_eagle_drop(
+        self, request: Request, boundary: int, materialized_tokens: int
+    ) -> bool:
+        """Cache what each EAGLE group must match past ``boundary`` to hit it."""
+        finalized_tokens = materialized_tokens - self.num_reprefillable_tokens
+        for group_id in sorted(self.eagle_group_ids):
+            manager = self.single_type_managers[group_id]
+            if isinstance(manager, MambaManager):
+                continue
+            proof_tokens = boundary + self.eagle_drop_unit(manager)
+            if proof_tokens > finalized_tokens:
+                return False
+            # The final output appends accepted IDs after slot allocation, so
+            # even completed full blocks may not have their hashes yet.
+            manager.cache_blocks(
+                request,
+                proof_tokens,
+                retention_interval=self.retention_interval,
+                replay_boundaries=(boundary,),
+            )
+            if proof_tokens % manager.block_size == 0:
+                num_cached_blocks = manager.num_cached_block.get(request.request_id, 0)
+                if num_cached_blocks * manager.block_size < proof_tokens:
+                    return False
+                continue
+            blocks = manager.req_to_blocks.get(request.request_id, [])
+            block_idx = proof_tokens // manager.block_size
+            if block_idx >= len(blocks) or blocks[block_idx].is_null:
+                return False
+            manager.block_pool.cache_partial_block(
+                request=request,
+                block=blocks[block_idx],
+                num_tokens=proof_tokens,
+                kv_cache_group_id=group_id,
+                block_size=manager.block_size,
+            )
+        return True
 
     def free(self, request_id: str) -> None:
         """Free the blocks for the request.
@@ -955,9 +1022,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 self.attention_groups
             ):
                 first_group_id = group_ids[0]
-                # DCP/PCP shard each block's KV across ranks, so the manager's
-                # effective block size may exceed the spec's.
-                group_block_size = self.single_type_managers[first_group_id].block_size
                 cached_blocks = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
@@ -977,12 +1041,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # mamba: its finder never drops (draft models have no mamba
                 # layers), so the hit would grow past the candidate.
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and group_block_size > self.hash_block_size
-                        else group_block_size
+                    eagle_margin = self.eagle_drop_unit(
+                        self.single_type_managers[first_group_id]
                     )
                     _max_length = min(
                         curr_hit_length + eagle_margin, max_cache_hit_length

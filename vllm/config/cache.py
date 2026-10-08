@@ -204,8 +204,9 @@ class CacheConfig:
     """Also publish the latest scheduler-aligned Mamba decode state to the local
     prefix cache when a request stops, so a follow-up turn that replays the
     generated message can resume from it. Off by default; requires
-    `prefix_cache_retention_interval` 0 and `mamba_cache_mode` "align", and is
-    not supported with EAGLE/MTP speculative decoding."""
+    `prefix_cache_retention_interval` 0 and `mamba_cache_mode` "align". With
+    EAGLE/MTP, publish the deepest retained state whose draft KV lookahead
+    is finalized and reusable."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.

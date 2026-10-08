@@ -4970,14 +4970,28 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     assert len(computed_blocks.blocks[1]) == 0
 
 
-def _make_decode_checkpoint_manager():
-    block_size = 4
+def _make_decode_checkpoint_manager(
+    use_eagle=False,
+    block_size=4,
+    hash_block_size=None,
+    num_prefill_lookahead=0,
+    num_speculative_blocks=0,
+):
+    hash_block_size = hash_block_size or block_size
+    config = _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"])
+    config.kv_cache_groups[0].is_eagle_group = use_eagle
+    config.kv_cache_groups[1].kv_cache_spec = replace(
+        config.kv_cache_groups[1].kv_cache_spec,
+        num_speculative_blocks=num_speculative_blocks,
+    )
     manager = make_kv_cache_manager(
-        _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
+        config,
         max_model_len=1024,
         enable_caching=True,
         retention_interval=0,
-        hash_block_size=block_size,
+        hash_block_size=hash_block_size,
+        use_eagle=use_eagle,
+        num_prefill_lookahead=num_prefill_lookahead,
         enable_mamba_decode_checkpoint=True,
     )
     return manager, block_size
@@ -5023,6 +5037,100 @@ def test_mamba_decode_checkpoints_publish_latest_on_finish(keep):
     assert full_hit == (20 if keep else 4)
 
 
+@pytest.mark.parametrize("keep", [True, False])
+def test_mamba_decode_checkpoint_eagle_falls_back_before_unproven_tail(keep):
+    """An EAGLE hit needs one finalized attention block past its SSM state."""
+    manager, block_size = _make_decode_checkpoint_manager(use_eagle=True)
+    request = _materialize_checkpoint_test_request(manager, block_size)
+
+    # State 20 is retained, but the draft attention group can only prove 16.
+    mamba_manager = manager.coordinator.single_type_managers[1]
+    candidates = mamba_manager._decode_checkpoint_candidates[request.request_id]
+    assert [candidate.num_tokens for candidate in candidates] == [16, 20]
+    manager.finalize_decode_checkpoints(request, keep=keep)
+    manager.free(request)
+
+    replay = make_request(
+        "replay", list(request.all_token_ids) + [100], block_size, sha256
+    )
+    _, hit_tokens, _ = manager.get_computed_blocks(replay)
+    assert hit_tokens == (16 if keep else 4)
+    assert all(candidate.block.ref_cnt == 0 for candidate in candidates)
+
+
+@pytest.mark.parametrize(
+    ("num_prefill_lookahead", "materialized_tokens", "expected_hit"),
+    [(1, 22, 16), (3, 22, 16), (3, 21, 0)],
+)
+def test_mamba_decode_checkpoint_eagle_registers_partial_proof(
+    num_prefill_lookahead, materialized_tokens, expected_hit
+):
+    """Fine-grained draft proof excludes MTP's mutable lookahead tail."""
+    manager, block_size = _make_decode_checkpoint_manager(
+        use_eagle=True,
+        block_size=8,
+        hash_block_size=4,
+        num_prefill_lookahead=num_prefill_lookahead,
+    )
+    request = make_request("producer", list(range(8)), 4, sha256)
+    manager.allocate_slots(request, 8)
+    request.num_computed_tokens = 8
+
+    manager.new_step_starts()
+    manager.allocate_slots(request, 6)
+    request.append_output_token_ids(list(range(8, 14)))
+    request.num_computed_tokens = 14
+
+    # Allocate before appending accepted IDs, as the scheduler does. The proof
+    # at 20 is materialized but has not been published as a partial hash.
+    manager.new_step_starts()
+    manager.allocate_slots(request, materialized_tokens - 14)
+    request.append_output_token_ids(list(range(14, materialized_tokens)))
+    request.num_computed_tokens = materialized_tokens
+    manager.update_decode_checkpoint_candidates(request)
+    assert manager.block_pool.get_cached_block(request.block_hashes[4], [0]) is None
+    manager.finalize_decode_checkpoints(request, keep=True)
+    manager.free(request)
+
+    replay = make_request("replay", request.all_token_ids[:21], 4, sha256)
+    _, hit_tokens, _ = manager.get_computed_blocks(replay)
+    assert hit_tokens == expected_hit
+
+
+def test_mamba_decode_checkpoint_spec_crossed_boundary_skips_scratch():
+    """Accepted draft states are reusable; relocated scratch remains writable."""
+    manager, block_size = _make_decode_checkpoint_manager(
+        use_eagle=True, num_speculative_blocks=2
+    )
+    request = _materialize_checkpoint_test_request(
+        manager, block_size, num_decode_blocks=1
+    )
+    mamba_manager = manager.coordinator.single_type_managers[1]
+
+    # A rejected speculative tail can leave the accepted boundary inside the
+    # scratch region. It must not acquire a private pin before relocation.
+    manager.new_step_starts()
+    manager.allocate_slots(request, 2)
+    request.append_output_token_ids([12, 13])
+    request.num_computed_tokens = 14
+    manager.update_decode_checkpoint_candidates(request)
+    candidates = mamba_manager._decode_checkpoint_candidates[request.request_id]
+    scratch = mamba_manager.req_to_blocks[request.request_id][-2:]
+    assert all(candidate.block not in scratch for candidate in candidates)
+    assert all(manager.block_pool.is_block_writable(block) for block in scratch)
+
+    # The worker copies the accepted state at floor(18 / 4) * 4 into a stable
+    # state block, including when that state follows an accepted draft token.
+    manager.new_step_starts()
+    manager.allocate_slots(request, 4)
+    request.append_output_token_ids([14, 15, 16, 17])
+    request.num_computed_tokens = 18
+    manager.update_decode_checkpoint_candidates(request)
+    assert mamba_manager.decode_checkpoint_boundaries(request.request_id)[-1] == 16
+    manager.free(request)
+    assert all(candidate.block.ref_cnt == 0 for candidate in candidates)
+
+
 def test_mamba_decode_checkpoint_pin_survives_state_rotation():
     """A private pin keeps an old state out of the allocator after rotation."""
     manager, block_size = _make_decode_checkpoint_manager()
@@ -5030,7 +5138,7 @@ def test_mamba_decode_checkpoint_pin_survives_state_rotation():
         manager, block_size, num_decode_blocks=2
     )
     mamba_manager = manager.coordinator.single_type_managers[1]
-    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
+    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id][-1]
     assert candidate.num_tokens == 16
     assert candidate.block.ref_cnt == 2  # request owner + private pin
 
@@ -5077,7 +5185,7 @@ def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary():
     manager.update_decode_checkpoint_candidates(request)
 
     mamba_manager = manager.coordinator.single_type_managers[1]
-    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
+    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id][-1]
     assert candidate.num_tokens == 16
     manager.free(request)
 
@@ -5088,7 +5196,6 @@ def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary():
         (None, True, False, "prefix_cache_retention_interval=0"),
         (64, True, False, "prefix_cache_retention_interval=0"),
         (0, False, False, "prefix caching"),
-        (0, True, True, "hidden-state speculative decoding"),
     ],
 )
 def test_decode_checkpoints_reject_unsupported_config(
