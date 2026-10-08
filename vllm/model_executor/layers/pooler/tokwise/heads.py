@@ -26,14 +26,12 @@ def _mean_pool_chunks(data: torch.Tensor, chunk_size: int) -> torch.Tensor:
     if not remainder:
         return full_chunks.mean(dim=1, dtype=torch.float32)
 
-    # Write both reductions into their final storage instead of concatenating
-    # separate results for the full chunks and the tail.
-    means = torch.empty(
-        (num_full + 1, data.shape[-1]), dtype=torch.float32, device=data.device
+    return torch.cat(
+        [
+            full_chunks.mean(dim=1, dtype=torch.float32),
+            data[full_end:].mean(dim=0, keepdim=True, dtype=torch.float32),
+        ]
     )
-    torch.mean(full_chunks, dim=1, dtype=torch.float32, out=means[:num_full])
-    torch.mean(data[full_end:], dim=0, dtype=torch.float32, out=means[-1])
-    return means
 
 
 class TokenPoolerHead(nn.Module, ABC):
