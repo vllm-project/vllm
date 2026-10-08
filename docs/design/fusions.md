@@ -178,9 +178,9 @@ Other attention backends do not support fused output quantization yet.
 a single kernel, avoiding separate reads and writes of the key and value tensors.
 
 Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active (automatic),
-and the `kv_cache` update op visible in the graph: either by using Inductor graph partition
-or removed from `splitting_ops`.
-If these conditions are set, the fusion is enabled automatically for optimization level O1 and above.
+and the `kv_cache` update op visible in the graph. Requesting the fusion keeps that op in
+the graph, except on torch older than 2.11, where doing so would compile one graph per
+attention layer; there, use Inductor graph partition instead.
 
 **Code locations.**
 
