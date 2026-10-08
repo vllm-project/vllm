@@ -7,6 +7,7 @@
 # the following copyright notice:
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 
+
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -15,17 +16,27 @@ from vllm.triton_utils import tl, triton
 @triton.jit
 def _attn_res_kernel(
     prefix_ptr,
+    delta_ptr,
     blocks_ptr,
     norm_weight_ptr,
     qk_weight_ptr,
+    output_norm_weight_ptr,
     output_ptr,
+    output_scale_ptr,
     stride_prefix_m: tl.constexpr,
+    stride_delta_m: tl.constexpr,
     stride_block_m: tl.constexpr,
     stride_block_r: tl.constexpr,
     stride_output_m: tl.constexpr,
     num_blocks: tl.constexpr,
     hidden_size: tl.constexpr,
+    block_write_idx: tl.constexpr,
     eps: tl.constexpr,
+    output_norm_eps: tl.constexpr,
+    HAS_DELTA: tl.constexpr,
+    WRITE_BLOCK: tl.constexpr,
+    APPLY_OUTPUT_NORM: tl.constexpr,
+    QUANT_MAX: tl.constexpr,
     BLOCK_L: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -33,51 +44,101 @@ def _attn_res_kernel(
     d_offsets = tl.max_contiguous(tl.arange(0, BLOCK_D), BLOCK_D)
     d_mask = d_offsets < hidden_size
 
-    prefix = tl.load(
+    updated_prefix = tl.load(
         prefix_ptr + row_idx * stride_prefix_m + d_offsets,
         mask=d_mask,
         other=0.0,
     ).to(tl.float32)
-    input_qk_weight = tl.load(norm_weight_ptr + d_offsets, mask=d_mask, other=0.0).to(
-        tl.float32
-    ) * tl.load(qk_weight_ptr + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-
-    max_logit = tl.full((), -float("inf"), tl.float32)
-    denominator = tl.zeros((), tl.float32)
-    mixed = tl.zeros((BLOCK_D,), tl.float32)
-    num_sources = num_blocks + 1
-
-    for source_tile in range(tl.cdiv(num_sources, BLOCK_L)):
-        source_offsets = source_tile * BLOCK_L + tl.arange(0, BLOCK_L)
-        source_mask = source_offsets < num_sources
-        is_prefix = source_offsets == num_blocks
-        block_ptrs = (
+    if HAS_DELTA:
+        delta = tl.load(
+            delta_ptr + row_idx * stride_delta_m + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
+        updated_prefix += delta
+        # Match the BF16 prefix-add result before using it as a residual source.
+        updated_prefix = updated_prefix.to(prefix_ptr.dtype.element_ty).to(tl.float32)
+        tl.store(
+            prefix_ptr + row_idx * stride_prefix_m + d_offsets,
+            updated_prefix,
+            mask=d_mask,
+        )
+    if WRITE_BLOCK:
+        tl.store(
             blocks_ptr
             + row_idx * stride_block_m
-            + source_offsets[:, None] * stride_block_r
-            + d_offsets[None, :]
+            + block_write_idx * stride_block_r
+            + d_offsets,
+            updated_prefix,
+            mask=d_mask,
         )
-        block_values = tl.load(
-            block_ptrs,
-            mask=(source_mask[:, None] & ~is_prefix[:, None] & d_mask[None, :]),
-            other=0.0,
-            eviction_policy="evict_first",
+    # With only the prefix source, the AttnRes softmax is exactly one.
+    if num_blocks == 0:
+        mixed = updated_prefix
+    else:
+        # Reloading avoids keeping the full prefix vector live across the loop.
+        if HAS_DELTA:
+            tl.debug_barrier()
+        input_qk_weight = tl.load(
+            norm_weight_ptr + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32) * tl.load(
+            qk_weight_ptr + d_offsets, mask=d_mask, other=0.0
         ).to(tl.float32)
-        values = tl.where(is_prefix[:, None], prefix[None, :], block_values)
-        reciprocal_std = tl.rsqrt(
-            tl.sum(values * values, axis=1) * (1.0 / hidden_size) + eps
+        max_logit = tl.full((), -float("inf"), tl.float32)
+        denominator = tl.zeros((), tl.float32)
+        mixed = tl.zeros((BLOCK_D,), tl.float32)
+
+        num_sources = num_blocks + 1
+        for source_tile in range(tl.cdiv(num_sources, BLOCK_L)):
+            source_offsets = source_tile * BLOCK_L + tl.arange(0, BLOCK_L)
+            source_mask = source_offsets < num_sources
+            is_prefix = source_offsets == num_blocks
+            block_ptrs = (
+                blocks_ptr
+                + row_idx * stride_block_m
+                + source_offsets[:, None] * stride_block_r
+                + d_offsets[None, :]
+            )
+            block_values = tl.load(
+                block_ptrs,
+                mask=(source_mask[:, None] & ~is_prefix[:, None] & d_mask[None, :]),
+                other=0.0,
+                eviction_policy="evict_first",
+            ).to(tl.float32)
+            values = tl.where(is_prefix[:, None], updated_prefix[None, :], block_values)
+            reciprocal_std = tl.rsqrt(
+                tl.sum(values * values, axis=1) * (1.0 / hidden_size) + eps
+            )
+            logits = tl.sum(values * input_qk_weight[None, :], axis=1) * reciprocal_std
+            scores = tl.where(source_mask, logits, -float("inf"))
+
+            new_max_logit = tl.maximum(max_logit, tl.max(scores, axis=0))
+            old_scale = tl.exp(max_logit - new_max_logit)
+            block_scales = tl.exp(scores - new_max_logit)
+            denominator = denominator * old_scale + tl.sum(block_scales, axis=0)
+            mixed = mixed * old_scale + tl.sum(block_scales[:, None] * values, axis=0)
+            max_logit = new_max_logit
+
+        mixed /= denominator
+    output = mixed
+
+    if APPLY_OUTPUT_NORM:
+        output_reciprocal_std = tl.rsqrt(
+            tl.sum(tl.where(d_mask, mixed * mixed, 0.0), axis=0) * (1.0 / hidden_size)
+            + output_norm_eps
         )
-        logits = tl.sum(values * input_qk_weight[None, :], axis=1) * reciprocal_std
-        scores = tl.where(source_mask, logits, -float("inf"))
-
-        new_max_logit = tl.maximum(max_logit, tl.max(scores, axis=0))
-        old_scale = tl.exp(max_logit - new_max_logit)
-        block_scales = tl.exp(scores - new_max_logit)
-        denominator = denominator * old_scale + tl.sum(block_scales, axis=0)
-        mixed = mixed * old_scale + tl.sum(block_scales[:, None] * values, axis=0)
-        max_logit = new_max_logit
-
-    output = mixed / denominator
+        output_norm_weight = tl.load(
+            output_norm_weight_ptr + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
+        output = mixed * output_reciprocal_std * output_norm_weight
+    if QUANT_MAX > 0:
+        # Preserve the rounding of the original BF16 output before quantizing.
+        output = output.to(prefix_ptr.dtype.element_ty).to(tl.float32)
+        amax = tl.max(tl.where(d_mask, tl.abs(output), 0.0), axis=0)
+        scale = tl.maximum(amax, 1e-10) * (1.0 / QUANT_MAX)
+        inv_scale = 1.0 / scale
+        output = tl.minimum(tl.maximum(output * inv_scale, -QUANT_MAX), QUANT_MAX)
+        tl.store(output_scale_ptr + row_idx, scale)
     tl.store(
         output_ptr + row_idx * stride_output_m + d_offsets,
         output,
@@ -87,46 +148,69 @@ def _attn_res_kernel(
 
 def attn_res(
     prefix: torch.Tensor,
+    delta: torch.Tensor | None,
     blocks: torch.Tensor,
     norm_weight: torch.Tensor,
     qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor | None,
     num_blocks: int,
+    block_write_idx: int,
     eps: float,
-) -> torch.Tensor:
+    output_norm_eps: float,
+    *,
+    quant_dtype: torch.dtype | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     num_tokens, hidden_size = prefix.shape
-    assert 0 < num_blocks <= blocks.shape[1]
-    assert blocks.shape[0] == num_tokens
-    assert norm_weight.numel() == hidden_size
-    assert qk_weight.numel() == hidden_size
     assert prefix.stride(-1) == 1
+    assert delta is None or delta.stride(-1) == 1
     assert blocks.stride(-1) == 1
     assert norm_weight.stride(-1) == 1
     assert qk_weight.stride(-1) == 1
-
-    output = prefix.new_empty(prefix.shape)
+    assert output_norm_weight is None or output_norm_weight.stride(-1) == 1
+    if quant_dtype is not None:
+        assert quant_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    output = torch.empty_like(
+        prefix, dtype=quant_dtype or prefix.dtype, memory_format=torch.contiguous_format
+    )
+    scale = (
+        torch.empty((num_tokens, 1), device=prefix.device, dtype=torch.float32)
+        if quant_dtype is not None
+        else None
+    )
     if num_tokens == 0:
-        return output
+        return output if scale is None else (output, scale)
 
+    # Source tiling helps decode, while one-source tiles scale better for prefill.
     if num_tokens >= 256 or num_blocks <= 1:
         block_l, num_warps = 1, 4
     else:
         block_l, num_warps = 4, 8
     _attn_res_kernel[(num_tokens,)](
         prefix,
+        delta,
         blocks,
         norm_weight,
         qk_weight,
+        output_norm_weight,
         output,
+        scale,
         prefix.stride(0),
+        0 if delta is None else delta.stride(0),
         blocks.stride(0),
         blocks.stride(1),
         output.stride(0),
         num_blocks,
         hidden_size,
+        block_write_idx,
         eps,
+        output_norm_eps,
+        HAS_DELTA=delta is not None,
+        WRITE_BLOCK=block_write_idx >= 0,
+        APPLY_OUTPUT_NORM=output_norm_weight is not None,
+        QUANT_MAX=0.0 if quant_dtype is None else torch.finfo(quant_dtype).max,
         BLOCK_L=block_l,
         BLOCK_D=triton.next_power_of_2(hidden_size),
         num_warps=num_warps,
         num_stages=2,
     )
-    return output
+    return output if scale is None else (output, scale)

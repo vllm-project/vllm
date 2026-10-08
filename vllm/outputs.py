@@ -13,9 +13,29 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class RequestError:
+    """A request-level error that does not mark the engine as unhealthy."""
+
+    code: str
+    message: str
+    retryable: bool = False
+
+
+@dataclass
+class SamplingMask:
+    """Per-token sampling support sets aligned with completion token IDs.
+
+    Each inner list contains the vocabulary token IDs that survived
+    top-k / top-p / min-p filtering for the corresponding generated token.
+    """
+
+    token_ids: list[list[int]]
 
 
 @dataclass
@@ -30,11 +50,19 @@ class CompletionOutput:
             output text.
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
+        sampling_mask: The post-processing token support set for each generated
+            token, if requested.
         finish_reason: The reason why the sequence is finished.
         stop_reason: The stop string or token id that caused the completion
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        spec_decode_metrics: Per-sequence speculative-decoding acceptance metrics,
+            populated on finish when speculative decoding ran and
+            ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
+            Surfaced in the response as ``metrics.speculative_decoding`` for
+            single-sequence (``n == 1``) requests.
+
     """
 
     index: int
@@ -46,6 +74,8 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    sampling_mask: SamplingMask | None = None
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -56,6 +86,7 @@ class CompletionOutput:
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
             f"routed_experts={self.routed_experts}, "
+            f"sampling_mask={self.sampling_mask}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
@@ -69,6 +100,7 @@ class PoolingOutput:
 
     Args:
         data: The extracted hidden states.
+
     """
 
     data: torch.Tensor
@@ -94,6 +126,10 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
+        prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids, shaped
+            [prompt_len - 1 - prompt_logprob_start, num_ids]; row i holds the
+            logprobs of its own IDs as predictions of prompt token
+            prompt_logprob_start + i + 1, with -inf in padded columns.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -107,6 +143,7 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+
     """
 
     def __init__(
@@ -124,6 +161,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
         *,
+        prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -138,6 +176,7 @@ class RequestOutput:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_logprobs = prompt_logprobs
+        self.prompt_token_id_logprobs = prompt_token_id_logprobs
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -151,7 +190,6 @@ class RequestOutput:
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
-
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
@@ -168,9 +206,23 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
+                        if next_completion.sampling_mask is not None:
+                            if completion.sampling_mask is None:
+                                completion.sampling_mask = SamplingMask([])
+                            completion.sampling_mask.token_ids.extend(
+                                next_completion.sampling_mask.token_ids
+                            )
+                        if next_completion.spec_decode_metrics is not None:
+                            completion.spec_decode_metrics = (
+                                next_completion.spec_decode_metrics
+                            )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
+                        # R3 is returned on the terminal output and must survive
+                        # aggregation with earlier chunks that have no R3.
+                        if next_completion.routed_experts is not None:
+                            completion.routed_experts = next_completion.routed_experts
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:
@@ -188,6 +240,7 @@ class RequestOutput:
             f"encoder_prompt={self.encoder_prompt!r}, "
             f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"prompt_token_id_logprobs={self.prompt_token_id_logprobs}, "
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
@@ -211,8 +264,7 @@ _O = TypeVar("_O", default=PoolingOutput)
 
 
 class PoolingRequestOutput(Generic[_O]):
-    """
-    The output data of a pooling request to the LLM.
+    """The output data of a pooling request to the LLM.
 
     Args:
         request_id (str): A unique identifier for the pooling request.
@@ -220,6 +272,8 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
+        error: Structured request-level error information, if the request failed.
+
     """
 
     def __init__(
@@ -229,20 +283,25 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids: list[int],
         num_cached_tokens: int,
         finished: bool,
+        *,
+        error: RequestError | None = None,
     ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.finished = finished
         self.outputs = outputs
+        self.error = error
 
-    def __repr__(self):
+    def __repr__(self) -> str:
+        error = f", error={self.error!r}" if self.error is not None else ""
         return (
             f"{type(self).__name__}(request_id={self.request_id!r}, "
             f"outputs={self.outputs!r}, "
             f"prompt_token_ids={self.prompt_token_ids}, "
             f"num_cached_tokens={self.num_cached_tokens}, "
-            f"finished={self.finished})"
+            f"finished={self.finished}"
+            f"{error})"
         )
 
 
@@ -253,12 +312,13 @@ class EmbeddingOutput:
     Args:
         embedding: The embedding vector, which is a list of floats.
             Its length depends on the hidden dimension of the model.
+
     """
 
     embedding: list[float]
 
     @staticmethod
-    def from_base(pooling_output: PoolingOutput):
+    def from_base(pooling_output: PoolingOutput) -> "EmbeddingOutput":
         pooled_data = pooling_output.data
         if pooled_data.ndim != 1:
             raise ValueError("pooled_data should be a 1-D embedding vector")
@@ -275,13 +335,21 @@ class EmbeddingOutput:
 
 class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
     @staticmethod
-    def from_base(request_output: PoolingRequestOutput):
+    def from_base(
+        request_output: PoolingRequestOutput,
+    ) -> "EmbeddingRequestOutput":
+        outputs = (
+            EmbeddingOutput([])
+            if request_output.error is not None
+            else EmbeddingOutput.from_base(request_output.outputs)
+        )
         return EmbeddingRequestOutput(
             request_id=request_output.request_id,
-            outputs=EmbeddingOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )
 
 
@@ -292,12 +360,13 @@ class ClassificationOutput:
     Args:
         probs: The probability vector, which is a list of floats.
             Its length depends on the number of classes.
+
     """
 
     probs: list[float]
 
     @staticmethod
-    def from_base(pooling_output: PoolingOutput):
+    def from_base(pooling_output: PoolingOutput) -> "ClassificationOutput":
         # pooling_output shape: (num_classes)
         pooled_data = pooling_output.data
         if pooled_data.ndim != 1:
@@ -315,13 +384,21 @@ class ClassificationOutput:
 
 class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
     @staticmethod
-    def from_base(request_output: PoolingRequestOutput):
+    def from_base(
+        request_output: PoolingRequestOutput,
+    ) -> "ClassificationRequestOutput":
+        outputs = (
+            ClassificationOutput([])
+            if request_output.error is not None
+            else ClassificationOutput.from_base(request_output.outputs)
+        )
         return ClassificationRequestOutput(
             request_id=request_output.request_id,
-            outputs=ClassificationOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )
 
 
@@ -331,12 +408,13 @@ class ScoringOutput:
 
     Args:
         score: The similarity score, which is a scalar value.
+
     """
 
     score: float
 
     @staticmethod
-    def from_base(pooling_output: PoolingOutput):
+    def from_base(pooling_output: PoolingOutput) -> "ScoringOutput":
         # pooling_output shape:
         #   classify task: (num_classes) num_classes == 1
         #   embed task: a scalar value
@@ -352,11 +430,19 @@ class ScoringOutput:
 
 class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
     @staticmethod
-    def from_base(request_output: PoolingRequestOutput):
+    def from_base(
+        request_output: PoolingRequestOutput,
+    ) -> "ScoringRequestOutput":
+        outputs = (
+            ScoringOutput(0.0)
+            if request_output.error is not None
+            else ScoringOutput.from_base(request_output.outputs)
+        )
         return ScoringRequestOutput(
             request_id=request_output.request_id,
-            outputs=ScoringOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )

@@ -54,3 +54,10 @@ async def get_server_load_metrics(request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.get("/kv_event_sources")
+async def kv_event_sources(raw_request: Request):
+    """KV-event publisher config per DP rank; empty on render-only servers."""
+    client: EngineClient | None = raw_request.app.state.engine_client
+    return client.get_kv_event_sources() if client is not None else {}

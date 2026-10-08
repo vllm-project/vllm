@@ -15,14 +15,26 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.manager import (
+    BoundaryStoreStats,
     SimpleCPUOffloadScheduler,
 )
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
+)
+from vllm.v1.simple_kv_offload.metrics import (
+    SimpleCPUOffloadPromMetrics,
+    SimpleCPUOffloadStats,
 )
 from vllm.v1.simple_kv_offload.worker import (
     SimpleCPUOffloadWorker,
@@ -40,6 +52,15 @@ logger = init_logger(__name__)
 
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
+
+VALID_KV_OFFLOAD_BACKENDS = ("cpu", "disk")
+# Keys that only apply to the disk backend, warned about under "cpu".
+_DISK_ONLY_KEYS = (
+    "disk_path",
+    "disk_capacity_bytes",
+    "disk_buffer_slots",
+    "use_page_cache",
+)
 
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
@@ -82,6 +103,43 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
 
+        kv_offload_backend = str(extra_config.get("kv_offload_backend", "cpu"))
+        if kv_offload_backend not in VALID_KV_OFFLOAD_BACKENDS:
+            raise ValueError(
+                f"Unknown kv_offload_backend {kv_offload_backend!r}; "
+                f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
+            )
+        disk_mode = kv_offload_backend == "disk"
+        self._cache_hit_source = (
+            CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
+        )
+
+        disk_path = extra_config.get("disk_path", None) or None
+        disk_capacity_bytes = int(
+            extra_config.get("disk_capacity_bytes", 100 * (1024**3))
+        )
+        disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
+        use_page_cache = bool(extra_config.get("use_page_cache", False))
+
+        if disk_mode:
+            if disk_path is None:
+                raise ValueError(
+                    'kv_offload_backend="disk" requires disk_path to be set.'
+                )
+            if disk_capacity_bytes <= 0:
+                raise ValueError(
+                    'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
+                )
+        else:
+            ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
+            if ignored:
+                logger.warning(
+                    'kv_offload_backend is "cpu", ignoring disk-only config: %s. '
+                    'Set kv_offload_backend="disk" to enable the disk backend.',
+                    ", ".join(ignored),
+                )
+            disk_path = None
+
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
 
@@ -94,11 +152,13 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         logger.info(
             "SimpleCPUOffloadConnector: role=%s, "
-            "per_rank=%.2f GB, world_size=%d, mode=%s",
+            "per_rank=%.2f GB, world_size=%d, mode=%s, backend=%s, disk=%s",
             role.name,
             cpu_capacity_per_rank / (1024**3),
             world_size,
             "lazy" if lazy_offload else "eager",
+            kv_offload_backend,
+            disk_path or "none",
         )
 
         if role == KVConnectorRole.SCHEDULER:
@@ -115,10 +175,19 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 scheduler_block_size=scheduler_block_size,
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
+                disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
+                use_page_cache=use_page_cache if disk_mode else False,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
-                vllm_config, kv_cache_config, cpu_capacity_per_rank
+                vllm_config,
+                kv_cache_config,
+                cpu_capacity_per_rank,
+                kv_offload_backend=kv_offload_backend,
+                disk_path=disk_path,
+                disk_capacity_bytes=disk_capacity_bytes,
+                disk_buffer_slots=disk_buffer_slots,
+                use_page_cache=use_page_cache,
             )
 
     # --- Worker-side methods ---
@@ -147,10 +216,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             self.worker_handler.handle_preemptions(kv_connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
-        pass  # Launch loads ops in get_finished() after launching model execution
+        if self.worker_handler is not None:
+            self.worker_handler.start_load_kv()
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        pass  # Always load asynchronously and deferred to get_finished()
+        pass  # Always load asynchronously, issued in start_load_kv()
 
     def save_kv_layer(
         self,
@@ -159,10 +229,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: "AttentionMetadata",
         **kwargs: Any,
     ) -> None:
-        pass  # Always save asynchronously and deferred to get_finished()
+        pass  # Always save asynchronously, issued in wait_for_save()
 
     def wait_for_save(self) -> None:
-        pass  # All stores are driven by get_finished() and no wait needed
+        if self.worker_handler is not None:
+            self.worker_handler.wait_for_save()
 
     def get_finished(
         self,
@@ -240,11 +311,48 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return False, None
 
-    # NOTE: New API only for SimpleCPUOffloadConnector.
-    def has_pending_transfers(self) -> bool:
+    def has_pending_push_work(self) -> bool:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.has_pending_stores()
         return False
+
+    def get_boundary_store_stats(self) -> BoundaryStoreStats | None:
+        """Return cumulative boundary-handoff store diagnostics."""
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.get_boundary_store_stats()
+        return None
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        # Worker-side callers may invoke this hook on connectors constructed
+        # via __new__ (as in test_worker.py), which lack scheduler_manager.
+        scheduler_manager: SimpleCPUOffloadScheduler | None = getattr(
+            self, "scheduler_manager", None
+        )
+        if scheduler_manager is not None:
+            return scheduler_manager.get_stats()
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return (
+            SimpleCPUOffloadStats(data=data)
+            if data is not None
+            else SimpleCPUOffloadStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return SimpleCPUOffloadPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self.scheduler_manager is not None:

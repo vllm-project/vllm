@@ -7,6 +7,7 @@ import pytest
 import schemathesis
 from hypothesis import HealthCheck, settings
 from schemathesis import GenerationMode
+from schemathesis.checks import not_a_server_error
 from schemathesis.config import (
     ChecksConfig,
     CoveragePhaseConfig,
@@ -83,8 +84,7 @@ def before_generate_case(context: schemathesis.HookContext, strategy):
     assert op is not None
 
     def no_invalid_types(case: schemathesis.Case):
-        """
-        Skips tool_calls with `"type": "custom"` which schemathesis incorrectly
+        """Skips tool_calls with `"type": "custom"` which schemathesis incorrectly
         generates instead of the valid `"type": "function"`.
 
         Example test case that is skipped:
@@ -162,8 +162,13 @@ def test_openapi_stateless(case: schemathesis.Case):
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost
-    case.call_and_validate(
+    systemone = case.operation.path == "/v1/systemone"
+    response = case.call_and_validate(
         verify=False,
         timeout=timeout,
         headers={"Content-Type": "application/json"},
+        excluded_checks=[not_a_server_error] if systemone else None,
     )
+    if systemone:
+        # SmolVLM does not support structured decisions.
+        assert response.status_code < 500 or response.status_code == 501

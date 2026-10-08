@@ -17,6 +17,18 @@ The edges of the build graph represent:
 
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
+The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
+requirements remain cached independently of per-commit vLLM wheels and source.
+
+The `extensions-build` stage can also produce an optional source-built Triton
+wheel. `vllm-openai-base` installs that wheel after its other Python
+dependencies so dependency resolution cannot restore an older Triton version.
+
+With `BUILD_NIXL=true`, `extensions-build` also builds NIXL, including its NIXL
+EP extension for the installed PyTorch, with `tools/build_nixl_with_torch215_for_rubin.py`.
+`vllm-openai-base` then replaces the NIXL packages installed from the KV-connector
+requirements with these wheels.
+
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
   > </figure>
@@ -28,6 +40,7 @@ The edges of the build graph represent:
   > ```bash
   > dockerfilegraph \
   >   -o png \
+  >   --concentrate \
   >   --legend \
   >   --dpi 200 \
   >   --max-label-length 50 \
@@ -47,6 +60,7 @@ The edges of the build graph represent:
   >    --dpi 200 \
   >    --max-label-length 50 \
   >    --filename docker/Dockerfile \
+  >    --concentrate \
   >    --legend
   > ```
   >

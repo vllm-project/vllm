@@ -5,11 +5,13 @@ import ipaddress
 import os
 import socket
 import sys
+import tempfile
 import warnings
 from collections.abc import (
     Iterator,
     Sequence,
 )
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -22,6 +24,23 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class ZmqListener:
+    """A supervisor-bound listener that a ZMQ socket can adopt."""
+
+    address: str
+    socket: socket.socket
+
+    def close(self) -> None:
+        self.socket.close()
+
+    def cleanup(self) -> None:
+        self.close()
+        if self.address.startswith("ipc://"):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.address.removeprefix("ipc://"))
 
 
 def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
@@ -131,6 +150,21 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
 
 
+def get_file_store_init_method() -> str:
+    return f"file://{tempfile.gettempdir()}/vllm_dist_{uuid4().hex}"
+
+
+def aiter_requires_tcp_store() -> bool:
+    """AITER custom all-reduce requires a pure-TCP default store (its IPC
+    metadata exchange asserts on ``TCPStore``); the file:// rendezvous yields a
+    ``FileStore`` and trips that assertion. Prefer the TCP rendezvous
+    (pre-#50999) for ROCm + AITER custom AR until AITER accepts FileStore.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return rocm_aiter_ops.is_custom_all_reduce_enabled()
+
+
 def get_tcp_uri(ip: str, port: int) -> str:
     if is_valid_ipv6_address(ip):
         return f"tcp://[{ip}]:{port}"
@@ -147,23 +181,27 @@ def get_open_zmq_inproc_path() -> str:
     return f"inproc://{uuid4()}"
 
 
+def _get_reserved_port_range() -> range:
+    """Ports reserved for the data parallel master process (empty if unset)."""
+    if "VLLM_DP_MASTER_PORT" not in os.environ:
+        return range(0)
+    dp_master_port = envs.VLLM_DP_MASTER_PORT
+    return range(dp_master_port, dp_master_port + 10)
+
+
 def get_open_port() -> int:
-    """
-    Get an open port for the vLLM process to listen on.
+    """Get an open port for the vLLM process to listen on.
     An edge case to handle, is when we run data parallel,
     we need to avoid ports that are potentially used by
     the data parallel master process.
     Right now we reserve 10 ports for the data parallel master
     process. Currently it uses 2 ports.
     """
-    if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_master_port = envs.VLLM_DP_MASTER_PORT
-        reserved_port_range = range(dp_master_port, dp_master_port + 10)
-        while True:
-            candidate_port = _get_open_port()
-            if candidate_port not in reserved_port_range:
-                return candidate_port
-    return _get_open_port()
+    reserved_port_range = _get_reserved_port_range()
+    port = _get_open_port()
+    if port in reserved_port_range:
+        port = _get_open_port(start_port=reserved_port_range.stop, max_attempts=1000)
+    return port
 
 
 def get_open_ports_list(count: int = 5) -> list[int]:
@@ -174,9 +212,14 @@ def get_open_ports_list(count: int = 5) -> list[int]:
     """
     ports_set = set[int]()
     if envs.VLLM_PORT is not None:
+        reserved_port_range = _get_reserved_port_range()
         next_port = envs.VLLM_PORT
         for _ in range(count):
             port = _get_open_port(start_port=next_port, max_attempts=1000)
+            if port in reserved_port_range:
+                port = _get_open_port(
+                    start_port=reserved_port_range.stop, max_attempts=1000
+                )
             ports_set.add(port)
             next_port = port + 1
         return list(ports_set)
@@ -272,6 +315,7 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
     Returns:
         A properly formatted ZMQ path string.
+
     """
     if port is None:
         return f"{scheme}://{host}"
@@ -281,6 +325,27 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
+# Apply the existing make_zmq_socket memory policy to every socket owner.
+_ZMQ_LARGE_BUFFER_SIZE = 512 * 1024**2
+_ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY = 32 * 1024**3
+_ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY = 16 * 1024**3
+
+
+def _get_zmq_socket_buffer_size() -> int:
+    """Choose the shared libzmq and inherited-listener buffer policy."""
+    mem = psutil.virtual_memory()
+    # For systems with substantial memory (>32GB total, >16GB available):
+    # - Set a large 0.5GB buffer to improve throughput
+    # For systems with less memory:
+    # - Use system default (-1) to avoid excessive memory consumption
+    if (
+        mem.total > _ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY
+        and mem.available > _ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY
+    ):
+        return _ZMQ_LARGE_BUFFER_SIZE
+    return -1
+
+
 def make_zmq_socket(
     ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
     path: str,
@@ -289,23 +354,19 @@ def make_zmq_socket(
     identity: bytes | None = None,
     linger: int | None = None,
     router_handover: bool = False,
+    listener: socket.socket | None = None,
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
-    """Make a ZMQ socket with the proper bind/connect semantics."""
+    """Make a ZMQ socket with the proper bind/connect semantics.
 
-    mem = psutil.virtual_memory()
+    When supplied, ``listener`` is detached and its fd moves to libzmq.
+    """
     socket = ctx.socket(socket_type)
-
-    # Calculate buffer size based on system memory
-    total_mem = mem.total / 1024**3
-    available_mem = mem.available / 1024**3
-    # For systems with substantial memory (>32GB total, >16GB available):
-    # - Set a large 0.5GB buffer to improve throughput
-    # For systems with less memory:
-    # - Use system default (-1) to avoid excessive memory consumption
-    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
+    buf_size = _get_zmq_socket_buffer_size()
 
     if bind is None:
         bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
+    if listener is not None and not bind:
+        raise ValueError("An inherited ZMQ listener requires bind=True")
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -328,6 +389,9 @@ def make_zmq_socket(
     if socket_type == zmq.XPUB:
         socket.setsockopt(zmq.XPUB_VERBOSE, True)
 
+    if listener is not None:
+        socket.setsockopt(zmq.USE_FD, listener.detach())
+
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
     scheme, host, _ = split_zmq_path(path)
@@ -342,6 +406,48 @@ def make_zmq_socket(
     return socket
 
 
+def make_zmq_listener(path: str, socket_type: Any) -> ZmqListener:
+    """Bind and listen on a raw socket for later ZMQ adoption."""
+    scheme, host, port = split_zmq_path(path)
+    if scheme == "tcp":
+        family = socket.AF_INET6 if is_valid_ipv6_address(host) else socket.AF_INET
+        bind_address: str | tuple[str, int] = (host, int(port))
+    elif scheme == "ipc":
+        family = socket.AF_UNIX
+        bind_address = path.removeprefix("ipc://")
+        os.makedirs(os.path.dirname(bind_address), exist_ok=True)
+    else:
+        raise ValueError(f"Cannot inherit a {scheme} ZMQ listener")
+
+    listener = socket.socket(family, socket.SOCK_STREAM)
+    bound = False
+    try:
+        buf_size = _get_zmq_socket_buffer_size()
+        if buf_size >= 0:
+            # Accepted stream sockets inherit these settings from the listener.
+            # ZMQ_USE_FD adopts this pre-created socket, so the policy belongs
+            # here as well as on the eventual libzmq socket.
+            if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buf_size)
+            if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buf_size)
+
+        listener.bind(bind_address)
+        bound = True
+        listener.listen()
+        if scheme == "tcp":
+            path = get_tcp_uri(host, listener.getsockname()[1])
+        return ZmqListener(address=path, socket=listener)
+    except BaseException:
+        listener.close()
+        # A failed bind leaves any existing pathname owned by its listener.
+        if scheme == "ipc" and bound:
+            assert isinstance(bind_address, str)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(bind_address)
+        raise
+
+
 @contextlib.contextmanager
 def zmq_socket_ctx(
     path: str,
@@ -351,8 +457,7 @@ def zmq_socket_ctx(
     identity: bytes | None = None,
     router_handover: bool = False,
 ) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
+    """Context manager for a ZMQ socket."""
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
         yield make_zmq_socket(

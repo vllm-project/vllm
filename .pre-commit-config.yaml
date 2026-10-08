@@ -29,12 +29,16 @@ repos:
   hooks:
   - id: markdownlint-cli2
     language_version: lts
-    args: [--fix]
-    exclude: (^|/)CLAUDE\.md$
+    args: [--config, tools/pre_commit/.markdownlint.yaml, --fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
   - id: actionlint
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
+  hooks:
+  - id: shellcheck
+    args: ["-s", "bash", "--format=gcc", "--rcfile=tools/pre_commit/.shellcheckrc"]
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.11.1
   hooks:
@@ -126,7 +130,6 @@ repos:
         -c, requirements/xpu.txt,
         -o, requirements/test/xpu.txt,
         --index-strategy, unsafe-best-match,
-        --torch-backend, xpu,
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
@@ -166,34 +169,43 @@ repos:
     language: python
     entry: python tools/pre_commit/generate_nightly_torch_test.py
     files: ^requirements/test/cuda\.(in|txt)$
-  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.10
-    entry: python tools/pre_commit/mypy.py "3.10"
-    <<: &mypy_common
-      language: python
-      types_or: [python, pyi]
-      require_serial: true
-      additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
-  - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.11
+  - id: check-label-rules
+    name: Check auto-label rules still match real files
+    language: python
+    entry: python tools/pre_commit/check_label_rules.py
+    files: ^\.github/mergify\.yml$
+    pass_filenames: false
+    additional_dependencies: [PyYAML, regex]
+  - id: check-agent-files
+    name: Check agent instruction files and skills
+    language: python
+    entry: python tools/pre_commit/check_agent_files.py
+    files: ^(\.agents/|\.claude/|(.*/)?(AGENTS|CLAUDE)\.md$|tools/pre_commit/check_agent_files\.py$)
+    pass_filenames: false
+    additional_dependencies: [PyYAML, regex]
+    verbose: true # `note:` lines are advisory, so the hook passes
+  - id: check-buildkite-step-keys
+    name: Check every Buildkite step declares an explicit key
+    language: python
+    entry: python tools/pre_commit/check_buildkite_step_keys.py
+    files: ^\.buildkite/.*\.ya?ml$
+    pass_filenames: false
+    additional_dependencies: [PyYAML]
+  - id: check-test-tethering
+    name: Check new tests are wired into Buildkite CI
+    language: python
+    entry: python tools/pre_commit/check_test_tethering.py
+    files: ^(tests/.*\.py|\.buildkite/(test_areas|hardware_tests|intel_jobs)/.*\.yaml|\.buildkite/(test-amd|ci_config[^/]*)\.yaml|tools/pre_commit/test_tethering_allowlist\.txt)$
+    additional_dependencies: [PyYAML, regex]
+    verbose: true # full-scan `note:` lines are advisory, so the hook passes
+    require_serial: true # one full scan, not one per pre-commit file batch
+  - id: mypy # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for the oldest supported Python version
     entry: python tools/pre_commit/mypy.py "3.11"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
-  - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.12
-    entry: python tools/pre_commit/mypy.py "3.12"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
-  - id: mypy-3.13 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.13
-    entry: python tools/pre_commit/mypy.py "3.13"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
-  - id: shellcheck
-    name: Lint shell scripts
-    entry: tools/pre_commit/shellcheck.sh
-    language: script
-    types: [shell]
+    language: python
+    types_or: [python, pyi]
+    require_serial: true
+    additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh
@@ -279,7 +291,7 @@ repos:
     pass_filenames: false
     require_serial: true
     stages: [pre-commit] # Only run locally as Buildkite will cover this
-    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+    files: ^rust/(Cargo\.toml|proto/Cargo\.toml|src/.*/Cargo\.toml)$
   - id: rust-cargo-sort
     name: Rust - Sort Cargo manifest sections
     entry: tools/pre_commit/rust-check.sh sort --workspace
@@ -287,7 +299,7 @@ repos:
     pass_filenames: false
     require_serial: true
     stages: [pre-commit] # Only run locally as Buildkite will cover this
-    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+    files: ^rust/(Cargo\.toml|proto/Cargo\.toml|src/.*/Cargo\.toml)$
   - id: rust-cargo-fmt
     name: Rust - Format code
     entry: tools/pre_commit/rust-check.sh fmt

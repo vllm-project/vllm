@@ -5,12 +5,11 @@ import math
 import random
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn.functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
@@ -18,6 +17,8 @@ from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
 from vllm.v1.attention.ops.prefix_prefill import context_attention_fwd
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
@@ -321,6 +322,63 @@ def test_contexted_kv_attention(
     output_ref = output_ref.permute(1, 0, 2).contiguous()
     atol = 1e-3 if "fp8" in kv_cache_dtype else 1e-4
     torch.testing.assert_close(output, output_ref, atol=atol, rtol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
+@pytest.mark.parametrize("sliding_window", [None, 1, 4])
+@pytest.mark.parametrize("query_len", [1, 3])
+@torch.inference_mode()
+def test_rocm_backend_sliding_window_includes_boundary_token(
+    sliding_window: int | None, query_len: int
+) -> None:
+    """A window of W must include the current token and W - 1 preceding tokens."""
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
+
+    device, dtype = "cuda:0", torch.float16
+    num_heads, head_size, seq_len = 4, 128, 8
+    query = torch.zeros(query_len, num_heads, head_size, dtype=dtype, device=device)
+    key = torch.zeros(seq_len, 1, head_size, dtype=dtype, device=device)
+    values = torch.arange(1, seq_len + 1, dtype=dtype, device=device)
+    value = values[:, None, None].expand_as(key)
+    kv_cache = torch.zeros(2, 1, 16, head_size, dtype=dtype, device=device)
+    _, value_cache = PagedAttention.split_kv_cache(kv_cache, 1, head_size)
+    value_cache[..., :seq_len] = value.permute(1, 2, 0)
+    scale = torch.tensor(1.0, device=device)
+    metadata = SimpleNamespace(
+        use_cascade=False,
+        num_actual_tokens=query_len,
+        query_start_loc=torch.tensor([0, query_len], dtype=torch.int32, device=device),
+        seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
+        max_query_len=query_len,
+        max_seq_len=seq_len,
+        block_table=torch.zeros(1, 1, dtype=torch.int32, device=device),
+        causal=True,
+    )
+    impl = RocmAttentionImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=sliding_window,
+        kv_cache_dtype="auto",
+    )
+    output = torch.empty_like(query)
+    impl.forward(
+        SimpleNamespace(_k_scale=scale, _v_scale=scale),
+        query,
+        key[-query_len:],
+        value[-query_len:],
+        kv_cache.transpose(0, 1),
+        metadata,
+        output,
+    )
+    mask = create_causal_attention_mask_for_sdpa(
+        [query_len], [seq_len], sliding_window or 0, device=device, dtype=dtype
+    )
+    expected = (mask.float().softmax(dim=-1) @ values.float())[:, None, None]
+    torch.testing.assert_close(output, expected.to(dtype).expand_as(output))
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -895,21 +953,15 @@ def test_contexted_kv_attention_alibi(
             query_len, seq_len, alibi_slopes, device, dtype
         )
 
-        # Compute attention. On ROCm we force use of the Math SDPA backend rather than
-        # the Flash or Mem-Efficient backends for increased numerical accuracy
-        if current_platform.is_rocm():
-            sdpa_context = sdpa_kernel(SDPBackend.MATH)
-        else:
-            sdpa_context = nullcontext()
-        with sdpa_context:
-            out = F.scaled_dot_product_attention(
-                q_sdpa,
-                k_sdpa,
-                v_sdpa,
-                attn_mask=alibi_mask,
-                dropout_p=0.0,
-                scale=scale,
-            )
+        # Compute attention
+        out = F.scaled_dot_product_attention(
+            q_sdpa,
+            k_sdpa,
+            v_sdpa,
+            attn_mask=alibi_mask,
+            dropout_p=0.0,
+            scale=scale,
+        )
 
         # Reshape output back to [query_len, num_heads, head_size]
         out = out.view(num_heads, query_len, head_size).permute(1, 0, 2)
@@ -987,29 +1039,39 @@ def test_contexted_kv_attention_alibi_f32(
     )
 
 
-@pytest.mark.parametrize("head_size", [128])
+# Hybrid mamba + full-attention models get a non-power-of-2 attention page.
+NONSTANDARD_BLOCK_SIZE_SHAPES = [
+    (64, 1, 128, 544),
+    (8, 4, 256, 1040),
+    (8, 4, 256, 1056),
+]
+
+
+@pytest.mark.parametrize(
+    "num_heads,num_queries_per_kv,head_size,block_size", NONSTANDARD_BLOCK_SIZE_SHAPES
+)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("op", OPS)
 @torch.inference_mode()
 def test_qwen3_nonstandard_block_size(
+    num_heads: int,
+    num_queries_per_kv: int,
     head_size: int,
+    block_size: int,
     dtype: torch.dtype,
     device: str,
     op: Callable,
 ) -> None:
-    """
-    A separate test function specifically added
-    for Qwen3-Next-80B (Block Size 544).
-    """
+    """Non-power-of-2 pages must match, even when a tile straddles a page."""
     if not current_platform.is_rocm():
-        pytest.skip("544 block size optimization is only for ROCm.")
+        pytest.skip("Non-power-of-2 block sizes are only exercised on ROCm CI.")
 
     test_contexted_kv_attention(
-        num_heads=64,
-        num_queries_per_kv=1,
+        num_heads=num_heads,
+        num_queries_per_kv=num_queries_per_kv,
         head_size=head_size,
-        block_size=544,
+        block_size=block_size,
         sliding_window=0,
         dtype=dtype,
         kv_cache_dtype="auto",

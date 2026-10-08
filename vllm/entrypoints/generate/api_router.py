@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 
@@ -53,6 +53,12 @@ def register_generate_api_routers(app: FastAPI):
 
     register_generative_scoring_api_router(app)
 
+    from .structured_decisions.api_router import (
+        register_structured_decisions_api_router,
+    )
+
+    register_structured_decisions_api_router(app)
+
 
 async def init_generate_state(
     engine_client: "EngineClient",
@@ -60,6 +66,7 @@ async def init_generate_state(
     args: "Namespace",
     request_logger: RequestLogger | None,
     supported_tasks: tuple["SupportedTask", ...],
+    default_chat_template_kwargs: dict[str, Any],
 ):
     from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
     from vllm.entrypoints.chat_utils import load_chat_template
@@ -79,12 +86,6 @@ async def init_generate_state(
             CohereServingChatV2 = None  # type: ignore[assignment,misc]
     else:
         CohereServingChatV2 = None  # type: ignore[assignment,misc]
-
-    from vllm.entrypoints.mcp.tool_server import (
-        DemoToolServer,
-        MCPToolServer,
-        ToolServer,
-    )
     from vllm.entrypoints.openai.chat_completion.batch_serving import (
         OpenAIServingChatBatch,
     )
@@ -100,33 +101,11 @@ async def init_generate_state(
         getattr(args, "fingerprint_value", None),
     )
 
-    if args.tool_server == "demo":
-        tool_server: ToolServer | None = DemoToolServer()
-        assert isinstance(tool_server, DemoToolServer)
-        await tool_server.init_and_validate()
-    elif args.tool_server:
-        tool_server = MCPToolServer()
-        await tool_server.add_tool_server(args.tool_server)
-    else:
-        tool_server = None
     resolved_chat_template = load_chat_template(args.chat_template)
 
-    # Fold the dedicated ``--cohere-format`` CLI flag into the renderer's
-    # default chat-template kwargs. The cohere renderer reads
-    # ``chat_template_kwargs["cohere_format"]`` to pick cmd3 vs cmd4
-    # rendering; making this a first-class flag keeps the right format
-    # discoverable for ``vllm serve --tokenizer-mode cohere`` users
-    # without forcing them to hand-construct a JSON dict for
-    # ``--default-chat-template-kwargs``. Per-request overrides still
-    # take precedence (see ``merge_kwargs`` in
-    # ``ChatCompletionRequest.build_chat_params``).
-    default_chat_template_kwargs = dict(args.default_chat_template_kwargs or {})
-    if getattr(args, "cohere_format", None):
-        default_chat_template_kwargs.setdefault("cohere_format", args.cohere_format)
-
-    # Render endpoints are always backed by OnlineRenderer so that
-    # /v1/chat/completions/render and /v1/completions/render work on both
-    # generate-mode and render-only servers. Created in init_app_state.
+    # Render endpoints are always backed by OnlineRenderer so that chat,
+    # completion, and Responses rendering work on both generate-mode and
+    # render-only servers. Created in init_app_state.
 
     state.openai_serving_responses = (
         OpenAIServingResponses(
@@ -139,10 +118,12 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
-            tool_server=tool_server,
+            tool_strict_level=args.tool_strict_level,
+            tool_server=state.tool_server,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            enable_per_request_metrics=args.enable_per_request_metrics,
             enable_log_outputs=args.enable_log_outputs,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
@@ -163,6 +144,7 @@ async def init_generate_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
@@ -204,10 +186,12 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
+            tool_strict_level=args.tool_strict_level,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             default_chat_template_kwargs=default_chat_template_kwargs,
+            disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
         )
         if "generate" in supported_tasks
         else None
@@ -224,6 +208,7 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
+            tool_strict_level=args.tool_strict_level,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
@@ -240,4 +225,32 @@ async def init_generate_state(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
+    )
+
+    from .structured_decisions.serving import ServingStructuredDecisions
+    from .structured_decisions.strategies import ReadContext, select_read_strategy
+
+    strategy = None
+    if "generate" in supported_tasks:
+        try:
+            strategy_cls = select_read_strategy(engine_client.model_config)
+            strategy = strategy_cls(
+                ReadContext(
+                    engine_client=engine_client,
+                    online_renderer=state.online_renderer,
+                    chat_template=resolved_chat_template,
+                    chat_template_content_format=args.chat_template_content_format,
+                    default_chat_template_kwargs=default_chat_template_kwargs,
+                )
+            )
+        except ValueError:
+            strategy = None
+    state.serving_structured_decisions = (
+        ServingStructuredDecisions(
+            state.openai_serving_models,
+            strategy,
+            request_logger=request_logger,
+        )
+        if strategy is not None
+        else None
     )
