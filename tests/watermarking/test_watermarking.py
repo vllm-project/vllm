@@ -1667,7 +1667,7 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
         context_width = 2
 
         @staticmethod
-        def try_sample_block(*args):
+        def _try_sample_block(*args, **kwargs):
             return None
 
         @staticmethod
