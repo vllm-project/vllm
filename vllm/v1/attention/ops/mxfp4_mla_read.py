@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton read-side unpack for the mxfp4_mla KV cache.
 
-Unpacks a gathered tile of packed rows to bf16 once and hands it to the
-existing ``tl.dot`` calls. On gfx950 ``tl.dot_scaled`` lowers to the same
-convert plus a bf16 MFMA, so it would only convert twice.
+A row is packed data then scales, ``row_bytes(d) == d // 2 + d // 32``.
+Unpacks a gathered tile to bf16 once and hands it to the existing ``tl.dot``
+calls. On gfx950 ``tl.dot_scaled`` lowers to the same convert plus a bf16
+MFMA, so it would only convert twice.
 """
 
 from __future__ import annotations

@@ -3,8 +3,8 @@
 """Triton store kernel for the mxfp4_mla KV cache.
 
 ``concat_and_cache_mla`` takes a single per-tensor scale, so it cannot write
-MXFP4's per-group scales. Rows are addressed flat as ``slot * row_bytes``,
-matching the read kernel's ``slot * kv_stride_n``.
+MXFP4's per-group scales. A row is packed data then scales,
+``row_bytes(d) == d // 2 + d // 32``, addressed as ``slot * row_bytes``.
 """
 
 from __future__ import annotations

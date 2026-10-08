@@ -6,7 +6,8 @@ The reference (:mod:`vllm.v1.attention.ops.mxfp4_mla`) is itself bit-exact
 against AITER's ``per_1x32_f4_quant``, so agreement here chains the kernel to
 the ecosystem reference.
 
-Requires a GPU. Run with::
+Kernel tests require a GPU. ``test_triton_constexprs_match_reference`` does not.
+Run the kernel tests with::
 
     docker run --rm --entrypoint python3 --device /dev/kfd --device /dev/dri \\
       --group-add video --security-opt seccomp=unconfined \\
@@ -28,7 +29,7 @@ def _on_rocm_gpu() -> bool:
     return current_platform.is_rocm() and torch.cuda.is_available()
 
 
-pytestmark = pytest.mark.skipif(not _on_rocm_gpu(), reason="mxfp4_mla is ROCm-only")
+_rocm_gpu = pytest.mark.skipif(not _on_rocm_gpu(), reason="mxfp4_mla is ROCm-only")
 
 LATENT = 512
 GROUP = 32
@@ -49,12 +50,41 @@ def _latent(rows: int, dim: int = LATENT, seed: int = 0) -> torch.Tensor:
     return x
 
 
+def _constexpr_value(value):
+    # No active Triton driver: ``tl.constexpr`` is a placeholder that returns
+    # the raw Python value. With Triton, it is a constexpr and ``.value`` is
+    # the number the kernel specializes on.
+    return getattr(value, "value", value)
+
+
+def test_triton_constexprs_match_reference():
+    """The store kernel's constexprs are the reference values, not copies."""
+    from vllm.v1.attention.ops import mxfp4_mla_store as store
+
+    assert _constexpr_value(store._E2M1_MAX) == mx.E2M1_MAX
+    assert _constexpr_value(store._E8M0_BIAS) == mx.E8M0_BIAS == 127
+    got = tuple(
+        _constexpr_value(midpoint)
+        for midpoint in (
+            store._M0,
+            store._M1,
+            store._M2,
+            store._M3,
+            store._M4,
+            store._M5,
+            store._M6,
+        )
+    )
+    assert got == mx._E2M1_MIDPOINTS
+
+
 def _empty_cache(num_slots: int) -> torch.Tensor:
     # 0xCD rather than zeros: a byte the kernel never legitimately writes for
     # the fixtures below, so untouched regions are visibly untouched.
     return torch.full((num_slots, ROW), 0xCD, dtype=torch.uint8, device="cuda")
 
 
+@_rocm_gpu
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_matches_reference_bit_exactly(seed: int):
     num = 37  # deliberately not a multiple of any tile size
@@ -74,6 +104,7 @@ def test_matches_reference_bit_exactly(seed: int):
         assert torch.equal(got[slot, 256:], want_scales[i]), f"scales row {i}"
 
 
+@_rocm_gpu
 def test_negative_slots_are_skipped():
     """PAD_SLOT_ID rows must leave the cache untouched, not scribble at -1."""
     x = _latent(8, seed=3)
@@ -91,6 +122,7 @@ def test_negative_slots_are_skipped():
             assert (got[slot] == 0xCD).all(), f"slot {slot} should be untouched"
 
 
+@_rocm_gpu
 def test_out_of_range_slots_are_skipped():
     x = _latent(4, seed=4)
     slots = torch.tensor([0, 99, 1, 4])  # 99 and 4 are past a 4-slot cache
@@ -103,6 +135,7 @@ def test_out_of_range_slots_are_skipped():
     assert (got[2] == 0xCD).all() and (got[3] == 0xCD).all()
 
 
+@_rocm_gpu
 def test_writes_stay_inside_their_row():
     """One token into the middle of a cache must not touch its neighbours."""
     x = _latent(1, seed=5)
@@ -117,6 +150,7 @@ def test_writes_stay_inside_their_row():
         assert (got[other] == 0xCD).all(), f"row {other} was disturbed"
 
 
+@_rocm_gpu
 def test_roundtrip_through_the_reference_reader():
     """Store with the kernel, read back with the reference: values must match."""
     num = 24
@@ -134,6 +168,7 @@ def test_roundtrip_through_the_reference_reader():
     assert torch.equal(values, want)
 
 
+@_rocm_gpu
 def test_zero_latent_writes_zero_codes_and_unit_scale():
     x = torch.zeros(1, LATENT, dtype=torch.bfloat16)
     cache = _empty_cache(1)
@@ -144,6 +179,7 @@ def test_zero_latent_writes_zero_codes_and_unit_scale():
     assert (got[0, 256:] == mx.E8M0_BIAS).all()
 
 
+@_rocm_gpu
 def test_no_element_saturates():
     """RoundUp's guarantee, checked on what the kernel actually wrote.
 
@@ -168,6 +204,7 @@ def test_no_element_saturates():
     assert (peak <= mx.E2M1_MAX + 1e-6).all(), peak.max()
 
 
+@_rocm_gpu
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 def test_accepts_the_model_dtypes(dtype: torch.dtype):
     x = _latent(8, seed=8).to(dtype)
@@ -180,6 +217,7 @@ def test_accepts_the_model_dtypes(dtype: torch.dtype):
     assert torch.equal(got[:, 256:], want_scales)
 
 
+@_rocm_gpu
 def test_non_contiguous_latent_is_handled():
     """The latent arrives as a slice of a larger buffer in the real call path."""
     big = _latent(16, dim=LATENT * 2, seed=9)
@@ -197,6 +235,7 @@ def test_non_contiguous_latent_is_handled():
     assert torch.equal(got[:, 256:], want_scales)
 
 
+@_rocm_gpu
 def test_empty_batch_is_a_noop():
     cache = _empty_cache(4)
     _store()(
@@ -207,6 +246,7 @@ def test_empty_batch_is_a_noop():
     assert (cache.cpu() == 0xCD).all()
 
 
+@_rocm_gpu
 def test_paged_cache_view_and_scale_view_agree():
     """Write flat, read the scales through the aliasing view the kernel uses."""
     num_blocks, block_size = 3, 8
@@ -223,6 +263,7 @@ def test_paged_cache_view_and_scale_view_agree():
     assert torch.equal(view.reshape(num, -1), want_scales)
 
 
+@_rocm_gpu
 def test_token_offset_does_not_overflow_int32():
     """A single launch may cover more than 2**31 source elements.
 
