@@ -16,6 +16,7 @@ The screen reads half the bytes of a BF16 head.
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -219,6 +220,9 @@ class ScreenedGreedyHead:
             current_platform.is_cuda() and current_platform.has_device_capability(89)
         ):
             reason = "an FP8-capable CUDA GPU (compute capability 8.9+)"
+        elif envs.VLLM_BATCH_INVARIANT:
+            # Whether a request is screened depends on the rest of its batch.
+            reason = "VLLM_BATCH_INVARIANT to be off"
         elif (
             type(sampler) is not Sampler
             or sampler.compute_nans
