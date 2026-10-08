@@ -596,6 +596,195 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+NOPE_ONLY_HEAD_DIM = 512
+
+
+def _nope_only_ragged_inputs(
+    kv_lens: list[int], num_heads: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build a GLM-like 512+0 NoPE decode batch with ragged KV segments."""
+    num_kv = 4096
+    kv = (
+        torch.randn(num_kv, NOPE_ONLY_HEAD_DIM, dtype=torch.bfloat16, device=device)
+        * 0.125
+    )
+    q = (
+        torch.randn(
+            len(kv_lens),
+            num_heads,
+            NOPE_ONLY_HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    rows = [torch.randperm(num_kv)[:length].tolist() for length in kv_lens]
+    indices, indptr = _ragged_from_rows(rows, device)
+    return q, kv, indices, indptr
+
+
+# Lengths below the split count leave splits empty; non-multiples force a tail.
+_NOPE_ONLY_KV_LENS = [0, 1, 3, 37, 129, 2048]
+
+
+@requires_split_decode_arch
+@pytest.mark.parametrize("num_splits", [2, 32])
+@pytest.mark.parametrize("with_sink", [True, False])
+@torch.inference_mode()
+def test_sparse_attn_decode_bf16_split_k_matches_ragged(
+    num_splits: int, with_sink: bool
+) -> None:
+    """Split-K decode must reproduce the single-workgroup ragged kernel."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_bf16_triton,
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    device = torch.device("cuda")
+    set_random_seed(0)
+    num_heads = 16
+    q, kv, indices, indptr = _nope_only_ragged_inputs(
+        _NOPE_ONLY_KV_LENS, num_heads, device
+    )
+    attn_sink = (
+        torch.randn(num_heads, dtype=torch.float32, device=device)
+        if with_sink
+        else None
+    )
+    scale = NOPE_ONLY_HEAD_DIM**-0.5
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_ONLY_HEAD_DIM,
+        rope_head_dim=0,
+    )
+    actual = _rocm_sparse_attn_decode_ragged_bf16_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_ONLY_HEAD_DIM,
+        rope_head_dim=0,
+        num_splits=num_splits,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+def _sparse_prefill_ragged_inputs(nope_dim: int, rope_dim: int) -> dict:
+    device = torch.device("cuda")
+    set_random_seed(7)
+    head_dim = nope_dim + rope_dim
+    return dict(
+        q=torch.randn(3, 3, head_dim, dtype=torch.bfloat16, device=device) * 0.125,
+        kv=torch.randn(5, head_dim, dtype=torch.bfloat16, device=device) * 0.125,
+        indices=torch.tensor([0, 2, 1, 3, 4], dtype=torch.int32, device=device),
+        indptr=torch.tensor([0, 2, 5, 5], dtype=torch.int32, device=device),
+        scale=head_dim**-0.5,
+        attn_sink=torch.tensor([-0.25, 0.0, 0.25], dtype=torch.float32, device=device),
+        nope_head_dim=nope_dim,
+        rope_head_dim=rope_dim,
+    )
+
+
+# 448+64 is DeepSeek V4/V4.1, 512+64 is V3.2, and 256+0 stands in for the
+# NoPE-only layouts where the destination spans the whole head dim.
+SPARSE_PREFILL_DIMS = [(NOPE_HEAD_DIM, ROPE_HEAD_DIM), (512, 64), (256, 0)]
+
+
+@pytest.mark.parametrize(("nope_dim", "rope_dim"), SPARSE_PREFILL_DIMS)
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_matches_allocated(
+    nope_dim: int, rope_dim: int
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(nope_dim, rope_dim)
+    allocated = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)
+
+    q = kwargs["q"]
+    dest = torch.empty(q.shape[0], q.shape[1], nope_dim, dtype=q.dtype, device=q.device)
+    returned = _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    assert returned is dest
+    torch.testing.assert_close(dest, allocated[..., :nope_dim], atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize(("nope_dim", "rope_dim"), SPARSE_PREFILL_DIMS)
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_view_leaves_neighbors_untouched(
+    nope_dim: int, rope_dim: int
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(nope_dim, rope_dim)
+    q = kwargs["q"]
+    num_queries, num_heads = q.shape[0], q.shape[1]
+
+    buffer = torch.full(
+        (num_queries + 4, num_heads + 2, nope_dim),
+        -7.0,
+        dtype=q.dtype,
+        device=q.device,
+    )
+    dest = buffer[2 : 2 + num_queries, :num_heads]
+    assert not dest.is_contiguous()
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)[..., :nope_dim]
+    torch.testing.assert_close(dest, expected, atol=0.0, rtol=0.0)
+
+    untouched = torch.ones_like(buffer, dtype=torch.bool)
+    untouched[2 : 2 + num_queries, :num_heads] = False
+    assert torch.all(buffer[untouched] == -7.0)
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16])
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_casts_to_dest_dtype(
+    out_dtype: torch.dtype,
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(512, 64)
+    q = kwargs["q"]
+    dest = torch.empty(q.shape[0], q.shape[1], 512, dtype=out_dtype, device=q.device)
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)[..., :512]
+    assert dest.dtype == out_dtype
+    torch.testing.assert_close(dest.float(), expected.float(), atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+def test_sparse_attn_prefill_head_dim_wide_out_keeps_rope_rows() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(NOPE_HEAD_DIM, ROPE_HEAD_DIM)
+    q = kwargs["q"]
+    dest = torch.empty_like(q)
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _ref_sparse_prefill_ragged(
+        q, kwargs["kv"], [[0, 2], [1, 3, 4], []], kwargs["scale"], kwargs["attn_sink"]
+    )
+    torch.testing.assert_close(dest, expected, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.parametrize(
     ("num_queries", "on_gfx950", "expected"),
     [(1023, True, False), (1024, True, True), (1024, False, False)],
@@ -718,10 +907,11 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
     output = torch.empty_like(q)
     dense_fallback_calls = 0
 
-    def fake_dense_fallback(*args, **kwargs):
+    def fake_dense_fallback(*args, out, **kwargs):
         nonlocal dense_fallback_calls
         dense_fallback_calls += 1
-        return torch.zeros_like(q)
+        out.zero_()
+        return out
 
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
     monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: None)
@@ -996,6 +1186,21 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
     assert mod._decode_gfx950_num_splits(1, 1, 128, 8192) == 32
     assert mod._decode_gfx950_num_splits(17, 1, 128, 32) == 4
     assert mod._decode_gfx950_num_splits(512, 1, 128, 7812) == 1
+    assert mod._decode_gfx950_num_splits(4, 1, 2048.0, 0.0, 32) == 32
+
+
+def test_sparse_decode_bf16_num_splits_floor_and_tile_clamp(monkeypatch) -> None:
+    """Short rows skip splitting, and splits never exceed the tiles they walk."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    monkeypatch.setattr(mod, "_decode_num_splits", lambda *args: 32)
+    monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *args: 32)
+
+    floor = mod._SPARSE_DECODE_BF16_MIN_SPLIT_LEN
+    block_k = mod._SPARSE_DECODE_BF16_BLOCK_K
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, floor - 1) == 1
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, floor) == floor // block_k
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, 2048) == 32
 
 
 @requires_split_decode_arch
