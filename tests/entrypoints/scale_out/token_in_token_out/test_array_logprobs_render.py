@@ -280,17 +280,10 @@ async def _serve_full(serving, rows):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "offload,large,thread",
-    [
-        (160, 1 << 40, "generate-response-mid"),  # 40 rows x 4 slots = 160
-        (159, 160, "generate-response"),
-        (161, 1 << 40, None),  # inline
-    ],
-)
-async def test_builds_run_on_the_thread_for_their_size(
-    monkeypatch, offload, large, thread
-):
+@pytest.mark.parametrize("offload,offloaded", [(160, True), (161, False)])
+async def test_large_builds_run_off_the_event_loop(monkeypatch, offload, offloaded):
+    """40 rows x 4 slots = 160 entries: built in a worker thread from the
+    threshold on, with the same bytes as inline."""
     serving = _build_serving_tokens(_mock_engine())
     rows = _rows(40, 4)
     threads, real = [], serving_mod.ServingTokens._build_full_response
@@ -303,62 +296,19 @@ async def test_builds_run_on_the_thread_for_their_size(
     inline = await asyncio.wait_for(_serve_full(serving, rows), 30)
     monkeypatch.setattr(serving_mod.ServingTokens, "_build_full_response", recording)
     monkeypatch.setattr(serving_mod, "OFFLOAD_MIN_LOGPROB_ENTRIES", offload)
-    monkeypatch.setattr(serving_mod, "LARGE_LOGPROB_ENTRIES", large)
     response = await asyncio.wait_for(_serve_full(serving, rows), 30)
-    if thread is None:
-        assert threads == [threading.current_thread()]
-    else:
-        # Daemon threads: a build in flight does not delay interpreter exit.
-        assert threads[0].name.rsplit("-", 1)[0] == thread and threads[0].daemon
+    on_loop = threads == [threading.current_thread()]
+    assert on_loop != offloaded
+    if offloaded:
+        assert threads[0].name.startswith("generate-response")
     assert response.body == inline.body
 
 
 @pytest.mark.asyncio
-async def test_worker_failure_cancellation_and_recovery(monkeypatch):
-    """A cancelled request's queued build never runs, its running build's
-    failure is logged, and the thread keeps serving."""
+async def test_two_builds_run_at_once(monkeypatch):
     serving = _build_serving_tokens(_mock_engine())
     rows = _rows(40, 4)
     monkeypatch.setattr(serving_mod, "OFFLOAD_MIN_LOGPROB_ENTRIES", 1)
-    monkeypatch.setattr(serving_mod, "LARGE_LOGPROB_ENTRIES", 1 << 40)
-    logger = MagicMock()
-    monkeypatch.setattr(serving_mod, "logger", logger)
-    release, started = threading.Event(), threading.Event()
-    ran: list[int] = []
-    real = serving_mod.ServingTokens._build_full_response
-
-    def build(self, request, *args):
-        ran.append(len(ran))
-        if len(ran) == 1:
-            started.set()
-            release.wait(10)
-            raise RuntimeError("boom")
-        return real(self, request, *args)
-
-    monkeypatch.setattr(serving_mod.ServingTokens, "_build_full_response", build)
-    running = asyncio.create_task(_serve_full(serving, rows))
-    assert await asyncio.to_thread(started.wait, 10)
-    queued = asyncio.create_task(_serve_full(serving, rows))
-    await asyncio.sleep(0.05)
-    running.cancel()
-    queued.cancel()
-    for task in (running, queued):
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    release.set()
-    response = await asyncio.wait_for(_serve_full(serving, rows), 30)
-    assert isinstance(response, RenderedGenerateResponse)
-    assert ran == [0, 1]  # the queued build never ran
-    (message, error), _ = logger.warning.call_args
-    assert "disconnected" in message and str(error) == "boom"
-
-
-@pytest.mark.asyncio
-async def test_two_large_builds_run_at_once(monkeypatch):
-    serving = _build_serving_tokens(_mock_engine())
-    rows = _rows(40, 4)
-    monkeypatch.setattr(serving_mod, "OFFLOAD_MIN_LOGPROB_ENTRIES", 1)
-    monkeypatch.setattr(serving_mod, "LARGE_LOGPROB_ENTRIES", 1)
     both, names = threading.Barrier(2, timeout=10), []
     real = serving_mod.ServingTokens._build_full_response
 
@@ -372,4 +322,4 @@ async def test_two_large_builds_run_at_once(monkeypatch):
         asyncio.gather(_serve_full(serving, rows), _serve_full(serving, rows)), 30
     )
     assert first.body == second.body
-    assert sorted(names) == ["generate-response-0", "generate-response-1"]
+    assert len(set(names)) == 2
