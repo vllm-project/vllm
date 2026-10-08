@@ -3619,6 +3619,7 @@ def test_hisparse_resident_prefill_uses_attention_block_stride():
         all_context_pages_resident=True,
         view=SimpleNamespace(block_size=64, attention_block_stride=832),
         block_table=torch.tensor([[3]], dtype=torch.int32),
+        batch_block_table=lambda: torch.tensor([[3]], dtype=torch.int32),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache_handle]
@@ -4035,6 +4036,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
         ),
         view=SimpleNamespace(cache=resident_cache, block_size=1),
         block_table=resident_block_table,
+        batch_block_table=lambda: resident_block_table,
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -4075,6 +4077,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     cache = SimpleNamespace(
         view=SimpleNamespace(cache=resident_cache, block_size=4),
         block_table=torch.tensor([[2, 3]], dtype=torch.int32),
+        batch_block_table=lambda: torch.tensor([[2, 3]], dtype=torch.int32),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
