@@ -23,7 +23,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 
 from .protocol import ReadPromptRequest
-from .question_types import LABELS, Question, StructuredDecisionError, label_softmax
+from .question_types import (
+    LABELS,
+    QUESTION_TYPES,
+    Question,
+    StructuredDecisionError,
+    label_softmax,
+)
 
 
 @dataclass
@@ -72,32 +78,28 @@ class ReadStrategy(ABC):
         """One read per question, in order."""
 
 
-def reply_tail(
-    tokenizer: TokenizerLike, prompt_ids: Sequence[int]
-) -> tuple[list[int], str]:
-    """The prompt's ids after its last added token, and the text the reply's
-    first token continues."""
+def reply_label_ids(
+    tokenizer: TokenizerLike,
+    prompt_ids: Sequence[int],
+    labels: Sequence[str] = LABELS,
+) -> tuple[list[int], list[int]]:
+    """The prompt's ids after its last added token, and the token each of
+    ``labels`` adds after them as the first token of the reply. Raises
+    ValueError if a label is not one distinct token there."""
     added = set(tokenizer.get_added_vocab().values())
     start = max((i + 1 for i, t in enumerate(prompt_ids) if t in added), default=0)
     tail = list(prompt_ids[start:])
-    return tail, tokenizer.decode(tail)
-
-
-def label_token_ids(
-    tokenizer: TokenizerLike, tail: list[int], tail_text: str, labels: Sequence[str]
-) -> list[int]:
-    """The token each label adds after ``tail`` as the first token of the
-    reply. Raises ValueError if a label is not one distinct token there."""
+    text = tokenizer.decode(tail)
     ids: list[int] = []
     for label in labels:
-        extended = tokenizer.encode(tail_text + label, add_special_tokens=False)
+        extended = tokenizer.encode(text + label, add_special_tokens=False)
         if extended[:-1] != tail or extended[-1] in ids:
             raise ValueError(
                 f"label {label!r} is not one distinct token after this model's "
                 "chat prompt"
             )
         ids.append(extended[-1])
-    return ids
+    return tail, ids
 
 
 class NextTokenStrategy(ReadStrategy):
@@ -109,7 +111,6 @@ class NextTokenStrategy(ReadStrategy):
     def __init__(self, context: ReadContext):
         super().__init__(context)
         tokenizer = context.online_renderer.renderer.get_tokenizer()
-        self._tokenizer = tokenizer
         probe = tokenizer.apply_chat_template(
             [{"role": "user", "content": "x"}],
             **{
@@ -125,37 +126,14 @@ class NextTokenStrategy(ReadStrategy):
             probe = tokenizer.encode(probe, add_special_tokens=False)
         # Every prompt ends with the same generation prompt, so a label's token
         # is the same for every question.
-        self.tail, self.tail_text = reply_tail(tokenizer, probe)
-        # A choice labels its options A to Z, so fail at startup when one of
-        # those is not one token here.
-        label_token_ids(tokenizer, self.tail, self.tail_text, LABELS)
-        self._label_ids: dict[str, int] = {}
+        self.tail, _ = reply_label_ids(tokenizer, probe, ())
+        self.label_ids: dict[str, int] = {}
+        for qtype in QUESTION_TYPES.values():
+            _, ids = reply_label_ids(tokenizer, probe, qtype.label_set)
+            self.label_ids.update(zip(qtype.label_set, ids))
 
     def limits(self) -> DecisionLimits:
         return DecisionLimits(max_questions=64, max_options=len(LABELS))
-
-    def label_ids(self, question: Question) -> list[int]:
-        """The token id of each of the question's labels."""
-        ids = []
-        for label in question.labels:
-            token = self._label_ids.get(label)
-            if token is None:
-                try:
-                    token = label_token_ids(
-                        self._tokenizer, self.tail, self.tail_text, (label,)
-                    )[0]
-                except ValueError:
-                    raise StructuredDecisionError(
-                        f"label {label!r} is not one token after this model's "
-                        "chat prompt"
-                    ) from None
-                self._label_ids[label] = token
-            ids.append(token)
-        if len(set(ids)) != len(ids):
-            raise StructuredDecisionError(
-                f"question {question.id!r}: two labels read as the same token"
-            )
-        return ids
 
     def _read_request(
         self, chat_template_kwargs: dict[str, Any] | None
@@ -207,7 +185,7 @@ class NextTokenStrategy(ReadStrategy):
                     "these chat options end the prompt differently, so the "
                     "labels' tokens are unknown"
                 )
-            slots.append(self.label_ids(q))
+            slots.append([self.label_ids[label] for label in q.labels])
             engine_inputs.append(engine_input)
 
         label_reads = await next_token_label_reads(

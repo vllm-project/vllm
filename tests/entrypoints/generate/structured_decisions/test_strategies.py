@@ -13,8 +13,7 @@ from vllm.entrypoints.generate.structured_decisions.question_types import LABELS
 from vllm.entrypoints.generate.structured_decisions.serving import state_text
 from vllm.entrypoints.generate.structured_decisions.strategies import (
     NextTokenStrategy,
-    label_token_ids,
-    reply_tail,
+    reply_label_ids,
     select_read_strategy,
 )
 
@@ -64,16 +63,12 @@ def qwen():
 
 def test_labels_start_the_reply(qwen):
     tokenizer, prompt_ids = qwen
-    tail, tail_text = reply_tail(tokenizer, prompt_ids)
-    ids = label_token_ids(tokenizer, tail, tail_text, LABELS)
+    tail, ids = reply_label_ids(tokenizer, prompt_ids)
     assert tokenizer.decode(tail) == "\n\n"
     assert [tokenizer.decode([i]) for i in ids] == list(LABELS)
     # A noul's and a score's labels are one token here too.
-    assert (
-        len(set(label_token_ids(tokenizer, tail, tail_text, ("yes", "no", "0", "9"))))
-        == 4
-    )
+    _, ids = reply_label_ids(tokenizer, prompt_ids, ("yes", "no", *"0123456789"))
+    assert len(set(ids)) == 12
     # After a colon, Qwen writes ":A" as one token, so "A" is not one token.
-    tail, tail_text = reply_tail(tokenizer, tokenizer.encode("team:"))
     with pytest.raises(ValueError, match="not one distinct token"):
-        label_token_ids(tokenizer, tail, tail_text, LABELS)
+        reply_label_ids(tokenizer, tokenizer.encode("team:"))
