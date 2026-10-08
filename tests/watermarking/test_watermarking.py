@@ -1667,6 +1667,10 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
         context_width = 2
 
         @staticmethod
+        def try_sample_block(*args):
+            return None
+
+        @staticmethod
         def sample(logits, contexts, random_sampler=None, skip_mask=None):
             watermarked = contexts[:, -1] + 1
             return WatermarkSample(

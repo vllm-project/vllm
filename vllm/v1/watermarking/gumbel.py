@@ -14,6 +14,7 @@ from vllm.v1.watermarking.detector import (
 )
 from vllm.v1.watermarking.prfs import PhiloxPRF, WatermarkPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
+    DraftBlockState,
     RandomSampler,
     SupportsSpeculativeDecoding,
     Watermarker,
@@ -100,6 +101,42 @@ class GumbelWatermarker(Watermarker):
             logits_cache_source=random_sampler.logits_cache_source,
         )
         return WatermarkSample(token_ids, logits)
+
+    def try_sample_block(
+        self,
+        logits: torch.Tensor,
+        num_steps: int,
+        random_sampler: RandomSampler,
+        state: DraftBlockState,
+    ) -> torch.Tensor | None:
+        if type(self.prf) is not PhiloxPRF or logits.device.type != "cuda":
+            return None
+
+        from vllm.v1.worker.gpu.sample.watermark import draft_philox_gumbel_sample
+
+        assert random_sampler.logits_cache is not None
+        assert random_sampler.logits_cache_col is not None
+        return draft_philox_gumbel_sample(
+            logits,
+            state.contexts,
+            self.prf.key,
+            num_steps=num_steps,
+            expanded_idx_mapping=random_sampler.expanded_idx_mapping,
+            temperatures=random_sampler.temperatures,
+            seeds=random_sampler.seeds,
+            positions=random_sampler.positions,
+            enabled=state.enabled,
+            logits_cache=random_sampler.logits_cache,
+            logits_cache_col=random_sampler.logits_cache_col,
+            use_fp64=random_sampler.use_fp64,
+            prior_contexts=state.prior_contexts,
+            all_token_ids=state.all_token_ids,
+            prompt_lens=state.prompt_lens,
+            total_lens=state.total_lens,
+            deduplicate=state.deduplicate_contexts != "none",
+            max_history=state.deduplicate_contexts_max_history,
+            include_prompt=state.deduplicate_contexts == "all",
+        )
 
 
 class DualKeyGumbelWatermarker(Watermarker, SupportsSpeculativeDecoding):
