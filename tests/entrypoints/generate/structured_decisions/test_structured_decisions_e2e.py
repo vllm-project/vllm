@@ -19,7 +19,6 @@ def server():
         "--max-num-seqs",
         "32",
         "--enable-prefix-caching",
-        "--enable-structured-decisions",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
