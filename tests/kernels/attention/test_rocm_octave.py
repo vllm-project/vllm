@@ -261,12 +261,21 @@ def _window_tables(entries, hkv, dev):
 
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("hkv,group", [(1, 6), (2, 6)])
-@pytest.mark.parametrize("window", ["off", "on", "evicted"])
-def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window):
+@pytest.mark.parametrize(
+    "window,window_size",
+    [
+        ("off", 64),
+        ("on", 64),
+        ("evicted", 64),
+        ("on", 300),
+        ("on", sq.MAX_EXACT_WINDOW),
+    ],
+)
+def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window, window_size):
     """Sparse (top-k) decode as qwen4_exp QSA runs it: each query reads the
     logical positions in its index row, -1 entries are holes. With the window
-    on, the first 4 and the last 64 positions come from the fp16 tables;
-    an entry whose tag was overwritten falls back to the packed cache."""
+    on, the first 4 and the last `window_size` positions come from the fp16
+    tables; an entry whose tag was overwritten falls back to the packed cache."""
     torch.manual_seed(4)
     dev, fmt = "cuda", _format(cache_dtype)
     signs = sq.sign_bits(HEAD).to(dev)
@@ -298,7 +307,7 @@ def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window):
         stags[::2] = -7
 
     q_to_req = torch.tensor([0, 1, 1, 2, 0, 1, 2], dtype=torch.int32, device=dev)
-    num_q, topk = q_to_req.numel(), 512
+    num_q, topk = q_to_req.numel(), max(512, 2 * window_size)
     qpos = torch.tensor(
         [lens[r] - 1 - 37 * i for i, r in enumerate(q_to_req.tolist())],
         dtype=torch.int32,
@@ -309,9 +318,9 @@ def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window):
         n = int(qpos[i]) + 1
         cand = torch.cat(
             [
-                torch.arange(max(0, n - 80), n, device=dev),
+                torch.arange(max(0, n - window_size - 16), n, device=dev),
                 torch.arange(4, device=dev),
-                torch.randperm(n, device=dev)[:300],
+                torch.randperm(n, device=dev)[: topk - window_size - 32],
             ]
         ).unique()
         indices[i, : cand.numel()] = cand.int()
@@ -336,6 +345,7 @@ def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window):
         64,
         fmt.kernel_code,
         *window_args,
+        **({} if window == "off" else {"window": window_size}),
     )
 
     ref = torch.zeros(num_q, hkv * group, HEAD, device=dev)
@@ -346,7 +356,7 @@ def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window):
         k, v = sq.reference_dequantize(cache[blocks, :, sel % BLOCK], fmt)
         if window != "off":
             slot = blocks * BLOCK + sel % BLOCK
-            exact = ((p - sel) < 64) & (wtags[slot % 4096].long() == slot)
+            exact = ((p - sel) < window_size) & (wtags[slot % 4096].long() == slot)
             exact |= (sel < 4) & (stags[slot % 256].long() == slot)
             k[exact] = ks[r][sel[exact]].float()
             v[exact] = vs[r][sel[exact]].float()
@@ -355,3 +365,21 @@ def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window):
         p_attn = torch.softmax(torch.einsum("hd,thd->ht", q[i].float(), k) * scale, -1)
         ref[i] = torch.einsum("ht,thd->hd", p_attn, v)
     assert _rel(out, ref) < 2e-2
+    if window != "off":
+        with pytest.raises(RuntimeError, match="window must be"):
+            torch.ops._C.octave_decode_sparse(
+                out,
+                q,
+                cache,
+                block_table,
+                q_to_req,
+                indices,
+                mid,
+                signs,
+                signs,
+                scale,
+                64,
+                fmt.kernel_code,
+                *window_args,
+                window=sq.MAX_EXACT_WINDOW + 1,
+            )

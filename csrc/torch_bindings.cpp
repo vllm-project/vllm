@@ -93,7 +93,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor block_table, Tensor q_to_req, Tensor indices, Tensor! mid_o, "
       "Tensor k_signs, Tensor v_signs, float sm_scale, int num_kv_splits, "
       "int fmt, Tensor? positions=None, Tensor? wtab=None, "
-      "Tensor? wtags=None, Tensor? stab=None, Tensor? stags=None) -> ()");
+      "Tensor? wtags=None, Tensor? stab=None, Tensor? stags=None, "
+      "int window=64) -> ()");
   ops.impl("octave_decode_sparse", torch::kCUDA, &octave_decode_sparse);
   ops.def(
       "octave_window_store(Tensor key, Tensor value, Tensor slot_mapping, "
