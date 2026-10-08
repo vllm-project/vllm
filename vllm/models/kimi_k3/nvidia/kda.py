@@ -228,6 +228,24 @@ def is_flashinfer_fused_kda_decode_supported(
 _FLASHINFER_KDA_STATE_INDICES_MODE = "unique_or_null"
 
 
+def _format_kda_decode_kwargs(kwargs: dict[str, str]) -> str:
+    """Render the FlashInfer call kwargs as ``k=v, ...`` (sorted, stable)."""
+    return ", ".join(f"{k}={v}" for k, v in sorted(kwargs.items()))
+
+
+def _announce_flashinfer_kda_decode(kwargs: dict[str, str]) -> None:
+    """Log once which kwargs the fused FlashInfer decode is called with.
+
+    ``logger.info_once`` deduplicates by hashing the message arguments, so the
+    kwargs are rendered to a string first (a dict argument raised ``TypeError:
+    unhashable type`` at model construction).
+    """
+    logger.info_once(
+        "FlashInfer selects the fused KDA decode kernel (%s).",
+        _format_kda_decode_kwargs(kwargs),
+    )
+
+
 def _flashinfer_kda_decode_kwargs(backend: str) -> dict[str, str]:
     """Extra ``flashinfer_fused_kda_decode`` kwargs for the resolved KDA decode
     backend.
@@ -728,10 +746,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             _flashinfer_kda_decode_kwargs(self.kda_decode_backend)
         )
         if self.flashinfer_kda_decode_kwargs:
-            logger.info_once(
-                "FlashInfer selects the fused KDA decode kernel (%s).",
-                self.flashinfer_kda_decode_kwargs,
-            )
+            _announce_flashinfer_kda_decode(self.flashinfer_kda_decode_kwargs)
         spec_decode_backend = (
             additional_config.get("kda_spec_decode_backend", "auto")
             if isinstance(additional_config, dict)

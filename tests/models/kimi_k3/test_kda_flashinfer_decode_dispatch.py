@@ -126,6 +126,19 @@ def test_init_decision_adds_kwargs_only_for_the_flashinfer_backend(
     assert kda_mod._flashinfer_kda_decode_kwargs(backend) == expected
 
 
+def test_flashinfer_selection_announcement_renders_the_kwargs():
+    """The once-only announcement must hash: it receives a rendered string, not the
+    dict (``logger.info_once`` hashes its arguments; a dict raised ``TypeError``
+    while constructing every KDA layer)."""
+    assert (
+        kda_mod._format_kda_decode_kwargs(SELECTING_KWARGS)
+        == "backend=auto, state_indices_mode=unique_or_null"
+    )
+    # The real logger and the production kwargs: must not raise.
+    kda_mod._announce_flashinfer_kda_decode(dict(SELECTING_KWARGS))
+    kda_mod._announce_flashinfer_kda_decode(dict(SELECTING_KWARGS))
+
+
 def test_forward_keeps_the_eager_break_decorator():
     # The decorator is the identity unless breakable CUDA-graph capture is
     # enabled, so a lost decorator would be invisible at runtime.
