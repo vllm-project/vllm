@@ -26,6 +26,7 @@ from vllm.models.glm5next.common.sparse_indexer import (
 from vllm.models.glm5next.nvidia.ops import kpool_compress as kpool_ops
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import has_deep_gemm
+from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import (
     LayerNameType,
     _resolve_layer_name,
@@ -717,6 +718,14 @@ class SparseAttnIndexerKpool(CustomOp):
                 )
             self.dcp_world_size = _parallel.decode_context_parallel_size
             self.dcp_rank = get_dcp_group().rank_in_group
+            if current_platform.is_cuda() and has_cutedsl():
+                from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (  # noqa: E501
+                    _PACK_DCP_TOPK_CANDIDATES_KERNEL,
+                    _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL,
+                )
+
+                _PACK_DCP_TOPK_CANDIDATES_KERNEL.register_warmup()
+                _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.register_warmup()
 
     @property
     def cp_kv_cache_interleave_size(self) -> int:

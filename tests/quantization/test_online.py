@@ -195,7 +195,6 @@ def test_qianfan_online_fp8_keeps_vision_layers_unquantized(
         config,
     )
 
-    layer = Mock(spec=LinearBase)
     for prefix in (
         "vision_model.encoder.layers.0.attn.qkv",
         "vision_model.encoder.layers.1.mlp.fc2",
@@ -203,10 +202,10 @@ def test_qianfan_online_fp8_keeps_vision_layers_unquantized(
         "mlp1.1",
         "mlp1.3",
     ):
-        assert config.resolve_quant_method_cls(layer, prefix) is None
+        assert config.resolve_quant_method_cls(LinearBase, prefix) is None
 
     resolved = config.resolve_quant_method_cls(
-        layer, "language_model.model.layers.0.self_attn.qkv_proj"
+        LinearBase, "language_model.model.layers.0.self_attn.qkv_proj"
     )
     assert resolved is not None and resolved[-1] is method_cls
     assert other_config.ignored_layers == []
@@ -1320,9 +1319,7 @@ def test_online_quantization_targets_ignore_collision() -> None:
         )
     )
     with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
-        config.resolve_quant_method_cls(
-            Mock(spec=LinearBase), "model.layers.0.self_attn.o_proj"
-        )
+        config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
 
 
 def test_online_quantization_targets_reject_unsupported_layer() -> None:
