@@ -12,6 +12,7 @@ import os
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 FAULT_DIR_ENV = "VLLM_READY_FAULT_DIR"
@@ -24,6 +25,8 @@ class FaultInjectionScheduler(AsyncScheduler):
     Mimics #45388: requests stay waiting but no tokens are ever scheduled,
     while the EngineCore busy loop keeps spinning.
     """
+
+    max_num_scheduled_tokens: int
 
     def schedule(self, *args, **kwargs):
         fault_dir = os.environ.get(FAULT_DIR_ENV)
@@ -40,6 +43,8 @@ class FaultInjectionScheduler(AsyncScheduler):
 
 
 class FaultInjectionWorkerExtension:
+    vllm_config: VllmConfig
+
     def _fault_targets_me(self, dp_ranks: str) -> bool:
         # Dense DP engines keep data_parallel_rank=0; the index is the DP rank.
         rank = self.vllm_config.parallel_config.data_parallel_index
