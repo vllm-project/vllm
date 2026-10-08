@@ -1136,6 +1136,7 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         from vllm.model_executor.models.granite_switch_kernels import SUPPORTED_RANKS
         from vllm.transformers_utils.configs.granite_switch import SWITCH_CACHE_LAYERS
+        from vllm.triton_utils import HAS_TRITON
 
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
@@ -1175,11 +1176,27 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
                     f"num_hidden_layers is {num_layers}."
                 )
 
+        # 2. Triton must be available. Every projection in the model is a
+        # SwitchedLoRALinear, whose shared-MLP gate/up path runs the fused
+        # expand+SwiGLU kernel unconditionally - it is the activation, not just
+        # the adapter delta - so this holds even at num_adapters == 0. Without
+        # Triton the kernel object is an undecorated function and the first
+        # forward dies on an unindexable launch, inside a worker, after the
+        # weights are loaded.
+        if not HAS_TRITON:
+            raise ValueError(
+                "Granite Switch requires Triton. Its projections run a fused "
+                "switched-LoRA Triton kernel that also computes the shared "
+                "MLP's SwiGLU activation, so there is no non-Triton path even "
+                "with no adapters. Granite Switch is therefore supported only "
+                "on platforms with a working Triton backend (CUDA and ROCm)."
+            )
+
         if num_adapters <= 0:
             # No adapters: a plain Granite base model. Nothing below applies.
             return
 
-        # 2. The switch's cache layers must leave at least one decoder layer.
+        # 3. The switch's cache layers must leave at least one decoder layer.
         # The model subtracts SWITCH_CACHE_LAYERS from num_hidden_layers to get
         # its decoder-layer count; without this check an under-inflated config
         # silently builds a zero-layer decoder.
@@ -1191,7 +1208,7 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
                 "num_hidden_layers by that many, so it must exceed it."
             )
 
-        # 3. The attention head size must be known. Every LoRA-targeted QKV
+        # 4. The attention head size must be known. Every LoRA-targeted QKV
         # projection is sized from it, and the arch config convertor reports it
         # as the KV-cache head size.
         head_dim = getattr(hf_config, "projection_head_dim", None)
@@ -1202,7 +1219,7 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
                 "projection and the KV cache are sized from."
             )
 
-        # 4. Every adapter rank must land on a kernel tier.
+        # 5. Every adapter rank must land on a kernel tier.
         # The fused kernel specializes on SUPPORTED_RANKS as compile-time
         # constants, so an out-of-range rank fails inside a Triton compile -
         # deep in a worker, after weights are loaded. Snap it here instead.
@@ -1222,7 +1239,7 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
                     "largest tier has nowhere to go."
                 )
 
-        # 5. The counting head's dtype bound. MultiSwitch recovers a control
+        # 6. The counting head's dtype bound. MultiSwitch recovers a control
         # token's write address from a 1/(1 + n) attention signal, and since
         # both switch heads are paged-KV attention layers that signal takes the
         # KV-cache dtype. bfloat16's 8-bit mantissa inverts 1/(1 + n) exactly
