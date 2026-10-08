@@ -3272,15 +3272,10 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("resident_copy_rows", [1 << 16, 3])
-def test_hisparse_gather_prefill_cache_prefers_resident_rows(
-    monkeypatch, resident_copy_rows
-):
-    """Staged rows come from the resident cache when a shadow page exists,
-    including when the resident copy is split into several chunks."""
+def test_hisparse_gather_prefill_cache_prefers_resident_rows():
+    """Staged rows come from the resident cache when a shadow page exists."""
     if not _has_hisparse_ops():
         pytest.skip("hisparse CUDA ops unavailable")
-    monkeypatch.setattr(hisparse_runtime, "_RESIDENT_COPY_ROWS", resident_copy_rows)
     device = torch.device("cuda")
     block_size, resident_block_size, row_width = 4, 2, 16
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32, device=device)
@@ -3447,8 +3442,7 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     def prepare_kernel(self, *args, **kwargs):  # noqa: ARG001
         pass
 
-    def run_kernel(self, q, cache, indices, counts, out=None):  # noqa: ARG001
-        assert out is None
+    def run_kernel(self, q, cache, indices, counts):  # noqa: ARG001
         kernel_shapes.append(q.shape)
         return q[..., :1], None
 

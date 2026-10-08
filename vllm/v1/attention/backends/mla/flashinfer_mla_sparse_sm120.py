@@ -121,27 +121,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         index_group = self.index_group
         if isinstance(index_group, HiSparseMLAIndexGroup):
             num_decode_tokens = attn_metadata.num_decode_tokens
-            physical_kv_cache = index_group.physical_kv_cache(self.index_group_index)
-            if num_decode_tokens == num_actual_toks or (
-                num_decode_tokens == 0
-                and index_group.cache(self.index_group_index).all_context_pages_resident
-            ):
-                topk_indices_physical = cast(
-                    torch.Tensor,
-                    index_group.convert_logical_to_physical_topk(
-                        self.index_group_index,
-                        topk_indices,
-                        attn_metadata,
-                        block_stride_rows=None,
-                        return_valid_counts=False,
-                    ),
-                )
-                return (
-                    self._run_mqa_kernel(q, physical_kv_cache, topk_indices_physical),
-                    None,
-                )
-
-            output = self._new_mqa_output(q)
+            outputs = []
             if num_decode_tokens:
                 topk_indices_physical = cast(
                     torch.Tensor,
@@ -153,36 +133,58 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                         return_valid_counts=False,
                     ),
                 )
-                self._run_mqa_kernel(
-                    q[:num_decode_tokens],
-                    physical_kv_cache,
-                    topk_indices_physical,
-                    out=output[:num_decode_tokens],
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q[:num_decode_tokens],
+                        index_group.physical_kv_cache(self.index_group_index),
+                        topk_indices_physical,
+                    )
                 )
-            for (
-                tokens,
-                prefill_cache,
-                block_table,
-                req_ids,
-            ) in index_group.staged_prefills(
-                self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
-            ):
-                topk_indices_physical = cast(
-                    torch.Tensor,
-                    triton_convert_req_index_to_global_index(
-                        req_ids,
+            if num_decode_tokens < num_actual_toks:
+                cache = index_group.cache(self.index_group_index)
+                if num_decode_tokens == 0 and cache.all_context_pages_resident:
+                    topk_indices_physical = cast(
+                        torch.Tensor,
+                        index_group.convert_logical_to_physical_topk(
+                            self.index_group_index,
+                            topk_indices,
+                            attn_metadata,
+                            block_stride_rows=None,
+                            return_valid_counts=False,
+                        ),
+                    )
+                    outputs.append(
+                        self._run_mqa_kernel(
+                            q,
+                            index_group.physical_kv_cache(self.index_group_index),
+                            topk_indices_physical,
+                        )
+                    )
+                else:
+                    for (
+                        tokens,
+                        prefill_cache,
                         block_table,
-                        topk_indices[tokens],
-                        BLOCK_SIZE=attn_metadata.block_size,
-                        NUM_TOPK_TOKENS=topk_indices.shape[1],
-                    ),
-                )
-                self._run_mqa_kernel(
-                    q[tokens],
-                    prefill_cache,
-                    topk_indices_physical,
-                    out=output[tokens],
-                )
+                        req_ids,
+                    ) in index_group.staged_prefills(
+                        self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
+                    ):
+                        topk_indices_physical = cast(
+                            torch.Tensor,
+                            triton_convert_req_index_to_global_index(
+                                req_ids,
+                                block_table,
+                                topk_indices[tokens],
+                                BLOCK_SIZE=attn_metadata.block_size,
+                                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                            ),
+                        )
+                        outputs.append(
+                            self._run_mqa_kernel(
+                                q[tokens], prefill_cache, topk_indices_physical
+                            )
+                        )
+            output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
             return output, None
 
         topk_indices_physical = cast(
@@ -204,17 +206,18 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             None,
         )
 
-    def _new_mqa_output(self, q: torch.Tensor) -> torch.Tensor:
-        return q.new_empty((q.shape[0], self.num_heads, self.kv_lora_rank))
-
     def _run_mqa_kernel(
         self,
         q: torch.Tensor,
         kv_cache: torch.Tensor,
         topk_indices_physical: torch.Tensor,
-        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        output = self._new_mqa_output(q) if out is None else out
+        num_actual_toks = q.shape[0]
+
+        output = q.new_empty(
+            (num_actual_toks, self.num_heads, self.kv_lora_rank),
+            dtype=q.dtype,
+        )
 
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(q.device)

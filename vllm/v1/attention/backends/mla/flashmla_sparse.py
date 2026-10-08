@@ -835,10 +835,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # req_id_per_token covers the whole batch; slice it to the MQA tokens
         # (q may exclude prefill tokens routed to dense MHA).
         req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
+        decode_out: torch.Tensor | None = None
         if cache is not None:
             assert isinstance(index_group, HiSparseMLAIndexGroup)
             num_decode_tokens = attn_metadata.num_decode_tokens
-            decode_out: torch.Tensor | None = None
             if num_decode_tokens > 0:
                 decode_topk, decode_lengths = (
                     index_group.convert_logical_to_physical_topk(
@@ -858,15 +858,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 )
                 if num_decode_tokens == q.shape[0]:
                     return decode_out, None
-            output = q.new_empty((q.shape[0], actual_num_heads, self.kv_lora_rank))
-            if decode_out is not None:
-                output[:num_decode_tokens].copy_(decode_out)
-                del decode_out
             # q is a view of this impl's workspace, so take staging alongside it.
             *_, staging = current_workspace_manager().get_simultaneous(
                 *self.workspace_specs,
                 index_group.prefill_staging_spec(self.index_group_index),
             )
+            outputs = [] if decode_out is None else [decode_out]
             for (
                 tokens,
                 staged_cache,
@@ -893,9 +890,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 plan_out, _ = self._bf16_flash_mla_kernel(
                     q[tokens], staged_rows, plan_topk, plan_lengths, actual_num_heads
                 )
-                output[tokens].copy_(plan_out)
-                del plan_out
-            return output, None
+                outputs.append(plan_out)
+            return torch.cat(outputs) if len(outputs) > 1 else outputs[0], None
         # Convert per-request indices to global slots (decode) or workspace offsets.
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
@@ -905,7 +901,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             == attn_metadata.num_actual_tokens
             == topk_indices.shape[0]
         )
-        if decode_only:
+        uses_host_cache = isinstance(index_group, HiSparseMLAIndexGroup)
+        if not uses_host_cache and decode_only:
             topk_indices, topk_length = self._convert_logical_to_physical_topk(
                 topk_indices,
                 attn_metadata,
@@ -923,13 +920,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 return_valid_counts=True,
             )
 
-        return self._bf16_flash_mla_kernel(
+        attn_out, lse = self._bf16_flash_mla_kernel(
             q,
             kv_rows,
             topk_indices,
             topk_length,
             actual_num_heads,
         )
+        if decode_out is None:
+            return attn_out, lse
+        return torch.cat([decode_out, attn_out], dim=0), None
 
     def _gather_prefill_chunk(
         self,
