@@ -194,7 +194,7 @@ constexpr int kHashLoadInverse = 4;
 // the page is not resident) and returns its host row (-1 when not host-backed).
 __device__ __forceinline__ int32_t translate_topk_entry(
     const int32_t token_index, const int32_t request_row,
-    const int32_t* __restrict__ source_block_table,
+    const int32_t state_row, const int32_t* __restrict__ source_block_table,
     const int32_t* __restrict__ resident_block_table, const int64_t host_rows,
     const int64_t source_bt_stride, const int32_t source_num_reqs,
     const int32_t source_num_blocks, const int32_t source_block_size,
@@ -221,10 +221,10 @@ __device__ __forceinline__ int32_t translate_topk_entry(
     if (resident_block_table != nullptr) {
       const int32_t resident_block =
           token_index >= 0 ? token_index / resident_block_size : -1;
-      if (request_row >= 0 && request_row < resident_num_reqs &&
+      if (state_row >= 0 && state_row < resident_num_reqs &&
           resident_block >= 0 && resident_block < resident_num_blocks) {
         const int32_t physical_block =
-            resident_block_table[static_cast<int64_t>(request_row) *
+            resident_block_table[static_cast<int64_t>(state_row) *
                                      resident_bt_stride +
                                  resident_block];
         if (physical_block != resident_null_block && physical_block >= 0) {
@@ -424,11 +424,11 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     for (int i = tid; i < top_k; i += blockDim.x) {
       int32_t resident_row;
       const int32_t g = translate_topk_entry(
-          row_topk[i], request_row, source_block_table, resident_block_table,
-          host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
-          source_block_size, resident_bt_stride, resident_num_reqs,
-          resident_num_blocks, resident_block_size, resident_null_block,
-          resident_row);
+          row_topk[i], request_row, state_row, source_block_table,
+          resident_block_table, host_rows, source_bt_stride, source_num_reqs,
+          source_num_blocks, source_block_size, resident_bt_stride,
+          resident_num_reqs, resident_num_blocks, resident_block_size,
+          resident_null_block, resident_row);
       if (resolved_global_indices != nullptr) {
         resolved_global_indices[static_cast<int64_t>(row) * top_k + i] = g;
       }
@@ -602,8 +602,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       g = translate_topk_entry(
           global_indices[static_cast<int64_t>(row) * input_row_stride +
                          position % top_k],
-          request_row, source_block_table, resident_block_table, host_rows,
-          source_bt_stride, source_num_reqs, source_num_blocks,
+          request_row, state_row, source_block_table, resident_block_table,
+          host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
           source_block_size, resident_bt_stride, resident_num_reqs,
           resident_num_blocks, resident_block_size, resident_null_block,
           resident_row);
@@ -708,8 +708,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       const int32_t g = translate_topk_entry(
           global_indices[static_cast<int64_t>(row) * input_row_stride +
                          position % top_k],
-          request_row, source_block_table, resident_block_table, host_rows,
-          source_bt_stride, source_num_reqs, source_num_blocks,
+          request_row, state_row, source_block_table, resident_block_table,
+          host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
           source_block_size, resident_bt_stride, resident_num_reqs,
           resident_num_blocks, resident_block_size, resident_null_block,
           resident_row);

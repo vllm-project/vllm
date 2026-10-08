@@ -254,7 +254,7 @@ def bind_hisparse_kv_caches(
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
-                block_table=residency.batch_rows[:, resident_source_index],
+                block_table=residency.state_rows[:, resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
             cache_handle.residency = residency

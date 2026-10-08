@@ -1108,7 +1108,7 @@ class HiSparseRuntime:
 
 class HiSparseResidencyTable:
     """GPU block of each resident page for every resident group, by request
-    state row and gathered by this step's batch row. Block 0 means host-only."""
+    state row. Block 0 means host-only."""
 
     def __init__(
         self,
@@ -1122,7 +1122,6 @@ class HiSparseResidencyTable:
             dtype=torch.int32,
             device=device,
         )
-        self.batch_rows = torch.zeros_like(self.state_rows)
 
 
 def update_hisparse_residency(
@@ -1131,28 +1130,25 @@ def update_hisparse_residency(
     request_ids: Sequence[str],
     request_state_indices: torch.Tensor,
 ) -> None:
-    """Apply scheduled requests' residency changes, then gather this batch."""
-    if updates:
-        batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
-        rows: list[int] = []
-        pages: list[int] = []
-        block_ids: list[tuple[int, ...]] = []
-        for request_id, update in updates.items():
-            num_pages = len(update.block_ids[0])
-            rows.extend([batch_rows[request_id]] * num_pages)
-            pages.extend(range(update.start_page, update.start_page + num_pages))
-            block_ids.extend(zip(*update.block_ids, strict=True))
-        values = async_tensor_h2d(
-            np.column_stack([rows, pages, np.asarray(block_ids, dtype=np.int32)]),
-            device=request_state_indices.device,
-            dtype=torch.int32,
-        )
-        state_rows = request_state_indices[values[:, 0]]
-        table.state_rows[state_rows, :, values[:, 1]] = values[:, 2:]
-    num_reqs = request_state_indices.numel()
-    torch.index_select(
-        table.state_rows, 0, request_state_indices, out=table.batch_rows[:num_reqs]
+    """Apply scheduled requests' residency changes."""
+    if not updates:
+        return
+    batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
+    rows: list[int] = []
+    pages: list[int] = []
+    block_ids: list[tuple[int, ...]] = []
+    for request_id, update in updates.items():
+        num_pages = len(update.block_ids[0])
+        rows.extend([batch_rows[request_id]] * num_pages)
+        pages.extend(range(update.start_page, update.start_page + num_pages))
+        block_ids.extend(zip(*update.block_ids, strict=True))
+    values = async_tensor_h2d(
+        np.column_stack([rows, pages, np.asarray(block_ids, dtype=np.int32)]),
+        device=request_state_indices.device,
+        dtype=torch.int32,
     )
+    state_rows = request_state_indices[values[:, 0]]
+    table.state_rows[state_rows, :, values[:, 1]] = values[:, 2:]
 
 
 class HiSparseCacheHandle:
@@ -1202,6 +1198,13 @@ class HiSparseCacheHandle:
         self.host_mirror_required = attn_metadata is not None and (
             not self.decode_batch or self.runtime.eager_host_mirror
         )
+
+    def batch_block_table(self) -> torch.Tensor:
+        """Resident rows by this step's batch row, for the prefill paths."""
+        assert self.block_table is not None
+        indices = self.runtime.request_state_indices
+        assert indices is not None
+        return self.block_table.index_select(0, indices.clamp(min=0))
 
     def write_target(
         self, num_input_rows: int, num_slot_rows: int

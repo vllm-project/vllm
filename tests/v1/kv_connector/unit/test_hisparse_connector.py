@@ -419,8 +419,8 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
     assert core_row[:3] == [0, 0, 0]
 
 
-def test_residency_updates_persist_by_state_row_and_gather_by_batch_row():
-    """Updates name requests, are stored by state row, and are read by batch row.
+def test_residency_updates_persist_by_state_row():
+    """Updates name requests by batch row but are stored by state row.
 
     A suffix update for a lost page must leave the earlier pages and the other
     request's row intact across steps that reorder the batch.
@@ -442,5 +442,5 @@ def test_residency_updates_persist_by_state_row_and_gather_by_batch_row():
         torch.tensor([0, 2], dtype=torch.int32),
     )
 
-    assert table.batch_rows[:2, 0].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
-    assert table.batch_rows[:2, 1].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
+    assert table.state_rows[[0, 2], 0].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
+    assert table.state_rows[[0, 2], 1].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
