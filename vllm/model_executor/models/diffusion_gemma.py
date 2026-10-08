@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -26,6 +26,7 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import AutoModel, DiffusionGemmaConfig
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
@@ -62,9 +63,15 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
+from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
@@ -90,6 +97,214 @@ from .interfaces import (
 logger = init_logger(__name__)
 
 
+_SUPPORTED_SC_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+
+
+def _sc_num_warps(block_h: int) -> int:
+    if block_h <= 1024:
+        return 4
+    if block_h <= 4096:
+        return 8
+    return 16
+
+
+def _sc_warmup_dims(vllm_config: Any) -> tuple[int, int, torch.dtype] | None:
+    if not HAS_TRITON:
+        return None
+    model_config = vllm_config.model_config
+    text_config = getattr(model_config, "hf_text_config", None)
+    if text_config is None:
+        return None
+    h = text_config.hidden_size
+    dtype = model_config.dtype
+    if not (0 < h <= 16384) or dtype not in _SUPPORTED_SC_DTYPES:
+        return None
+    hf_config = getattr(model_config, "hf_config", None)
+    inter_size = (
+        getattr(hf_config, "self_conditioning_size", None)
+        or text_config.intermediate_size
+    )
+    return h, inter_size, dtype
+
+
+def _sc_rmsnorm_warmup_inputs(vllm_config: Any) -> list[dict[str, Any]]:
+    dims = _sc_warmup_dims(vllm_config)
+    if dims is None:
+        return []
+    h, _, dtype = dims
+    block_h = triton.next_power_of_2(h)
+    num_warps = _sc_num_warps(block_h)
+    cast_variants = (False,) if dtype == torch.float32 else (False, True)
+    return [
+        {
+            "grid": (2,),
+            "x_ptr": TritonWarmupTensor(
+                torch.float32 if cast_first else dtype, shape=(2, h)
+            ),
+            "w_ptr": TritonWarmupTensor(dtype, shape=(h,)),
+            "out_ptr": TritonWarmupTensor(dtype, shape=(2, h)),
+            "stride_x_m": h,
+            "stride_x_h": 1,
+            "stride_w": 1,
+            "stride_out_m": h,
+            "stride_out_h": 1,
+            "H": h,
+            "eps": 1e-6,
+            "BLOCK_H": block_h,
+            "CAST_INPUT_FIRST": cast_first,
+            "num_warps": num_warps,
+        }
+        for cast_first in cast_variants
+    ]
+
+
+def _gelu_tanh_and_mul_warmup_inputs(vllm_config: Any) -> list[dict[str, Any]]:
+    dims = _sc_warmup_dims(vllm_config)
+    if dims is None or dims[1] <= 0:
+        return []
+    _, inter_size, dtype = dims
+    block_i = 1024
+    return [
+        {
+            "grid": (2, triton.cdiv(inter_size, block_i)),
+            "gate_up_ptr": TritonWarmupTensor(dtype, shape=(2, 2 * inter_size)),
+            "out_ptr": TritonWarmupTensor(dtype, shape=(2, inter_size)),
+            "stride_m": 2 * inter_size,
+            "stride_out_m": inter_size,
+            "inter_size": inter_size,
+            "BLOCK_I": block_i,
+        }
+    ]
+
+
+def _sc_add_rmsnorm_warmup_inputs(vllm_config: Any) -> list[dict[str, Any]]:
+    dims = _sc_warmup_dims(vllm_config)
+    if dims is None:
+        return []
+    h, _, dtype = dims
+    block_h = triton.next_power_of_2(h)
+    return [
+        {
+            "grid": (2,),
+            "inp_ptr": TritonWarmupTensor(dtype, shape=(2, h)),
+            "sig_ptr": TritonWarmupTensor(dtype, shape=(2, h)),
+            "out_ptr": TritonWarmupTensor(dtype, shape=(2, h)),
+            "stride_inp_m": h,
+            "stride_inp_h": 1,
+            "stride_sig_m": h,
+            "stride_sig_h": 1,
+            "stride_out_m": h,
+            "stride_out_h": 1,
+            "H": h,
+            "eps": 1e-6,
+            "BLOCK_H": block_h,
+            "num_warps": _sc_num_warps(block_h),
+        }
+    ]
+
+
+@triton_kernel_dispatcher_with_warmup(warmup_inputs=_sc_rmsnorm_warmup_inputs)
+@triton.jit
+def _sc_rmsnorm_kernel(
+    x_ptr,
+    w_ptr,
+    out_ptr,
+    stride_x_m,
+    stride_x_h,
+    stride_w,
+    stride_out_m,
+    stride_out_h,
+    H: int,
+    eps: float,
+    BLOCK_H: tl.constexpr,
+    CAST_INPUT_FIRST: tl.constexpr,
+):
+    row_idx = tl.program_id(0).to(tl.int64)
+    offs_h = tl.arange(0, BLOCK_H)
+    offs_h_i64 = offs_h.to(tl.int64)
+    mask = offs_h < H
+    x_ptrs = x_ptr + row_idx * stride_x_m + offs_h_i64 * stride_x_h
+    x_val = tl.load(x_ptrs, mask=mask, other=0.0)
+    if CAST_INPUT_FIRST:
+        x_f = x_val.to(out_ptr.dtype.element_ty).to(tl.float32)
+    else:
+        x_f = x_val.to(tl.float32)
+    w_val = tl.load(w_ptr + offs_h_i64 * stride_w, mask=mask, other=0.0)
+    var = tl.sum(x_f * x_f, axis=0) / H
+    rstd = tl.rsqrt(var + eps)
+    y = (x_f * rstd).to(w_val.dtype) * w_val
+    out_ptrs = out_ptr + row_idx * stride_out_m + offs_h_i64 * stride_out_h
+    tl.store(out_ptrs, y.to(out_ptr.dtype.element_ty), mask=mask)
+
+
+@triton_kernel_dispatcher_with_warmup(warmup_inputs=_gelu_tanh_and_mul_warmup_inputs)
+@triton.jit
+def _gelu_tanh_and_mul_kernel(
+    gate_up_ptr,
+    out_ptr,
+    stride_m,
+    stride_out_m,
+    inter_size: int,
+    BLOCK_I: tl.constexpr,
+):
+    row_idx = tl.program_id(0).to(tl.int64)
+    col_block_idx = tl.program_id(1)
+    offs_i = col_block_idx * BLOCK_I + tl.arange(0, BLOCK_I)
+    offs_i_i64 = offs_i.to(tl.int64)
+    mask = offs_i < inter_size
+    g = tl.load(gate_up_ptr + row_idx * stride_m + offs_i_i64, mask=mask, other=0.0).to(
+        tl.float32
+    )
+    u = tl.load(
+        gate_up_ptr + row_idx * stride_m + inter_size + offs_i_i64,
+        mask=mask,
+        other=0.0,
+    )
+    inner = 0.7978845608028654 * (g + 0.044715 * g * g * g)
+    gelu_g = (0.5 * g * (1.0 + tldevice.tanh(inner))).to(u.dtype)
+    res = gelu_g * u
+    tl.store(out_ptr + row_idx * stride_out_m + offs_i_i64, res, mask=mask)
+
+
+@triton_kernel_dispatcher_with_warmup(warmup_inputs=_sc_add_rmsnorm_warmup_inputs)
+@triton.jit
+def _sc_add_rmsnorm_kernel(
+    inp_ptr,
+    sig_ptr,
+    out_ptr,
+    stride_inp_m,
+    stride_inp_h,
+    stride_sig_m,
+    stride_sig_h,
+    stride_out_m,
+    stride_out_h,
+    H: int,
+    eps: float,
+    BLOCK_H: tl.constexpr,
+):
+    row_idx = tl.program_id(0).to(tl.int64)
+    offs_h = tl.arange(0, BLOCK_H)
+    offs_h_i64 = offs_h.to(tl.int64)
+    mask = offs_h < H
+    inp = tl.load(
+        inp_ptr + row_idx * stride_inp_m + offs_h_i64 * stride_inp_h,
+        mask=mask,
+        other=0.0,
+    )
+    sig = tl.load(
+        sig_ptr + row_idx * stride_sig_m + offs_h_i64 * stride_sig_h,
+        mask=mask,
+        other=0.0,
+    )
+    s = (inp + sig).to(tl.float32)
+    var = tl.sum(s * s, axis=0) / H
+    rstd = tl.rsqrt(var + eps)
+    res = (s * rstd).to(inp.dtype)
+    tl.store(
+        out_ptr + row_idx * stride_out_m + offs_h_i64 * stride_out_h, res, mask=mask
+    )
+
+
 class DiffusionGemmaSelfConditioning(nn.Module):
     """Gated MLP that processes soft embeddings from the previous denoising step.
 
@@ -106,16 +321,260 @@ class DiffusionGemmaSelfConditioning(nn.Module):
         self.gate_proj = nn.Linear(hidden_size, self_conditioning_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, self_conditioning_size, bias=False)
         self.down_proj = nn.Linear(self_conditioning_size, hidden_size, bias=False)
+        self._merged_gate_up_w: torch.Tensor | None = None
+        self._merged_gate_up_key: tuple[Any, ...] | None = None
+        # Keep _merged_gate_up_w so process_weights_after_loading or
+        # _get_merged_gate_up_weight can refill it in-place via refill_derived.
+        self.register_load_state_dict_post_hook(
+            lambda module, _incompatible: setattr(module, "_merged_gate_up_key", None)
+        )
+
+    def _apply(self, fn: Any, recurse: bool = True) -> Any:
+        self._merged_gate_up_w = None
+        self._merged_gate_up_key = None
+        return super()._apply(fn, recurse=recurse)
+
+    def _gate_up_weights_if_mergeable(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[Any, ...]] | None:
+        if (
+            type(self.gate_proj) is not nn.Linear
+            or type(self.up_proj) is not nn.Linear
+            or self.gate_proj.bias is not None
+            or self.up_proj.bias is not None
+            or self.gate_proj._forward_hooks
+            or self.gate_proj._forward_pre_hooks
+            or self.up_proj._forward_hooks
+            or self.up_proj._forward_pre_hooks
+        ):
+            return None
+
+        gw = self.gate_proj.weight
+        uw = self.up_proj.weight
+        if (
+            type(gw) not in (torch.Tensor, nn.Parameter)
+            or type(uw) not in (torch.Tensor, nn.Parameter)
+            or gw.is_quantized
+            or uw.is_quantized
+            or not gw.is_floating_point()
+            or not uw.is_floating_point()
+            or gw.dtype != uw.dtype
+            or gw.device != uw.device
+            or gw.shape != uw.shape
+            or not gw.is_contiguous()
+            or not uw.is_contiguous()
+        ):
+            return None
+
+        key = (
+            gw.data_ptr(),
+            gw._version,
+            uw.data_ptr(),
+            uw._version,
+            gw.dtype,
+            gw.device,
+            gw.shape,
+        )
+        return gw, uw, key
+
+    def _refill_merged_gate_up_weight(
+        self, gw: torch.Tensor, uw: torch.Tensor, key: tuple[Any, ...]
+    ) -> torch.Tensor:
+        with torch.inference_mode(False), torch.no_grad():
+            if (
+                self._merged_gate_up_w is not None
+                and self._merged_gate_up_w.is_inference()
+            ):
+                self._merged_gate_up_w = None
+            gw_src = gw.detach().clone() if gw.is_inference() else gw.detach()
+            uw_src = uw.detach().clone() if uw.is_inference() else uw.detach()
+            merged = torch.cat([gw_src, uw_src], dim=0)
+            w = refill_derived(self, "_merged_gate_up_w", merged)
+        self._merged_gate_up_key = key
+        return w
+
+    def process_weights_after_loading(self) -> None:
+        weights = self._gate_up_weights_if_mergeable()
+        if weights is None:
+            refill_derived(self, "_merged_gate_up_w", None)
+            self._merged_gate_up_key = None
+            return
+        gw, uw, key = weights
+        self._refill_merged_gate_up_weight(gw, uw, key)
+
+    def _get_merged_gate_up_weight(self) -> torch.Tensor | None:
+        weights = self._gate_up_weights_if_mergeable()
+        if weights is None:
+            self._merged_gate_up_w = None
+            self._merged_gate_up_key = None
+            return None
+
+        gw, uw, key = weights
+        if torch.is_grad_enabled() and (gw.requires_grad or uw.requires_grad):
+            return None
+
+        if self._merged_gate_up_key != key or self._merged_gate_up_w is None:
+            return self._refill_merged_gate_up_weight(gw, uw, key)
+        return self._merged_gate_up_w
+
+    def _can_use_triton(
+        self,
+        inputs_embeds: torch.Tensor,
+        soft_embeds: torch.Tensor,
+        merged_w: torch.Tensor | None,
+    ) -> bool:
+        if (
+            not HAS_TRITON
+            or torch.compiler.is_compiling()
+            or envs.VLLM_BATCH_INVARIANT
+            or not current_platform.is_cuda_alike()
+            or not inputs_embeds.is_cuda
+            or not soft_embeds.is_cuda
+            or inputs_embeds.device != soft_embeds.device
+            or inputs_embeds.ndim < 1
+            or inputs_embeds.shape != soft_embeds.shape
+            or merged_w is None
+        ):
+            return False
+
+        h = inputs_embeds.shape[-1]
+        return (
+            0 < h <= 16384
+            and merged_w.shape[0] > 0
+            and inputs_embeds.dtype in _SUPPORTED_SC_DTYPES
+            and soft_embeds.dtype in _SUPPORTED_SC_DTYPES
+            and not torch.is_autocast_enabled(inputs_embeds.device.type)
+            and merged_w.device == inputs_embeds.device
+            and merged_w.dtype == inputs_embeds.dtype
+            and type(self.pre_norm) is RMSNorm
+            and type(self.post_norm) is RMSNorm
+            and not self.pre_norm._forward_hooks
+            and not self.pre_norm._forward_pre_hooks
+            and not self.post_norm._forward_hooks
+            and not self.post_norm._forward_pre_hooks
+            and self.pre_norm.weight.device == inputs_embeds.device
+            and self.pre_norm.weight.dtype in _SUPPORTED_SC_DTYPES
+            and self.pre_norm.weight.shape == (h,)
+        )
 
     def forward(
         self,
         inputs_embeds: torch.Tensor,
         soft_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        x = self.pre_norm(soft_embeds)
-        sc_signal = self.down_proj(
-            F.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x)
+        if inputs_embeds.numel() == 0 and inputs_embeds.shape == soft_embeds.shape:
+            return inputs_embeds.clone()
+
+        compiling = torch.compiler.is_compiling()
+        needs_grad = torch.is_grad_enabled() and (
+            inputs_embeds.requires_grad or soft_embeds.requires_grad
         )
+        merged_w = (
+            None if (compiling or needs_grad) else self._get_merged_gate_up_weight()
+        )
+
+        if self._can_use_triton(inputs_embeds, soft_embeds, merged_w):
+            assert merged_w is not None
+            if inputs_embeds.stride(-1) != 1:
+                inputs_embeds = inputs_embeds.contiguous()
+            if soft_embeds.stride(-1) != 1:
+                soft_embeds = soft_embeds.contiguous()
+
+            h = inputs_embeds.shape[-1]
+            orig_shape = inputs_embeds.shape
+            inp_flat = inputs_embeds.reshape(-1, h)
+            soft_flat = soft_embeds.reshape(-1, h)
+            m = inp_flat.shape[0]
+
+            cast_first = soft_flat.dtype != inp_flat.dtype
+            normed_x = torch.empty((m, h), device=inp_flat.device, dtype=inp_flat.dtype)
+            block_h = triton.next_power_of_2(h)
+            num_warps = _sc_num_warps(block_h)
+            _sc_rmsnorm_kernel[(m,)](
+                soft_flat,
+                self.pre_norm.weight,
+                normed_x,
+                soft_flat.stride(0),
+                soft_flat.stride(1),
+                self.pre_norm.weight.stride(0),
+                normed_x.stride(0),
+                normed_x.stride(1),
+                h,
+                self.pre_norm.variance_epsilon,
+                BLOCK_H=block_h,
+                CAST_INPUT_FIRST=cast_first,
+                num_warps=num_warps,
+            )
+
+            gate_up = F.linear(normed_x, merged_w)
+            inter_size = gate_up.shape[-1] // 2
+            if inter_size > 0:
+                act = torch.empty(
+                    (m, inter_size), device=inp_flat.device, dtype=inp_flat.dtype
+                )
+                block_i = 1024
+                grid_i = (m, triton.cdiv(inter_size, block_i))
+                _gelu_tanh_and_mul_kernel[grid_i](
+                    gate_up,
+                    act,
+                    gate_up.stride(0),
+                    act.stride(0),
+                    inter_size,
+                    BLOCK_I=block_i,
+                )
+            else:
+                act = torch.empty((m, 0), device=inp_flat.device, dtype=inp_flat.dtype)
+
+            sc_signal = self.down_proj(act)
+            if (
+                sc_signal.dtype != inp_flat.dtype
+                or sc_signal.shape != inp_flat.shape
+                or sc_signal.device != inp_flat.device
+            ):
+                return self.post_norm(inp_flat + sc_signal).reshape(orig_shape)
+
+            out = torch.empty((m, h), device=inp_flat.device, dtype=inp_flat.dtype)
+            _sc_add_rmsnorm_kernel[(m,)](
+                inp_flat,
+                sc_signal,
+                out,
+                inp_flat.stride(0),
+                inp_flat.stride(1),
+                sc_signal.stride(0),
+                sc_signal.stride(1),
+                out.stride(0),
+                out.stride(1),
+                h,
+                self.post_norm.variance_epsilon,
+                BLOCK_H=block_h,
+                num_warps=num_warps,
+            )
+            return out.reshape(orig_shape)
+
+        # Fallback
+        if soft_embeds.dtype != inputs_embeds.dtype:
+            soft_embeds = soft_embeds.to(inputs_embeds.dtype)
+        x = self.pre_norm(soft_embeds)
+        autocast_active = x.device.type in (
+            "cuda",
+            "cpu",
+            "xpu",
+        ) and torch.is_autocast_enabled(x.device.type)
+        if (
+            not compiling
+            and not needs_grad
+            and merged_w is not None
+            and merged_w.device == x.device
+            and merged_w.dtype == x.dtype
+            and not autocast_active
+        ):
+            gate_up = F.linear(x, merged_w)
+            gate, up = gate_up.chunk(2, dim=-1)
+            sc_signal = self.down_proj(F.gelu(gate, approximate="tanh") * up)
+        else:
+            sc_signal = self.down_proj(
+                F.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x)
+            )
         return self.post_norm(inputs_embeds + sc_signal)
 
 
@@ -280,6 +739,10 @@ class DiffusionGemmaForConditionalGeneration(
                 softcap_logits.register_warmup()
             sample_row_stats.register_warmup()
             sample_step.register_warmup()
+            if HAS_TRITON:
+                _sc_rmsnorm_kernel.register_warmup()
+                _gelu_tanh_and_mul_kernel.register_warmup()
+                _sc_add_rmsnorm_kernel.register_warmup()
 
     # ------------------------------------------------------------------ #
     # Multimodal: reuse Gemma4's image parsing, processing & embedding
@@ -365,7 +828,10 @@ class DiffusionGemmaForConditionalGeneration(
         loader = AutoWeightsLoader(
             self, ignore_unexpected_prefixes=["embed_vision.embedding."]
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        try:
+            return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        finally:
+            self.self_conditioning._merged_gate_up_key = None
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -572,7 +1038,9 @@ class DiffusionGemmaRequestStates:
         self.single_step_slots: set[int] = set()
         # Per-slot canvas width, at most canvas_length. The scheduler schedules
         # this many draft tokens for the slot and the sampler pads the rest.
-        self.canvas_width_np = np.full(max_num_reqs, canvas_length, dtype=np.int32)
+        self.canvas_width_np: np.ndarray = np.full(
+            max_num_reqs, canvas_length, dtype=np.int32
+        )
 
         # Per-slot self-conditioning soft embedding (probs @ embed_weight) from
         # the previous denoise step. Storing the [.., hidden] soft embed instead
@@ -866,14 +1334,97 @@ class DiffusionGemmaModelState(ModelState):
         # positions. sc_embeds already holds probs @ embed_weight from the prior
         # denoise step, masked to zero by the sampler for slots not denoising
         # this step; only the MLP runs here. CPU metadata -> no GPU syncs.
-        for slot, idx in zip(decode_slots_np.tolist(), decode_idx_np.tolist()):
+        n_dec = len(decode_slots_np)
+        if n_dec == 0:
+            return
+        cl = sc_embeds.shape[1]
+        h = sc_embeds.shape[-1]
+        target_dtype = inputs_embeds.dtype
+        sc_module = self.model.self_conditioning
+        is_sc_module = isinstance(sc_module, DiffusionGemmaSelfConditioning)
+        sc_fn = cast(
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+            sc_module,
+        )
+        if n_dec == 1:
+            slot = int(decode_slots_np[0])
+            idx = int(decode_idx_np[0])
             start = int(query_start_loc_np[idx])
             end = int(query_start_loc_np[idx + 1])
+            ln = end - start
+            if ln < 0 or ln > cl:
+                raise RuntimeError(
+                    f"Self-conditioning span length {ln} out of bounds for "
+                    f"canvas length {cl} (slot {slot})"
+                )
             canvas = slice(start, end)
-            soft = sc_embeds[slot, : end - start]
-            inputs_embeds[canvas] = self.model.self_conditioning(
-                inputs_embeds[canvas], soft.to(inputs_embeds.dtype)
-            )
+            soft = sc_embeds[slot, :ln]
+            if not is_sc_module and soft.dtype != target_dtype:
+                soft = soft.to(target_dtype)
+            inputs_embeds[canvas] = sc_fn(inputs_embeds[canvas], soft)
+            return
+
+        starts = query_start_loc_np[decode_idx_np]
+        ends = query_start_loc_np[decode_idx_np + 1]
+        start_0 = int(starts[0])
+        end_last = int(ends[-1])
+
+        if (
+            end_last - start_0 == n_dec * cl
+            and bool((ends - starts == cl).all())
+            and bool((starts[1:] == ends[:-1]).all())
+        ):
+            if int(decode_slots_np[-1]) - int(decode_slots_np[0]) == n_dec - 1 and bool(
+                (np.diff(decode_slots_np) == 1).all()
+            ):
+                s0 = int(decode_slots_np[0])
+                soft_batch = sc_embeds[s0 : s0 + n_dec].reshape(n_dec * cl, h)
+            else:
+                if sc_embeds.device.type == "cpu":
+                    slots_t = torch.tensor(
+                        decode_slots_np.tolist(),
+                        dtype=torch.long,
+                        device=sc_embeds.device,
+                    )
+                else:
+                    slots_t = async_tensor_h2d(
+                        decode_slots_np.tolist(),
+                        dtype=torch.long,
+                        device=sc_embeds.device,
+                    )
+                soft_batch = sc_embeds.index_select(0, slots_t).reshape(n_dec * cl, h)
+            if not is_sc_module and soft_batch.dtype != target_dtype:
+                soft_batch = soft_batch.to(target_dtype)
+            span = slice(start_0, end_last)
+            inputs_embeds[span] = sc_fn(inputs_embeds[span], soft_batch)
+            return
+
+        starts_list = starts.tolist()
+        ends_list = ends.tolist()
+        slots_list = decode_slots_np.tolist()
+        lengths = [int(e - s) for s, e in zip(starts_list, ends_list, strict=True)]
+        for slot, ln in zip(slots_list, lengths, strict=True):
+            if ln < 0 or ln > cl:
+                raise RuntimeError(
+                    f"Self-conditioning span length {ln} out of bounds for "
+                    f"canvas length {cl} (slot {slot})"
+                )
+        spans = [
+            slice(int(s), int(e)) for s, e in zip(starts_list, ends_list, strict=True)
+        ]
+        inp_cat = torch.cat([inputs_embeds[sp] for sp in spans], dim=0)
+        soft_cat = torch.cat(
+            [
+                sc_embeds[int(slot), :ln]
+                for slot, ln in zip(slots_list, lengths, strict=True)
+            ],
+            dim=0,
+        )
+        if not is_sc_module and soft_cat.dtype != target_dtype:
+            soft_cat = soft_cat.to(target_dtype)
+        out_cat = sc_fn(inp_cat, soft_cat)
+        for sp, chunk in zip(spans, torch.split(out_cat, lengths, dim=0), strict=True):
+            inputs_embeds[sp] = chunk
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         states = self.diffusion_states
