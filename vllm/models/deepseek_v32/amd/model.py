@@ -172,7 +172,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states"], config.hidden_size
         )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
@@ -199,8 +199,10 @@ class DeepseekV32Model(torch.nn.Module):
             residual = None
         else:
             assert intermediate_tensors is not None
+            # The previous stage sends the full residual stream; the first
+            # layer here treats it like an embedding (plain RMSNorm, no AR).
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+            residual = None
 
         aux_hidden_states = []
         for idx, layer in enumerate(
@@ -208,16 +210,16 @@ class DeepseekV32Model(torch.nn.Module):
             start=self.start_layer,
         ):
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
+                aux_hidden_states.append(
+                    hidden_states if residual is None else hidden_states + residual
+                )
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             # hidden_states is a per-TP-rank partial sum, but PP send/recv
-            # requires TP-replicated tensors. Reduce it into the residual.
-            residual = residual + tensor_model_parallel_all_reduce(hidden_states)
-            return IntermediateTensors(
-                {"hidden_states": torch.zeros_like(residual), "residual": residual}
-            )
+            # requires TP-replicated tensors.
+            hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
+            return IntermediateTensors({"hidden_states": hidden_states})
 
         hidden_states, _ = fused_allreduce_rms_norm(hidden_states, residual, self.norm)
         if len(aux_hidden_states) > 0:
