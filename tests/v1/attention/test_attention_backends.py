@@ -31,6 +31,7 @@ from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     is_quantized_kv_cache,
     is_torch_equal_or_newer,
+    nvfp4_kv_cache_full_dim,
     set_random_seed,
 )
 from vllm.v1.attention.backend import (
@@ -41,7 +42,7 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout, KVQuantMode
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
@@ -1696,6 +1697,99 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
         [AttentionBackendEnum.FLASHINFER],
         causal_mask_mod,
     )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
+    or not current_platform.is_device_capability_family(120),
+    reason="NVFP4 XQA decode requires SM12x.",
+)
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
+@pytest.mark.parametrize("q_len", [1, 4])
+def test_flashinfer_xqa_nvfp4_decode_correctness(
+    default_vllm_config, q_len, use_cuda_graph
+):
+    """Single-token and spec-decode queries over an NVFP4 cache decode with
+    XQA, eager and replayed, and match the fa2 prefill that wrote the cache."""
+    import unittest.mock
+
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    seq_lens, bs, d = [40, 300, 1027], 16, 256
+    config = create_vllm_config(max_model_len=max(seq_lens), block_size=bs)
+    # GQA 6 at head_dim 256, as Qwen3.8-27B at TP=2.
+    config.model_config.model_arch_config = replace(
+        config.model_config.model_arch_config,
+        total_num_attention_heads=24,
+        total_num_kv_heads=4,
+        head_size=d,
+    )
+    config.cache_config.cache_dtype = "nvfp4"
+    if q_len > 1:
+        config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=q_len - 1
+        )
+    spec = FullAttentionSpec(
+        block_size=bs,
+        num_kv_heads=4,
+        head_size=d,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.NVFP4,
+    )
+    cg_support = fi.FlashInferMetadataBuilder.get_cudagraph_support(config, spec)
+    assert cg_support == AttentionCGSupport.UNIFORM_BATCH
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    # Request i owns consecutive pages from starts[i]; page 0 stays null.
+    pages = [0] + [cdiv(s, bs) for s in seq_lens[:-1]]
+    starts = 1 + torch.tensor(pages).cumsum(0)
+    max_pages = cdiv(max(seq_lens), bs)
+    block_table = (starts[:, None] + torch.arange(max_pages)).int().to(device)
+    full_dim = nvfp4_kv_cache_full_dim(d)
+    kv_cache = torch.zeros(
+        int(starts[-1]) + max_pages, bs, 8, full_dim, dtype=torch.uint8, device=device
+    ).transpose(1, 2)
+    q, k, v = (
+        torch.randn(sum(seq_lens), h, d).bfloat16().to(device) for h in (24, 4, 4)
+    )
+
+    def run(query_lens, use_cuda_graph=False):
+        req = torch.repeat_interleave(torch.arange(3), torch.tensor(query_lens))
+        pos = torch.cat([torch.arange(s - n, s) for s, n in zip(seq_lens, query_lens)])
+        rows = pos + torch.tensor([0, *seq_lens]).cumsum(0)[req]
+        metadata = replace(
+            create_common_attn_metadata(BatchSpec(seq_lens, query_lens), bs, device),
+            block_table_tensor=block_table,
+            slot_mapping=(starts[req] * bs + pos).to(device),
+        )
+        with set_current_vllm_config(config):
+            return rows, run_attention_backend(
+                AttentionBackendEnum.FLASHINFER,
+                spec,
+                ["placeholder"],
+                config,
+                device,
+                metadata,
+                q[rows],
+                k[rows],
+                v[rows],
+                kv_cache,
+                kv_cache_dtype="nvfp4",
+                use_cuda_graph=use_cuda_graph,
+                layer_k_scale=0.02,
+                layer_v_scale=0.03,
+            )
+
+    # The full prefill writes every token through the NVFP4 writer; its fa2
+    # output for the last q_len tokens of each request is the reference.
+    _, reference = run(seq_lens)
+    xqa_fn = fi.flashinfer_xqa_batch_decode_with_kv_cache
+    with unittest.mock.patch.object(
+        fi, "flashinfer_xqa_batch_decode_with_kv_cache", wraps=xqa_fn
+    ) as xqa:
+        rows, output = run([q_len] * len(seq_lens), use_cuda_graph)
+    assert xqa.called
+    torch.testing.assert_close(output, reference[rows], atol=2e-2, rtol=2e-2)
 
 
 if current_platform.is_rocm():
