@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
     flat_kv_row_view,
     request_row_bounds,
     triton_convert_req_index_to_global_index,
@@ -162,6 +163,16 @@ class FlashMLASparseBackend(AttentionBackend):
         ):
             return [64]
         return [MultipleOf(64)]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        # Off SM100 the quantized kernel reads 64-token pages, only needed
+        # when blocks span several.
+        if spec.kv_quant_mode != KVQuantMode.NONE and (
+            not current_platform.is_device_capability_family(100)
+        ):
+            return replace(spec, block_stride_alignment=MultipleOf(64))
+        return align_blocks_to_rows(spec)
 
     @staticmethod
     def get_name() -> str:

@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.worker.utils import allocate_kv_cache
+from vllm.v1.worker.utils import allocate_kv_cache, customize_attention_spec
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -84,7 +84,9 @@ def test_allocation_and_warmup_follow_addressing_mode(
         non_causal_multi_token_decode=False,
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
-    spec = MLAAttention.get_kv_cache_spec(layer, config)
+    spec = customize_attention_spec(
+        backend, MLAAttention.get_kv_cache_spec(layer, config)
+    )
     indexer = SimpleNamespace(
         cache_config=config.cache_config, head_dim=132, dtype=torch.uint8
     )

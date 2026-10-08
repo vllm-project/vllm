@@ -282,7 +282,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MLAAttentionImpl,
-    MultipleOf,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.prefill import (
@@ -1377,25 +1376,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
-        backend = self.attn_backend.get_name()
-        # Sparse kernels address the cache in flat rows (FlashMLA's quantized
-        # cache only for SM100 TMA), so blocks must be whole rows apart; TRT-LLM
-        # and SM120 view the rows as 32/64-row pages.
-        if self.attn_backend.is_sparse() and (
-            backend != "FLASHMLA_SPARSE"
-            or self._uses_flat_kv_cache()
-            or current_platform.is_device_capability_family(100)
-        ):
-            page_rows = {
-                "FLASHINFER_MLA_SPARSE": 32,
-                "FLASHINFER_MLA_SPARSE_SM120": 64,
-            }.get(backend, 1)
-            spec = replace(
-                spec, block_stride_alignment=page_rows * spec.state_content_size_bytes
-            )
-        elif backend == "FLASHMLA_SPARSE":
-            # FlashMLA's quantized cache is read in 64-token pages.
-            spec = replace(spec, block_stride_alignment=MultipleOf(64))
         return spec
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):

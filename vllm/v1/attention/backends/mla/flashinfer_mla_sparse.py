@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
     flat_kv_row_view,
     prepare_sparse_mla_safe_lengths,
     triton_convert_req_index_to_global_index,
@@ -69,6 +70,13 @@ class _FlashInferMLASparseBackendBase(AttentionBackend):
     @classmethod
     def is_sparse(cls) -> bool:
         return True
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        # The kernels read the rows as pages of their kernel block size.
+        (page,) = cls.get_supported_kernel_block_sizes(spec)
+        assert isinstance(page, MultipleOf)
+        return align_blocks_to_rows(spec, page.base)
 
 
 class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
