@@ -7,6 +7,8 @@ from typing import ClassVar, Literal
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
+from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+from transformers.core_model_loading import WeightRenaming
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -1109,10 +1111,14 @@ class Glm5NextForConditionalGeneration(
     # checkpoint's safetensors keys differ (e.g. ``language_model.model.`` with
     # no outer ``model.``), override ``hf_to_vllm_mapper`` accordingly.
 
-    # transformers nests f_a_proj/f_b_proj under ``forget_gate``; the checkpoint
-    # and this model keep them flat, so LoRA adapters trained there need this.
+    # PEFT saves LoRA adapters under transformers' load-time renames (e.g.
+    # ``self_attn.forget_gate.f_a_proj``); this model keeps the checkpoint names.
     hf_to_vllm_mapper = Glm4vForConditionalGeneration.hf_to_vllm_mapper | WeightsMapper(
-        orig_to_new_substr={".forget_gate.": "."}
+        orig_to_new_renaming=[
+            renaming.reverse_transform()
+            for renaming in get_checkpoint_conversion_mapping("glm5_next") or []
+            if isinstance(renaming, WeightRenaming)
+        ]
     )
 
     @classmethod
