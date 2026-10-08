@@ -719,6 +719,14 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
 class JinaRankingTokenEmbedIOProcessor(
     TokenEmbedIOProcessor, JinaRankingIOProcessorMixin
 ):
+    def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
+        if render_params["params"].late_chunking_params is not None:
+            raise VLLMValidationError(
+                "JinaForRanking returns document/query vectors and does not support "
+                "late chunking"
+            )
+        return super().render(render_params)
+
     def get_request_factory_online(
         self, ctx: PoolingServeContext
     ) -> Sequence[AnyRenderParam]:

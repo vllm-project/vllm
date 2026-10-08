@@ -68,6 +68,57 @@ def test_unsupported_tasks(llm: LLM, task: PoolingTask, caplog_vllm):
 
 
 @pytest.mark.parametrize("use_v2_runner", [False, True])
+def test_bge_m3_late_chunking_keeps_special_tokens(
+    vllm_runner, monkeypatch, use_v2_runner
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_runner else "0")
+    with vllm_runner(
+        "BAAI/bge-m3",
+        hf_overrides={"architectures": ["BgeM3EmbeddingModel"]},
+        pooler_config=PoolerConfig(task="token_embed"),
+        dtype="float32",
+        max_model_len=128,
+        # Keep encoder batch size fixed for the numerical reference.
+        max_num_seqs=1,
+        gpu_memory_utilization=0.5,
+        enforce_eager=True,
+    ) as runner:
+        llm = runner.llm
+        text = "A document about Berlin and its museums."
+        sizes = (1, 3, 128, None)
+        tokens, *outputs = llm.encode(
+            [text] * len(sizes),
+            pooling_task="token_embed",
+            pooling_params=[
+                PoolingParams(
+                    use_activation=size not in (1, None),
+                    late_chunking_params=LateChunkingParams(size) if size else None,
+                )
+                for size in sizes
+            ],
+            use_tqdm=False,
+        )
+        assert tokens.outputs.data.shape[0] == len(tokens.prompt_token_ids)
+        assert tokens.late_chunking.chunks[0].char_range is None
+        for size, output in zip(sizes[1:], outputs):
+            if size is None:
+                # Ordinary BGE-M3 token embeddings still drop BOS only.
+                expected = tokens.outputs.data[1:]
+                assert output.late_chunking is None
+            else:
+                # BGE-M3's projector is linear, so its unnormalized token
+                # outputs also provide a reference for projected chunk means.
+                expected = torch.nn.functional.normalize(
+                    torch.stack([p.mean(0) for p in tokens.outputs.data.split(size)]),
+                    dim=-1,
+                )
+                assert len(output.late_chunking.chunks) == len(expected)
+            torch.testing.assert_close(
+                output.outputs.data, expected, atol=2e-5, rtol=2e-4
+            )
+
+
+@pytest.mark.parametrize("use_v2_runner", [False, True])
 def test_nomic_late_chunking_offline(vllm_runner, monkeypatch, use_v2_runner):
     """Compare worker chunking with unnormalized states using both GPU runners."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_runner else "0")
@@ -209,3 +260,111 @@ def test_nomic_late_chunking_offline(vllm_runner, monkeypatch, use_v2_runner):
             "after rejection", pooling_task="token_embed", use_tqdm=False
         )[0]
         assert output.late_chunking is None
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("normalize", [False, True])
+def test_e5_late_chunking_mixed_requests(llm: LLM, normalize: bool):
+    texts = [prompt, "Short text.", "中文 😀 café"]
+    raw = llm.encode(
+        texts,
+        pooling_task="token_embed",
+        use_tqdm=False,
+        pooling_params=PoolingParams(use_activation=False),
+    )
+    sizes = [3, None, 100]
+    params = [
+        PoolingParams(
+            late_chunking_params=LateChunkingParams(size) if size is not None else None,
+            use_activation=normalize,
+        )
+        for size in sizes
+    ]
+    actual = llm.encode(
+        texts, pooling_task="token_embed", pooling_params=params, use_tqdm=False
+    )
+    for original, result, size in zip(raw, actual, sizes):
+        expected = original.outputs.data
+        if size is not None:
+            expected = torch.stack(
+                [part.float().mean(0) for part in expected.split(size)]
+            )
+            assert result.late_chunking is not None
+            assert len(result.late_chunking.chunks) == len(expected)
+            assert result.late_chunking.input_tokens == len(result.prompt_token_ids)
+        else:
+            assert result.late_chunking is None
+        if normalize:
+            expected = torch.nn.functional.normalize(expected, dim=-1)
+        check_embeddings_close(
+            embeddings_0_lst=result.outputs.data.tolist(),
+            embeddings_1_lst=expected.tolist(),
+            name_0="late_chunking",
+            name_1="token_reference",
+        )
+        torch.testing.assert_close(
+            result.outputs.data.norm(dim=-1),
+            expected.norm(dim=-1),
+            atol=1e-3,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.parametrize("use_v2_runner", [False, True])
+def test_late_chunking_recomputes_cached_prefix_with_chunked_prefill(
+    vllm_runner, monkeypatch, use_v2_runner
+):
+    # Dummy weights suffice for testing scheduling and reduction of the same states.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_runner else "0")
+    with vllm_runner(
+        "openai-community/gpt2",
+        runner="pooling",
+        convert="embed",
+        load_format="dummy",
+        pooler_config=PoolerConfig(
+            task="token_embed", seq_pooling_type="LAST", tok_pooling_type="ALL"
+        ),
+        dtype="float32",
+        max_model_len=128,
+        max_num_batched_tokens=16,
+        max_num_seqs=2,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.3,
+        seed=0,
+    ) as runner:
+        text = "The document has several important words. " * 6
+        llm = runner.llm
+        raw = llm.encode(
+            text,
+            pooling_task="token_embed",
+            use_tqdm=False,
+            pooling_params=PoolingParams(use_activation=False),
+        )[0]
+        assert len(raw.prompt_token_ids) > 16
+        cached = llm.encode(
+            text,
+            pooling_task="token_embed",
+            use_tqdm=False,
+            pooling_params=PoolingParams(
+                use_activation=False, skip_reading_prefix_cache=False
+            ),
+        )[0]
+        assert cached.num_cached_tokens > 0
+        params = PoolingParams(
+            late_chunking_params=LateChunkingParams(7),
+            use_activation=False,
+            skip_reading_prefix_cache=False,
+        )
+        actual = llm.encode(
+            text, pooling_task="token_embed", pooling_params=params, use_tqdm=False
+        )[0]
+        assert actual.num_cached_tokens == 0
+        assert actual.prompt_token_ids == raw.prompt_token_ids
+        expected = torch.stack([part.mean(0) for part in raw.outputs.data.split(7)])
+        torch.testing.assert_close(actual.outputs.data, expected, atol=1e-5, rtol=1e-4)
+        assert actual.late_chunking.input_tokens == len(raw.prompt_token_ids)
+        assert params.skip_reading_prefix_cache is False
+        assert params.late_chunking_params is not None
+        assert params.late_chunking_params.metadata is None

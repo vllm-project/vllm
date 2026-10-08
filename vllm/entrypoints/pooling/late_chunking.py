@@ -19,15 +19,6 @@ def prepare_late_chunking_input(
     """Validate full-document text input before requesting tokenizer offsets."""
     params = render_params["params"]
     params.verify(config.model_config)
-    if (
-        config.cache_config.enable_prefix_caching
-        or config.scheduler_config.enable_chunked_prefill
-        or config.lora_config is not None
-        or render_params["lora_requests"] is not None
-    ):
-        raise VLLMValidationError(
-            "Late chunking does not support prefix caching, chunked prefill or LoRA"
-        )
     if "prompts" not in render_params:
         raise VLLMValidationError("Late chunking requires plain-text input")
     prompt = cast(EncodeCMPLRenderParams, render_params)["prompts"]

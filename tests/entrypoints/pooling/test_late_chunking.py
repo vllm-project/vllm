@@ -10,7 +10,10 @@ import torch
 
 from vllm import PoolingParams
 from vllm.config import PoolerConfig
-from vllm.entrypoints.pooling.embed.io_processor import TokenEmbedIOProcessor
+from vllm.entrypoints.pooling.embed.io_processor import (
+    JinaRankingTokenEmbedIOProcessor,
+    TokenEmbedIOProcessor,
+)
 from vllm.entrypoints.pooling.late_chunking import build_late_chunking_metadata
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.pooling.typing import (
@@ -93,6 +96,33 @@ def test_late_chunk_render_requests_offsets_once_and_keeps_params_isolated(
     assert result["params"].late_chunking_params.metadata.input_tokens == 4
 
 
+@pytest.mark.parametrize("as_sequence", [False, True])
+@pytest.mark.parametrize("chunk_size", [None, 2])
+def test_jina_ranking_rejects_chunking_before_tokenization(
+    late_chunk_processor, as_sequence, chunk_size
+):
+    processor = object.__new__(JinaRankingTokenEmbedIOProcessor)
+    processor.__dict__.update(late_chunk_processor.__dict__)
+    ctx = _late_chunk_context(prompts=["document", "query"])
+    params = PoolingParams(
+        late_chunking_params=LateChunkingParams(chunk_size) if chunk_size else None
+    )
+    ctx.pooling_params = [params] if as_sequence else params
+    factory, count = processor.get_request_factory_offline(ctx)
+    assert count == 1
+    request = next(factory())
+    if chunk_size is not None:
+        with pytest.raises(VLLMValidationError, match="JinaForRanking.*late chunking"):
+            processor.render(request)
+        late_chunk_processor.renderer.render_cmpl.assert_not_called()
+    else:
+        result = processor.render(request)
+        assert result["prompts"]["type"] == "token"
+        assert result["prompts"]["prompt_token_ids"] == [101, 1, 2, 102]
+        late_chunk_processor.renderer.render_cmpl.assert_called_once()
+        assert not request["tok_params"].return_token_offsets
+
+
 @pytest.mark.parametrize(
     "prompts", ["", [1, 2], {"prompt": "abc", "multi_modal_data": {}}]
 )
@@ -127,9 +157,7 @@ def test_late_chunking_rejects_text_changes_before_render(late_chunk_processor, 
 
 
 @pytest.mark.parametrize("setting", ["prefix_cache", "chunked_prefill", "lora"])
-def test_late_chunking_rejects_unsupported_execution_before_render(
-    late_chunk_processor, setting
-):
+def test_late_chunking_reuses_existing_execution_support(late_chunk_processor, setting):
     processor = late_chunk_processor
     if setting == "prefix_cache":
         processor.vllm_config.cache_config.enable_prefix_caching = True
@@ -138,9 +166,10 @@ def test_late_chunking_rejects_unsupported_execution_before_render(
     else:
         processor.vllm_config.lora_config = object()
     factory, _ = processor.get_request_factory_offline(_late_chunk_context())
-    with pytest.raises(VLLMValidationError, match="does not support"):
-        processor.render(next(factory()))
-    processor.renderer.render_cmpl.assert_not_called()
+    result = processor.render(next(factory()))
+    assert result["params"].skip_reading_prefix_cache is True
+    assert result["params"].late_chunking_params.metadata.input_tokens == 4
+    processor.renderer.render_cmpl.assert_called_once()
 
 
 def test_late_chunk_ranges_keep_unicode_overlaps_and_special_only_chunks():

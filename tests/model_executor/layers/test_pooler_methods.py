@@ -20,7 +20,7 @@ from vllm.model_executor.layers.pooler.seqwise.methods import (
     MeanPool,
     get_seq_pooling_method,
 )
-from vllm.model_executor.layers.pooler.special import DispatchPooler
+from vllm.model_executor.layers.pooler.special import BOSEOSFilter, DispatchPooler
 from vllm.model_executor.layers.pooler.tokwise.heads import TokenEmbeddingPoolerHead
 from vllm.model_executor.layers.pooler.tokwise.methods import (
     AllPool,
@@ -699,3 +699,63 @@ def test_late_chunk_pool_waits_for_complete_states():
     actual = pooler(hidden[2:], last)[0]
     torch.testing.assert_close(actual, torch.stack([hidden[:3].mean(0), hidden[3]]))
     assert not last.pooling_states[0].hidden_states_cache
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 8])
+@pytest.mark.parametrize("embedding_size", [1, 4])
+def test_bos_eos_filter_preserves_chunk_vectors_in_mixed_batch(
+    chunk_size, embedding_size
+):
+    hidden = torch.arange(10 * embedding_size, dtype=torch.float32).reshape(
+        10, embedding_size
+    )
+    pooler = BOSEOSFilter(
+        TokenPooler(TestAllPool._make_all_pool(), TokenEmbeddingPoolerHead()),
+        bos_token_id=101,
+        eos_token_id=102,
+    )
+    metadata = _make_metadata(
+        [5, 5],
+        token_ids=[[101, 1, 2, 3, 102]] * 2,
+        pooling_params=[
+            PoolingParams(
+                task="token_embed", late_chunking_params=LateChunkingParams(chunk_size)
+            ),
+            PoolingParams(task="token_embed"),
+        ],
+    )
+    chunked, ordinary = pooler(hidden, metadata)
+    expected = torch.stack([part.mean(0) for part in hidden[:5].split(chunk_size)])
+    torch.testing.assert_close(chunked, expected)
+    torch.testing.assert_close(ordinary, hidden[6:9].squeeze(-1))
+
+
+def test_bos_eos_filter_waits_for_complete_chunk_vectors():
+    pooler = BOSEOSFilter(
+        TokenPooler(
+            TestAllPool._make_all_pool(chunked=True), TokenEmbeddingPoolerHead()
+        ),
+        bos_token_id=101,
+    )
+    params = [
+        PoolingParams(task="token_embed", late_chunking_params=LateChunkingParams(3))
+    ]
+    first = _make_metadata(
+        [4],
+        token_ids=[[101, 1, 2, 102]],
+        pooling_params=params,
+        num_scheduled_tokens=[2],
+        seq_lens=[2],
+    )
+    hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    assert pooler(hidden[:2], first) == [None]
+    last = _make_metadata(
+        [4],
+        token_ids=[[101, 1, 2, 102]],
+        pooling_params=params,
+        num_scheduled_tokens=[2],
+        seq_lens=[4],
+    )
+    last.pooling_states = first.pooling_states
+    actual = pooler(hidden[2:], last)[0]
+    torch.testing.assert_close(actual, torch.stack([hidden[:3].mean(0), hidden[3]]))
