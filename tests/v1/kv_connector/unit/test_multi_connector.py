@@ -204,7 +204,9 @@ def _prefix_hashing_connector_config(supported: bool) -> dict[str, Any]:
 
 def _enable_eagle(vllm_config) -> None:
     vllm_config.speculative_config = SimpleNamespace(
-        use_eagle=lambda: True, use_eagle_block_drop=lambda: True
+        use_eagle=lambda: True,
+        use_eagle_block_drop=lambda: True,
+        use_multi_module_mtp=lambda: False,
     )
 
 
