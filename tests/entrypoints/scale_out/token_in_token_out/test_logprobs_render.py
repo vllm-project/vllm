@@ -10,8 +10,10 @@ import threading
 from unittest.mock import MagicMock
 
 import numpy as np
+import pybase64 as base64
 import pytest
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from tests.entrypoints.scale_out.token_in_token_out.test_generate_stream import (
     MODEL_NAME,
@@ -27,11 +29,16 @@ from vllm.entrypoints.scale_out.token_in_token_out.logprobs_render import (
     format_float_reprs,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateLogProbs,
     GenerateRequest,
     GenerateResponseBase,
+    GenerateTokensChoice,
+    GenerateTokensResponse,
+    PackedTopK,
     RenderedGenerateResponse,
 )
-from vllm.logprobs import Logprob, create_sample_logprobs
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.logprobs import FlatLogprobs, Logprob, create_sample_logprobs
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -354,3 +361,131 @@ async def test_two_builds_run_at_once(monkeypatch):
     )
     assert first.body == second.body
     assert len(set(names)) == 2
+
+
+def _top_k_body(serving, k, outputs, **fields):
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10, logprobs=k),
+        model=MODEL_NAME,
+        return_top_k_logprobs=True,
+        **fields,
+    )
+    response = serving._build_full_response(
+        request, _final(outputs), "r", MODEL_NAME, 1700000000
+    )[0]
+    assert isinstance(response, RenderedGenerateResponse)
+    return response.body
+
+
+def _engine_rows(n, k, seed):
+    """Rows as the engine emits them: a sampled id repeated in the top-k has
+    the same logprob there."""
+    if n == 0:
+        return np.empty((0, k + 1), np.int32), np.empty((0, k + 1), np.float32), []
+    ids, lps, ranks = _rows(n, k + 1, seed=seed)
+    for i in range(n):
+        lps[i, 1:][ids[i, 1:] == ids[i, 0]] = lps[i, 0]
+    return ids, lps, ranks
+
+
+@pytest.mark.parametrize("k", [1, 5])
+@pytest.mark.parametrize("n", [0, 1, 300])
+def test_top_k_bytes_equal_the_pydantic_dump(k, n):
+    """The spliced body is what JSONResponse gives for the same values:
+    ``{content: null, top_k}``."""
+    serving = _build_serving_tokens(_mock_engine())
+    ids, lps, ranks = _engine_rows(n, k, seed=n + k)
+    lps[n // 2 :: 7, 0] = np.nan
+    stored = _stored(k, (ids, lps, ranks), flat=True) if n else FlatLogprobs()
+    body = _top_k_body(serving, k, [(ids[:, 0].tolist(), stored)])
+
+    top_k = PackedTopK(
+        num_positions=n,
+        k=k,
+        token_ids=base64.b64encode(ids[:, 1:].astype("<i4").tobytes()).decode(),
+        logprobs=base64.b64encode(lps[:, 1:].astype("<f4").tobytes()).decode(),
+    )
+    expected = GenerateTokensResponse(
+        request_id="r",
+        created=1700000000,
+        model=MODEL_NAME,
+        usage=UsageInfo(prompt_tokens=3, completion_tokens=n, total_tokens=n + 3),
+        choices=[
+            GenerateTokensChoice(
+                index=0,
+                finish_reason="length",
+                token_ids=ids[:, 0].tolist(),
+                logprobs=GenerateLogProbs(top_k=top_k),
+            )
+        ],
+    )
+    assert body == JSONResponse(content=expected.model_dump()).body
+    logprobs = json.loads(body)["choices"][0]["logprobs"]
+    assert list(logprobs) == ["content", "top_k"]
+    assert list(logprobs["top_k"]) == ["num_positions", "k", "token_ids", "logprobs"]
+
+
+def test_top_k_round_trip_against_content():
+    """Decoded top_k matches the content entries of the same rows."""
+    serving = _build_serving_tokens(_mock_engine())
+    k, n = 4, 50
+    ids, lps, ranks = _engine_rows(n, k, seed=3)
+    lps[3, 2] = -np.inf  # raw in top_k, clamped in content
+    tokens = ids[:, 0].tolist()
+
+    def stored():
+        return _stored(k, (ids, lps, ranks), flat=True)
+
+    packed = json.loads(_top_k_body(serving, k, [(tokens, stored())]))["choices"][0][
+        "logprobs"
+    ]
+    content = json.loads(_body(serving, k, [(tokens, stored())])[0])["choices"][0][
+        "logprobs"
+    ]["content"]
+
+    assert packed["content"] is None
+    top_k = packed["top_k"]
+    assert (top_k["num_positions"], top_k["k"]) == (n, k)
+    top_ids = np.frombuffer(base64.b64decode(top_k["token_ids"]), "<i4")
+    top_lps = np.frombuffer(base64.b64decode(top_k["logprobs"]), "<f4")
+    top_ids, top_lps = top_ids.reshape(n, k), top_lps.reshape(n, k)
+    np.testing.assert_array_equal(top_ids, ids[:, 1:])
+    np.testing.assert_array_equal(top_lps, lps[:, 1:])
+    for i, entry in enumerate(content):
+        # content lists the sampled entry first, then slots 1..k in order
+        # (the sampled id's own slot merged into the first entry).
+        expected = [
+            (int(t), max(float(v), -9999.0))
+            for t, v in zip(top_ids[i], top_lps[i])
+            if t != tokens[i]
+        ]
+        got = [(e["token_id"], e["logprob"]) for e in entry["top_logprobs"][1:]]
+        assert got == expected[: len(got)]
+
+
+@pytest.mark.parametrize(
+    "fields,message",
+    [
+        ({"stream": True}, "stream"),
+        ({"output_mode": "text"}, "output_mode"),
+        ({"sampling_params": {"max_tokens": 1}}, "got None"),
+        ({"sampling_params": {"logprobs": 0}}, "got 0"),
+        ({"sampling_params": {"logprobs": -1}}, "got -1"),
+    ],
+)
+def test_return_top_k_logprobs_invalid_requests(fields, message):
+    body = {
+        "token_ids": [1],
+        "sampling_params": {"max_tokens": 1, "logprobs": 2},
+        "return_top_k_logprobs": True,
+        **fields,
+    }
+    with pytest.raises(ValidationError, match=message):
+        GenerateRequest.model_validate(body)
+
+
+def test_top_k_is_omitted_unless_set():
+    """Responses without return_top_k_logprobs keep their schema and bytes."""
+    assert GenerateLogProbs(content=[]).model_dump() == {"content": []}
+    assert "top_k" not in GenerateLogProbs(content=[]).model_dump_json()

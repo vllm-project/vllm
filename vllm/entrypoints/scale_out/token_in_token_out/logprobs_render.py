@@ -6,8 +6,9 @@
 :class:`~vllm.logprobs.FlatLogprobs` and produces exactly the JSON that
 ``ServingTokens._create_tokens_logprobs`` + ``model_dump`` + Starlette's
 ``JSONResponse.render`` produce for the same rows, without a Python object
-per entry. :func:`render_json_with_fragments` splices such pre-rendered values
-into the JSON of the remaining (small) response.
+per entry. :func:`render_top_k_logprobs` renders the packed form of the rows
+(``return_top_k_logprobs``). :func:`render_json_with_fragments` splices such
+pre-rendered values into the JSON of the remaining (small) response.
 """
 
 import json
@@ -18,7 +19,9 @@ from typing import Any
 
 import msgspec
 import numpy as np
+import pybase64
 
+from vllm.exceptions import GenerationError
 from vllm.logprobs import FlatLogprobs
 
 # Rows rendered per batch; bounds the per-entry lists and index arrays.
@@ -277,3 +280,36 @@ def render_json_with_fragments(
         out += fragments[index]
         out.append(piece)
     return out
+
+
+def render_top_k_logprobs(
+    container: Any,
+    num_tokens: int,
+    num_output_top_logprobs: int,
+) -> list[bytes]:
+    """Render the ``return_top_k_logprobs`` ``GenerateLogProbs`` JSON of one
+    choice, as parts whose concatenation is the JSON that ``model_dump`` +
+    ``JSONResponse`` give for ``content=None`` and ``top_k``.
+
+    ``top_k`` holds slots ``1..k`` of the rows as raw little-endian bytes,
+    base64-encoded in one pass. Raises GenerationError if the rows cannot be
+    packed (irregular widths or ranks, ids beyond int32, or a row count that
+    differs from the tokens).
+    """
+    rows = container.rows() if isinstance(container, FlatLogprobs) else None
+    if rows is None:
+        raise GenerationError("Top-k logprobs are unavailable for this request")
+    token_ids, logprobs, _ = rows
+    k = num_output_top_logprobs
+    if len(token_ids) != num_tokens or (num_tokens and token_ids.shape[1] != k + 1):
+        raise GenerationError("Top-k logprobs are unavailable for this request")
+    top_ids = np.ascontiguousarray(token_ids[:, 1:]).reshape(-1)
+    top_logprobs = np.ascontiguousarray(logprobs[:, 1:]).reshape(-1)
+    return [
+        b'{"content":null,"top_k":{"num_positions":%d,"k":%d,"token_ids":"'
+        % (num_tokens, k),
+        pybase64.b64encode(top_ids.tobytes()),
+        b'","logprobs":"',
+        pybase64.b64encode(top_logprobs.tobytes()),
+        b'"}}',
+    ]
