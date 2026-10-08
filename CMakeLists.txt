@@ -1564,6 +1564,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
       "csrc/rocm/moe_q_gemm_rdna3.cu"
+      "csrc/rocm/qwen4_hc_rdna3.cu"
       "csrc/rocm/jart_ar.cu")
   endif()
 
