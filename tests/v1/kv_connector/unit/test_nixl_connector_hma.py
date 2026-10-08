@@ -60,6 +60,8 @@ def region_pull_worker():
     worker._transfer_layer_group_ids = ()
     worker._bidirectional_kv_xfer_enabled = False
     worker._recving_transfers = {}
+    worker._failed_remote_engines = set()
+    worker._invalid_remote_engines = set()
     worker.use_mla, worker._has_mamba = True, False
     worker.dcp_size = 1
     worker.dcp_rank = 0
@@ -690,6 +692,8 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._invalid_remote_engines = set()
+    worker._remote_agents = {"remote-engine": {}}
     worker._engine_last_active = {}
     worker._recving_transfers = {}
     worker._bidirectional_kv_xfer_enabled = False
@@ -1555,17 +1559,22 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "has_mamba,is_hma_required,expected_count",
+    "has_mamba,is_hma_required,bounded_replay,expected_count",
     [
-        (True, True, 9),
-        (False, False, 10),
-        (False, True, 10),
+        (True, True, False, 9),
+        (False, False, False, 10),
+        (False, True, False, 10),
+        (False, True, True, 9),
     ],
-    ids=["mamba", "fa_only", "swa_only"],
+    ids=["mamba", "fa_only", "swa_only", "swa_bounded_replay"],
 )
-def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
-    """D-side: Mamba gets N-1 matched tokens, non-Mamba gets N."""
-    sched = make_nixl_scheduler(has_mamba=has_mamba, is_hma_required=is_hma_required)
+def test_mamba_n1_d_side(has_mamba, is_hma_required, bounded_replay, expected_count):
+    """D-side: Mamba and SWA bounded replay get N-1 matched tokens, others N."""
+    sched = make_nixl_scheduler(
+        has_mamba=has_mamba,
+        is_hma_required=is_hma_required,
+        bounded_replay=bounded_replay,
+    )
     req = create_request(num_tokens=10, do_remote_prefill=True)
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
@@ -1633,6 +1642,20 @@ def test_mamba_n1_p_side_truncation():
 
     fa_sched.on_new_request(fa_req)
     assert len(fa_req.prompt_token_ids) == fa_original
+
+    # SWA bounded replay: the window is not replayed after the load, so the
+    # prefiller stops short of the last token too.
+    swa_sched = make_nixl_scheduler(is_hma_required=True, bounded_replay=True)
+    swa_req = create_request(num_tokens=10, do_remote_decode=True)
+    swa_sched.on_new_request(swa_req)
+    assert len(swa_req.prompt_token_ids) == 9
+
+    # A request that skips reading the prefix cache (prompt logprobs) is not
+    # cut: the decoder loads nothing and recomputes its whole prompt.
+    logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
+    logprobs_req.sampling_params.skip_reading_prefix_cache = True
+    swa_sched.on_new_request(logprobs_req)
+    assert len(logprobs_req.prompt_token_ids) == 10
 
 
 @pytest.mark.cpu_test

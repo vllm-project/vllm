@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedConfig
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+    from vllm.sampling_params import BeamSearchParams, SamplingParams
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
     PreTrainedConfig = Any
@@ -640,13 +641,15 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
-        if speculative_config.use_dflash():
-            # DFlash requires an extra lookahead slot since it uses in-fill-style
-            # decoding instead of standard next-token sampling, so it has a query
-            # for the last sampled token plus queries for each draft token.
+        dspark_fill_in = speculative_config.use_dspark() and not getattr(
+            speculative_config.draft_model_config.hf_config, "sample_from_anchor", True
+        )
+        if speculative_config.use_dflash() or dspark_fill_in:
+            # Fill-in drafting uses a bonus query plus one query per draft token.
+            # DSpark's anchor-sampling layout does not need the extra slot.
             return self.num_speculative_tokens + 1
         if speculative_config.use_eagle() or speculative_config.uses_draft_model():
-            # DSpark (covered by use_eagle) drafts a block of num_speculative_tokens
+            # Anchor-sampling DSpark drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
             # position (no separate bonus query), so it needs exactly
             # num_speculative_tokens lookahead slots.
@@ -1312,15 +1315,22 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
-    def _check_watermarking_unsupported(
+    def _check_supports_watermarking(
         self,
+        config: "SamplingParams | BeamSearchParams | None" = None,
         *,
-        beam_search: bool = False,
         custom_sampler: bool = False,
-    ) -> None:
+    ) -> bool:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
-            return
+            if config is not None and config.watermarking is not False:
+                logger.warning_once(
+                    "Watermarking is enabled for this request, but the engine has no "
+                    "watermark configuration. This and subsequent requests will run "
+                    "without watermarking.",
+                    scope="global",
+                )
+            return False
         if self.speculative_config is not None:
             speculative_config = self.speculative_config
             if speculative_config.draft_sample_method != "probabilistic":
@@ -1375,12 +1385,44 @@ class VllmConfig:
                     watermark_config.alpha,
                     scope="global",
                 )
-        if beam_search:
-            raise ValueError("Beam search is not supported with watermarking.")
         if custom_sampler:
             raise ValueError(
                 "Model-specific custom samplers are not supported with watermarking."
             )
+        if config is None:
+            return True
+        if config.watermarking is False:
+            return False
+
+        from vllm.sampling_params import BeamSearchParams, SamplingParams
+
+        if isinstance(config, BeamSearchParams):
+            logger.warning_once(
+                "Watermarking is enabled, but beam search cannot be watermarked. "
+                "This and subsequent beam search requests will run without "
+                "watermarking.",
+                scope="global",
+            )
+            return False
+        if not isinstance(config, SamplingParams):
+            raise TypeError(f"Unsupported watermarking config: {type(config).__name__}")
+        if config.trace_decode_token_ids is not None:
+            logger.warning_once(
+                "Watermarking is enabled, but trace replay cannot be watermarked. "
+                "This and subsequent trace replay requests will run without "
+                "watermarking.",
+                scope="global",
+            )
+            return False
+        if config.temperature == 0:
+            logger.warning_once(
+                "Watermarking is enabled, but greedy decoding "
+                "(temperature=0) cannot be watermarked. This and subsequent "
+                "greedy requests will use ordinary greedy sampling.",
+                scope="global",
+            )
+            return False
+        return True
 
     def _resolve_and_verify_engram_config(self) -> None:
         """Resolve defaults and validate n-gram embedding settings."""
@@ -1444,7 +1486,7 @@ class VllmConfig:
         self.try_verify_and_update_config()
         self._resolve_and_verify_engram_config()
 
-        self._check_watermarking_unsupported()
+        self._check_supports_watermarking()
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
@@ -1835,6 +1877,12 @@ class VllmConfig:
             if self.parallel_config.decode_context_parallel_size > 1:
                 raise ValueError(
                     "HiSparse does not support decode context parallelism."
+                )
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
+                raise ValueError(
+                    "HiSparse does not support cudagraph_mode=FULL; use "
+                    "FULL_AND_PIECEWISE (the default), which captures FULL graphs "
+                    "for decode batches."
                 )
             if not self.scheduler_config.scheduler_reserve_full_isl:
                 # Without it, async loads admitted against free host blocks can
@@ -3092,9 +3140,6 @@ class VllmConfig:
 
         if speculative_config is not None:
             if speculative_config.method in (
-                # https://github.com/vllm-project/vllm/pull/40704
-                "ngram",
-                "ngram_gpu",
                 "suffix",
                 "medusa",
                 "mlp_speculator",
@@ -3110,6 +3155,11 @@ class VllmConfig:
                 and speculative_config.method not in ("dflash", "dspark")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
+
+            # The V2 draft-model speculator has no token mapping between the
+            # draft and target vocabularies (TLI is TBD in #47172).
+            if getattr(speculative_config, "use_heterogeneous_vocab", False):
+                unsupported.append("heterogeneous-vocabulary draft models")
 
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())

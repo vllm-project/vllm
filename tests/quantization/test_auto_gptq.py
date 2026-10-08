@@ -23,7 +23,10 @@ from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQLinearMethod,
     AutoGPTQMoEMethod,
 )
-from vllm.model_executor.layers.quantization.utils.gptq_utils import override_config
+from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+    is_layer_gptq_quantized,
+    override_config,
+)
 from vllm.platforms import current_platform
 
 PROMPT = "On the surface of Mars, we found"
@@ -69,6 +72,19 @@ def test_auto_gptq_quantization_method(
 def test_auto_gptq_config_get_name():
     """Test that AutoGPTQConfig.get_name() returns 'auto_gptq'."""
     assert AutoGPTQConfig.get_name() == "auto_gptq"
+
+
+def test_auto_gptq_quantizes_every_layer_when_the_module_list_is_unknown():
+    """An empty module list means the safetensors metadata could not be read,
+    not that the checkpoint holds no quantized layer."""
+    assert is_layer_gptq_quantized(
+        prefix="model.layers.0.mlp.down_proj",
+        quantized_layers=[],
+    )
+    assert not is_layer_gptq_quantized(
+        prefix="model.layers.0.mlp.down_proj",
+        quantized_layers=["self_attn.q_proj"],
+    )
 
 
 @pytest.mark.parametrize(
