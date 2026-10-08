@@ -57,10 +57,20 @@ def call(a, b, sa, sb, config=None):
     return triton_scaled_mm(a, b, sa, sb, torch.bfloat16, **kwargs)
 
 
-def check(output, ref):
-    if not torch.isfinite(output).all().item():
-        raise ValueError("Non-finite output")
-    error = ((output.float() - ref).square().mean() / ref.square().mean()).sqrt().item()
+def reference(a, w, sa, sb):
+    rows = torch.linspace(0, a.shape[0] - 1, min(a.shape[0], 64), device=a.device)
+    cols = torch.linspace(0, w.shape[0] - 1, min(w.shape[0], 128), device=w.device)
+    rows, cols = rows.long().unique(), cols.long().unique()
+    ref = (a[rows].float() @ w[cols].float().t()) * sa[rows] * sb[cols].t()
+    return rows, cols, ref
+
+
+def check(output, ref, rows, cols):
+    for chunk in output.reshape(-1).split(16 * 1024 * 1024):
+        if not torch.isfinite(chunk).all().item():
+            raise ValueError("Non-finite output")
+    sample = output[rows[:, None], cols[None, :]].float()
+    error = ((sample - ref).square().mean() / ref.square().mean()).sqrt().item()
     if error >= 0.01:
         raise ValueError(f"Relative RMS error {error} >= 0.01")
     return error
@@ -85,6 +95,10 @@ def main():
     parser.add_argument("--rep-ms", type=int, default=10)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--finalists", type=int, default=8)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--exclude-cases", type=Path, help="JSON list of already tuned [M,N,K] cases"
+    )
     parser.add_argument(
         "--validate-only",
         action="store_true",
@@ -95,9 +109,14 @@ def main():
     torch.set_num_threads(4)
     shapes = sorted({tuple(map(int, s.split(","))) for s in args.shapes})
     cases = [(m, n, k) for n, k in shapes for m in sorted(set(args.m))]
+    if args.exclude_cases:
+        excluded = {tuple(case) for case in json.loads(args.exclude_cases.read_text())}
+        cases = [case for case in cases if case not in excluded]
+    if not cases:
+        parser.error("No cases to run")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     result_path = args.output_dir / "results.jsonl"
-    if result_path.exists():
+    if result_path.exists() and not args.resume:
         raise FileExistsError("Choose a fresh output directory")
     history = {}
     if args.history:
@@ -121,6 +140,7 @@ def main():
         "method": "CUDA graphs, hot operands, median of randomized rounds",
         "bias": False,
         "quantization_included": False,
+        "correctness": "all elements finite; <=64 rows x128 columns vs FP32",
         "cases": cases,
         "search_space": search,
         "arguments": {
@@ -136,10 +156,67 @@ def main():
         metadata["history_sha256"] = hashlib.sha256(
             args.history.read_bytes()
         ).hexdigest()
-    (args.output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
+    checkpoints = args.output_dir / "checkpoints"
+    checkpoints.mkdir(exist_ok=True)
+    complete = {}
+    metadata_path = args.output_dir / "metadata.json"
+    if args.resume and metadata_path.exists():
+        old = json.loads(metadata_path.read_text())
+        for key in (
+            "device",
+            "torch",
+            "hip",
+            "triton",
+            "sources",
+            "cases",
+            "history_sha256",
+        ):
+            assert json.loads(json.dumps(metadata.get(key))) == old.get(key), key
+        old_args, new_args = dict(old["arguments"]), dict(metadata["arguments"])
+        old_args.pop("resume")
+        new_args.pop("resume")
+        assert old_args == new_args, "Resume arguments differ"
+        for path in checkpoints.glob("*.json"):
+            row = json.loads(path.read_text())
+            case = (row["M"], row["N"], row["K"])
+            assert case in cases and case not in complete, path
+            complete[case] = row
+        # Atomic checkpoints also recover a partially written JSONL tail.
+        result_path.write_text(
+            "".join(json.dumps(complete[c]) + "\n" for c in cases if c in complete)
+        )
+    metadata["completed_cases"] = len(complete)
+    metadata_path.write_text(json.dumps(metadata, indent=2))
     started = time.monotonic()
     configs = {}
+
+    def save(record):
+        name = f"M={record['M']}-N={record['N']}-K={record['K']}.json"
+        path = checkpoints / name
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps(record) + "\n")
+        temp.replace(path)
+        with result_path.open("a") as stream:
+            stream.write(json.dumps(record) + "\n")
+
+    if not args.validate_only:
+        for (m, n, k), row in complete.items():
+            filename = per_token_fp8_config_filename(
+                n,
+                k,
+                get_device_name_as_file_name(),
+                current_platform.fp8_dtype(),
+                torch.bfloat16,
+            )
+            configs.setdefault(filename, {})[m] = row["config"]
+        # Rebuild exports even if the interruption followed the final checkpoint.
+        folder = args.output_dir / "configs"
+        folder.mkdir(exist_ok=True)
+        for filename, config in configs.items():
+            (folder / filename).write_text(json.dumps(config, indent=4) + "\n")
     for index, case in enumerate(cases):
+        if case in complete:
+            continue
         m, n, k = case
         seed_index = history[case][0] if history else index
         torch.manual_seed(1234 + seed_index)
@@ -149,7 +226,7 @@ def main():
         b = w.t()
         sa = torch.rand(m, 1, device="cuda") + 0.5
         sb = torch.rand(n, 1, device="cuda") + 0.5
-        ref = (a.float() @ w.float().t()) * sa * sb.t()
+        rows, cols, ref = reference(a, w, sa, sb)
         if args.validate_only:
             config = get_per_token_fp8_config(m, n, k, dtype, torch.bfloat16)
             if config is None:
@@ -166,7 +243,9 @@ def main():
                     None,
                 ),
             }
-            errors = {name: check(fn(), ref) for name, fn in methods.items()}
+            errors = {
+                name: check(fn(), ref, rows, cols) for name, fn in methods.items()
+            }
             timings = {name: [] for name in methods}
             rng = random.Random(1234 + seed_index)
             for _ in range(args.rounds):
@@ -190,15 +269,14 @@ def main():
             )
             if history:
                 record["historical_median_us"] = history[case][1]["median_us"]
-            with result_path.open("a") as stream:
-                stream.write(json.dumps(record) + "\n")
+            save(record)
             print(
                 f"[{index + 1}/{len(cases)}] M={m} N={n} K={k}: "
                 f"{record['median_us']} ({record['speedup']:.3f}x)",
                 flush=True,
             )
             methods.clear()
-            del a, w, b, sa, sb, ref
+            del a, w, b, sa, sb, rows, cols, ref
             torch.accelerator.empty_cache()
             continue
         ranked, skipped = [], []
@@ -208,7 +286,7 @@ def main():
         for candidate in order:
             fn = partial(call, a, b, sa, sb, candidate)
             try:
-                error = check(fn(), ref)
+                error = check(fn(), ref, rows, cols)
                 latency = bench(fn, args.search_ms)
             except (
                 triton.runtime.errors.OutOfResources,
@@ -269,12 +347,11 @@ def main():
             "samples_us": timings,
             "ranked": ranked,
             "skipped": skipped,
-            "relative_rms": check(call(a, b, sa, sb, config), ref),
+            "relative_rms": check(call(a, b, sa, sb, config), ref, rows, cols),
         }
         if history:
             record["historical_median_us"] = history[case][1]["median_us"]
-        with result_path.open("a") as stream:
-            stream.write(json.dumps(record) + "\n")
+        save(record)
         filename = per_token_fp8_config_filename(
             n, k, get_device_name_as_file_name(), dtype, torch.bfloat16
         )
@@ -288,7 +365,7 @@ def main():
             flush=True,
         )
         methods.clear()
-        del fn, a, w, b, sa, sb, ref
+        del fn, a, w, b, sa, sb, rows, cols, ref
         torch.accelerator.empty_cache()
     metadata["elapsed_seconds"] = time.monotonic() - started
     metadata["completed_cases"] = len(cases)
