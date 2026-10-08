@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
@@ -224,6 +225,14 @@ def init_attn_backend(
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
+            if (
+                envs.VLLM_BATCH_INVARIANT
+                and not attn_backend.supports_batch_invariance()
+            ):
+                raise RuntimeError(
+                    "VLLM batch_invariant mode is not supported for "
+                    f"{attn_backend.get_name()}."
+                )
             if layer_name in fast_prefill_eligible_layers:
                 attn_backend = create_fast_prefill_custom_backend(
                     "FastPrefill", attn_backend
