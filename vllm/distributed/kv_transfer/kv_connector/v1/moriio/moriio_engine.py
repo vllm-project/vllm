@@ -3,6 +3,7 @@
 import threading
 import time
 from collections import OrderedDict, defaultdict
+from math import ceil
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
@@ -58,6 +59,11 @@ try:
     logger.info("MoRIIO is available")
 except ImportError:
     logger.error("MoRIIO is not available")
+
+try:
+    from mori.io import StatusCode
+except ImportError:
+    StatusCode = None
 
 """Write task execution logic for MoRIIO connector."""
 
@@ -363,11 +369,15 @@ class MoRIIOWriter:
             task.dst_engine_id
         )
 
-        # Prepare transfer plan
-        plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
-
-        # Execute transfer
-        transfer_statuses = self._do_layer_write(plan, sessions)
+        if self.worker._is_mamba_layer(task.layer_name):
+            plans = self._prepare_mamba_transfer_plans(task, request_info)
+        else:
+            plans = [
+                self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
+            ]
+        transfer_statuses = []
+        for plan in plans:
+            transfer_statuses.extend(self._do_layer_write(plan, sessions))
         with self._write_state_lock:
             request_info.transfer_statuses.extend(transfer_statuses)
 
@@ -395,10 +405,17 @@ class MoRIIOWriter:
         key = (task.layer_name, *_get_write_geometry_key(layer_cache))
         offsets = request_info.transfer_offsets.get(key)
         if offsets is None:
+            group = self.worker.layer_to_group[task.layer_name]
+            assert request_info.block_ids is not None
+            local_blocks = task.local_block_ids[group]
+            remote_blocks = request_info.block_ids[group]
+            if self.worker._has_mamba:
+                # D can reserve a tail block for the token recomputed locally.
+                remote_blocks = remote_blocks[: len(local_blocks)]
             offsets = self.worker._compute_block_transfer_offsets(
                 task.layer_name,
-                task.local_block_ids,
-                request_info.block_ids,
+                local_blocks,
+                remote_blocks,
                 remote_moriio_meta,
                 remote_engine_id=task.dst_engine_id,
             )
@@ -421,6 +438,44 @@ class MoRIIOWriter:
             use_batch=True,
         )
 
+    def _prepare_mamba_transfer_plans(
+        self, task: WriteTask, request_info: RemoteAllocInfo
+    ) -> list[LayerTransferPlan]:
+        """Plan both registered regions as one scheduled layer write."""
+        assert request_info.block_ids is not None
+        local_slots = self.worker._mamba_blocks_for_layer(
+            task.layer_name, task.local_block_ids
+        )
+        remote_slots = self.worker._mamba_blocks_for_layer(
+            task.layer_name, request_info.block_ids
+        )
+        if len(local_slots) != 1 or len(remote_slots) != 1:
+            raise MoRIIOError(
+                "Hybrid WRITE requires one running-state slot per Mamba group"
+            )
+        local, remote, sizes, n_conv = self.worker._compute_mamba_transfer_offsets(
+            task.layer_name,
+            local_slots,
+            remote_slots,
+            remote_tp_size=task.remote_tp_size,
+        )
+        conv_session, ssm_session = self.worker._region_session_indices(task.layer_name)
+        return [
+            LayerTransferPlan(
+                request_id=task.request_id,
+                transfer_id=task.transfer_id,
+                layer_name=task.layer_name,
+                sess_idx=session,
+                transfer_local_offsets=local[region],
+                transfer_remote_offsets=remote[region],
+                transfer_sizes=sizes[region],
+            )
+            for session, region in (
+                (conv_session, slice(0, n_conv)),
+                (ssm_session, slice(n_conv, None)),
+            )
+        ]
+
     def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> list[Any]:
         """Perform the actual layer write.
 
@@ -429,6 +484,8 @@ class MoRIIOWriter:
             sessions: List of transfer sessions
 
         """
+        if not plan.transfer_sizes:
+            return []
         if plan.use_batch:
             return [
                 self.worker.moriio_wrapper.write_remote_data(
@@ -691,7 +748,28 @@ class MoRIIOWrapper:
         if not transfers_to_wait:
             return
 
-        self._poll_transfers_until_done(transfers_to_wait)
+        wait_all = getattr(self.moriio_engine, "wait_all", None)
+        if wait_all is None or StatusCode is None:
+            self._poll_transfers_until_done(transfers_to_wait)
+            return
+
+        # Zero means a nonblocking progress call in Mori, not an immediate
+        # deadline. Round up so even sub-millisecond waits remain blocking.
+        timeout_ms = ceil(self._transfer_timeout * 1000)
+        result = wait_all(transfers_to_wait, timeout_ms=timeout_ms)
+        if result != StatusCode.SUCCESS:
+            details = [
+                f"{status.Message()} (code={status.Code()})"
+                for status in transfers_to_wait
+                if status.Failed()
+            ]
+            if not details and result in (StatusCode.INIT, StatusCode.IN_PROGRESS):
+                details.append(
+                    f"RDMA transfer timed out after {self._transfer_timeout:g}s"
+                )
+            raise TransferError(
+                f"MoRIIO batch wait failed ({result}): " + "; ".join(details)
+            )
 
     def _poll_transfers_until_done(self, transfers_to_wait: list[Any]) -> None:
         """Fallback for mori builds without the batched wait.
@@ -826,7 +904,12 @@ class MoRIIOWrapper:
                 )
                 return
             self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
-                block_ids=block_notify_list, decode_dp_rank=decode_dp_rank
+                block_ids=(
+                    [block_notify_list]
+                    if isinstance(block_notify_list[0], int)
+                    else block_notify_list
+                ),
+                decode_dp_rank=decode_dp_rank,
             )
 
     def _handle_write_done_message(self, data: dict):

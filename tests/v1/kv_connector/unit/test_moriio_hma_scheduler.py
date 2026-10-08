@@ -12,12 +12,13 @@ wiring.
 import importlib
 from dataclasses import asdict
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
@@ -52,6 +53,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     attributes read by the method under test are set."""
 
     def __init__(self, **attrs):
+        self.mode = MoRIIOMode.READ
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
         self._num_ssm_scratch_blocks = 0
@@ -287,7 +289,8 @@ def test_scheduler_rejects_mamba_group_without_two_states():
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
-def test_scheduler_rejects_non_dspark_speculative_hybrid_read():
+@pytest.mark.parametrize("read_mode", [True, False])
+def test_scheduler_rejects_non_dspark_speculative_hybrid(read_mode):
     config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
@@ -298,7 +301,9 @@ def test_scheduler_rejects_non_dspark_speculative_hybrid_read():
 
     with pytest.raises(moriio_common.MoRIIOError, match="speculative decoding"):
         moriio_connector.MoRIIOConnectorScheduler(
-            _gate_vllm_config(speculative_config=_spec_config("ngram")),
+            _gate_vllm_config(
+                read_mode=read_mode, speculative_config=_spec_config("ngram")
+            ),
             "engine",
             config,
         )
@@ -336,14 +341,16 @@ def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize("read_mode", [True, False])
 @pytest.mark.parametrize(
     "dcp_size,dcp_sharded,expected_tail", [(1, True, 4), (4, True, 1), (4, False, 4)]
 )
 def test_scheduler_accepts_dspark_with_wrapped_full_attention(
-    dcp_size, dcp_sharded, expected_tail
+    dcp_size, dcp_sharded, expected_tail, read_mode
 ):
     config = _dspark_wrapped_attention_config(dcp_sharded=dcp_sharded)
     vllm_config = _gate_vllm_config(
+        read_mode=read_mode,
         speculative_config=_spec_config("dspark"),
         block_size=4,
         num_lookahead_tokens=7,
@@ -384,19 +391,123 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
         )
 
 
-def test_scheduler_rejects_hybrid_write():
-    config = SimpleNamespace(
-        kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec()),
-        ],
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_hybrid_write_clamps_attention_and_excludes_scratch_slots():
+    config = _dspark_wrapped_attention_config()
+    config.select_transfer_block_ids = lambda blocks: tuple(blocks)
+    sched = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
     )
-    config.transfer_groups = tuple(config.kv_cache_groups)
+    assert sched._clamp_to_prompt_blocks(
+        SimpleNamespace(num_prompt_tokens=9), [[10, 11, 12, 13], [1, 2, 3, 4]]
+    ) == [[11], [1, 2]]
 
-    with pytest.raises(moriio_common.MoRIIOError, match="READ mode only"):
-        moriio_connector.MoRIIOConnectorScheduler(
-            _gate_vllm_config(read_mode=False), "engine", config
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_hybrid_write_resolves_current_state_instead_of_cached_block_ids():
+    config = _dspark_wrapped_attention_config()
+    config.select_transfer_block_ids = lambda blocks: tuple(blocks)
+    sched = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
+    )
+    state = KVConnectorBlockState(
+        req_ids={"req"},
+        resolve_block_ids=lambda _: ([0, 51, 52, 53], [31, 32, 33]),
+        boundary_state_offloads={},
+    )
+    assert sched._get_write_blocks(
+        SimpleNamespace(request_id="req", num_prompt_tokens=9),
+        [[10, 11, 12], [1]],
+        SimpleNamespace(kv_connector_block_state=state),
+    ) == [[51], [31, 32]]
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize("external_tokens", [0, 9])
+def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
+    external_tokens,
+):
+    config = _dspark_wrapped_attention_config()
+    config.select_transfer_block_ids = lambda blocks: tuple(blocks)
+    sched = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(read_mode=False), "engine", config
+    )
+    sched.send_notify_block = Mock()
+    sched._send_transfer_release = Mock()
+    req = _mk_request(
+        list(range(10)),
+        params={
+            "do_remote_prefill": True,
+            "transfer_id": "tx",
+            "remote_host": "127.0.0.2",
+            "remote_notify_port": 7000,
+        },
+    )
+    req.request_id = "req"
+    sched.update_state_after_alloc(
+        req, _FakeBlocks(([10, 11, 12], [1, 2, 3])), external_tokens
+    )
+    if external_tokens:
+        sched.send_notify_block.assert_called_once_with(
+            req_id="req",
+            transfer_id="tx",
+            block_notify_list=[[10], [1, 2, 3]],
+            host="127.0.0.2",
+            port=7000,
         )
+        sched._send_transfer_release.assert_not_called()
+    else:
+        sched.send_notify_block.assert_not_called()
+        sched._send_transfer_release.assert_called_once_with("tx", "127.0.0.2", 7000)
+    assert not req.kv_transfer_params["do_remote_prefill"]
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_hybrid_write_keeps_separate_draft_groups_and_their_block_spans():
+    config = _dspark_wrapped_attention_config()
+    # A disabled cache is absent from the wire. Target and draft may have
+    # different token spans, and neither can borrow the other's block IDs.
+    draft = SimpleNamespace(
+        enable_kv_transfer=True,
+        kv_cache_spec=FullAttentionSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=2,
+            dtype=torch.float32,
+            dcp_sharded=False,
+        ),
+    )
+    disabled = SimpleNamespace(enable_kv_transfer=False, kv_cache_spec=object())
+    config.kv_cache_groups.insert(1, disabled)
+    config.kv_cache_groups.append(draft)
+    config.transfer_groups = tuple(
+        g for g in config.kv_cache_groups if g.enable_kv_transfer
+    )
+    config.select_transfer_block_ids = lambda blocks: (blocks[0], blocks[2], blocks[3])
+    sched = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(
+            read_mode=False, dcp_size=2, speculative_config=_spec_config("dspark")
+        ),
+        "engine",
+        config,
+    )
+    req = _mk_request(
+        list(range(9)),
+        params={
+            "do_remote_decode": True,
+            "transfer_id": "tx",
+        },
+    )
+    req.request_id = "req"
+    req.status = moriio_connector.RequestStatus.FINISHED_LENGTH_CAPPED
+    blocks = ([10, 11, 12, 13], [99], [20, 21, 22], [30, 31, 32, 33])
+    expected = [[11], [20, 21], [30, 31, 32]]
+    assert sched._clamp_to_prompt_blocks(req, blocks) == expected
+    # Exercise the connector entry point too: completion must not flatten
+    # a multi-group WRITE payload through READ's single-attention helper.
+    delay_free, params = _FakeConnector(sched).request_finished_all_groups(req, blocks)
+    assert delay_free
+    assert params["remote_block_ids"] == expected
 
 
 def test_split_block_groups_rejects_non_hybrid_use():
@@ -728,11 +839,15 @@ def test_session_build_rejects_per_layer_region_count_mismatch():
         worker._get_built_session("prefill")
 
 
-def test_register_kv_caches_rejects_hybrid_write_before_registration():
-    worker = _FakeWorker(mode=MoRIIOMode.WRITE, _transfer_layer_names={"kda.0"})
+def test_register_kv_caches_rejects_invalid_hybrid_write_state_layout():
+    worker = _FakeWorker(
+        mode=MoRIIOMode.WRITE,
+        _transfer_layer_names={"kda.0"},
+        layer_to_spec={"kda.0": _mamba_spec(1)},
+    )
     worker._is_mamba_layer = lambda _layer_name: True
 
-    with pytest.raises(moriio_common.MoRIIOError, match="READ mode only"):
+    with pytest.raises(moriio_common.MoRIIOError, match="exactly two Mamba states"):
         worker.register_kv_caches({"kda.0": object()})
 
 
@@ -824,7 +939,7 @@ def test_get_num_new_matched_tokens_write_plain_keeps_all_tokens():
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=2)
     # Pure-attention WRITE: no N-1 drop; full length minus already-computed.
@@ -832,12 +947,37 @@ def test_get_num_new_matched_tokens_write_plain_keeps_all_tokens():
     assert is_async is True
 
 
+@pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": False}])
+def test_write_does_not_wait_again_after_receive_or_for_local_requests(params):
+    sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.WRITE, _has_mamba=True)
+    req = _mk_request(list(range(10)))
+    req.kv_transfer_params = params
+    assert sched.get_num_new_matched_tokens(req, 0) == (0, False)
+
+
+def test_write_never_declares_an_empty_async_load():
+    sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.WRITE, _has_mamba=False)
+    req = _mk_request(list(range(10)), params={"do_remote_prefill": True})
+    assert sched.get_num_new_matched_tokens(req, 10) == (0, False)
+
+
+@pytest.mark.parametrize(
+    "prompt_len,computed,expected", [(16, 0, 15), (17, 16, 0), (1, 0, 0)]
+)
+def test_hybrid_write_advertises_only_the_state_computed_by_prefill(
+    prompt_len, computed, expected
+):
+    sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.WRITE, _has_mamba=True)
+    req = _mk_request(list(range(prompt_len)), params={"do_remote_prefill": True})
+    assert sched.get_num_new_matched_tokens(req, computed) == (expected, expected > 0)
+
+
 @pytest.mark.parametrize(
     ("mode", "num_computed_tokens", "expected", "is_async"),
     [
         (MoRIIOMode.READ, 0, 9, False),
         (MoRIIOMode.READ, 10, 0, False),
-        (MoRIIOMode.WRITE, 2, 8, True),
+        (MoRIIOMode.WRITE, 2, 7, True),
     ],
 )
 def test_get_num_new_matched_tokens_supports_embeds_only_prompts(
@@ -848,7 +988,7 @@ def test_get_num_new_matched_tokens_supports_embeds_only_prompts(
         num_prompt_tokens=10,
         prompt_token_ids=None,
         prompt_embeds=object(),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
 
     assert sched.get_num_new_matched_tokens(req, num_computed_tokens) == (

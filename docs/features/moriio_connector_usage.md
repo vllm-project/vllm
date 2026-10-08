@@ -136,6 +136,14 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
 !!! note
     `notify_port` is used as a *base* port: each (DP rank, TP rank) pair within an instance uses `notify_port + offset` where the offset is based on the rank. Make sure the range starting at `notify_port` is free on the host.
 
+### Hybrid attention and recurrent state
+
+WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark, with equal producer and consumer TP sizes. Use matching cache layouts on both instances, `--mamba-cache-mode align`, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Sliding-window WRITE and hybrid speculative methods other than DSpark remain unsupported.
+
+For DSpark, configure the same draft model on both instances through `--speculative-config`. Target and draft attention groups retain their own block IDs and token spans; only the running recurrent state is transferred, not speculative scratch slots. The producer transfers the state after the first N-1 prompt tokens, and the consumer recomputes the last prompt token. Convolution and SSM transfers must both finish before the layer is complete.
+
+Hybrid READ keeps its existing single-transferable-attention-group requirement. Plain-attention WRITE retains its existing notification format.
+
 ### Transport configuration
 
 MoRI has two transport backends: RDMA and xGMI. You can select backend using `--kv-transfer-config.kv_connector_extra_config.backend $BACKEND`, with `$BACKEND` being `rdma` or `xgmi`. RDMA is the default backend and should be used in multi-node deployments.
