@@ -443,6 +443,7 @@ def triton_mla_sparse_attention(
 
     Returns:
         out:   [num_tokens, num_heads_q, _BLOCK_DV] bf16
+
     """
     num_tokens, num_heads_q, dim_qk = q.shape
     assert dim_qk == _DIM_QK, (
