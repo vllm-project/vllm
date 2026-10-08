@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 
+from ..fx_utils import is_func
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -616,5 +617,27 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+        if self.matched_count:
+            _record_reduce_scatter_divisibility(graph)
         # Clean up reshape nodes
         self.noop_cleanup(graph)
+
+
+def _record_reduce_scatter_divisibility(graph: fx.Graph) -> None:
+    """Record in the ShapeEnv that each reduce_scatter input splits evenly."""
+    for node in graph.nodes:
+        if not is_func(node, torch.ops.vllm.reduce_scatter.default):
+            continue
+        args = dict(zip(("tensor", "dim", "world_size"), node.args)) | node.kwargs
+        val = args["tensor"].meta.get("val")
+        if val is None:
+            continue
+        size = val.shape[args["dim"]]
+        if isinstance(size, torch.SymInt):
+            # The model runner pads num_tokens to a multiple of TP before
+            # calling the compiled model (_pad_for_sequence_parallelism), so
+            # the compiler never sees the padding. Without this check,
+            # all_gather(reduce_scatter(x)) has size tp * (s // tp), which the
+            # pattern matcher's metadata check cannot prove equal to s, and
+            # AsyncTP all-gather + GEMM fusions are rejected.
+            torch._check(size % args["world_size"] == 0)
