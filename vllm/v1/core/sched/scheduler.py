@@ -1742,8 +1742,13 @@ class Scheduler(SchedulerInterface):
         candidates: list[Request] = []
         held_block_ids: set[int] = set()
         seen_req_ids: set[str] = set()
+        # Deferred requests can be held in schedule()'s temporary queues.
+        # Use a stable fallback order for peers absent from the main queues.
         for candidate in itertools.chain(
-            self.running, self.waiting, self.skipped_waiting
+            self.running,
+            self.kv_holding_waiting,
+            self.waiting,
+            sorted(self.deferred_waiting, key=lambda req: req.request_id),
         ):
             candidate_id = candidate.request_id
             if (

@@ -388,7 +388,7 @@ def test_rewind_converges_emulated_worker_ranks() -> None:
 
         model_state = object.__new__(MambaHybridModelState)
         model_state.device = device
-        model_state.cache_config = SimpleNamespace(block_size=8)
+        model_state.cache_config = SimpleNamespace(block_size=8, mamba_block_size=8)
         model_state._align_mode = True
         model_state.num_accepted_tokens_gpu = torch.full(
             (2,), 9, dtype=torch.int32, device=device

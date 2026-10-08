@@ -350,10 +350,13 @@ def test_postprocess_state_scalar_with_int32_mapping(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_rewind_requests_restores_mamba_align_state() -> None:
+@pytest.mark.parametrize("attention_block_size", [4, 8])
+def test_rewind_requests_restores_mamba_align_state(attention_block_size: int) -> None:
     state = object.__new__(MambaHybridModelState)
     state.device = torch.device("cuda")
-    state.cache_config = SimpleNamespace(block_size=8)
+    state.cache_config = SimpleNamespace(
+        block_size=attention_block_size, mamba_block_size=8
+    )
     state._align_mode = True
     state.num_accepted_tokens_gpu = torch.full(
         (5,), 9, dtype=torch.int32, device="cuda"
