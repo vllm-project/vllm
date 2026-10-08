@@ -1778,7 +1778,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             decode.seq_lens.view(-1).copy_(metadata.seq_lens)
         decode.decode_lens.fill_(1)
 
-        if current_platform.is_cuda() and has_deep_gemm():
+        if current_platform.is_cuda() and is_deep_gemm_supported():
             schedule_metadata = get_paged_mqa_logits_metadata(
                 decode.seq_lens,
                 self.kv_cache_spec.num_states,

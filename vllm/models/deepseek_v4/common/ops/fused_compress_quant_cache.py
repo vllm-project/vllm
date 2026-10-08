@@ -1324,11 +1324,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             if use_fp4_cache
             else {
                 "FP8_SOFTWARE_CONV": fp8_software_conv,
-                **(
-                    {"extern_libs": FP8E4NV_EXTERN_LIBS}
-                    if fp8_software_conv
-                    else {}
-                ),
+                **({"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}),
             }
         )
         return (num_actual,), dict(

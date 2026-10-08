@@ -136,7 +136,6 @@ def _decode_bf16_pack4(x0, x1, x2, x3):
 @triton.jit
 def convert_to_fp8e4m3(x):
     """Encode float -> uint8 fp8e4m3 bytes (saturating RNE)."""
-
     tl.static_assert(
         (x.dtype == tl.float16) or (x.dtype == tl.bfloat16) or (x.dtype == tl.float32),
         "convert_to_fp8e4m3 expects fp16, bf16, or fp32 input",
