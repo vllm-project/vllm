@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter,
 )
+from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNormGated
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
@@ -295,6 +296,34 @@ def test_disabled_when_a_layer_is_unsupported(monkeypatch):
     assert XpuMoESharedFusionPass._all_moe_layers_supported(VllmConfig())
     runners.clear()
     assert not XpuMoESharedFusionPass._all_moe_layers_supported(VllmConfig())
+
+
+@pytest.mark.parametrize(
+    "linear,moe,targets,expected",
+    [
+        ("tensor", "tensor", None, True),
+        ("tensor", "block", None, False),
+        (None, "tensor", None, False),
+        ("tensor", "tensor", {"re:.*": "fp8_per_tensor_static"}, False),
+    ],
+)
+def test_fp8_per_tensor_online_quantization(linear, moe, targets, expected):
+    # --quantization fp8 on an unquantized checkpoint is online quantization.
+    from vllm.compilation.passes.fusion.xpu_fusion import _is_fp8_per_tensor
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Static128BlockSym,
+        kFp8StaticTensorSym,
+    )
+
+    keys = {"tensor": kFp8StaticTensorSym, "block": kFp8Static128BlockSym}
+
+    def spec(name):
+        return None if name is None else QuantSpec(weight=keys[name])
+
+    args = SimpleNamespace(linear=spec(linear), moe=spec(moe), targets=targets)
+    quant = SimpleNamespace(get_name=lambda: "online", args=args)
+    assert _is_fp8_per_tensor(SimpleNamespace(quant_config=quant)) is expected
 
 
 def _structure_before_after(g, fusion_pass):
@@ -641,8 +670,11 @@ def _norm_ops_available():
 class GdnOutput(torch.nn.Module):
     """RMSNormGated + out_proj, as QwenGatedDeltaNetAttention part 3 (TP1)."""
 
-    def __init__(self, heads=32, head_dim=128):
+    def __init__(self, heads=32, head_dim=128, flat_rows=True):
         super().__init__()
+        # flat_rows: norm on (T * H, D) rows; otherwise on the (T, H, D)
+        # tensors directly.
+        self.flat_rows = flat_rows
         self.norm = RMSNormGated(head_dim, eps=1e-6, norm_before_gate=True)
         with torch.no_grad():
             self.norm.weight.normal_(1.0, 0.1)
@@ -651,15 +683,19 @@ class GdnOutput(torch.nn.Module):
         self.register_buffer("scale", torch.tensor([0.02]), persistent=False)
 
     def forward(self, core_attn_out, z):
-        z_shape = z.shape
-        x = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        y = self.norm(x, z.reshape(-1, z.shape[-1]))
-        y = y.reshape(z_shape).flatten(-2)
+        if self.flat_rows:
+            z_shape = z.shape
+            x = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+            y = self.norm(x, z.reshape(-1, z.shape[-1]))
+            y = y.reshape(z_shape).flatten(-2)
+        else:
+            y = self.norm(core_attn_out, z).flatten(-2)
         return torch.ops._xpu_C.fp8_gemm_w8a16.default(y, self.w_t, self.scale, None)
 
 
 @xpu_only
-def test_gated_norm_fused():
+@pytest.mark.parametrize("flat_rows", [True, False])
+def test_gated_norm_fused(flat_rows):
     if not _norm_ops_available():
         pytest.skip("vllm-xpu-kernels without the norm + fp8 GEMV ops")
     torch.set_default_device("xpu")
@@ -668,7 +704,7 @@ def test_gated_norm_fused():
     vllm_config = _norm_config()
     # Inference graph (as in vLLM): no autograd decompositions.
     with set_current_vllm_config(vllm_config), torch.inference_mode():
-        model = GdnOutput()
+        model = GdnOutput(flat_rows=flat_rows)
         fusion = XpuNormFp8GemmFusionPass(vllm_config)
         noop, cleanup = NoOpEliminationPass(vllm_config), PostCleanupPass(vllm_config)
         x = torch.randn(1, 32, 128)
@@ -820,6 +856,36 @@ class GatedQkvModel(torch.nn.Module):
         )
 
 
+class TritonGatedQkvModel(GatedQkvModel):
+    """Qwen3NextAttention with the fused Triton q/k norm + RoPE + gate kernel."""
+
+    def forward(self, qkv, positions):
+        q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
+        q, k, gate = fused_qk_rmsnorm_rope_gate(
+            q_gate,
+            k,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.rotary_emb.cos_sin_cache,
+            positions,
+            self.q_norm.variance_epsilon,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rotary_emb.rotary_dim,
+            norm_beta=1.0,
+            mrope_section=self.rotary_emb.mrope_section
+            if positions.ndim == 2
+            else None,
+        )
+        return (
+            q.view(-1, self.num_heads, self.head_dim),
+            k.view(-1, self.num_kv_heads, self.head_dim),
+            v.view(-1, self.num_kv_heads, self.head_dim),
+            torch.sigmoid(gate),
+        )
+
+
 def _has_op(graph, name):
     # The fused op sits inside auto_functionalized(op, ...).
     return any(
@@ -830,9 +896,10 @@ def _has_op(graph, name):
 
 
 @xpu_only
+@pytest.mark.parametrize("model_cls", [GatedQkvModel, TritonGatedQkvModel])
 @pytest.mark.parametrize("mrope", [True, False])
 @pytest.mark.parametrize("num_tokens", [1, 5])
-def test_xpu_qkv_norm_rope_fusion(mrope, num_tokens):
+def test_xpu_qkv_norm_rope_fusion(model_cls, mrope, num_tokens):
     if not hasattr(torch.ops._xpu_C, "qkv_split_norm_rope"):
         pytest.skip("qkv_split_norm_rope not available")
     dtype = torch.float16
@@ -850,7 +917,7 @@ def test_xpu_qkv_norm_rope_fusion(mrope, num_tokens):
         set_current_vllm_config(vllm_config),
         vllm_config.kernel_config.ir_op_priority.set_priority(),
     ):
-        model = GatedQkvModel(8, 1, 256, vllm_config, dtype)
+        model = model_cls(8, 1, 256, vllm_config, dtype)
         fusion = XpuQkvNormRopeFusionPass(vllm_config)
         noop, cleanup = NoOpEliminationPass(vllm_config), PostCleanupPass(vllm_config)
         backend = TestBackend(noop, fusion, cleanup)

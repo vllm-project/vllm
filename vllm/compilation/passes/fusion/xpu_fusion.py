@@ -24,6 +24,10 @@ import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._functorch.compile_utils import fx_graph_cse
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
+from torch._higher_order_ops.triton_kernel_wrap import (
+    kernel_side_table,
+    triton_kernel_wrapper_functional,
+)
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
@@ -51,7 +55,28 @@ P = ParamSpec("P")
 
 def _is_fp8_per_tensor(config: VllmConfig) -> bool:
     quant = config.quant_config
-    if quant is None or quant.get_name() != "fp8":
+    if quant is None:
+        return False
+    if quant.get_name() == "online":
+        # Online quantization of an unquantized checkpoint (what
+        # --quantization fp8 resolves to for one): fp8 per-tensor static
+        # weights, unquantized activations, for both linears and experts.
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8StaticTensorSym,
+        )
+
+        args = getattr(quant, "args", None)
+        return (
+            args is not None
+            and args.targets is None
+            and all(
+                spec is not None
+                and spec.weight == kFp8StaticTensorSym
+                and spec.activation is None
+                for spec in (args.linear, args.moe)
+            )
+        )
+    if quant.get_name() != "fp8":
         return False
     return getattr(quant, "weight_block_size", None) is None
 
@@ -595,6 +620,10 @@ class XpuQkvNormRopeFusionPass(VllmPatternMatcherPass):
     pattern is traced from the same reference code as the model, so a graph that
     differs in any op (other norm, rotary layout, eps, ...) is left unchanged.
 
+    Attention layers that run this step as the fused Triton kernel
+    (``fused_qk_rmsnorm_rope_gate``) get the same op in its place, when the
+    kernel's geometry, eps and (M)RoPE sections match a registered pattern.
+
     Only applied for compile ranges ending at <= 8 tokens (decode). For large
     (prefill / memory-profiling) ranges the separate q / k / gate outputs raise
     the device memory held after profiling, which comes out of the KV cache,
@@ -659,9 +688,123 @@ class XpuQkvNormRopeFusionPass(VllmPatternMatcherPass):
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         return compile_range.end <= MAX_TOKEN_NUM
 
+    def _triton_call_args(self, node: fx.Node) -> dict | None:
+        """Arguments for `_xpu_C.qkv_split_norm_rope` if `node` is a
+        `fused_qk_rmsnorm_rope_gate` Triton launch on the q_gate / k slices
+        of one qkv split, with a geometry this pass registered."""
+        if node.target is not triton_kernel_wrapper_functional:
+            return None
+        kernel = kernel_side_table.get_kernel(node.kwargs["kernel_idx"])
+        if getattr(getattr(kernel, "fn", None), "__name__", None) != (
+            "_fused_qk_rmsnorm_rope_gate_kernel"
+        ):
+            return None
+        kw = node.kwargs["kwargs"]
+        consts = kernel_side_table.get_constant_args(node.kwargs["constant_args_idx"])
+        try:
+            nh, nkv = consts["num_q_heads"], consts["num_kv_heads"]
+            hd, rot = consts["head_dim"], consts["rotary_dim"]
+            eps, beta = consts["eps"], consts["norm_beta"]
+            q_gate, k, pos = kw["q_gate_ptr"], kw["k_ptr"], kw["positions_ptr"]
+        except KeyError:
+            return None
+        if not all(isinstance(n, fx.Node) for n in (q_gate, k, pos)):
+            return None
+        # q_gate and k must be slices 0 and 1 of split(qkv, [2q, kv, kv], -1).
+        split = q_gate.args[0] if q_gate.target is operator.getitem else None
+        if not (
+            isinstance(split, fx.Node)
+            and is_func(split, torch.ops.aten.split_with_sizes.default)
+            and q_gate.args[1] == 0
+            and k.target is operator.getitem
+            and k.args == (split, 1)
+            and list(split.args[1]) == [2 * nh * hd, nkv * hd, nkv * hd]
+            and (len(split.args) < 3 or split.args[2] in (-1, 1))
+        ):
+            return None
+        qkv = split.args[0]
+        pos_val = pos.meta.get("val")
+        if not isinstance(pos_val, torch.Tensor) or pos_val.dim() not in (1, 2):
+            return None
+        mrope = pos_val.dim() == 2
+        for num_heads, num_kv_heads, key_eps, rope_key, mrope_positions in self._keys:
+            head_dim, rotary_dim, section, interleaved = rope_key
+            if (num_heads, num_kv_heads, head_dim, rotary_dim, key_eps) != (
+                nh,
+                nkv,
+                hd,
+                rot,
+                eps,
+            ) or mrope_positions != mrope:
+                continue
+            if bool(consts.get("HAS_MROPE")) != mrope or (
+                mrope
+                and not (
+                    interleaved
+                    and consts.get("MROPE_SECTION_H") == section[1]
+                    and consts.get("MROPE_SECTION_W") == section[2]
+                )
+            ):
+                continue
+            return dict(
+                qkv=qkv,
+                positions=pos,
+                q_weight=kw["q_weight_ptr"],
+                k_weight=kw["k_weight_ptr"],
+                cos_sin_cache=kw["cos_sin_cache_ptr"],
+                q_out=kw["q_out_ptr"],
+                k_out=kw["k_out_ptr"],
+                gate_out=kw["gate_out_ptr"],
+                num_q_heads=nh,
+                num_kv_heads=nkv,
+                head_dim=hd,
+                rotary_dim=rot,
+                eps=eps,
+                weight_offset=float(beta),
+                mrope_section=list(section) if mrope else [0, 0, 0],
+                mrope_interleaved=bool(mrope and interleaved),
+            )
+        return None
+
+    def _replace_triton_qk_norm_rope(self, graph: fx.Graph) -> int:
+        """Run the model's fused Triton q/k norm + RoPE + gate kernel (used
+        when the attention layer fuses that step itself) as the SYCL op,
+        which has a much lower per-call host cost at decode sizes."""
+        outs = {"q_out_ptr": 1, "k_out_ptr": 2, "gate_out_ptr": 3}
+        count = 0
+        for node in list(graph.nodes):
+            args = self._triton_call_args(node)
+            if args is None or any(
+                u.target is not operator.getitem or u.args[1] not in outs
+                for u in node.users
+            ):
+                continue
+            with graph.inserting_before(node):
+                af = graph.call_function(
+                    auto_functionalized,
+                    (torch.ops._xpu_C.qkv_split_norm_rope.default,),
+                    args,
+                )
+            af.meta["val"] = (None,) + tuple(
+                args[name].meta.get("val") for name in ("q_out", "k_out", "gate_out")
+            )
+            for user in list(node.users):
+                with graph.inserting_before(user):
+                    new = graph.call_function(
+                        operator.getitem, (af, outs[user.args[1]])
+                    )
+                new.meta["val"] = user.meta.get("val")
+                user.replace_all_uses_with(new)
+                graph.erase_node(user)
+            graph.erase_node(node)
+            count += 1
+        return count
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
+        if self._keys:
+            self.matched_count += self._replace_triton_qk_norm_rope(graph)
         logger.debug("XPU QKV norm+RoPE fusion replaced %d sites", self.matched_count)
 
     def uuid(self) -> str:
@@ -812,11 +955,10 @@ class GatedRMSNormFp8GemmPattern:
     def register(self, pm_pass: PatternMatcherPass) -> None:
         D, eps, dtype = self.head_dim, self.eps, self.dtype
 
-        def pattern(x, z, norm_weight, weight, scale):
-            z_shape = z.shape
-            y = RMSNormGated.forward_static(
-                x.reshape(-1, D),
-                z.reshape(-1, D),
+        def norm(x, z, norm_weight):
+            return RMSNormGated.forward_static(
+                x,
+                z,
                 norm_weight,
                 eps,
                 dtype,
@@ -824,7 +966,17 @@ class GatedRMSNormFp8GemmPattern:
                 norm_before_gate=True,
                 activation="silu",
             )
+
+        def pattern(x, z, norm_weight, weight, scale):
+            # Norm on (T * H, D) rows, as the GDN output path reshapes them.
+            z_shape = z.shape
+            y = norm(x.reshape(-1, D), z.reshape(-1, D), norm_weight)
             y = y.reshape(z_shape).flatten(-2)
+            return torch.ops._xpu_C.fp8_gemm_w8a16.default(y, weight, scale, None)
+
+        def pattern_3d(x, z, norm_weight, weight, scale):
+            # Norm directly on the (T, H, D) tensors.
+            y = norm(x, z, norm_weight).flatten(-2)
             return torch.ops._xpu_C.fp8_gemm_w8a16.default(y, weight, scale, None)
 
         def replacement(x, z, norm_weight, weight, scale):
@@ -847,20 +999,21 @@ class GatedRMSNormFp8GemmPattern:
             return gm
 
         inputs = self.get_inputs()
-        search_fn_pattern = pm.fx_to_pattern(
-            trace_fn(pattern, inputs),
-            ignore_types=(int, torch.SymInt),
-            argnames=[*inspect.signature(pattern).parameters.keys()],
-        )
-        pm.register_replacement(
-            pattern,
-            replacement,
-            inputs,
-            trace_fn,
-            pm_pass,
-            extra_check=self._check,
-            search_fn_pattern=search_fn_pattern,
-        )
+        for search_fn in (pattern, pattern_3d):
+            search_fn_pattern = pm.fx_to_pattern(
+                trace_fn(search_fn, inputs),
+                ignore_types=(int, torch.SymInt),
+                argnames=[*inspect.signature(search_fn).parameters.keys()],
+            )
+            pm.register_replacement(
+                search_fn,
+                replacement,
+                inputs,
+                trace_fn,
+                pm_pass,
+                extra_check=self._check,
+                search_fn_pattern=search_fn_pattern,
+            )
 
     def _check(self, match: pm.Match) -> bool:
         def val(name):
@@ -917,7 +1070,7 @@ class XpuNormFp8GemmFusionPass(VllmPatternMatcherPass):
 
     * Gated RMSNorm + linear (GDN output projection)::
 
-          y = RMSNormGated(x.view(-1, D), z.view(-1, D))   # norm_before_gate
+          y = RMSNormGated(x, z)   # norm_before_gate; (T, H, D) or (T * H, D)
           out = fp8_gemm_w8a16(y.view(T, H, D).flatten(-2), W, s)
       ->  out = _xpu_C.gated_rmsnorm_fp8_gemm(x, z, w_norm, eps, W, s)
 
