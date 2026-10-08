@@ -2803,6 +2803,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            stream_interval: None,
         },
     );
 

@@ -616,20 +616,13 @@ fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
 impl EngineCoreClient {
     /// Add a new request to the engine and return a per-request raw output
     /// stream.
-    pub async fn call(&self, req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
-        self.call_with_stream_interval(req, NonZeroU32::MIN).await
-    }
-
-    /// Like [`Self::call`], but deliver outputs after the first one to the
-    /// stream in batches of at least `stream_interval` new tokens. The
-    /// terminal output is delivered immediately together with any held-back
-    /// outputs. The stream still yields every raw output in order; batching
-    /// only reduces how often the consuming task is woken.
-    pub async fn call_with_stream_interval(
-        &self,
-        mut req: EngineCoreRequest,
-        stream_interval: NonZeroU32,
-    ) -> Result<EngineCoreOutputStream> {
+    ///
+    /// With `sampling_params.stream_interval` above one, outputs after the
+    /// first are delivered to the stream in batches of at least that many new
+    /// tokens, and the terminal output is delivered immediately together with
+    /// any held-back outputs. The stream still yields every raw output in
+    /// order; batching only reduces how often the consuming task is woken.
+    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
         trace!(
@@ -643,6 +636,9 @@ impl EngineCoreClient {
         let request_id = req.request_id.clone();
         let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
         let data_parallel_rank = req.data_parallel_rank;
+        let stream_interval = (req.sampling_params.as_ref())
+            .and_then(|params| params.stream_interval)
+            .unwrap_or(NonZeroU32::MIN);
         let (engine_id, rx) = self.inner.register_request(
             request_id.clone(),
             lora_name,

@@ -151,7 +151,7 @@ pub struct SamplingParams {
     /// Number of newly generated tokens to batch into each streamed output.
     /// Raises the interval above the frontend-level `--stream-interval`;
     /// values below it are clamped up to it. The first and final outputs are
-    /// always emitted immediately. Not sent to engine-core.
+    /// always emitted immediately.
     pub stream_interval: Option<NonZeroU32>,
 }
 
