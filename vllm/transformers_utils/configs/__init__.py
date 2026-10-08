@@ -82,8 +82,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "InklingAudioConfig": "vllm.models.inkling.configs",
     "InklingVisionConfig": "vllm.models.inkling.configs",
     "InklingMMConfig": "vllm.models.inkling.configs",
-    # Special case: DeepseekV3Config is from HuggingFace Transformers
+    # Upstream Transformers classes registered in _CONFIG_REGISTRY
     "DeepseekV3Config": "transformers",
+    "HyperCLOVAXConfig": "transformers",
+    "Kimi_K25Config": "transformers",
 }
 
 __all__ = [
@@ -111,6 +113,7 @@ __all__ = [
     "FunAudioChatConfig",
     "FunAudioChatAudioEncoderConfig",
     "HYV4Config",
+    "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",
     "MedusaConfig",
@@ -126,6 +129,7 @@ __all__ = [
     "MoonViTConfig",
     "KimiLinearConfig",
     "KimiVLConfig",
+    "Kimi_K25Config",
     "MuseGlimmerConfig",
     "MuseGlimmerTextConfig",
     "MuseGlimmerVisionConfig",

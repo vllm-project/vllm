@@ -15,12 +15,7 @@ import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import (
-    GenerationConfig,
-    HyperCLOVAXConfig,
-    Kimi_K25Config,
-    PreTrainedConfig,
-)
+from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -100,12 +95,12 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     hy_v4="HYV4Config",
-    hyperclovax=HyperCLOVAXConfig,  # Upstream class, hub remote code is broken
+    hyperclovax="HyperCLOVAXConfig",  # Upstream class, hub remote code is broken
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
-    kimi_k25=Kimi_K25Config,  # Upstream class, hub remote code uses old schema
+    kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
     muse_glimmer="MuseGlimmerConfig",
     muse_glimmer_text="MuseGlimmerTextConfig",
     muse_glimmer_vision="MuseGlimmerVisionConfig",
