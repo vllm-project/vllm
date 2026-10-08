@@ -554,7 +554,15 @@ class BuildPrefillChunkMetadataKernel(
             # Cover Triton's divisible, exact-one, and generic i32 classes.
             query_slice_start=(0, 1, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
-            DCP_INTERLEAVE=dcp_interleave,
+            # Compressed indexers localize in units of compressed states.
+            DCP_INTERLEAVE=list(
+                dict.fromkeys(
+                    dcp_interleave // ratio
+                    for ratio in compress_ratios
+                    if dcp_interleave % ratio == 0
+                )
+            )
+            or [dcp_interleave],
             BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
             # PCP's global cumulative lengths are the second row of one packed
@@ -670,6 +678,7 @@ class DeepseekV32IndexerMetadata:
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
     positions: torch.Tensor | None = None
+    block_table: torch.Tensor | None = None
 
 
 @triton.jit(do_not_specialize=["num_reqs", "num_actual_tokens", "num_tokens"])
@@ -1010,11 +1019,31 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
 
-        if self.dcp_world_size > 1 and self.compress_ratio > 1:
-            raise NotImplementedError(
-                "DCP is not supported with sparse indexer KV compression "
-                f"(compress_ratio={self.compress_ratio})."
+        # Each compressed state must live on a single rank, so the DCP
+        # interleave has to cover whole states.
+        if (
+            self.dcp_world_size > 1
+            and self.compress_ratio > 1
+            and (
+                (
+                    isinstance(self.kv_cache_spec, MLAAttentionSpec)
+                    and self.kv_cache_spec.model_version == "deepseek_v4"
+                )
+                or self.cp_kv_cache_interleave_size % self.compress_ratio != 0
             )
+        ):
+            raise NotImplementedError(
+                "DCP with sparse indexer KV compression "
+                f"(compress_ratio={self.compress_ratio}) requires "
+                "--cp-kv-cache-interleave-size to be a multiple of it; "
+                "DeepSeek-V4 is not supported."
+            )
+        # DCP interleave in units of compressed states.
+        self.compressed_cp_interleave_size = (
+            self.cp_kv_cache_interleave_size // self.compress_ratio
+            if self.dcp_world_size > 1 and self.compress_ratio > 1
+            else self.cp_kv_cache_interleave_size
+        )
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
@@ -1348,6 +1377,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
+                dcp_world_size=self.dcp_world_size,
+                cp_interleave=self.cp_kv_cache_interleave_size,
             )
             if self.pcp_world_size > 1:
                 compressed_slot_mapping = get_pcp_group().all_gather(
@@ -1467,7 +1498,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     skip_kv_gather=query_slice.start > 0,
                     dcp_rank=self.dcp_rank,
                     dcp_world_size=self.dcp_world_size,
-                    cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                    cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
                     pcp_plan=pcp_plan,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
@@ -1683,6 +1714,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            block_table=common_attn_metadata.block_table_tensor,
         )
 
         return attn_metadata
@@ -1698,7 +1730,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert metadata.num_prefills == 0
         assert metadata.num_decodes == metadata.num_decode_tokens
         assert decode.seq_lens.numel() == metadata.num_decode_tokens
+        assert metadata.block_table is not None
         assert self.dcp_world_size == 1
+
+        # One query token per request, so the per-token decode block table is
+        # the request block table (at the indexer kernel's page size). build()
+        # may copy it into a builder buffer, so re-derive it for this batch.
+        block_table = metadata.block_table[: metadata.num_decode_tokens]
+        kernel_block_size = self.kernel_block_size
+        if (
+            self.compress_ratio > 1
+            and kernel_block_size is not None
+            and self.kv_cache_spec.block_size != kernel_block_size
+            and self.kv_cache_spec.block_size % kernel_block_size == 0
+        ):
+            factor = self.kv_cache_spec.block_size // kernel_block_size
+            block_table = block_table[:, ::factor] // factor
+        decode.block_table.copy_(block_table)
+        if decode.indices is not None:
+            decode.indices.copy_(self.arange_buffer[: metadata.num_decode_tokens])
+        if decode.per_req_decode_lens is not None:
+            decode.per_req_decode_lens.fill_(1)
 
         if self.compress_ratio > 1:
             get_compressed_slot_mapping(

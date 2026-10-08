@@ -43,7 +43,7 @@ print(response["choices"][0]["token_ids"])
 
 ### Logprobs
 
-With `output_mode: "tokens"`, logprob entries carry `token_id:N` placeholders. With `output_mode: "text"`, they carry the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`. A server started with `--return-tokens-as-token-ids` always returns the placeholders, as `/v1/completions` does.
+With `output_mode: "tokens"`, logprobs are `GenerateLogProbs` with an integer `token_id` and `rank` per entry and no `token` or `bytes` (see [Generate Output Logprobs](renderer.md#generate-output-logprobs)). With `output_mode: "text"`, they are `ChatCompletionLogProbs` carrying the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`; a server started with `--return-tokens-as-token-ids` returns `token_id:N` placeholders there instead, as `/v1/completions` does.
 
 ### Errors
 
