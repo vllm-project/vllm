@@ -21,30 +21,6 @@ using TensorType = torch::stable::Tensor;
 
 using namespace cute;
 
-template <typename T>
-struct identity {
-  CUTLASS_HOST_DEVICE
-  T operator()(T lhs) const { return lhs; }
-};
-
-template <typename ElementAcc, typename ElementD, typename TileShape>
-struct TrivialEpilogue {
- private:
-  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
-  using Compute = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::epilogue::thread::Identity, ElementD, ElementAcc,
-      cutlass::FloatRoundStyle::round_to_nearest>;
-
- public:
-  using EVTCompute = cutlass::epilogue::fusion::Sm90EVT<Compute, Accum>;
-  using ArgumentType = typename EVTCompute::Arguments;
-
-  template <typename... Args>
-  static ArgumentType prepare_args(Args... args) {
-    return {};
-  }
-};
-
 /*
  * This class provides the common load descriptors for the
  * ScaledEpilogue[...] classes

@@ -3,8 +3,6 @@
 #include <torch/headeronly/util/Exception.h>
 #include <torch/headeronly/core/ScalarType.h>
 
-#include "libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h"
-
 #include <cmath>
 
 #ifdef USE_ROCM
@@ -346,11 +344,13 @@ inline int GetGroupsPerBlockX(int64_t padded_groups_per_row) {
   return 4;
 }
 
-void per_token_group_quant_8bit(const torch::stable::Tensor& input,
-                                torch::stable::Tensor& output_q,
-                                torch::stable::Tensor& output_s,
-                                int64_t group_size, double eps, double min_8bit,
-                                double max_8bit, bool scale_ue8m0) {
+// 8-bit per-token-group quantization helper used by both FP8 and INT8
+static void per_token_group_quant_8bit(const torch::stable::Tensor& input,
+                                       torch::stable::Tensor& output_q,
+                                       torch::stable::Tensor& output_s,
+                                       int64_t group_size, double eps,
+                                       double min_8bit, double max_8bit,
+                                       bool scale_ue8m0 = false) {
   STD_TORCH_CHECK(input.is_contiguous());
   STD_TORCH_CHECK(output_q.is_contiguous());
 
@@ -869,4 +869,13 @@ void per_token_group_quant_fp8(const torch::stable::Tensor& input,
                                bool dummy_is_tma_aligned = false) {
   per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
                              fp8_min, fp8_max, scale_ue8m0);
+}
+
+void per_token_group_quant_int8(const torch::stable::Tensor& input,
+                                torch::stable::Tensor& output_q,
+                                torch::stable::Tensor& output_s,
+                                int64_t group_size, double eps, double int8_min,
+                                double int8_max) {
+  per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
+                             int8_min, int8_max);
 }

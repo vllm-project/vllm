@@ -1,4 +1,4 @@
-// see csrc/quantization/w8a8/cutlass/moe/get_group_starts.cuh
+// see csrc/libtorch_stable/quantization/w8a8/cutlass/moe/get_group_starts.cuh
 #pragma once
 
 #include <cuda.h>

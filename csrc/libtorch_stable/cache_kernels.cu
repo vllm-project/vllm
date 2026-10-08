@@ -1,7 +1,7 @@
 #include "torch_utils.h"
 #include "dispatch_utils.h"
 
-#include "cuda_utils.h"
+#include "core/utils.hpp"
 #include "core/cuda_compat.h"
 
 #include "quantization/vectorization_utils.cuh"
@@ -712,8 +712,7 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
   }
   __syncthreads();
 
-  for (int iter = 0; iter < cuda_utils::ceil_div(batch_size, int(blockDim.x));
-       iter++) {
+  for (int iter = 0; iter < div_ceil(batch_size, int(blockDim.x)); iter++) {
     int tid = iter * blockDim.x + threadIdx.x;
     if (tid < batch_size) {
       const int seq_start = cu_seq_lens[tid];
@@ -1229,7 +1228,7 @@ __device__ __forceinline__ bool map_gather_page_task(
     const int32_t source_begin = seq_starts == nullptr ? 0 : seq_starts[req_id];
     const int32_t first_block = source_begin / block_size;
     const int32_t num_pages =
-        cuda_utils::ceil_div(source_begin + seq_len, block_size) - first_block;
+        div_ceil(source_begin + seq_len, block_size) - first_block;
     if (relative_page < num_pages) {
       page.req_id = req_id;
       page.logical_block = first_block + relative_page;
@@ -1408,8 +1407,7 @@ void gather_and_maybe_dequant_cache(
   const int64_t dst_entry_stride = dst.stride(0);
   const int32_t page_threads = num_tokens >= (1 << 20) ? 128 : 256;
   const int32_t required_blocks =
-      cuda_utils::ceil_div(static_cast<int32_t>(num_tokens), block_size) +
-      2 * num_reqs;
+      div_ceil(static_cast<int32_t>(num_tokens), block_size) + 2 * num_reqs;
   const dim3 grid(required_blocks);
   const dim3 block(page_threads);
 
@@ -1685,7 +1683,7 @@ void cp_gather_cache(
 
   const int32_t num_reqs = static_cast<int32_t>(batch_size);
   const int32_t required_blocks =
-      cuda_utils::ceil_div(total_tokens, block_size) + 2 * num_reqs;
+      div_ceil(total_tokens, block_size) + 2 * num_reqs;
   const dim3 grid(required_blocks);
   const dim3 block(256);
 
@@ -1828,8 +1826,8 @@ void cp_gather_and_upconvert_fp8_kv_cache(
   const int32_t* seq_starts_ptr =
       seq_starts.has_value() ? seq_starts.value().const_data_ptr<int32_t>()
                              : nullptr;
-  const int required_blocks = cuda_utils::ceil_div(total_tokens, block_size) +
-                              2 * static_cast<int32_t>(batch_size);
+  const int required_blocks =
+      div_ceil(total_tokens, block_size) + 2 * static_cast<int32_t>(batch_size);
   vllm::cp_gather_and_upconvert_fp8_kv_cache_page<<<
       required_blocks, block_size_threads, 0, stream>>>(
       src_ptr, reinterpret_cast<__nv_bfloat16*>(dst.data_ptr()),

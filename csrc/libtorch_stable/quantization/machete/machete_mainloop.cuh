@@ -17,8 +17,9 @@
 // before feeding them into the tensor cores in registers, we need the weight
 // matrix to be A. To achieve this we compute the transpose of Y = XW^t as
 // Y^t = W^tX^t. This is mostly done outside of this file in
-// csrc/quantization/machete/machete_mm_kernel.cuh, but this why A is the
-// quantized/narrow type and has the prepacked layout despite the API being:
+// csrc/libtorch_stable/quantization/machete/machete_mm_kernel.cuh, but this why
+// A is the quantized/narrow type and has the prepacked layout despite the API
+// being:
 //   B_prepacked = machete_prepack_B(B)
 //   Y = machete_mm(A, B_prepacked)
 //

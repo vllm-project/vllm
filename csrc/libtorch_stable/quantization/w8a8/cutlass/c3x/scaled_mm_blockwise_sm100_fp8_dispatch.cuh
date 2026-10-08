@@ -2,7 +2,7 @@
 
 #include <torch/headeronly/util/shim_utils.h>
 
-#include "libtorch_stable/cuda_utils.h"
+#include "core/utils.hpp"
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
 
@@ -242,10 +242,10 @@ void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::stable::Tensor& out,
   if (!swap_ab) {
     constexpr int TILE_N = 128;
     int tile_m = 256;
-    if (cuda_utils::ceil_div(n, TILE_N) * cuda_utils::ceil_div(m, 64) <= sms) {
+    if (div_ceil(n, TILE_N) * div_ceil(m, 64) <= sms) {
       tile_m = 64;
     }
-    else if (cuda_utils::ceil_div(n, TILE_N) * cuda_utils::ceil_div(m, 128) <= sms) {
+    else if (div_ceil(n, TILE_N) * div_ceil(m, 128) <= sms) {
       tile_m = 128;
     }
     if (tile_m == 64) {

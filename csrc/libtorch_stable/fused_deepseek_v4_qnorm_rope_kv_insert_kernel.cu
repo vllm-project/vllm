@@ -14,7 +14,7 @@
  * TensorRT-LLM's mlaKernels.cu: one kernel, one grid, with head-slot
  * dispatch choosing Q vs KV work per warp.  The per-warp RMSNorm/RoPE
  * skeleton is adapted from vllm-deepseek_v4's existing
- * `fusedQKNormRopeKernel` (csrc/fused_qknorm_rope_kernel.cu).
+ * `fusedQKNormRopeKernel` (csrc/libtorch_stable/fused_qknorm_rope_kernel.cu).
  *
  * Assumptions (hard-coded for DeepseekV4 attention):
  *   HEAD_DIM  = 512

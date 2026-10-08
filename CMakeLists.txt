@@ -374,16 +374,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     SOURCES ${VLLM_EXT_SRC}
     COMPILE_FLAGS ${VLLM_GPU_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
-    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
     USE_SABI 3
     WITH_SOABI)
-
-  # If CUTLASS is compiled on NVCC >= 12.5, it by default uses
-  # cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the
-  # driver API. This causes problems when linking with earlier versions of CUDA.
-  # Setting this variable sidesteps the issue by calling the driver directly.
-  target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 endif() # _C HIP endif
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
@@ -429,7 +421,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
-    "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
     "csrc/libtorch_stable/quantization/gptq/q_gemm.cu"
     "csrc/libtorch_stable/pos_encoding_kernels.cu"
     "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu"
@@ -508,7 +499,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     FetchContent_MakeAvailable(cutlass)
 
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/libtorch_stable/cutlass_extensions/common.cpp"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
@@ -1349,7 +1339,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # preselected input type pairs and schedules.
     # Generate sources:
     set(MOE_MARLIN_GEN_SCRIPT
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/moe/marlin_moe_wna16/generate_kernels.py)
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/quantization/marlin/generate_kernels.py)
     file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
     list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
     set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
@@ -1363,6 +1353,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$ENV{PYTHONPATH}
           ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
+          ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/moe/marlin_moe_wna16
         RESULT_VARIABLE moe_marlin_generation_result
         OUTPUT_VARIABLE moe_marlin_generation_output
         OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
