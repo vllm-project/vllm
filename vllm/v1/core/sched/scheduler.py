@@ -2200,8 +2200,8 @@ class Scheduler(SchedulerInterface):
                 and not output_is_stale
             ):
                 # Rejections are already rolled back and later steps are still
-                # in flight, so this is the committed frontier. Supported
-                # platforms write draft KV for every scheduled token in the step.
+                # in flight, so this is the committed frontier. The drafter
+                # writes draft KV for every scheduled token in the step.
                 committed_tokens = (
                     request.num_computed_tokens - request.num_in_flight_tokens
                 )
