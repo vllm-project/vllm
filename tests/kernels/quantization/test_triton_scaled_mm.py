@@ -7,6 +7,7 @@ Run `pytest tests/kernels/quantization/test_triton_scaled_mm.py`.
 
 import importlib
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -20,6 +21,9 @@ triton_scaled_mm_module = importlib.import_module(
     "vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm"
 )
 triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+fp8_utils_module = importlib.import_module(
+    "vllm.model_executor.layers.quantization.utils.fp8_utils"
+)
 
 
 def torch_scaled_mm(
@@ -163,25 +167,22 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm RDNA4")
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Requires FP8")
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [False, True])
-def test_rdna4_triton_fp8_backend_preserves_linear_shape(out_dtype, use_bias):
+def test_triton_fp8_per_token_backend_preserves_linear_shape(out_dtype, use_bias):
     """Select the backend and validate quantization, weight layout and 3D output."""
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
     from vllm.model_executor.kernels.linear.scaled_mm.triton import (
-        TritonPerTokenFp8ScaledMMLinearKernel,
+        TritonFp8PerTokenScaledMMKernel,
     )
     from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8DynamicTokenSym,
         kFp8StaticChannelSym,
     )
-    from vllm.platforms.rocm import on_rdna4
 
-    if not on_rdna4():
-        pytest.skip("Requires RDNA4")
     set_random_seed(0)
     n, k = 256, 128
     with set_current_vllm_config(
@@ -194,7 +195,7 @@ def test_rdna4_triton_fp8_backend_preserves_linear_shape(out_dtype, use_bias):
             out_dtype=out_dtype,
             weight_shape=(n, k),
         )
-    assert isinstance(kernel, TritonPerTokenFp8ScaledMMLinearKernel)
+    assert isinstance(kernel, TritonFp8PerTokenScaledMMKernel)
     layer = torch.nn.Module()
     layer.weight = (
         (0.2 * torch.randn(n, k, device=device)).to(current_platform.fp8_dtype()).t()
@@ -225,20 +226,16 @@ def test_rdna4_triton_fp8_backend_preserves_linear_shape(out_dtype, use_bias):
     )
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm RDNA4")
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Requires FP8")
 @pytest.mark.parametrize("n", [256, 8192])
 @pytest.mark.parametrize("tuned", [False, True])
-def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(
+def test_triton_fp8_per_token_dynamic_shapes_keep_runtime_tiles(
     monkeypatch, tmp_path, n, tuned
 ):
     """Prefill compilation must preserve decode tiles and GPU graph replay."""
-    from vllm.platforms.rocm import on_rdna4
-
-    if not on_rdna4():
-        pytest.skip("Requires RDNA4")
     importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
-    monkeypatch.setattr(triton_scaled_mm_module, "_PER_TOKEN_CONFIG_DIR", tmp_path)
-    triton_scaled_mm_module.get_per_token_fp8_configs.cache_clear()
+    monkeypatch.setattr(fp8_utils_module, "_W8A8_PER_TOKEN_FP8_CONFIG_DIR", tmp_path)
+    fp8_utils_module.get_w8a8_per_token_fp8_configs.cache_clear()
     tuned_config = {
         "BLOCK_SIZE_M": 32,
         "BLOCK_SIZE_N": 64,
@@ -247,10 +244,10 @@ def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(
         "num_stages": 1,
     }
     if tuned:
-        filename = triton_scaled_mm_module.per_token_fp8_config_filename(
+        filename = fp8_utils_module.get_w8a8_per_token_fp8_config_filename(
             n,
             128,
-            triton_scaled_mm_module.get_device_name_as_file_name(),
+            fp8_utils_module.get_device_name_as_file_name(),
             current_platform.fp8_dtype(),
             torch.bfloat16,
         )
@@ -309,19 +306,19 @@ def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(
         graph.replay()
         torch.testing.assert_close(captured, expected, rtol=1e-2, atol=1e-2)
         assert len(launches) == count
-    triton_scaled_mm_module.get_per_token_fp8_configs.cache_clear()
+    fp8_utils_module.get_w8a8_per_token_fp8_configs.cache_clear()
 
 
 def test_per_token_fp8_config_respects_device_dtype_and_measured_m(
     monkeypatch, tmp_path
 ):
     """Partial decode tuning must not override prefill or other devices/dtypes."""
-    module = triton_scaled_mm_module
-    monkeypatch.setattr(module, "_PER_TOKEN_CONFIG_DIR", tmp_path)
+    module = fp8_utils_module
+    monkeypatch.setattr(module, "_W8A8_PER_TOKEN_FP8_CONFIG_DIR", tmp_path)
     monkeypatch.setattr(module, "get_device_name_as_file_name", lambda: "test_device")
-    module.get_per_token_fp8_configs.cache_clear()
+    module.get_w8a8_per_token_fp8_configs.cache_clear()
     dtype = torch.float8_e4m3fn
-    filename = module.per_token_fp8_config_filename(
+    filename = module.get_w8a8_per_token_fp8_config_filename(
         256, 128, "test_device", dtype, torch.bfloat16
     )
     configs = {
@@ -330,7 +327,7 @@ def test_per_token_fp8_config_respects_device_dtype_and_measured_m(
         8: {"BLOCK_SIZE_M": 64},
     }
     (tmp_path / filename).write_text(json.dumps(configs))
-    get = lambda m, out=torch.bfloat16: module.get_per_token_fp8_config(
+    get = lambda m, out=torch.bfloat16: module.get_w8a8_per_token_fp8_config(
         m, 256, 128, dtype, out
     )
     assert get(1) == configs[1]
@@ -341,7 +338,71 @@ def test_per_token_fp8_config_respects_device_dtype_and_measured_m(
     assert get(1, torch.float16) is None
     monkeypatch.setattr(module, "get_device_name_as_file_name", lambda: "other_device")
     assert get(1) is None
-    module.get_per_token_fp8_configs.cache_clear()
+    module.get_w8a8_per_token_fp8_configs.cache_clear()
+
+
+@pytest.mark.parametrize("platform", ["cuda", "rocm", "xpu", "cpu"])
+def test_triton_fp8_per_token_support_matches_block_scaled(monkeypatch, platform):
+    from vllm.model_executor.kernels.linear.scaled_mm import triton as module
+
+    monkeypatch.setattr(
+        module,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda_alike=lambda: platform in ("cuda", "rocm"),
+            is_xpu=lambda: platform == "xpu",
+        ),
+    )
+    assert module.TritonFp8PerTokenScaledMMKernel.is_supported() == (
+        module.TritonFp8BlockScaledMMKernel.is_supported()
+    )
+
+
+@pytest.mark.parametrize("backend", ["auto", "triton", "torch"])
+def test_triton_fp8_per_token_default_precedes_rowwise(monkeypatch, backend):
+    """Auto prefers Triton; an explicit torch backend must still select RowWise."""
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.kernels import linear
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        FP8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+        kFp8StaticChannelSym,
+    )
+    from vllm.platforms.interface import PlatformEnum
+
+    monkeypatch.setattr(linear.current_platform, "_enum", PlatformEnum.ROCM)
+    monkeypatch.setattr(linear.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setenv("VLLM_DISABLED_KERNELS", "")
+    eligible = (
+        linear.TritonFp8PerTokenScaledMMKernel,
+        linear.RowWiseTorchFP8ScaledMMLinearKernel,
+    )
+    for kernel in linear._POSSIBLE_FP8_KERNELS[PlatformEnum.ROCM]:
+        monkeypatch.setattr(
+            kernel,
+            "is_supported",
+            classmethod(lambda cls, cc=None: (cls in eligible, None)),
+        )
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8StaticChannelSym,
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_shape=(256, 128),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+    )
+    with set_current_vllm_config(
+        VllmConfig(kernel_config=KernelConfig(linear_backend=backend))
+    ):
+        selected = linear.choose_scaled_mm_linear_kernel(
+            config,
+            linear._POSSIBLE_FP8_KERNELS,
+            compute_capability=90,
+            quantization="fp8_w8a8",
+        )
+    expected = eligible[1] if backend == "torch" else eligible[0]
+    assert selected is expected
 
 
 @pytest.mark.parametrize("in_dtype", get_8bit_types())

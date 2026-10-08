@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tune native per-token FP8 GEMM with transposed weights and BF16 output.
+"""Tune or validate native per-token FP8 GEMM with transposed weights.
 
-Example: python benchmarks/kernels/tune_per_token_fp8.py --shapes 4096,3840
-    --output-dir /tmp/per-token-tuning --m 1 2 4 8
+Example: .venv/bin/python benchmarks/kernels/benchmark_w8a8_per_token_fp8.py
+    --shapes 4096,3840 3840,4096 --output-dir /tmp/per-token-tuning
+
+Use --out-dtype float16 to tune FP16 output, --m to select batch sizes,
+--resume to continue an interrupted sweep, or --validate-only to compare
+installed configs against the default heuristic through the runtime custom op.
 
 Configs are written to output-dir/configs. Copy them to
 vllm/model_executor/layers/quantization/utils/configs after validation.
@@ -24,9 +28,11 @@ from pathlib import Path
 import torch
 
 from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
-    get_per_token_fp8_config,
-    per_token_fp8_config_filename,
     triton_scaled_mm,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    get_w8a8_per_token_fp8_config,
+    get_w8a8_per_token_fp8_config_filename,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -43,7 +49,7 @@ def candidates():
     ]
 
 
-def call(a, b, sa, sb, config=None):
+def call(a, b, sa, sb, config=None, out_dtype=torch.bfloat16):
     kwargs = {}
     if config is not None:
         kwargs = {
@@ -54,7 +60,7 @@ def call(a, b, sa, sb, config=None):
             "num_warps": config["num_warps"],
             "num_stages": config["num_stages"],
         }
-    return triton_scaled_mm(a, b, sa, sb, torch.bfloat16, **kwargs)
+    return triton_scaled_mm(a, b, sa, sb, out_dtype, **kwargs)
 
 
 def reference(a, w, sa, sb):
@@ -77,18 +83,23 @@ def check(output, ref, rows, cols):
 
 
 def bench(fn, rep_ms):
-    return 1000 * triton.testing.do_bench_cudagraph(
-        fn, rep=rep_ms, return_mode="median"
+    benchmark = (
+        triton.testing.do_bench
+        if current_platform.is_xpu()
+        else triton.testing.do_bench_cudagraph
     )
+    return 1000 * benchmark(fn, rep=rep_ms, return_mode="median")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shapes", nargs="+", required=True, help="N,K pairs")
-    parser.add_argument("--m", type=int, nargs="+", default=[1, 2, 4, 8])
-    parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
-        "--history", type=Path, help="Reuse prior input seeds and timings"
+        "--m", "--batch-sizes", type=int, nargs="+", default=[2**i for i in range(16)]
+    )
+    parser.add_argument("--output-dir", "--save-path", type=Path, required=True)
+    parser.add_argument(
+        "--out-dtype", choices=("bfloat16", "float16"), default="bfloat16"
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--search-ms", type=int, default=3)
@@ -97,47 +108,43 @@ def main():
     parser.add_argument("--finalists", type=int, default=8)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
-        "--exclude-cases", type=Path, help="JSON list of already tuned [M,N,K] cases"
-    )
-    parser.add_argument(
         "--validate-only",
         action="store_true",
         help="Benchmark installed configs through the native custom op vs heuristic",
     )
     args = parser.parse_args()
+    if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+        parser.error("Requires a CUDA, ROCm, or XPU device")
+    if any(m <= 0 for m in args.m):
+        parser.error("Batch sizes must be positive")
+    out_dtype = getattr(torch, args.out_dtype)
+    run_mm = partial(call, out_dtype=out_dtype)
+    device = current_platform.device_type
     torch.accelerator.set_device_index(args.device)
     torch.set_num_threads(4)
     shapes = sorted({tuple(map(int, s.split(","))) for s in args.shapes})
+    if any(len(shape) != 2 or min(shape) <= 0 for shape in shapes):
+        parser.error("Shapes must be positive N,K pairs")
     cases = [(m, n, k) for n, k in shapes for m in sorted(set(args.m))]
-    if args.exclude_cases:
-        excluded = {tuple(case) for case in json.loads(args.exclude_cases.read_text())}
-        cases = [case for case in cases if case not in excluded]
     if not cases:
         parser.error("No cases to run")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     result_path = args.output_dir / "results.jsonl"
     if result_path.exists() and not args.resume:
         raise FileExistsError("Choose a fresh output directory")
-    history = {}
-    if args.history:
-        history = {
-            (r["M"], r["N"], r["K"]): (i, r)
-            for i, line in enumerate(args.history.read_text().splitlines())
-            for r in [json.loads(line)]
-        }
-        assert all(case in history for case in cases)
     search = [] if args.validate_only else candidates()
     if args.validate_only:
         import vllm.model_executor.kernels.linear.scaled_mm.triton  # noqa: F401
     metadata = {
-        "device": str(torch.cuda.get_device_properties(args.device)),
+        "device": str(getattr(torch, device).get_device_properties(args.device)),
         "torch": torch.__version__,
         "hip": torch.version.hip,
         "triton": triton.__version__,
         "input_dtype": str(current_platform.fp8_dtype()),
-        "output_dtype": "bfloat16",
+        "output_dtype": args.out_dtype,
         "weight_layout": "contiguous [N,K] storage, transposed [K,N] view",
-        "method": "CUDA graphs, hot operands, median of randomized rounds",
+        "method": ("event timing" if current_platform.is_xpu() else "CUDA graphs")
+        + ", hot operands, median of randomized rounds",
         "bias": False,
         "quantization_included": False,
         "correctness": "all elements finite; <=64 rows x128 columns vs FP32",
@@ -148,13 +155,13 @@ def main():
         },
         "sources": {},
     }
-    for source in (Path(__file__), Path(triton_scaled_mm.__code__.co_filename)):
+    for source in (
+        Path(__file__),
+        Path(triton_scaled_mm.__code__.co_filename),
+        Path(get_w8a8_per_token_fp8_config.__code__.co_filename),
+    ):
         metadata["sources"][str(source)] = hashlib.sha256(
             source.read_bytes()
-        ).hexdigest()
-    if args.history:
-        metadata["history_sha256"] = hashlib.sha256(
-            args.history.read_bytes()
         ).hexdigest()
     checkpoints = args.output_dir / "checkpoints"
     checkpoints.mkdir(exist_ok=True)
@@ -169,7 +176,6 @@ def main():
             "triton",
             "sources",
             "cases",
-            "history_sha256",
         ):
             assert json.loads(json.dumps(metadata.get(key))) == old.get(key), key
         old_args, new_args = dict(old["arguments"]), dict(metadata["arguments"])
@@ -201,12 +207,12 @@ def main():
 
     if not args.validate_only:
         for (m, n, k), row in complete.items():
-            filename = per_token_fp8_config_filename(
+            filename = get_w8a8_per_token_fp8_config_filename(
                 n,
                 k,
                 get_device_name_as_file_name(),
                 current_platform.fp8_dtype(),
-                torch.bfloat16,
+                out_dtype,
             )
             configs.setdefault(filename, {})[m] = row["config"]
         # Rebuild exports even if the interruption followed the final checkpoint.
@@ -218,28 +224,28 @@ def main():
         if case in complete:
             continue
         m, n, k = case
-        seed_index = history[case][0] if history else index
+        seed_index = index
         torch.manual_seed(1234 + seed_index)
         dtype = current_platform.fp8_dtype()
-        a = (torch.randn(m, k, device="cuda") * 0.2).to(dtype)
-        w = (torch.randn(n, k, device="cuda") * 0.2).to(dtype)
+        a = (torch.randn(m, k, device=device) * 0.2).to(dtype)
+        w = (torch.randn(n, k, device=device) * 0.2).to(dtype)
         b = w.t()
-        sa = torch.rand(m, 1, device="cuda") + 0.5
-        sb = torch.rand(n, 1, device="cuda") + 0.5
+        sa = torch.rand(m, 1, device=device) + 0.5
+        sb = torch.rand(n, 1, device=device) + 0.5
         rows, cols, ref = reference(a, w, sa, sb)
         if args.validate_only:
-            config = get_per_token_fp8_config(m, n, k, dtype, torch.bfloat16)
+            config = get_w8a8_per_token_fp8_config(m, n, k, dtype, out_dtype)
             if config is None:
                 raise ValueError(f"No installed tuned config for {case}")
             methods = {
-                "heuristic": partial(call, a, b, sa, sb),
+                "heuristic": partial(run_mm, a, b, sa, sb),
                 "tuned": partial(
                     torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func,
                     a,
                     b,
                     sa,
                     sb,
-                    torch.bfloat16,
+                    out_dtype,
                     None,
                 ),
             }
@@ -267,8 +273,6 @@ def main():
             record["speedup"] = (
                 record["median_us"]["heuristic"] / record["median_us"]["tuned"]
             )
-            if history:
-                record["historical_median_us"] = history[case][1]["median_us"]
             save(record)
             print(
                 f"[{index + 1}/{len(cases)}] M={m} N={n} K={k}: "
@@ -284,7 +288,7 @@ def main():
         random.Random(1234 + seed_index).shuffle(order)
         print(f"[{index + 1}/{len(cases)}] searching M={m} N={n} K={k}", flush=True)
         for candidate in order:
-            fn = partial(call, a, b, sa, sb, candidate)
+            fn = partial(run_mm, a, b, sa, sb, candidate)
             try:
                 error = check(fn(), ref, rows, cols)
                 latency = bench(fn, args.search_ms)
@@ -300,9 +304,9 @@ def main():
         ranked.sort(key=lambda r: r["search_us"])
         if not ranked:
             raise RuntimeError(f"No valid config for {case}")
-        methods = {"heuristic": partial(call, a, b, sa, sb)}
+        methods = {"heuristic": partial(run_mm, a, b, sa, sb)}
         for i, row in enumerate(ranked[: args.finalists]):
-            methods[f"finalist_{i}"] = partial(call, a, b, sa, sb, row["config"])
+            methods[f"finalist_{i}"] = partial(run_mm, a, b, sa, sb, row["config"])
         timings = {name: [] for name in methods}
         rng = random.Random(9999 + seed_index)
         for _ in range(args.rounds):
@@ -333,7 +337,7 @@ def main():
                 "BLOCK_SIZE_N": tile[1],
                 "BLOCK_SIZE_K": tile[2],
                 "num_warps": 4,
-                "num_stages": 2,
+                "num_stages": 2 if current_platform.is_rocm() else 3,
             }
             tuned_us = baseline_us
         record = {
@@ -347,13 +351,11 @@ def main():
             "samples_us": timings,
             "ranked": ranked,
             "skipped": skipped,
-            "relative_rms": check(call(a, b, sa, sb, config), ref, rows, cols),
+            "relative_rms": check(run_mm(a, b, sa, sb, config), ref, rows, cols),
         }
-        if history:
-            record["historical_median_us"] = history[case][1]["median_us"]
         save(record)
-        filename = per_token_fp8_config_filename(
-            n, k, get_device_name_as_file_name(), dtype, torch.bfloat16
+        filename = get_w8a8_per_token_fp8_config_filename(
+            n, k, get_device_name_as_file_name(), dtype, out_dtype
         )
         configs.setdefault(filename, {})[m] = config
         folder = args.output_dir / "configs"

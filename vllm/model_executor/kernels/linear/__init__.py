@@ -218,8 +218,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
+    TritonFp8PerTokenScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
-    TritonPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFp8BlockScaledMMKernel,
@@ -311,7 +311,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "triton": {
         TritonInt8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
-        TritonPerTokenFp8ScaledMMLinearKernel,
+        TritonFp8PerTokenScaledMMKernel,
         TritonW4A16LinearKernel,
     },
     "deep_gemm": {
@@ -431,6 +431,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         CutlassFP8ScaledMMLinearKernel,
         B12xTensorFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
+        TritonFp8PerTokenScaledMMKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         MarlinFP8ScaledMMLinearKernel,
         HummingFP8ScaledMMLinearKernel,
@@ -441,9 +442,9 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         AiterPerTokenFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
+        TritonFp8PerTokenScaledMMKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
-        TritonPerTokenFp8ScaledMMLinearKernel,
     ],
     PlatformEnum.CPU: [
         CPUFP8W8A8ScaledMMLinearKernel,
@@ -455,6 +456,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         XPUW8A16FP8LinearKernel,
         XPUW8A8FP8LinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
+        TritonFp8PerTokenScaledMMKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
 }

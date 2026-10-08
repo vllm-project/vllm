@@ -6,7 +6,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
-    get_per_token_fp8_config,
     triton_scaled_mm,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -31,19 +30,15 @@ from .ScaledMMLinearKernel import (
 )
 
 
-class TritonPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """Native Triton FP8 GEMM for RDNA4 per-token/per-channel quantization."""
+class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
+    """Triton FP8 GEMM with per-token activations and per-channel weights."""
 
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.is_rocm():
-            return False, "requires ROCm RDNA4."
-        from vllm.platforms.rocm import on_rdna4
-
-        if not on_rdna4():
-            return False, "requires ROCm RDNA4."
+        if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+            return False, "only CUDA-alike and XPU devices are supported."
         return True, None
 
     @classmethod
@@ -240,27 +235,12 @@ def _w8a8_triton_per_token_scaled_mm_func(
     output_dtype: torch.dtype,
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
-    # Dynamo must not freeze the tile heuristic using a symbolic M's hint.
-    config = None
-    if qx.stride(1) == 1 and weight.stride(0) == 1:
-        config = get_per_token_fp8_config(
-            qx.size(0), weight.size(1), qx.size(1), qx.dtype, output_dtype
-        )
-    if config is None:
-        return triton_scaled_mm(qx, weight, x_scale, weight_scale, output_dtype, bias)
-    return triton_scaled_mm(
-        qx,
-        weight,
-        x_scale,
-        weight_scale,
-        output_dtype,
-        bias,
-        use_heuristic=False,
-        block_size_m=config["BLOCK_SIZE_M"],
-        block_size_n=config["BLOCK_SIZE_N"],
-        block_size_k=config["BLOCK_SIZE_K"],
-        num_warps=config["num_warps"],
-        num_stages=config["num_stages"],
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        w8a8_triton_per_token_scaled_mm,
+    )
+
+    return w8a8_triton_per_token_scaled_mm(
+        qx, weight, x_scale, weight_scale, output_dtype, bias
     )
 
 
