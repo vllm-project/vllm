@@ -27,9 +27,22 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.utils import initialize_model
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 # Construction only: skip model runner checks that need a GPU or Triton
 VllmConfig._get_v1_model_runner_unsupported_features = lambda self: []  # type: ignore[method-assign]
+
+# Model code that moves submodules to a device must leave them on meta
+_module_to = torch.nn.Module.to
+
+
+def _meta_safe_to(self, *args, **kwargs):
+    kwargs.pop("device", None)
+    args = tuple(a for a in args if not isinstance(a, (torch.device, str, int)))
+    return _module_to(self, *args, **kwargs)
+
+
+torch.nn.Module.to = _meta_safe_to  # type: ignore[method-assign]
 
 SCALARS = (bool, int, float, str)
 
@@ -64,7 +77,7 @@ def dump(repo: str, trust_remote_code: bool) -> dict:
                 port = sock.getsockname()[1]
             init_distributed_environment(1, 0, f"tcp://127.0.0.1:{port}", 0, "gloo")
             initialize_model_parallel(1, 1)
-        with torch.device("meta"):
+        with set_default_torch_dtype(model_config.dtype), torch.device("meta"):
             model = initialize_model(vllm_config=vllm_config)
     return {
         "repo": repo,
