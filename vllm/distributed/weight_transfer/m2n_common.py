@@ -9,16 +9,26 @@ runtime import, layout descriptors, and the conversion to `nccl.m2n` types —
 so the engine module stays about the transfer itself.
 """
 
-from collections.abc import Sequence
+import ctypes
+import functools
+import hashlib
+import json
+import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
+from vllm import envs
 from vllm.distributed.weight_transfer.base import ParamMeta
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.utils import StatelessProcessGroup
 
 # Placement code for a mesh axis that replicates. Any other (non-negative) code
 # is the tensor dim that axis shards. Ints rather than `nccl.m2n` objects so
@@ -41,6 +51,17 @@ DESTINATION_SHARD_AXIS = 1
 # here; a build with larger arrays makes these conservative, never wrong.
 MAX_SOURCE_SHARDS = 16
 MAX_DEST_SHARDS = 64
+
+# Increment when the JSON init payload changes incompatibly.
+M2N_WIRE_SCHEMA_VERSION = 2
+
+_NCCL_RESHARD_ENV_PREFIX = "NCCL_RESHARD_"
+_NCCL_RESHARD_DIAGNOSTIC_ENV_VARS = frozenset(
+    {
+        "NCCL_RESHARD_LOG_LEVEL",
+        "NCCL_RESHARD_SPLIT_KERNEL_TRACE",
+    }
+)
 
 # Wire dtypes `ncclReshard` accepts. Notably excludes fp4 and any packed
 # sub-byte type, so quantized checkpoints are out of scope for now.
@@ -70,10 +91,151 @@ _IMPORT_HINT = (
     "The nccl_m2n weight transfer backend requires the `nccl-extensions` "
     "package (and its `nccl4py` dependency), which is not installed by vLLM. "
     "See https://github.com/NVIDIA/nccl-extensions for build "
-    "and install instructions. It needs NCCL 2.30.5 or newer, and "
-    "VLLM_NCCL_SO_PATH must point at the same libnccl.so that libnccl_m2n.so "
-    "was linked against."
+    "and install instructions. It needs NCCL 2.30.5 or newer. If runtime "
+    "validation reports mismatched NCCL libraries, preload the NCCL linked "
+    "by libnccl_m2n.so before starting Python."
 )
+
+
+@dataclass(frozen=True)
+class M2NNcclRuntime:
+    """The process-wide NCCL DSO selected for both PyNccl and M2N."""
+
+    library_path: str
+    library_handle: int
+    library: Any
+
+
+@functools.cache
+def prepare_m2n_nccl_runtime() -> M2NNcclRuntime:
+    """Resolve and globally promote the NCCL DSO used by ``nccl.m2n``."""
+    try:
+        from cuda.pathfinder import load_nvidia_dynamic_lib
+    except ImportError as exc:
+        raise ImportError(
+            f"{_IMPORT_HINT} (cuda.pathfinder import failed: {exc})"
+        ) from exc
+
+    loaded = load_nvidia_dynamic_lib("nccl")
+    library_path = loaded.abs_path
+    if not library_path:
+        raise RuntimeError(
+            "cuda.pathfinder found NCCL but could not resolve its absolute path; "
+            "preload the NCCL linked by libnccl_m2n.so before starting Python"
+        )
+    library = ctypes.CDLL(library_path, mode=os.RTLD_NOW | os.RTLD_GLOBAL)
+    loaded_handle = int(loaded._handle_uint)
+    promoted_handle = int(library._handle)
+    if promoted_handle != loaded_handle:
+        raise RuntimeError(
+            "globally promoted NCCL differs from cuda.pathfinder's loaded NCCL: "
+            f"path={library_path}, pathfinder_handle={loaded_handle:#x}, "
+            f"promoted_handle={promoted_handle:#x}"
+        )
+
+    configured_path = os.environ.get("VLLM_NCCL_SO_PATH")
+    if configured_path:
+        try:
+            same_file = os.path.samefile(configured_path, library_path)
+        except OSError:
+            same_file = os.path.realpath(configured_path) == os.path.realpath(
+                library_path
+            )
+        if not same_file:
+            logger.warning_once(
+                "NCCL M2N is reusing the already-loaded NCCL at %s instead of "
+                "VLLM_NCCL_SO_PATH=%s so its communicator and extension share "
+                "one process runtime. Preload the configured library before "
+                "Python starts to force that file.",
+                library_path,
+                configured_path,
+            )
+
+    return M2NNcclRuntime(library_path, promoted_handle, library)
+
+
+def validate_m2n_nccl_library(library: Any, runtime: M2NNcclRuntime) -> None:
+    """Reject a PyNccl wrapper bound to a different NCCL DSO."""
+    loaded = getattr(library, "lib", None)
+    handle = getattr(loaded, "_handle", None)
+    if handle is None:
+        raise RuntimeError("PyNccl does not expose its NCCL library handle")
+    if int(handle) != runtime.library_handle:
+        comm_path = getattr(loaded, "_name", "<unknown>")
+        raise RuntimeError(
+            "PyNccl and NCCL M2N loaded different NCCL runtimes: "
+            f"pynccl={comm_path} handle={int(handle):#x}, "
+            f"m2n={runtime.library_path} handle={runtime.library_handle:#x}. "
+            "Preload one NCCL library before Python starts."
+        )
+
+
+def validate_m2n_nccl_communicator(
+    comm: "PyNcclCommunicator", runtime: M2NNcclRuntime
+) -> None:
+    """Reject a PyNccl communicator created by a different NCCL DSO."""
+    library = getattr(comm, "nccl", None)
+    if library is None:
+        raise RuntimeError("PyNcclCommunicator does not expose its NCCL library")
+    validate_m2n_nccl_library(library, runtime)
+
+
+def prepare_m2n_local_runtime(
+    m2n: Any, max_cta: int | None
+) -> tuple[M2NNcclRuntime, int, Any]:
+    """Prepare rank-local resources before any rank enters NCCL init."""
+    from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
+    from vllm.utils.nccl import unpinned_nccl_env
+
+    runtime = prepare_m2n_nccl_runtime()
+    with unpinned_nccl_env():
+        library = NCCLLibrary(runtime.library_path)
+        library.ncclGetRawVersion()
+    validate_m2n_nccl_library(library, runtime)
+    device = torch.accelerator.current_device_index()
+    if not isinstance(device, int) or isinstance(device, bool) or device < 0:
+        raise RuntimeError(f"invalid current accelerator device index: {device!r}")
+    handle = m2n.Handle.create(m2n.Config(max_cta=max_cta))
+    return runtime, device, handle
+
+
+@functools.cache
+def _load_m2n_library(library_path: str) -> Any:
+    """Keep the M2N DSO and its dependency scope alive process-wide."""
+    return ctypes.CDLL(library_path, mode=os.RTLD_NOW | os.RTLD_GLOBAL)
+
+
+def _symbol_address(library: Any, symbol: str) -> int:
+    try:
+        function = getattr(library, symbol)
+    except AttributeError as exc:
+        raise RuntimeError(
+            f"NCCL library {getattr(library, '_name', '<unknown>')} does not "
+            f"export required symbol {symbol}"
+        ) from exc
+    address = ctypes.cast(function, ctypes.c_void_p).value
+    if address is None:
+        raise RuntimeError(f"NCCL symbol {symbol} resolved to a null function pointer")
+    return int(address)
+
+
+def validate_m2n_nccl_library_binding(
+    runtime: M2NNcclRuntime, m2n_library_path: str
+) -> None:
+    """Attest that M2N's NCCL calls resolve through the PyNccl runtime."""
+    m2n_library = _load_m2n_library(os.path.realpath(m2n_library_path))
+    symbol = "ncclCommWindowRegister"
+    runtime_address = _symbol_address(runtime.library, symbol)
+    m2n_address = _symbol_address(m2n_library, symbol)
+    if m2n_address != runtime_address:
+        raise RuntimeError(
+            "libnccl_m2n and PyNccl resolve NCCL through different runtimes: "
+            f"symbol={symbol}, m2n_library={m2n_library_path}, "
+            f"m2n_address={m2n_address:#x}, "
+            f"pynccl_library={runtime.library_path}, "
+            f"pynccl_address={runtime_address:#x}. Preload the NCCL linked by "
+            "libnccl_m2n before Python starts."
+        )
 
 
 def import_m2n() -> Any:
@@ -82,10 +244,18 @@ def import_m2n() -> Any:
     Deferred so that importing vLLM — or any other weight transfer backend —
     never requires the m2n runtime to be present.
     """
+    if envs.VLLM_DISABLE_PYNCCL:
+        raise ValueError(
+            "nccl_m2n requires PyNccl; unset VLLM_DISABLE_PYNCCL on every rank"
+        )
+    runtime = prepare_m2n_nccl_runtime()
     try:
         import nccl.m2n as m2n
     except ImportError as e:
         raise ImportError(f"{_IMPORT_HINT} (import failed: {e})") from e
+    m2n_library_path = os.environ.get("NCCL_M2N_LIBRARY")
+    if m2n_library_path:
+        validate_m2n_nccl_library_binding(runtime, m2n_library_path)
     return m2n
 
 
@@ -97,17 +267,25 @@ class M2NMesh:
     `[start_rank, start_rank + dims[0] * dims[1])`. There is no 1-D mesh; a
     single-axis topology is spelled with a second axis of size 1.
 
-    One mesh describes every tensor on its side, so it is exchanged once at the
-    init handshake rather than per parameter.
+    A model may use a different factorization for each tensor. For example,
+    dense weights can use a DP x TP mesh while expert weights use EDP x EP.
     """
 
     dims: tuple[int, int]
     start_rank: int
 
     def __post_init__(self) -> None:
-        if len(self.dims) != MESH_NDIMS or any(d <= 0 for d in self.dims):
+        object.__setattr__(self, "dims", tuple(self.dims))
+        if len(self.dims) != MESH_NDIMS or any(
+            not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0
+            for dim in self.dims
+        ):
             raise ValueError(f"mesh dims must be {MESH_NDIMS} positive ints")
-        if self.start_rank < 0:
+        if (
+            not isinstance(self.start_rank, int)
+            or isinstance(self.start_rank, bool)
+            or self.start_rank < 0
+        ):
             raise ValueError(
                 f"mesh start_rank must be non-negative, got {self.start_rank}"
             )
@@ -124,6 +302,21 @@ Placements = tuple[int, int]
 REPLICATED: Placements | None = None
 
 
+@dataclass(frozen=True)
+class M2NLayout:
+    """A tensor's mesh and placement on one side of a transfer."""
+
+    mesh: M2NMesh
+    placements: Placements | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mesh, M2NMesh):
+            raise TypeError("M2N layout mesh must be an M2NMesh")
+        if self.placements is not None:
+            object.__setattr__(self, "placements", tuple(self.placements))
+            check_placements(self.placements)
+
+
 def check_placements(placements: Placements, context: str = "placements") -> None:
     """Reject placement pairs m2n cannot express.
 
@@ -134,6 +327,8 @@ def check_placements(placements: Placements, context: str = "placements") -> Non
     """
     if len(placements) != MESH_NDIMS:
         raise ValueError(f"{context} must have {MESH_NDIMS} entries")
+    if any(not isinstance(code, int) or isinstance(code, bool) for code in placements):
+        raise TypeError(f"{context} must contain integer placement codes")
     invalid = [code for code in placements if code < REPLICATE]
     if invalid:
         raise ValueError(
@@ -247,11 +442,381 @@ class M2NParamMeta(ParamMeta):
     """`ParamMeta` extended with how the trainer places this tensor.
 
     The base class carries only name / dtype / full shape, which is not enough
-    to plan a reshard. `placements` is relative to its side's `M2NMesh`, or
-    `REPLICATED` when every rank holds the whole tensor.
+    to plan a reshard. `source_layout` carries both the per-parameter mesh and
+    its placement on that mesh.
     """
 
-    placements: Placements | None
+    source_layout: M2NLayout
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_layout, M2NLayout):
+            raise TypeError("source_layout must be an M2NLayout")
+
+
+@dataclass(frozen=True)
+class M2NWireParam:
+    """JSON-safe source metadata for one parameter in the init handshake."""
+
+    name: str
+    dtype_name: str
+    shape: tuple[int, ...]
+    src_mesh_dims: tuple[int, int]
+    src_placements: Placements | None
+
+    def __post_init__(self) -> None:
+        shape = tuple(self.shape)
+        dims = tuple(self.src_mesh_dims)
+        placements = None if self.src_placements is None else tuple(self.src_placements)
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "src_mesh_dims", dims)
+        object.__setattr__(self, "src_placements", placements)
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("M2N wire parameter name must not be empty")
+        if not isinstance(self.dtype_name, str) or not self.dtype_name:
+            raise ValueError(f"parameter '{self.name}' has an empty wire dtype name")
+        if not shape or any(
+            not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0
+            for dim in shape
+        ):
+            raise ValueError(
+                f"parameter '{self.name}' shape must contain positive integers"
+            )
+        M2NMesh(cast(tuple[int, int], dims), 0)
+        if placements is not None:
+            check_placements(
+                cast(Placements, placements),
+                f"parameter '{self.name}' source placements",
+            )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "M2NWireParam":
+        """Parse one strict wire record from its JSON-decoded mapping."""
+        fields = {
+            "name",
+            "dtype_name",
+            "shape",
+            "src_mesh_dims",
+            "src_placements",
+        }
+        missing = fields - value.keys()
+        extra = value.keys() - fields
+        if missing or extra:
+            details = []
+            if missing:
+                details.append(f"missing {sorted(missing)}")
+            if extra:
+                details.append(f"unexpected {sorted(extra)}")
+            raise ValueError(f"invalid M2N wire parameter: {', '.join(details)}")
+        return cls(**value)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize this record using only JSON-compatible values."""
+        return {
+            "name": self.name,
+            "dtype_name": self.dtype_name,
+            "shape": list(self.shape),
+            "src_mesh_dims": list(self.src_mesh_dims),
+            "src_placements": (
+                None if self.src_placements is None else list(self.src_placements)
+            ),
+        }
+
+
+def source_plan_digest(params: Sequence[M2NWireParam]) -> str:
+    """Return a rank-independent digest of the ordered source wire plan."""
+    payload = json.dumps(
+        {
+            "schema_version": M2N_WIRE_SCHEMA_VERSION,
+            "params": [param.to_dict() for param in params],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def check_source_plan_agreement(
+    group: "StatelessProcessGroup",
+    params: Sequence[M2NWireParam],
+    expected_digest: str | None = None,
+    local_error: str | None = None,
+) -> str:
+    """Verify every participant entered with the same source plan."""
+    prepared_error = local_error
+    digest: str | None = None
+    declared: str | None = expected_digest
+    if prepared_error is None:
+        try:
+            digest = source_plan_digest(params)
+            declared = digest if expected_digest is None else expected_digest
+            if not isinstance(declared, str) or not declared:
+                raise ValueError("declared source digest must be a non-empty string")
+        except Exception as exc:
+            prepared_error = f"{type(exc).__name__}: {exc}"
+    elif not isinstance(prepared_error, str) or not prepared_error:
+        prepared_error = "TypeError: local source error must be a non-empty string"
+
+    gathered = group.all_gather_obj(
+        {
+            "phase": "source",
+            "digest": digest,
+            "declared_digest": declared,
+            "error": prepared_error,
+        }
+    )
+    errors: list[str] = []
+    expected_fields = {"phase", "digest", "declared_digest", "error"}
+    if len(gathered) != group.world_size:
+        errors.append(
+            "control-plane all-gather returned "
+            f"{len(gathered)} records for world size {group.world_size}"
+        )
+    agreed: list[tuple[int, str, str]] = []
+    for rank, item in enumerate(gathered):
+        if not isinstance(item, Mapping) or set(item) != expected_fields:
+            errors.append(f"rank {rank}: invalid source preflight envelope")
+            continue
+        if item["phase"] != "source":
+            errors.append(f"rank {rank}: invalid source preflight phase")
+            continue
+        error = item["error"]
+        if error is not None:
+            if not isinstance(error, str) or not error:
+                errors.append(f"rank {rank}: invalid source preflight error")
+            else:
+                errors.append(f"rank {rank}: {error}")
+            continue
+        computed = item["digest"]
+        claimed = item["declared_digest"]
+        if (
+            not isinstance(computed, str)
+            or not computed
+            or not isinstance(claimed, str)
+            or not claimed
+        ):
+            errors.append(f"rank {rank}: invalid source digest")
+            continue
+        agreed.append((rank, computed, claimed))
+    if errors:
+        raise RuntimeError(
+            "nccl_m2n source preflight rejected before NCCL init: " + "; ".join(errors)
+        )
+
+    canonical = agreed[0][1]
+    for rank, computed, claimed in agreed:
+        if computed != claimed:
+            errors.append(
+                f"rank {rank}: computed digest {computed} does not match "
+                f"declared digest {claimed}"
+            )
+        if computed != canonical:
+            errors.append(f"rank {rank}: source digest disagrees with rank 0")
+    if errors:
+        raise RuntimeError(
+            "nccl_m2n source preflight rejected before NCCL init: " + "; ".join(errors)
+        )
+    return canonical
+
+
+def check_runtime_ready_agreement(
+    group: "StatelessProcessGroup", local_error: str | None
+) -> None:
+    """Require every rank to prepare local resources before NCCL init."""
+    prepared_error = local_error
+    if prepared_error is not None and (
+        not isinstance(prepared_error, str) or not prepared_error
+    ):
+        prepared_error = "TypeError: local runtime error must be a non-empty string"
+    gathered = group.all_gather_obj({"phase": "runtime_ready", "error": prepared_error})
+    errors: list[str] = []
+    if len(gathered) != group.world_size:
+        errors.append(
+            "control-plane all-gather returned "
+            f"{len(gathered)} records for world size {group.world_size}"
+        )
+    for rank, item in enumerate(gathered):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"phase", "error"}
+            or item.get("phase") != "runtime_ready"
+        ):
+            errors.append(f"rank {rank}: invalid runtime readiness envelope")
+            continue
+        error = item.get("error")
+        if error is not None:
+            if not isinstance(error, str) or not error:
+                errors.append(f"rank {rank}: invalid runtime readiness error")
+            else:
+                errors.append(f"rank {rank}: {error}")
+    if errors:
+        raise RuntimeError(
+            "nccl_m2n local runtime preflight failed before NCCL init: "
+            + "; ".join(errors)
+        )
+
+
+def _nccl_reshard_environment() -> dict[str, str]:
+    """Snapshot rank-local M2N settings that can affect execution."""
+    return {
+        name: value
+        for name, value in sorted(os.environ.items())
+        if name.startswith(_NCCL_RESHARD_ENV_PREFIX)
+        and name not in _NCCL_RESHARD_DIAGNOSTIC_ENV_VARS
+    }
+
+
+def check_data_plane_agreement(
+    group: "StatelessProcessGroup",
+    unique_id_bytes: bytes | None,
+    max_cta: int | None,
+    local_error: str | None = None,
+) -> None:
+    """Agree on NCCL rendezvous identity and M2N config before NCCL init."""
+    prepared_error = local_error
+    uid_digest: str | None = None
+    if prepared_error is None:
+        try:
+            if unique_id_bytes is not None:
+                if not isinstance(unique_id_bytes, bytes):
+                    raise TypeError("NCCL unique id must decode to bytes")
+                uid_digest = hashlib.sha256(unique_id_bytes).hexdigest()
+            if max_cta is not None and (
+                not isinstance(max_cta, int)
+                or isinstance(max_cta, bool)
+                or max_cta <= 0
+            ):
+                raise ValueError("max_cta must be a positive integer or null")
+        except Exception as exc:
+            prepared_error = f"{type(exc).__name__}: {exc}"
+    elif not isinstance(prepared_error, str) or not prepared_error:
+        prepared_error = "TypeError: local data-plane error must be non-empty"
+
+    gathered = group.all_gather_obj(
+        {
+            "phase": "data_plane",
+            "mode": "uid" if unique_id_bytes is not None else "tcp",
+            "uid_digest": uid_digest,
+            "max_cta": max_cta,
+            "reshard_env": _nccl_reshard_environment(),
+            "error": prepared_error,
+        }
+    )
+    expected_fields = {
+        "phase",
+        "mode",
+        "uid_digest",
+        "max_cta",
+        "reshard_env",
+        "error",
+    }
+    errors: list[str] = []
+    valid: list[tuple[int, str, str | None, int | None, dict[str, str]]] = []
+    if len(gathered) != group.world_size:
+        errors.append(
+            "control-plane all-gather returned "
+            f"{len(gathered)} records for world size {group.world_size}"
+        )
+    for rank, item in enumerate(gathered):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != expected_fields
+            or item.get("phase") != "data_plane"
+        ):
+            errors.append(f"rank {rank}: invalid data-plane preflight envelope")
+            continue
+        error = item["error"]
+        if error is not None:
+            if not isinstance(error, str) or not error:
+                errors.append(f"rank {rank}: invalid data-plane preflight error")
+            else:
+                errors.append(f"rank {rank}: {error}")
+            continue
+        mode = item["mode"]
+        uid = item["uid_digest"]
+        cta = item["max_cta"]
+        reshard_env = item["reshard_env"]
+        if mode not in {"tcp", "uid"} or (mode == "uid") != isinstance(uid, str):
+            errors.append(f"rank {rank}: invalid data-plane identity")
+            continue
+        if cta is not None and (
+            not isinstance(cta, int) or isinstance(cta, bool) or cta <= 0
+        ):
+            errors.append(f"rank {rank}: invalid max_cta")
+            continue
+        if not isinstance(reshard_env, Mapping) or any(
+            not isinstance(name, str)
+            or not name.startswith(_NCCL_RESHARD_ENV_PREFIX)
+            or name in _NCCL_RESHARD_DIAGNOSTIC_ENV_VARS
+            or not isinstance(value, str)
+            for name, value in reshard_env.items()
+        ):
+            errors.append(f"rank {rank}: invalid NCCL_RESHARD environment")
+            continue
+        valid.append((rank, mode, uid, cta, dict(reshard_env)))
+    if not errors:
+        _, mode, uid, cta, reshard_env = valid[0]
+        for rank, other_mode, other_uid, other_cta, other_env in valid[1:]:
+            if (other_mode, other_uid) != (mode, uid):
+                errors.append(f"rank {rank}: NCCL data-plane identity disagrees")
+            if other_cta != cta:
+                errors.append(f"rank {rank}: max_cta disagrees")
+            if other_env != reshard_env:
+                different = sorted(
+                    name
+                    for name in set(reshard_env) | set(other_env)
+                    if reshard_env.get(name) != other_env.get(name)
+                )
+                errors.append(
+                    f"rank {rank}: NCCL_RESHARD environment disagrees with "
+                    f"rank 0 for {', '.join(different)}"
+                )
+    if errors:
+        raise RuntimeError(
+            "nccl_m2n data-plane preflight rejected before NCCL init: "
+            + "; ".join(errors)
+        )
+
+
+def validate_local_tensor(
+    meta: M2NParamMeta,
+    tensor: Any,
+    expected_device: torch.device | None = None,
+) -> None:
+    """Check one source value against its initialization-time metadata."""
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(
+            f"parameter '{meta.name}' source returned {type(tensor).__name__}; "
+            "expected a torch.Tensor"
+        )
+    if tensor.dtype != meta.dtype:
+        raise ValueError(
+            f"parameter '{meta.name}' source returned dtype {tensor.dtype}, "
+            f"but its metadata declared {meta.dtype}"
+        )
+    mesh, placements = resolve_layout(
+        meta.source_layout.mesh, meta.source_layout.placements
+    )
+    validate_layout(mesh, placements, meta.shape, "source")
+    expected_shape = list(meta.shape)
+    for axis, tensor_dim in enumerate(placements):
+        if tensor_dim != REPLICATE:
+            expected_shape[tensor_dim] //= mesh.dims[axis]
+    expected = tuple(expected_shape)
+    if tuple(tensor.shape) != expected:
+        raise ValueError(
+            f"parameter '{meta.name}' source returned local shape "
+            f"{tuple(tensor.shape)}, but layout {meta.source_layout} implies "
+            f"{expected} from global shape {meta.shape}"
+        )
+    if expected_device is not None and tensor.device != expected_device:
+        raise ValueError(
+            f"parameter '{meta.name}' source returned tensor on "
+            f"{tensor.device}, expected {expected_device}"
+        )
+    if not tensor.is_contiguous():
+        raise ValueError(
+            f"parameter '{meta.name}' source returned a non-contiguous tensor"
+        )
 
 
 def check_transferable(name: str, dtype: torch.dtype, shape: Sequence[int]) -> None:
@@ -328,8 +893,8 @@ def publish_destination_placements(
 def comm_ptr(comm: "PyNcclCommunicator") -> int:
     """Raw `ncclComm_t` behind vLLM's `PyNcclCommunicator`.
 
-    m2n links its own NCCL, so the handle only means anything if vLLM loaded
-    the same `libnccl.so` — set `VLLM_NCCL_SO_PATH` accordingly.
+    ``prepare_m2n_nccl_runtime`` selects the shared NCCL runtime and
+    ``validate_m2n_nccl_communicator`` validates this handle before use.
     """
     handle = comm.comm
     ptr = getattr(handle, "value", handle)
