@@ -824,7 +824,7 @@ def test_get_num_new_matched_tokens_write_plain_keeps_all_tokens():
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=2)
     # Pure-attention WRITE: no N-1 drop; full length minus already-computed.
@@ -848,7 +848,7 @@ def test_get_num_new_matched_tokens_supports_embeds_only_prompts(
         num_prompt_tokens=10,
         prompt_token_ids=None,
         prompt_embeds=object(),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
 
     assert sched.get_num_new_matched_tokens(req, num_computed_tokens) == (
