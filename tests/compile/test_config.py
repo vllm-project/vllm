@@ -215,7 +215,9 @@ def test_use_cudagraphs(
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-def test_stock_torch_compile(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_stock_torch_compile(vllm_runner, monkeypatch, use_v2_model_runner):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -226,9 +228,10 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
             "facebook/opt-125m",
             compilation_config={"mode": CompilationMode.STOCK_TORCH_COMPILE},
             gpu_memory_utilization=0.4,
-        ) as _,
+        ) as runner,
     ):
-        pass
+        outputs = runner.generate_greedy(["Hello, my name is"], max_tokens=5)
+        assert outputs[0][0]
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
@@ -262,6 +265,21 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         ) as _,
     ):
         pass
+
+
+@pytest.mark.parametrize("enable_fault_tolerance", [False, True])
+def test_enforce_eager_jit_warmup(enable_fault_tolerance):
+    """Enforce-eager disables JIT warmup unless fault tolerance is on.
+
+    FT fault detection runs against deadlines that in-inference Triton
+    compilation latency spikes can blow past, so warmup stays enabled.
+    """
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", enforce_eager=True),
+        parallel_config=ParallelConfig(enable_fault_tolerance=enable_fault_tolerance),
+    )
+    assert config.compilation_config.mode == CompilationMode.NONE
+    assert config.kernel_config.enable_jit_warmup == enable_fault_tolerance
 
 
 @pytest.mark.forked
@@ -1348,3 +1366,70 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
+
+
+@pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("override", [None, False, True])
+def test_combo_kernel_benchmarking_respects_deterministic(deterministic, override):
+    from torch._inductor import config as inductor_config
+
+    overrides = {} if override is None else {"deterministic": override}
+    with (
+        inductor_config.patch(deterministic=deterministic),
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=False),
+    ):
+        config = CompilationConfig(inductor_compile_config=overrides)
+
+    assert config.inductor_compile_config["combo_kernels"] is True
+    effective_deterministic = deterministic if override is None else override
+    assert config.inductor_compile_config["benchmark_combo_kernel"] is (
+        not effective_deterministic
+    )
+
+
+@pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"combo_kernels": False},
+        {"combo_kernels": True},
+        {"benchmark_combo_kernel": False},
+        {"benchmark_combo_kernel": True},
+    ],
+)
+def test_combo_kernel_explicit_settings_preserved(deterministic, overrides):
+    from torch._inductor import config as inductor_config
+
+    with (
+        inductor_config.patch(deterministic=deterministic),
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=False),
+    ):
+        config = CompilationConfig(inductor_compile_config=overrides.copy())
+
+    for key in ("combo_kernels", "benchmark_combo_kernel"):
+        assert config.inductor_compile_config.get(key) == overrides.get(key)
+
+
+@pytest.mark.parametrize("is_cpu,torch_version", [(True, "2.13.0"), (False, "2.8.0")])
+def test_combo_kernel_defaults_require_supported_platform_and_torch(
+    is_cpu, torch_version
+):
+    with (
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=is_cpu),
+        patch("torch.__version__", torch_version),
+    ):
+        config = CompilationConfig()
+
+    assert "combo_kernels" not in config.inductor_compile_config
+    assert "benchmark_combo_kernel" not in config.inductor_compile_config
+
+
+def test_combo_kernel_defaults_without_inductor_deterministic_setting():
+    with (
+        patch("torch._inductor.config", SimpleNamespace()),
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=False),
+    ):
+        config = CompilationConfig()
+
+    assert config.inductor_compile_config["combo_kernels"] is True
+    assert config.inductor_compile_config["benchmark_combo_kernel"] is True
