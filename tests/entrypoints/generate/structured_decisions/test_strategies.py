@@ -11,6 +11,7 @@ from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
 )
 from vllm.entrypoints.generate.structured_decisions.question_types import LABELS
+from vllm.entrypoints.generate.structured_decisions.serving import state_text
 from vllm.entrypoints.generate.structured_decisions.strategies import (
     NextTokenStrategy,
     reply_label_ids,
@@ -59,6 +60,11 @@ def test_unsupported_model_returns_501():
             },
         )
     assert response.status_code == 501
+
+
+def test_structured_state_keeps_unicode_in_prompt():
+    state = {"message": "Français 日本語"}
+    assert state_text(state) == '{"message": "Français 日本語"}'
 
 
 @pytest.fixture(scope="module")
