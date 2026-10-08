@@ -1107,18 +1107,26 @@ class HiSparseRuntime:
 
 
 class HiSparseResidencyTable:
-    """GPU block of each resident page by request state row, and the per-step
-    gather by batch row that attention reads. Block 0 means not resident."""
+    """GPU block of each resident page for every resident group, by request
+    state row and gathered by this step's batch row. Block 0 means host-only."""
 
-    def __init__(self, max_num_reqs: int, max_num_pages: int, device: torch.device):
+    def __init__(
+        self,
+        max_num_reqs: int,
+        num_groups: int,
+        max_num_pages: int,
+        device: torch.device,
+    ) -> None:
         self.state_rows = torch.zeros(
-            (max_num_reqs, max_num_pages), dtype=torch.int32, device=device
+            (max_num_reqs, num_groups, max_num_pages),
+            dtype=torch.int32,
+            device=device,
         )
         self.batch_rows = torch.zeros_like(self.state_rows)
 
 
 def update_hisparse_residency(
-    tables: Sequence[HiSparseResidencyTable],
+    table: HiSparseResidencyTable,
     updates: Mapping[str, SparseKVResidencyUpdate],
     request_ids: Sequence[str],
     request_state_indices: torch.Tensor,
@@ -1128,28 +1136,23 @@ def update_hisparse_residency(
         batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
         rows: list[int] = []
         pages: list[int] = []
-        block_ids: list[list[int]] = [[] for _ in tables]
+        block_ids: list[tuple[int, ...]] = []
         for request_id, update in updates.items():
             num_pages = len(update.block_ids[0])
             rows.extend([batch_rows[request_id]] * num_pages)
             pages.extend(range(update.start_page, update.start_page + num_pages))
-            for table_ids, group_ids in zip(block_ids, update.block_ids, strict=True):
-                table_ids.extend(group_ids)
+            block_ids.extend(zip(*update.block_ids, strict=True))
         values = async_tensor_h2d(
-            np.array([rows, pages, *block_ids], dtype=np.int32),
+            np.column_stack([rows, pages, np.asarray(block_ids, dtype=np.int32)]),
             device=request_state_indices.device,
+            dtype=torch.int32,
         )
-        state_rows = request_state_indices[values[0]]
-        for table, table_ids in zip(tables, values[2:], strict=True):
-            table.state_rows[state_rows, values[1]] = table_ids
+        state_rows = request_state_indices[values[:, 0]]
+        table.state_rows[state_rows, :, values[:, 1]] = values[:, 2:]
     num_reqs = request_state_indices.numel()
-    for table in tables:
-        torch.index_select(
-            table.state_rows,
-            0,
-            request_state_indices,
-            out=table.batch_rows[:num_reqs],
-        )
+    torch.index_select(
+        table.state_rows, 0, request_state_indices, out=table.batch_rows[:num_reqs]
+    )
 
 
 class HiSparseCacheHandle:

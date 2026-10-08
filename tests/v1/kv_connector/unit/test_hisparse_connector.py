@@ -425,9 +425,9 @@ def test_residency_updates_persist_by_state_row_and_gather_by_batch_row():
     A suffix update for a lost page must leave the earlier pages and the other
     request's row intact across steps that reorder the batch.
     """
-    tables = [HiSparseResidencyTable(4, 4, torch.device("cpu")) for _ in range(2)]
+    table = HiSparseResidencyTable(4, 2, 4, torch.device("cpu"))
     update_hisparse_residency(
-        tables,
+        table,
         {
             "a": SparseKVResidencyUpdate(0, ([1, 2, 3], [11, 12, 13])),
             "b": SparseKVResidencyUpdate(0, ([4, 5], [14, 15])),
@@ -436,11 +436,11 @@ def test_residency_updates_persist_by_state_row_and_gather_by_batch_row():
         torch.tensor([2, 0], dtype=torch.int32),
     )
     update_hisparse_residency(
-        tables,
+        table,
         {"a": SparseKVResidencyUpdate(1, ([0, 3, 6], [0, 13, 16]))},
         ["b", "a"],
         torch.tensor([0, 2], dtype=torch.int32),
     )
 
-    assert tables[0].batch_rows[:2].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
-    assert tables[1].batch_rows[:2].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
+    assert table.batch_rows[:2, 0].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
+    assert table.batch_rows[:2, 1].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]

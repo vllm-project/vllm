@@ -66,7 +66,6 @@ class _HiSparseRequestState:
     unpinned_pages: set[int] = field(default_factory=set)
     # Prefix pages whose GPU copies are adopted after the admitting allocation.
     pages_to_adopt: int = 0
-    # Leading pages whose residency the worker has been sent.
     synced_pages: int = 0
 
 

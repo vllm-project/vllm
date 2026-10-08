@@ -2494,11 +2494,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
 
 class HiSparseResidentManager(_HiSparseAuxiliaryManager):
-    """Track GPU-resident pages for otherwise host-backed KV.
-
-    The block table row is append-only. Pages later pointed at a GPU copy or
-    lost to the pool are recorded as overrides on top of it.
-    """
+    """Track GPU-resident pages for otherwise host-backed KV."""
 
     max_admission_blocks_per_request: int
 

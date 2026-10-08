@@ -339,12 +339,8 @@ class HiSparseConnectorWorker:
                 "HiSparse request-state mapping does not match max_num_seqs."
             )
         self.hot_backing = hot_backing
-        residency_tables: dict[int, HiSparseResidencyTable] = {}
-        for cache in cache_handles:
-            if cache.residency is not None:
-                residency_tables[cache.runtime.resident_source_index] = cache.residency
-        self.residency_tables = tuple(
-            residency_tables[index] for index in sorted(residency_tables)
+        self.residency: HiSparseResidencyTable | None = next(
+            (cache.residency for cache in cache_handles if cache.residency), None
         )
         self._pending_invalid_block_ids: list[int] = []
         # Destination block ids of host copies this worker has run.
@@ -450,9 +446,13 @@ class HiSparseConnectorWorker:
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
-            if request_ids is not None and not torch.cuda.is_current_stream_capturing():
+            if (
+                self.residency is not None
+                and request_ids is not None
+                and not torch.cuda.is_current_stream_capturing()
+            ):
                 update_hisparse_residency(
-                    self.residency_tables,
+                    self.residency,
                     metadata.residency_updates,
                     request_ids,
                     request_state_indices,
