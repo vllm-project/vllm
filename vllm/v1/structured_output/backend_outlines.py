@@ -3,7 +3,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import ast
 import json
 from dataclasses import dataclass, field
 from re import _constants, _parser  # type: ignore[attr-defined]
@@ -68,7 +67,7 @@ class OutlinesBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.REGEX:
             regex = grammar_spec
         elif request_type == StructuredOutputOptions.CHOICE:
-            choices = ast.literal_eval(grammar_spec)
+            choices = json.loads(grammar_spec)
             choices = [regex_escape(c) for c in choices]
             regex = "(" + "|".join(choices) + ")"
         else:
