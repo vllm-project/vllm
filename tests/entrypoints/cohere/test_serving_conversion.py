@@ -753,22 +753,16 @@ class TestResponseFormat:
         assert result.response_format.type == "json_object"
         assert result.response_format.json_schema is None
 
-    def test_json_schema(self):
+    def test_json_schema_reaches_sampling_params(self):
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
-        result = _convert(
-            _make_request(
-                response_format={"type": "json_object", "json_schema": schema}
-            )
+        request = _make_request(
+            response_format={"type": "json_object", "json_schema": schema}
         )
-        assert result.response_format is not None
-        assert result.response_format.type == "json_schema"
-        assert result.response_format.json_schema is not None
-        assert result.response_format.json_schema.name == "cohere_v2_json_schema"
-        # ``JsonSchemaResponseFormat.json_schema`` has alias=``schema`` on
-        # the Pydantic field, so we observe the value via the serialized
-        # payload (which is what downstream consumers actually read).
-        dumped = result.response_format.json_schema.model_dump(exclude_none=True)
-        assert dumped["json_schema"] == schema
+
+        params = _convert(request).to_sampling_params(16, {})
+
+        assert params.structured_outputs is not None
+        assert params.structured_outputs.json == schema
 
 
 # ======================================================================
