@@ -17,6 +17,11 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     PackedBlockHashes,
 )
+from vllm.distributed.aux_output_connector.logprobs import (
+    LogprobRows,
+    decode_rows,
+    encode_rows,
+)
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
@@ -28,16 +33,19 @@ from vllm.distributed.aux_output_connector.store import (
     BlockObject,
     BlockObjectStore,
     BlockObjectStoreError,
+    VariableBlockObjectStore,
 )
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
+    PendingAuxOutput,
+    _WorkerRequestState,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 _SHAPE = (3, 2)
 _DTYPE = np.dtype("uint8")
@@ -62,6 +70,177 @@ def test_background_store_publishes_without_blocking_caller():
     store.close()
 
     underlying.close.assert_called_once_with()
+
+
+def test_variable_store_round_trips_logprob_rows():
+    rows = LogprobRows(
+        positions=np.array([1, 2], dtype=np.int64),
+        token_ids=np.array([[4, 5], [6, 7]], dtype=np.int32),
+        values=np.array([[-0.1, -0.2], [-0.3, -0.4]], dtype=np.float32),
+        ranks=np.array([0, 1], dtype=np.int32),
+    )
+    payload = encode_rows(rows)
+    store = VariableBlockObjectStore(max_bytes=len(payload) * 2)
+    store.put([BlockObject("logprobs", payload)])
+
+    result = decode_rows(store.get_concatenated(["logprobs"]))
+
+    np.testing.assert_array_equal(result.positions, rows.positions)
+    np.testing.assert_array_equal(result.token_ids, rows.token_ids)
+    np.testing.assert_array_equal(result.values, rows.values)
+    np.testing.assert_array_equal(result.ranks, rows.ranks)
+    store.close()
+
+
+def _logprob_rows(start: int, count: int) -> LogprobRows:
+    positions = np.arange(start, start + count, dtype=np.int64)
+    token_ids = np.stack((positions, positions + 100), axis=1).astype(np.int32)
+    values = -token_ids.astype(np.float32)
+    return LogprobRows(positions, token_ids, values, positions.astype(np.int32))
+
+
+def _make_logprob_worker() -> AuxOutputWorkerConnector:
+    worker = object.__new__(AuxOutputWorkerConnector)
+    worker._store = None
+    worker._buffer = None
+    worker._logprob_store = BackgroundBlockObjectStore(
+        VariableBlockObjectStore(max_bytes=1 << 20),
+        max_pending_batches=4,
+    )
+    worker._logprob_block_size = _BLOCK_SIZE
+    worker._requests = {}
+    worker._generation = 0
+    worker._step_metadata = None
+    worker._pending_outputs = []
+    worker._lock = threading.Lock()
+    worker._max_concurrent_batches = 2
+    return worker
+
+
+def test_worker_publishes_causally_aligned_logprob_block():
+    worker = _make_logprob_worker()
+    state = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+    state.logprob_keys = ["block"]
+    state.prompt_logprob_keys = state.logprob_keys
+    state.prompt_logprob_rows[1] = _logprob_rows(1, _BLOCK_SIZE - 1)
+    state.logprob_rows[_BLOCK_SIZE] = _logprob_rows(_BLOCK_SIZE, 1)
+    worker._requests["request"] = state
+
+    worker._publish_logprob_blocks(["request"])
+
+    stored = worker._read_logprob_rows(["block"])
+    np.testing.assert_array_equal(stored.positions, np.arange(1, _BLOCK_SIZE + 1))
+    worker.close()
+
+
+def test_worker_incrementally_updates_sparse_generated_logprob_block():
+    worker = _make_logprob_worker()
+    state = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+    state.logprob_keys = ["block"]
+    state.logprob_rows[_BLOCK_SIZE] = _logprob_rows(_BLOCK_SIZE, 1)
+    worker._requests["request"] = state
+
+    worker._publish_logprob_blocks(["request"])
+    np.testing.assert_array_equal(
+        worker._read_logprob_rows(["block"]).positions, [_BLOCK_SIZE]
+    )
+    assert not state.logprob_rows
+
+    second = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+    second.logprob_keys = ["block"]
+    second.logprob_rows[_BLOCK_SIZE - 1] = _logprob_rows(_BLOCK_SIZE - 1, 1)
+    worker._requests["second"] = second
+    worker._publish_logprob_blocks(["second"])
+    np.testing.assert_array_equal(
+        worker._read_logprob_rows(["block"]).positions,
+        [_BLOCK_SIZE - 1, _BLOCK_SIZE],
+    )
+    worker.close()
+
+
+def test_worker_merges_cached_prompt_rows_with_chunked_live_suffix():
+    worker = _make_logprob_worker()
+    cached = _logprob_rows(1, _BLOCK_SIZE)
+    worker._logprob_store.put([BlockObject("block", encode_rows(cached))])
+    state = _WorkerRequestState(
+        prompt_len=2 * _BLOCK_SIZE,
+        prompt_replay_prefix=_BLOCK_SIZE,
+    )
+    state.logprob_keys = ["block"]
+    state.prompt_logprob_keys = state.logprob_keys
+    worker._requests["request"] = state
+
+    live = _logprob_rows(_BLOCK_SIZE + 1, _BLOCK_SIZE - 1)
+    prompt_logprobs = LogprobsTensors(
+        torch.from_numpy(live.token_ids),
+        torch.from_numpy(live.values),
+        torch.from_numpy(live.ranks),
+    )
+    generated = _logprob_rows(2 * _BLOCK_SIZE, 1)
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([2 * _BLOCK_SIZE - 1], dtype=np.int32),
+        query_start_loc=np.array([0, 1], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        logprobs={
+            "request": LogprobsLists(
+                generated.token_ids,
+                generated.values,
+                generated.ranks,
+            )
+        },
+        prompt_logprobs={"request": prompt_logprobs},
+        replay_logprobs=frozenset({"request"}),
+        replay_prompt_logprobs=frozenset({"request"}),
+    )
+
+    output = worker._commit_output(pending)["request"]
+
+    assert output.prompt_logprobs is not None
+    np.testing.assert_array_equal(
+        output.prompt_logprobs.logprob_token_ids.numpy(),
+        np.concatenate((cached.token_ids, live.token_ids)),
+    )
+    np.testing.assert_array_equal(
+        output.prompt_logprobs.selected_token_ranks.numpy(),
+        np.arange(1, 2 * _BLOCK_SIZE, dtype=np.int32),
+    )
+    worker.close()
+
+
+def test_worker_emits_empty_prompt_logprobs_for_single_token_prompt():
+    worker = _make_logprob_worker()
+    worker._requests["request"] = _WorkerRequestState(prompt_len=1)
+    generated = _logprob_rows(1, 1)
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([0], dtype=np.int32),
+        query_start_loc=np.array([0, 1], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        logprobs={
+            "request": LogprobsLists(
+                generated.token_ids,
+                generated.values,
+                generated.ranks,
+            )
+        },
+        replay_logprobs=frozenset({"request"}),
+        replay_prompt_logprobs=frozenset({"request"}),
+    )
+
+    output = worker._commit_output(pending)["request"]
+
+    assert output.prompt_logprobs is not None
+    assert output.prompt_logprobs.logprobs.shape == (0, 2)
+    worker.close()
 
 
 def _make_connector():
@@ -1454,6 +1633,41 @@ def test_scheduler_starts_worker_output_at_requested_prompt_token():
         {request.request_id: request},
     )
     assert metadata.requests == {request.request_id: 3}
+
+
+def test_scheduler_marks_only_opted_in_logprob_requests():
+    connector = AuxOutputSchedulerConnector(
+        enable_routed_experts=False,
+        enable_logprobs=True,
+        enable_prompt_logprobs=True,
+    )
+    opted_in = _scheduler_request("opted-in", [b"a" * 32])
+    opted_in.sampling_params = SimpleNamespace(
+        routed_experts_prompt_start=0,
+        extra_args={"aux_output_replay": True},
+        num_logprobs=2,
+        prompt_logprobs=2,
+        logprob_token_ids=None,
+        prompt_logprob_token_ids=None,
+    )
+    regular = _scheduler_request("regular", [b"b" * 32])
+    regular.sampling_params = SimpleNamespace(
+        routed_experts_prompt_start=0,
+        extra_args=None,
+        num_logprobs=2,
+        prompt_logprobs=2,
+        logprob_token_ids=None,
+        prompt_logprob_token_ids=None,
+    )
+
+    metadata = connector.build_connector_meta(
+        _step_output([opted_in.request_id, regular.request_id], [0, 0], [4, 4]),
+        {opted_in.request_id: opted_in, regular.request_id: regular},
+    )
+
+    assert metadata.logprobs.keys() == {opted_in.request_id}
+    assert metadata.prompt_logprobs.keys() == {opted_in.request_id}
+    assert metadata.block_hashes.keys() == {opted_in.request_id}
 
 
 def test_scheduler_connector_preserves_request_finish_order():

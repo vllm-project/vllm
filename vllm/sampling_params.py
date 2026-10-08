@@ -623,7 +623,10 @@ class SamplingParams(
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            self.skip_reading_prefix_cache = (
+            aux_output_replay = bool(
+                self.extra_args and self.extra_args.get("aux_output_replay", False)
+            )
+            self.skip_reading_prefix_cache = not aux_output_replay and (
                 self.prompt_logprobs is not None
                 or self.prompt_logprob_token_ids is not None
             )

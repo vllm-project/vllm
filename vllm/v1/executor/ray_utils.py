@@ -237,6 +237,14 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
     if aux_output is not None:
         for request_output in aux_output.values():
             request_output.rows = _copy_if_readonly(request_output.rows)
+            if request_output.logprobs is not None:
+                token_ids, values, ranks, cu = request_output.logprobs
+                request_output.logprobs = type(request_output.logprobs)(
+                    _copy_if_readonly(token_ids),
+                    _copy_if_readonly(values),
+                    _copy_if_readonly(ranks),
+                    cu,
+                )
 
 
 class FutureWrapper(Future):

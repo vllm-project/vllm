@@ -279,10 +279,9 @@ class KVCacheManager:
                   the junction and defeat cross-request reuse.
 
         """
-        # We skip finding the prefix cache hit when prefix caching is
-        # disabled or the request is marked as skipping kv cache read
-        # (which happens when the request requires prompt logprobs
-        # or calls a pooling model with all pooling).
+        # Prompt-logprob replay requests may read cached KV. The connector
+        # supplies the cached prompt score rows; ordinary prompt-logprob
+        # requests retain the legacy cache bypass set by SamplingParams.
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0
 
