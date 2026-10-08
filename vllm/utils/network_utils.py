@@ -420,6 +420,7 @@ def make_zmq_listener(path: str, socket_type: Any) -> ZmqListener:
         raise ValueError(f"Cannot inherit a {scheme} ZMQ listener")
 
     listener = socket.socket(family, socket.SOCK_STREAM)
+    bound = False
     try:
         buf_size = _get_zmq_socket_buffer_size()
         if buf_size >= 0:
@@ -432,13 +433,15 @@ def make_zmq_listener(path: str, socket_type: Any) -> ZmqListener:
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buf_size)
 
         listener.bind(bind_address)
+        bound = True
         listener.listen()
         if scheme == "tcp":
             path = get_tcp_uri(host, listener.getsockname()[1])
         return ZmqListener(address=path, socket=listener)
     except BaseException:
         listener.close()
-        if scheme == "ipc":
+        # A failed bind leaves any existing pathname owned by its listener.
+        if scheme == "ipc" and bound:
             assert isinstance(bind_address, str)
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(bind_address)

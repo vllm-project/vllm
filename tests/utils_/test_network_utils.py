@@ -237,6 +237,21 @@ def test_make_zmq_socket_adopts_listener(tmp_path, scheme):
         listener.cleanup()
 
 
+def test_make_zmq_listener_failed_ipc_bind_keeps_existing_path(tmp_path):
+    path = tmp_path / "taken.sock"
+    owner = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    owner.bind(str(path))
+    owner.listen()
+    try:
+        with pytest.raises(OSError, match="Address already in use"):
+            make_zmq_listener(f"ipc://{path}", zmq.ROUTER)
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(path))
+    finally:
+        owner.close()
+
+
 def test_make_zmq_path():
     assert make_zmq_path("tcp", "127.0.0.1", 5555) == "tcp://127.0.0.1:5555"
     assert make_zmq_path("tcp", "::1", 5555) == "tcp://[::1]:5555"
