@@ -620,6 +620,7 @@ class EngineArgs:
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
     enable_trace_replay: bool = ModelConfig.enable_trace_replay
+    screened_lm_head: bool = ModelConfig.screened_lm_head
     disable_log_stats: bool = False
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
@@ -998,6 +999,9 @@ class EngineArgs:
         model_group.add_argument("--use-fp64-gumbel", **model_kwargs["use_fp64_gumbel"])
         model_group.add_argument(
             "--enable-trace-replay", **model_kwargs["enable_trace_replay"]
+        )
+        model_group.add_argument(
+            "--screened-lm-head", **model_kwargs["screened_lm_head"]
         )
         model_group.add_argument(
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
@@ -2003,6 +2007,7 @@ class EngineArgs:
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
             enable_trace_replay=self.enable_trace_replay,
+            screened_lm_head=self.screened_lm_head,
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
