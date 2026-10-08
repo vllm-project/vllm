@@ -15,6 +15,12 @@ and kernel launch details. Its native runner shares the same sparse execution
 implementation. vLLM keeps model dispatch, auxiliary-state capture, and teardown
 ordering.
 
+The ROCm model directory provides `M3MonoWorker` through the existing
+`--worker-cls` extension point. Its V2 runner owns mono initialization,
+weight-update guards, and shutdown. The shared GPU worker, model runner,
+and platform code need no mono-specific changes. Enabling the mono flag
+without selecting this worker raises during model construction.
+
 The port uses ATOM's shared mono runtime and retains its store-publication,
 per-step mailbox reset/fence, and padded-row expert-reduction fixes. It requires
 the paired ATOM library revision; the earlier low-level cache ABI is insufficient.
@@ -37,7 +43,7 @@ BF16 attention weights for fallback, using separate converted copies for mono.
   at most four sequences, prefix caching disabled.
 - Shared-expert fusion enabled; no context/expert parallelism, microbatching,
   LoRA, KV transfer, sleep, or online weight updates. Configured weight transfer
-  and weight reload are rejected before changing weights.
+  and weight reload/reset are rejected before changing weights.
 - Decode/verification buckets 1, 4, 8, and 16. Prefill, mixed batches, dense
   layers, and unsupported step shapes use native execution.
 
@@ -67,6 +73,7 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ROCM_USE_ATOM_M3_MONO=1
 
 vllm serve "$TARGET_MODEL" \
+    --worker-cls vllm.models.minimax_m3.amd.mono_worker.M3MonoWorker \
     --served-model-name minimax-m3 --host 127.0.0.1 --port 8000 \
     --tensor-parallel-size 4 --pipeline-parallel-size 1 \
     --language-model-only --max-model-len 16384 --max-num-seqs 4 \
@@ -88,7 +95,8 @@ The refactor is validated separately from the earlier October 2 experiment.
 The current checks cover kernel compilation for both cache modes and every
 supported width, the public tensor interface on saved native layers, graph
 replay with changed cache addresses, poisoned padding, collective startup
-failures, and shutdown. CPU worker tests retain the weight-update guards.
+failures, and shutdown. ROCm worker tests cover selection, initialization order,
+weight-update guards, and graph-before-IPC teardown.
 The paired Draft PRs record commands, exact results, and remaining evaluation
 limits for the current revisions.
 

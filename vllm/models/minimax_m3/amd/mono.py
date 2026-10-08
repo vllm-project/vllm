@@ -37,6 +37,8 @@ def _collective_stage(group, name, action):
 
 
 class M3Mono:
+    layer_ids: list[int]
+
     def __init__(self, model, config, kv_cache_config):
         self.group = get_tp_group().cpu_group
         self.fallback_counts = {}

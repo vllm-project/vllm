@@ -1375,6 +1375,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self._mono: M3Mono | None = None
         if envs.VLLM_ROCM_USE_ATOM_M3_MONO and not vllm_config.use_v2_model_runner:
             raise ValueError("MiniMax-M3 ATOM mono requires the V2 model runner")
+        if envs.VLLM_ROCM_USE_ATOM_M3_MONO and (
+            vllm_config.parallel_config.worker_cls
+            != "vllm.models.minimax_m3.amd.mono_worker.M3MonoWorker"
+        ):
+            raise ValueError(
+                "MiniMax-M3 ATOM mono requires --worker-cls "
+                "vllm.models.minimax_m3.amd.mono_worker.M3MonoWorker"
+            )
 
         self.vocab_size = config.vocab_size
 
