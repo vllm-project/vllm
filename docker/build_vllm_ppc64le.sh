@@ -104,14 +104,19 @@ echo "XGRAMMAR_VERSION=${XGRAMMAR_VERSION}"
 
 rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm || true
 
+# Dynamically match openssl-devel version with installed openssl-libs
+OPENSSL_DEVEL="openssl-devel-$(rpm -q --queryformat '%{VERSION}-%{RELEASE}' openssl-libs 2>/dev/null || echo 'openssl-devel')"
+
 microdnf install -y \
+    "${OPENSSL_DEVEL}" \
     python3.12 python3.12-devel python3.12-pip gcc \
     git jq gcc-toolset-14 gcc-toolset-14-libatomic-devel \
-    automake libtool clang-devel openssl-devel \
+    automake libtool clang-devel \
     harfbuzz-devel kmod lcms2-devel libimagequant-devel libjpeg-turbo-devel \
     llvm15-devel libraqm-devel libtiff-devel libwebp-devel libxcb-devel \
     ninja-build openjpeg2-devel pkgconfig \
-    tcl-devel tk-devel xsimd-devel zeromq-devel zlib-devel patchelf file openblas openblas-devel protobuf numactl numactl-devel openmpi openmpi-devel
+    tcl-devel tk-devel xsimd-devel zeromq-devel zlib-devel patchelf file \
+    openblas openblas-devel protobuf numactl numactl-devel openmpi openmpi-devel
 
 rpm -ivh --nodeps \
     https://mirror.stream.centos.org/9-stream/CRB/ppc64le/os/Packages/protobuf-lite-devel-3.14.0-17.el9.ppc64le.rpm
