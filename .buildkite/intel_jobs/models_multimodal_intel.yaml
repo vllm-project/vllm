@@ -9,7 +9,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -33,7 +33,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -72,7 +72,8 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"'
+      pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma" &&
+      pytest -v -s models/multimodal/generation/test_gemma_ragged_audio.py -m core_model'
 
 - label: "Multi-Modal Models (Standard) 4: other + whisper"
   key: multi-modal-models-standard-4-other-whisper
@@ -81,7 +82,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -95,7 +96,7 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing'
+      pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_gemma_ragged_audio.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing'
 
 - label: Multi-Modal Processor # 44min
   key: multi-modal-processor
@@ -131,7 +132,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
