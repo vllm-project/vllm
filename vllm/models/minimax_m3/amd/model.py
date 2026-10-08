@@ -465,6 +465,7 @@ class MiniMaxM3MoE(nn.Module):
                 self.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
         )
