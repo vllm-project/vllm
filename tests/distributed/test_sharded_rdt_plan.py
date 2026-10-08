@@ -34,6 +34,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferInitInfo,
+    _check_streams,
     _dtype_from_name,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
@@ -1101,6 +1102,93 @@ class TestCallPlanRouting:
         backstop, and either way it fails at init rather than at first pull."""
         with pytest.raises(ValueError, match="empty"):
             RdtRouter(2, 1, [[]], [0], ["w"], [1]).validate()
+
+    def test_pure_pipeline_assigns_one_stream_per_owner_component(self):
+        eng, names, group_lens = self._routed_planner(
+            [[0, 1], [0, 1], [2, 3], [2, 3], [4, 5], [4, 5]],
+            1,
+            0,
+        )
+        plan = eng._build_call_plan(names, group_lens)
+        assert [chunk.stream for chunk in plan.chunks] == [0, 0, 1, 1, 2, 2]
+        assert plan.num_streams == 3
+
+    def test_a_cross_owned_group_merges_its_owner_components(self):
+        eng, names, group_lens = self._routed_planner(
+            [[0], [0], [0, 1], [1], [2], [2]],
+            1,
+            0,
+        )
+        plan = eng._build_call_plan(names, group_lens)
+        assert [chunk.stream for chunk in plan.chunks] == [0, 0, 0, 0, 1, 1]
+        assert plan.num_streams == 2
+
+    def test_an_expert_owner_stays_in_its_stage_stream(self):
+        eng, names, group_lens = self._routed_planner(
+            [[0, 1], [0, 1], [2, 3], [2, 3]],
+            1,
+            0,
+            held_by={"model.layers.1.w": [3]},
+        )
+        plan = eng._build_call_plan(names, group_lens)
+        assert [chunk.stream for chunk in plan.chunks] == [0, 0, 1, 1]
+
+
+class TestStreamInvariants:
+    """Parallel streams cannot split ordering owned by one plan entity."""
+
+    @staticmethod
+    def _chunk(owner, stream, layer):
+        return SimpleNamespace(
+            owner=owner,
+            stream=stream,
+            scatters=[
+                SimpleNamespace(
+                    layer=layer,
+                    src=(layer.tag, ()),
+                )
+            ],
+        )
+
+    def test_a_plan_that_keeps_every_entity_in_one_stream_passes(self):
+        a, b = _FakeLayer("a"), _FakeLayer("b")
+        _check_streams(
+            [self._chunk(0, 0, a), self._chunk(1, 1, b)],
+            [0, 1],
+        )
+
+    def test_an_owner_in_two_streams_is_refused(self):
+        a, b = _FakeLayer("a"), _FakeLayer("b")
+        with pytest.raises(
+            RuntimeError,
+            match="trainer rank 0 spans stage streams 0 and 1",
+        ):
+            _check_streams(
+                [self._chunk(0, 0, a), self._chunk(0, 1, b)],
+                [0, 1],
+            )
+
+    def test_a_group_in_two_streams_is_refused(self):
+        a, b = _FakeLayer("a"), _FakeLayer("b")
+        with pytest.raises(
+            RuntimeError,
+            match="gather group 5 spans stage streams 0 and 1",
+        ):
+            _check_streams(
+                [self._chunk(0, 0, a), self._chunk(1, 1, b)],
+                [5, 5],
+            )
+
+    def test_a_module_in_two_streams_is_refused(self):
+        layer = _FakeLayer("a")
+        with pytest.raises(
+            RuntimeError,
+            match="module loading 'a' spans stage streams 0 and 1",
+        ):
+            _check_streams(
+                [self._chunk(0, 0, layer), self._chunk(1, 1, layer)],
+                [0, 1],
+            )
 
 
 class TestSignalCompleteness:
