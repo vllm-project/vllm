@@ -467,6 +467,53 @@ CPU underprovisioning particularly impacts:
 
 If you observe that GPU utilization is lower than expected, CPU contention may be the bottleneck. Increasing the number of available CPU cores and even the clock speed can significantly improve end-to-end performance.
 
+### Host Kernel Tuning
+
+Beyond core counts, a few Linux host settings affect the engine core and worker
+processes described above, because vLLM's V1 architecture relies on tight
+polling loops and shared-memory IPC for low latency (see
+[V1 Process Architecture](../design/arch_overview.md#v1-process-architecture)).
+These are host/OS settings, not vLLM flags, so they must be applied outside of
+vLLM itself.
+
+**CPU frequency governor and idle states.** The engine core busy loop and the
+shared-memory IPC readers between engine core and workers use a brief
+spin-then-block polling strategy to avoid wake-up latency on every request. If
+the CPU governor is set to a power-saving policy (for example `powersave`), or
+if deep C-states are enabled on the cores handling these processes, the
+polling loop's effectiveness is undermined: the core either clocks down during
+the spin window or takes longer to wake from a deep idle state, adding latency
+jitter that is easy to misattribute to GPU or network issues. When running a
+latency-sensitive deployment, set the governor to `performance`
+(`cpupower frequency-set -g performance`) and consider limiting deep idle
+states on the cores you pin with `--numa-bind`/`--numa-bind-cpus` (for
+example `cpupower idle-set -D 0`, or the `intel_idle.max_cstate`/
+`processor.max_cstate` kernel boot parameters). `isolcpus` and `nohz_full` can
+further reduce scheduler-tick interference on cores dedicated to the engine
+core or worker processes, at the cost of reduced flexibility for the rest of
+the host workload.
+
+**Memory overcommit and swap for KV offloading.** If you offload KV cache
+blocks to host memory (see
+[KV Offloading Usage Guide](../features/kv_offloading_usage.md)), the
+offloaded tier competes with the page cache and other host memory consumers.
+A default `vm.swappiness` can let the kernel swap out offloaded KV cache pages
+under memory pressure instead of reclaiming page cache first, turning a cache
+miss into a disk-swap stall; setting `vm.swappiness=0` (or a low value) biases
+reclaim away from anonymous/offloaded memory. Conversely, a permissive
+`vm.overcommit_memory` setting combined with a large configured offload tier
+can lead to the OOM killer terminating a worker process under sustained
+pressure rather than vLLM's own admission control rejecting the allocation
+gracefully; size `cpu_bytes_to_use` with real headroom (as already noted under
+[Tuning Tips](../features/kv_offloading_usage.md#tuning-tips)) and verify your
+overcommit policy accounts for it.
+
+!!! note
+    These are general Linux kernel tuning knobs, not vLLM-specific behavior.
+    Validate changes like governor/idle-state settings and `vm.swappiness`
+    against your own workload before applying them broadly, since they affect
+    the whole host, not just vLLM.
+
 ## Attention Backend Selection
 
 vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.

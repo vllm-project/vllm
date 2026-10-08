@@ -356,6 +356,7 @@ Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your 
 - `block_size` / `blocks_per_chunk`: larger offloaded chunks reduce per-block bookkeeping overhead but increase the granularity of lookups.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.
 - Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
+- Host memory pressure: the CPU tier competes with the page cache and other host memory consumers. See [Host Kernel Tuning](../configuration/optimization.md#host-kernel-tuning) for `vm.swappiness`/`vm.overcommit_memory` guidance so the kernel doesn't swap out offloaded blocks or let the OOM killer take a worker process under sustained pressure.
 
 ## Per-Request Selective Offload
 
