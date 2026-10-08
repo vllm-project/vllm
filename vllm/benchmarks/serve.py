@@ -253,7 +253,7 @@ async def fetch_spec_decode_metrics(
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -315,7 +315,7 @@ async def fetch_diffusion_metrics(
                 num_canvas_positions=num_canvas_positions,
                 num_committed_tokens=num_committed_tokens,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
