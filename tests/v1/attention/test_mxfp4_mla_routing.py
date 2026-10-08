@@ -4,10 +4,13 @@
 
 ``_use_rocm_sparse_triton`` guards a single ``rocm_sparse_attn_prefill`` call,
 so prefill and single-token decode share ``_sparse_attn_prefill_ragged_kernel``,
-the only kernel that reads an MXFP4 cache. CPU-only.
+the only kernel that reads an MXFP4 cache. CPU-only, except where marked.
 """
 
 from __future__ import annotations
+
+import pytest
+import torch
 
 # GLM-5.3-Flash: kv_lora_rank=512, qk_rope_head_dim=0, so head_size == 512.
 HEAD_SIZE = 512
@@ -43,3 +46,48 @@ def test_rope_bearing_geometry_is_refused():
     """DeepSeek shapes (576 = 512 + 64) must not take this route."""
     assert _route("mxfp4_mla", head_size=576, **DECODE) is False
     assert _route("auto", head_size=576, **PREFILL) is False
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="_forward_mla imports vllm.platforms.rocm, which queries the GPU",
+)
+def test_mxfp4_decode_skips_the_bf16_split_k_kernel(monkeypatch):
+    """The split-K decode reads bf16 rows, so a packed cache stays on the
+    ragged kernel even when split-K would be chosen."""
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
+
+    def no_split_k(**kwargs):
+        raise AssertionError("mxfp4_mla reached the bf16 split-K decode")
+
+    captured = {}
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_decode_bf16_num_splits", lambda *a: 4)
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_decode_bf16", no_split_k)
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_prefill", captured.update)
+
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.num_heads = 16
+    impl.kv_lora_rank = KV_LORA_RANK
+    impl.kv_cache_dtype = "mxfp4_mla"
+    impl.scale = KV_LORA_RANK**-0.5
+    impl.sinks = None
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=0,
+        num_decodes=2,
+        num_decode_tokens=2,
+        max_query_len=1,
+        max_seq_len=8192,
+        topk_tokens=2048,
+        paged_kv_indices=torch.zeros(4, dtype=torch.int32),
+        paged_kv_indptr=torch.tensor([0, 2, 4], dtype=torch.int32),
+    )
+    q = torch.zeros(2, 16, HEAD_SIZE, dtype=torch.bfloat16)
+    cache = torch.zeros(4, 1, 272, dtype=torch.uint8)
+
+    impl._forward_mla(SimpleNamespace(), q, cache, metadata)
+
+    assert captured["kv_cache_dtype"] == "mxfp4_mla"
+    assert captured["kv"].shape == (4, 1, 272)

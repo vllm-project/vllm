@@ -1,26 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton read-side unpack for the MXFP4 MLA latent cache.
+"""Triton read-side unpack for the mxfp4_mla KV cache.
 
-Unpacks a gathered tile of packed rows to bf16 once, then hands it to the
-existing ``tl.dot`` calls unchanged.
-
-Feeding the packed bytes to ``tl.dot_scaled`` instead looks attractive on the
-expectation of native FP4 arithmetic. Measured on gfx950 with Triton 3.7.1,
-``dot_scaled`` emits ``v_mfma_f32_16x16x32_bf16`` -- a **bf16** MFMA -- after
-upconverting with ``v_cvt_scalef32_pk_bf16_fp4``. No ``*_f8f6f4`` scaled MFMA
-appears. Since the multiply is bf16 either way and the output accumulation needs
-a bf16 tile regardless, converting once and reusing it is both cheaper and a
-smaller diff than converting inside the score dot and again for the output dot.
-
-The attention kernels keep their fp32 accumulators: bf16 operands feed
-``V_MFMA_F32_*_BF16``, which accumulates in fp32 for free.
+Unpacks a gathered tile of packed rows to bf16 once and hands it to the
+existing ``tl.dot`` calls. On gfx950 ``tl.dot_scaled`` lowers to the same
+convert plus a bf16 MFMA, so it would only convert twice.
 """
 
 from __future__ import annotations
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.mxfp4_mla import GROUP_SIZE
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX950
@@ -29,7 +20,7 @@ else:
 
 # v_cvt_scalef32_pk_bf16_fp4 exists only on gfx950.
 _HW_UNPACK = tl.constexpr(_ON_GFX950)
-_GROUP = tl.constexpr(32)
+_GROUP = tl.constexpr(GROUP_SIZE)
 
 # E2M1 magnitudes reconstructed arithmetically rather than from a lookup table,
 # so the kernel needs no constant memory. Code index ``c = e << 1 | f``, where
@@ -57,11 +48,8 @@ _F32_MANT_BITS = tl.constexpr(23)
 def _e2m1_codes_to_f32(codes):
     """4-bit E2M1 codes (as integers) -> signed fp32 values.
 
-    Deliberately transcendental-free. An earlier version used ``tl.exp2`` for
-    the magnitude's power-of-two term, which measured catastrophically: the read
-    path plateaued at 7% of peak HBM bandwidth and ran 1.8x *slower* than bf16
-    despite moving 3.76x fewer bytes, because ~17 ``exp2`` per tile dominated.
-    The exponent here only takes values 0..3, so a two-select chain replaces it.
+    Avoids ``tl.exp2``: the exponent only takes values 0..3, so a two-select
+    chain gives the power-of-two term.
     """
     magnitude_index = codes & 0x07
     exponent = (magnitude_index >> 1) & 0x03

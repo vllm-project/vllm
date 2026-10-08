@@ -1,36 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MXFP4 primitives for the MLA latent cache.
+"""PyTorch reference for the mxfp4_mla KV cache layout.
 
-Pure-PyTorch reference for the packed layout the Triton store and read kernels
-implement. This module is the numerical oracle: the kernels are validated
-against it, and it in turn is validated against AITER's ``per_1x32_f4_quant``
-(``tests/kernels/attention/test_mxfp4_mla.py``).
+OCP MXFP4, group 32: E2M1 elements packed two per byte (the low nibble holds
+the lower index) and one E8M0 scale per group. A row is the packed data
+followed by its scales, ``row_bytes(d) == d // 2 + d // 32``.
 
-Format is OCP MXFP4, group 32:
-
-* elements are E2M1 -- 8 magnitudes, max 6.0, sign in bit 3
-* two elements per byte, **low nibble holds the lower element index**, which is
-  what ``tl.dot_scaled`` requires
-* one E8M0 shared exponent per group of 32, stored as ``X = shared_exp + 127``
-
-The row layout is array-of-structs: for a 512-wide latent, 256 data bytes
-followed by 16 scale bytes = **272 bytes per token per layer**.
-
-Scale rounding is ``MxScaleRoundMode.RoundUp``::
-
-    scale = ceil_pow2(absmax / 6.0)
-
-which is AITER's ``MX_DEFAULT_ROUND_MODE`` and the cross-stack default (NV
-ROUND_UP, DSv4 Pro, FlashInfer, torchao RCEIL). RoundUp guarantees the scaled
-peak lands in ``(3, 6]``, so it never clamps -- unlike
-``floor(log2(absmax)) - 2``, which puts the peak in ``[4, 8)`` and clamps
-whenever it exceeds 6 (about half of all groups).
+Scales round up, ``ceil_pow2(absmax / 6.0)``, as AITER's default does, so the
+scaled peak lands in ``(3, 6]`` and never clamps.
 """
 
 from __future__ import annotations
 
 import torch
+
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_BLOCK_SIZE,
+)
+from vllm.v1.attention.ops.ultraquant.reference import (
+    _pack_nibbles_last_dim,
+    _unpack_nibbles_last_dim,
+)
 
 # E2M1 magnitudes by code index 0..7. Code is ``sign << 3 | index``.
 E2M1_VALUES: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
@@ -38,7 +28,7 @@ E2M1_MAX = 6.0
 # Midpoints between consecutive magnitudes, for round-to-nearest via bucketize.
 _E2M1_MIDPOINTS: tuple[float, ...] = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
 
-GROUP_SIZE = 32
+GROUP_SIZE = OCP_MX_BLOCK_SIZE
 E8M0_BIAS = 127
 # X = 0 is the E8M0 encoding for a zero scale; the smallest usable exponent is 1.
 _E8M0_MIN_X = 1
@@ -122,23 +112,6 @@ def quantize_to_e2m1_codes(
     return (index | sign).reshape(x.shape)
 
 
-def pack_nibbles(codes: torch.Tensor) -> torch.Tensor:
-    """``[..., D]`` uint8 codes -> ``[..., D // 2]`` bytes, low nibble first."""
-    if codes.shape[-1] % 2:
-        raise ValueError(f"last dim {codes.shape[-1]} must be even to pack")
-    pairs = codes.reshape(*codes.shape[:-1], -1, 2)
-    low = pairs[..., 0] & 0x0F
-    high = pairs[..., 1] & 0x0F
-    return (low | (high << 4)).to(torch.uint8)
-
-
-def unpack_nibbles(packed: torch.Tensor) -> torch.Tensor:
-    """``[..., D // 2]`` bytes -> ``[..., D]`` uint8 codes, low nibble first."""
-    low = packed & 0x0F
-    high = (packed >> 4) & 0x0F
-    return torch.stack((low, high), dim=-1).reshape(*packed.shape[:-1], -1)
-
-
 def dequantize_e2m1_codes(
     codes: torch.Tensor,
     scales_encoded: torch.Tensor,
@@ -161,7 +134,7 @@ def quantize_pack(
     """``[..., D]`` -> ``(packed [..., D // 2], scales [..., D // group])``, uint8."""
     scales = compute_e8m0_scales(x, group)
     codes = quantize_to_e2m1_codes(x, scales, group)
-    return pack_nibbles(codes), scales
+    return _pack_nibbles_last_dim(codes), scales
 
 
 def unpack_dequantize(
@@ -171,7 +144,8 @@ def unpack_dequantize(
     out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Inverse of :func:`quantize_pack`."""
-    return dequantize_e2m1_codes(unpack_nibbles(packed), scales, group, out_dtype)
+    codes = _unpack_nibbles_last_dim(packed, 2 * packed.shape[-1])
+    return dequantize_e2m1_codes(codes, scales, group, out_dtype)
 
 
 def quantize_dequantize(x: torch.Tensor, group: int = GROUP_SIZE) -> torch.Tensor:

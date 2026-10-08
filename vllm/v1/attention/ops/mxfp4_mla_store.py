@@ -1,16 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton store kernel for the MXFP4 MLA latent cache.
+"""Triton store kernel for the mxfp4_mla KV cache.
 
-Replaces ``ops.concat_and_cache_mla`` for the MXFP4 dtype. That op cannot be
-extended: its ``scale`` argument is a ``const float*`` dereferenced as
-``*scale``, so a single per-tensor scale is the only thing it can express, and
-MXFP4 needs one E8M0 byte per group of 32.
-
-Layout written (see :mod:`mxfp4_mla`): one 272-byte row per slot, 256 bytes of
-packed E2M1 followed by 16 E8M0 scale bytes, addressed flat as
-``slot * 272``. That matches the flat ``slot * kv_stride_n`` addressing the read
-kernels already use, so no paged block arithmetic is needed on either side.
+``concat_and_cache_mla`` takes a single per-tensor scale, so it cannot write
+MXFP4's per-group scales. Rows are addressed flat as ``slot * row_bytes``,
+matching the read kernel's ``slot * kv_stride_n``.
 """
 
 from __future__ import annotations
@@ -27,29 +21,16 @@ from vllm.v1.attention.ops.mxfp4_mla import (
     scale_region_offset,
 )
 
-# Triton's JIT can only read module globals that are ``tl.constexpr``
-# *instances* -- annotating a plain value is not enough -- so the constants the
-# kernel needs are mirrored here rather than imported. The assertions below pin
-# them to the reference so the two cannot drift.
-_E2M1_MAX = tl.constexpr(6.0)
-_E8M0_BIAS = tl.constexpr(127)
+# Triton's JIT only reads module globals that are ``tl.constexpr`` instances.
+_E2M1_MAX = tl.constexpr(E2M1_MAX)
+_E8M0_BIAS = tl.constexpr(E8M0_BIAS)
 
 # Midpoints between consecutive E2M1 magnitudes. Summing ``(a > m)`` over these
 # is exactly ``torch.bucketize(a, midpoints, right=False)``: a value sitting on
 # a midpoint rounds *down*, matching the reference and AITER.
-_M0 = tl.constexpr(0.25)
-_M1 = tl.constexpr(0.75)
-_M2 = tl.constexpr(1.25)
-_M3 = tl.constexpr(1.75)
-_M4 = tl.constexpr(2.5)
-_M5 = tl.constexpr(3.5)
-_M6 = tl.constexpr(5.0)
-
-assert _E2M1_MAX.value == E2M1_MAX
-assert _E8M0_BIAS.value == E8M0_BIAS
-assert [m.value for m in (_M0, _M1, _M2, _M3, _M4, _M5, _M6)] == [
-    (E2M1_VALUES[i] + E2M1_VALUES[i + 1]) / 2 for i in range(7)
-]
+_M0, _M1, _M2, _M3, _M4, _M5, _M6 = (
+    tl.constexpr((lo + hi) / 2) for lo, hi in zip(E2M1_VALUES, E2M1_VALUES[1:])
+)
 
 
 @triton.jit

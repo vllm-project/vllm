@@ -93,16 +93,11 @@ def test_floor_formula_would_clamp():
 
 
 def test_low_nibble_holds_lower_index():
-    """tl.dot_scaled requires "first element in lower bits"."""
+    """The Triton unpack reads the low nibble as the lower latent index."""
+    from vllm.v1.attention.ops.ultraquant.reference import _pack_nibbles_last_dim
+
     codes = torch.tensor([[1, 2, 3, 4]], dtype=torch.uint8)
-    packed = mx.pack_nibbles(codes)
-    assert packed.tolist() == [[1 | (2 << 4), 3 | (4 << 4)]]
-    assert torch.equal(mx.unpack_nibbles(packed), codes)
-
-
-def test_pack_unpack_roundtrip_all_codes():
-    codes = torch.arange(16, dtype=torch.uint8).repeat(4).reshape(2, 32)
-    assert torch.equal(mx.unpack_nibbles(mx.pack_nibbles(codes)), codes)
+    assert _pack_nibbles_last_dim(codes).tolist() == [[1 | (2 << 4), 3 | (4 << 4)]]
 
 
 def test_representable_values_survive_exactly():

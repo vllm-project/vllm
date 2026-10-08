@@ -152,13 +152,20 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch, kv_cache_dtype):
 
 def test_write_hook_rejects_a_rope_bearing_latent():
     """mxfp4_mla targets NoPE models; a non-empty k_pe would be silently lost."""
-    import inspect
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
 
-    from vllm.v1.attention.backend import MLAAttentionImpl
-
-    body = inspect.getsource(MLAAttentionImpl.do_kv_cache_update)
-    assert "mxfp4_mla" in body
-    assert "rope-free latent" in body
+    with pytest.raises(AssertionError, match="rope-free latent"):
+        ROCMAiterMLASparseImpl.do_kv_cache_update(
+            None,
+            kv_c_normed=torch.zeros(1, 512),
+            k_pe=torch.zeros(1, 1, 64),
+            kv_cache=torch.zeros(1, 272, dtype=torch.uint8),
+            slot_mapping=torch.zeros(1, dtype=torch.int64),
+            kv_cache_dtype="mxfp4_mla",
+            k_scale=torch.ones(1),
+        )
 
 
 def test_engine_config_validation_accepts_the_dtype():

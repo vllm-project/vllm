@@ -54,6 +54,7 @@ def _attend(q, kv, indices, indptr):
         output=out,
         ragged_indices=indices,
         ragged_indptr=indptr,
+        kv_cache_dtype="mxfp4_mla" if kv.dtype == torch.uint8 else "auto",
     )
     return out
 
@@ -208,6 +209,7 @@ def test_dense_indices_entry_point_also_reaches_the_mxfp4_path():
             output=out,
             ragged_indices=None,
             ragged_indptr=None,
+            kv_cache_dtype="mxfp4_mla" if kv.dtype == torch.uint8 else "auto",
         )
         return out
 
