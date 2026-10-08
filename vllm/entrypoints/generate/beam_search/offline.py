@@ -2,12 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import json
 from collections.abc import Callable, Sequence
 
 import torch
 from tqdm import tqdm
 
 from vllm import RequestOutput, TextPrompt, TokensPrompt
+from vllm.entrypoints.beam_search_utils import (
+    OVER_CAP_STOP_REASON,
+    BeamSearchSOState,
+    bitmask_to_token_ids,
+    get_trie_allowed_token_ids,
+    resolve_over_cap_logprobs,
+    validate_and_resolve_beam_search_so,
+)
 from vllm.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -18,9 +27,13 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.v1.structured_output.backend_types import StructuredOutputBackend
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend,
+    StructuredOutputOptions,
+)
 from vllm.v1.structured_output.request import get_structured_output_key
 
+from .choice_trie import ChoiceTrie
 from .utils import (
     BeamSearchInstance,
     BeamSearchOutput,
@@ -33,23 +46,6 @@ logger = init_logger(__name__)
 # Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
 # MAX_NUM_ALLOWED_TOKEN_IDS in vllm/v1/worker/gpu/sample/logit_bias.py.
 _MAX_NUM_ALLOWED_TOKEN_IDS = 1024
-
-
-_bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-
-
-def _bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[int]:
-    """Convert a packed int32 bitmask row to a list of allowed token IDs."""
-    if vocab_size not in _bitmask_cache:
-        indices = torch.arange(vocab_size)
-        _bitmask_cache[vocab_size] = (
-            indices,
-            indices >> 5,  # i // 32
-            indices & 31,  # i % 32
-        )
-    indices, word_indices, bit_indices = _bitmask_cache[vocab_size]
-    mask = ((bitmask_row[word_indices] >> bit_indices) & 1).bool()
-    return indices[mask].tolist()
 
 
 class BeamSearchOfflineMixin(OfflineInferenceMixin):
@@ -104,13 +100,21 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None = None
         structured_output_key = None
         structured_output_bitmask = None
+        structured_output_trie: ChoiceTrie | None = None
+        over_cap_logprobs = 0
         if params.structured_outputs is not None:
             (
                 structured_output_backend,
                 structured_output_key,
                 structured_output_bitmask,
+                structured_output_trie,
             ) = self._init_beam_search_structured_output(
                 params.structured_outputs, tokenizer
+            )
+            over_cap_logprobs = resolve_over_cap_logprobs(
+                self.model_config.max_logprobs,
+                self.model_config.get_vocab_size(),
+                2 * beam_width,
             )
 
         # generate 2 * beam_width candidates at each step
@@ -164,6 +168,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     should_stop = self._beam_search_step(
                         instances_batch=instances_batch,
                         base_sampling_params=base_sampling_params,
+                        over_cap_logprobs=over_cap_logprobs,
                         eos_token_id=eos_token_id,
                         ignore_eos=ignore_eos,
                         beam_width=beam_width,
@@ -171,6 +176,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         structured_output_backend=structured_output_backend,
                         structured_output_key=structured_output_key,
                         structured_output_bitmask=structured_output_bitmask,
+                        structured_output_trie=structured_output_trie,
                     )
                     if should_stop:
                         break
@@ -199,6 +205,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         self,
         instances_batch: list[BeamSearchInstance],
         base_sampling_params: SamplingParams,
+        over_cap_logprobs: int,
         eos_token_id: int | None,
         ignore_eos: bool,
         beam_width: int,
@@ -206,6 +213,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple | None,
         structured_output_bitmask: torch.Tensor | None,
+        structured_output_trie: ChoiceTrie | None,
     ) -> bool:
         """Run one token step of beam search across a batch of instances.
 
@@ -224,7 +232,15 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         if len(all_beams) == 0:
             return True
 
-        if structured_output_backend is not None:
+        beam_entries: list[tuple[SamplingParams, list[int]] | None] | None = None
+        if structured_output_trie is not None:
+            beam_entries = self._build_trie_sampling_params(
+                all_beams,
+                base_sampling_params,
+                over_cap_logprobs,
+                structured_output_trie,
+            )
+        elif structured_output_backend is not None:
             assert (
                 structured_output_key is not None
                 and structured_output_bitmask is not None
@@ -232,10 +248,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             beam_entries = self._build_beam_sampling_params(
                 all_beams,
                 base_sampling_params,
+                over_cap_logprobs,
                 structured_output_backend,
                 structured_output_key,
                 structured_output_bitmask,
             )
+
+        if beam_entries is not None:
             active_indices = [
                 i for i, entry in enumerate(beam_entries) if entry is not None
             ]
@@ -245,6 +264,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     assert beam.orig_prompt["type"] != "enc_dec"
                     prompt_len = len(beam.orig_prompt["prompt_token_ids"])
                     if len(beam.tokens) > prompt_len:
+                        # Grammar/trie reached a terminal state (no EOS
+                        # emitted); this beam is a completed valid output.
+                        beam.finish_reason = "stop"
                         for (s, e), inst in zip(
                             instance_start_and_end,
                             instances_batch,
@@ -288,7 +310,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         # the only grammar enforcement for beams whose allowed set exceeds
         # the engine-side allowed_token_ids cap.
         allowed_sets: list[set[int] | None] = [None] * len(all_beams)
-        if structured_output_backend is not None:
+        if beam_entries is not None:
             for i, entry in enumerate(beam_entries):
                 if entry is not None:
                     allowed_sets[i] = set(entry[1])
@@ -317,9 +339,11 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     allowed = allowed_sets[i]
+                    beam_produced = False
                     for token_id, logprob_obj in logprobs.items():
                         if allowed is not None and token_id not in allowed:
                             continue
+                        beam_produced = True
                         new_beam = BeamSearchSequence(
                             current_beam.orig_prompt,
                             tokens=current_beam.tokens + [token_id],
@@ -329,9 +353,39 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         )
 
                         if token_id == eos_token_id and not ignore_eos:
+                            new_beam.finish_reason = "stop"
+                            new_beam.stop_reason = eos_token_id
                             instance.completed.append(new_beam)
                         else:
                             instance_new_beams.append(new_beam)
+                    if (
+                        not beam_produced
+                        and allowed is not None
+                        and len(allowed) > _MAX_NUM_ALLOWED_TOKEN_IDS
+                    ):
+                        # Over-cap regime (see _build_beam_sampling_params): the
+                        # engine sampled unconstrained and none of its top
+                        # logprobs fell in the allowed set, so the grammar could
+                        # not be extended for this beam. Rather than silently
+                        # dropping it, retain the grammar-valid prefix as a
+                        # length-truncated output tagged with a distinctive
+                        # stop_reason so callers can detect that the
+                        # structured-output constraint could not be satisfied
+                        # here. Mirrors the online path.
+                        logger.warning(
+                            "Beam search: structured-output allowed set has "
+                            "%d tokens (> cap %d), so engine-side constraint "
+                            "was disabled and none of the %d sampled logprobs "
+                            "were valid. Returning this beam as a "
+                            "length-truncated output (stop_reason=%r).",
+                            len(allowed),
+                            _MAX_NUM_ALLOWED_TOKEN_IDS,
+                            over_cap_logprobs,
+                            OVER_CAP_STOP_REASON,
+                        )
+                        current_beam.finish_reason = "length"
+                        current_beam.stop_reason = OVER_CAP_STOP_REASON
+                        instance.completed.append(current_beam)
             sorted_beams = sorted(
                 instance_new_beams,
                 key=sort_beams_key,
@@ -345,9 +399,29 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         self,
         structured_outputs: StructuredOutputsParams,
         tokenizer: TokenizerLike,
-    ) -> tuple[StructuredOutputBackend, tuple, torch.Tensor]:
-        """Initialize the structured output backend for beam search."""
+    ) -> BeamSearchSOState:
+        """Initialize the structured output backend for beam search.
+
+        For CHOICE requests a token-level prefix trie is built and returned
+        instead of a grammar backend; it is choice-count independent and much
+        faster for large choice sets. Returns a :class:`BeamSearchSOState`
+        where exactly one of ``backend`` or ``trie`` is set.
+        """
+        # Capture the request type BEFORE validation: the shared validator
+        # rewrites a CHOICE request to an equivalent grammar in place, which
+        # would otherwise hide the CHOICE type and make this fast path
+        # unreachable for the default "auto"/"xgrammar" backend.
         vllm_config = self.llm_engine.vllm_config
+        key = get_structured_output_key(structured_outputs)
+        validate_and_resolve_beam_search_so(structured_outputs, vllm_config, tokenizer)
+
+        if key[0] == StructuredOutputOptions.CHOICE:
+            choices = json.loads(key[1])
+            trie = ChoiceTrie.build(
+                choices, tokenizer, eos_token_id=tokenizer.eos_token_id
+            )
+            return BeamSearchSOState(None, None, None, trie)
+
         so_config = vllm_config.structured_outputs_config
         if so_config is None:
             raise ValueError(
@@ -355,10 +429,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 "with structured outputs"
             )
 
-        # Resolve the backend name from engine config if not already set.
-        if not structured_outputs._backend:
-            structured_outputs._backend = so_config.backend
-
+        # `_backend` is now a concrete backend resolved by the validator above.
         backend_name = structured_outputs._backend
         vocab_size = self.model_config.get_vocab_size()
 
@@ -406,15 +477,15 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         else:
             raise ValueError(f"Unsupported structured output backend: {backend_name}")
 
-        structured_output_key = get_structured_output_key(structured_outputs)
         bitmask = backend.allocate_token_bitmask(1)
 
-        return backend, structured_output_key, bitmask
+        return BeamSearchSOState(backend, key, bitmask, None)
 
     def _build_beam_sampling_params(
         self,
         beams: list[BeamSearchSequence],
         base_params: SamplingParams,
+        over_cap_logprobs: int,
         backend: StructuredOutputBackend,
         structured_output_key: tuple,
         bitmask: torch.Tensor,
@@ -444,7 +515,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 continue
 
             grammar.fill_bitmask(bitmask, 0)
-            allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
+            allowed_ids = bitmask_to_token_ids(bitmask[0], vocab_size)
 
             if not allowed_ids:
                 result.append(None)
@@ -453,18 +524,58 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             # The engine caps the size of allowed_token_ids. While the
             # grammar still allows more tokens than the cap (e.g. inside
             # free-form strings), skip the engine-side constraint and rely
-            # on the logprobs filtering in _beam_search_step instead.
+            # on the logprobs filtering in _beam_search_step instead. In that
+            # over-cap regime request `over_cap_logprobs` logprobs so the
+            # filter sees more (all, when max_logprobs == -1) candidates.
+            over_cap = len(allowed_ids) > _MAX_NUM_ALLOWED_TOKEN_IDS
             beam_params = SamplingParams(
-                logprobs=base_params.logprobs,
+                logprobs=over_cap_logprobs if over_cap else base_params.logprobs,
                 max_tokens=1,
                 temperature=base_params.temperature,
                 watermarking=base_params.watermarking,
                 detokenize=False,
-                allowed_token_ids=(
-                    allowed_ids
-                    if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
-                    else None
-                ),
+                allowed_token_ids=None if over_cap else allowed_ids,
+                skip_clone=True,
+            )
+            result.append((beam_params, allowed_ids))
+
+        return result
+
+    def _build_trie_sampling_params(
+        self,
+        beams: list[BeamSearchSequence],
+        base_params: SamplingParams,
+        over_cap_logprobs: int,
+        trie: ChoiceTrie,
+    ) -> list[tuple[SamplingParams, list[int]] | None]:
+        """Build per-beam SamplingParams and allowed token IDs from a trie.
+
+        Returns None for beams that have reached a trie terminal or gone
+        off-trie; both are dropped by the caller. The trie walk is
+        O(generation_length) per beam and independent of the number of
+        choices, so this stays fast even for very large choice sets.
+        """
+        result: list[tuple[SamplingParams, list[int]] | None] = []
+        for beam in beams:
+            allowed_ids = get_trie_allowed_token_ids(beam, trie)
+            if not allowed_ids:
+                result.append(None)
+                continue
+
+            # The engine caps the size of allowed_token_ids. When a trie node
+            # branches wider than the cap (e.g. the root over thousands of
+            # choices), skip the engine-side constraint and rely on the
+            # logprobs filtering in _beam_search_step instead. In that over-cap
+            # regime request `over_cap_logprobs` logprobs so the filter sees
+            # more (all, when max_logprobs == -1) candidates.
+            over_cap = len(allowed_ids) > _MAX_NUM_ALLOWED_TOKEN_IDS
+            beam_params = SamplingParams(
+                logprobs=over_cap_logprobs if over_cap else base_params.logprobs,
+                max_tokens=1,
+                temperature=base_params.temperature,
+                watermarking=base_params.watermarking,
+                detokenize=False,
+                allowed_token_ids=None if over_cap else allowed_ids,
                 skip_clone=True,
             )
             result.append((beam_params, allowed_ids))

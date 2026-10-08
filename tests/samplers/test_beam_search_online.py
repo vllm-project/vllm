@@ -11,6 +11,7 @@ import torch
 from vllm import CompletionOutput, PromptType, RequestOutput, SamplingParams
 from vllm import logger as vllm_logger
 from vllm.config import VllmConfig
+from vllm.entrypoints.generate.beam_search.choice_trie import ChoiceTrie
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.generate.beam_search.utils import (
@@ -118,6 +119,7 @@ class _OfflineServing(BeamSearchOfflineMixin):
         self,
         instances_batch: list[BeamSearchInstance],
         base_sampling_params: SamplingParams,
+        over_cap_logprobs: int,
         eos_token_id: int | None,
         ignore_eos: bool,
         beam_width: int,
@@ -125,6 +127,7 @@ class _OfflineServing(BeamSearchOfflineMixin):
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple[Any, ...] | None,
         structured_output_bitmask: torch.Tensor | None,
+        structured_output_trie: ChoiceTrie | None,
     ) -> bool:
         assert base_sampling_params.watermarking is False
         return True
@@ -310,6 +313,7 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     entries = serving._build_beam_sampling_params(
         [beam],
         base_params,
+        2,
         backend,
         ("regex", ".*"),
         torch.zeros((1, 1), dtype=torch.int32),
@@ -322,3 +326,48 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     assert beam_params.watermarking is False
     assert beam_params.allowed_token_ids == [0]
     assert base_params.allowed_token_ids is None
+
+
+def _build_choice_trie() -> ChoiceTrie:
+    tokenizer = MagicMock()
+    tokenizer.encode.side_effect = lambda text, **kwargs: [ord(c) for c in text]
+    return ChoiceTrie.build(["ab"], tokenizer, eos_token_id=_Tokenizer.eos_token_id)
+
+
+def test_offline_trie_beam_search_disables_internal_watermarking() -> None:
+    beam = BeamSearchSequence(
+        orig_prompt={"type": "token", "prompt_token_ids": [1]},
+        tokens=[1],
+        logprobs=[],
+    )
+    base_params = SamplingParams(logprobs=2, watermarking=False, skip_clone=True)
+
+    entries = _OfflineServing()._build_trie_sampling_params(
+        [beam], base_params, 2, _build_choice_trie()
+    )
+
+    assert entries[0] is not None
+    assert entries[0][0].watermarking is False
+
+
+def test_online_trie_beam_search_disables_internal_watermarking() -> None:
+    beam = BeamSearchSequence(
+        orig_prompt={"type": "token", "prompt_token_ids": [1]},
+        tokens=[1],
+        logprobs=[],
+    )
+
+    _, params, _, _ = _AsyncServing()._build_online_so_params(
+        [beam],
+        logprobs_num=2,
+        over_cap_logprobs=2,
+        temperature=0.0,
+        so_backend=None,
+        so_key=None,
+        so_bitmask=None,
+        so_trie=_build_choice_trie(),
+        vocab_size=32,
+    )
+
+    assert len(params) == 1
+    assert params[0].watermarking is False

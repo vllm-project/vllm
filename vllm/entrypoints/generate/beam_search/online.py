@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
 
@@ -9,14 +10,35 @@ import numpy as np
 
 from vllm import CompletionOutput, RequestOutput
 from vllm.engine.protocol import EngineClient
-from vllm.inputs import EngineInput
+from vllm.entrypoints.beam_search_utils import (
+    OVER_CAP_STOP_REASON,
+    get_beam_allowed_token_ids,
+    get_trie_allowed_token_ids,
+    init_beam_search_so_backend,
+    resolve_over_cap_logprobs,
+)
+from vllm.inputs import (
+    EncoderDecoderInput,
+    EngineInput,
+    MultiModalInput,
+    TokensInput,
+)
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
+from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
+from .choice_trie import ChoiceTrie
 from .utils import BeamSearchSequence, create_sort_beams_key_function
+
+logger = init_logger(__name__)
+
+# Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
+# MAX_NUM_ALLOWED_TOKEN_IDS in vllm/v1/worker/gpu/sample/logit_bias.py.
+_MAX_NUM_ALLOWED_TOKEN_IDS = 1024
 
 
 class BeamSearchOnlineMixin(ABC):
@@ -66,6 +88,26 @@ class BeamSearchOnlineMixin(ABC):
             watermarking=False,
             detokenize=False,
         )
+
+        so_backend: StructuredOutputBackend | None = None
+        so_key: tuple | None = None
+        so_bitmask = None
+        so_trie: ChoiceTrie | None = None
+        vocab_size = 0
+        over_cap_logprobs = logprobs_num
+        if params.structured_outputs is not None:
+            vllm_config = self.engine_client.vllm_config
+            vocab_size = vllm_config.model_config.get_vocab_size()
+            over_cap_logprobs = resolve_over_cap_logprobs(
+                vllm_config.model_config.max_logprobs, vocab_size, logprobs_num
+            )
+            so_backend, so_key, so_bitmask, so_trie = init_beam_search_so_backend(
+                vllm_config=vllm_config,
+                tokenizer=tokenizer,
+                vocab_size=vocab_size,
+                structured_outputs=params.structured_outputs,
+            )
+
         all_beams = [
             BeamSearchSequence(
                 orig_prompt=prompt,
@@ -75,124 +117,41 @@ class BeamSearchOnlineMixin(ABC):
                 lora_request=lora_request,
             )
         ]
-        completed = []
+        completed: list[BeamSearchSequence] = []
 
-        for _ in range(max_tokens):
-            tasks = []
-            request_id_batch = f"{request_id}-{random_uuid()}"
-
-            for i, beam in enumerate(all_beams):
-                prompt_item = beam.get_prompt()
-                lora_request_item = beam.lora_request
-                request_id_item = f"{request_id_batch}-beam-{i}"
-                task = asyncio.create_task(
-                    collect_from_async_generator(
-                        self.engine_client.generate(
-                            prompt_item,
-                            sampling_params,
-                            request_id_item,
-                            lora_request=lora_request_item,
-                            trace_headers=trace_headers,
-                            session_id=session_id,
-                        )
-                    )
+        try:
+            for _ in range(max_tokens):
+                all_beams, error_output = await self._beam_search_step(
+                    all_beams=all_beams,
+                    completed=completed,
+                    prompt=prompt,
+                    prompt_text=prompt_text,
+                    prompt_token_ids=prompt_token_ids,
+                    request_id=request_id,
+                    sampling_params=sampling_params,
+                    logprobs_num=logprobs_num,
+                    over_cap_logprobs=over_cap_logprobs,
+                    beam_width=beam_width,
+                    temperature=temperature,
+                    eos_token_id=eos_token_id,
+                    ignore_eos=ignore_eos,
+                    include_stop_str_in_output=include_stop_str_in_output,
+                    so_backend=so_backend,
+                    so_key=so_key,
+                    so_bitmask=so_bitmask,
+                    so_trie=so_trie,
+                    vocab_size=vocab_size,
+                    trace_headers=trace_headers,
+                    session_id=session_id,
                 )
-                tasks.append(task)
-
-            output = [x[0] for x in await asyncio.gather(*tasks)]
-
-            for result in output:
-                # check for error finish reason and abort beam search
-                if result.outputs[0].finish_reason == "error":
-                    # yield error output and terminate beam search
-                    yield RequestOutput(
-                        request_id=request_id,
-                        prompt=prompt_text,
-                        outputs=[
-                            CompletionOutput(
-                                index=0,
-                                text="",
-                                token_ids=[],
-                                cumulative_logprob=None,
-                                logprobs=None,
-                                finish_reason="error",
-                            )
-                        ],
-                        finished=True,
-                        prompt_token_ids=prompt_token_ids,
-                        prompt_logprobs=None,
-                    )
+                if error_output is not None:
+                    yield error_output
                     return
-
-            if any(result.outputs[0].finish_reason == "abort" for result in output):
-                for beam in all_beams:
-                    beam.finish_reason = "abort"
-                break
-
-            candidates = []
-            for i, result in enumerate(output):
-                current_beam = all_beams[i]
-
-                if result.outputs[0].logprobs is not None:
-                    logprobs = result.outputs[0].logprobs[0]
-                    for token_id, logprob_obj in logprobs.items():
-                        candidate_logprob = (
-                            current_beam.cum_logprob + logprob_obj.logprob
-                        )
-                        if token_id == eos_token_id and not ignore_eos:
-                            completed.append(
-                                BeamSearchSequence(
-                                    orig_prompt=prompt,
-                                    tokens=current_beam.tokens + [eos_token_id]
-                                    if include_stop_str_in_output
-                                    else current_beam.tokens,
-                                    logprobs=current_beam.logprobs + [logprobs],
-                                    cum_logprob=candidate_logprob,
-                                    finish_reason="stop",
-                                    stop_reason=eos_token_id,
-                                )
-                            )
-                        else:
-                            candidates.append(
-                                (
-                                    candidate_logprob,
-                                    int(token_id),
-                                    current_beam,
-                                    logprobs,
-                                )
-                            )
-
-            # Processing non-EOS tokens
-            candidate_logprobs = np.fromiter(
-                (candidate[0] for candidate in candidates),
-                dtype=np.float64,
-                count=len(candidates),
-            )
-            if len(candidates) <= beam_width:
-                topn_idx = np.argsort(-candidate_logprobs)
-            else:
-                topn_idx = np.argpartition(
-                    -candidate_logprobs,
-                    beam_width - 1,
-                )[:beam_width]
-                topn_idx = topn_idx[np.argsort(-candidate_logprobs[topn_idx])]
-
-            new_beams = []
-            for idx in topn_idx:
-                cum_logprob, token_id, current_beam, logprobs = candidates[int(idx)]
-                new_beams.append(
-                    BeamSearchSequence(
-                        orig_prompt=prompt,
-                        tokens=current_beam.tokens + [token_id],
-                        logprobs=current_beam.logprobs + [logprobs],
-                        lora_request=current_beam.lora_request,
-                        cum_logprob=cum_logprob,
-                    )
-                )
-
-            all_beams = new_beams
-            if not all_beams:
-                break
+                if not all_beams:
+                    break
+        finally:
+            if so_backend is not None:
+                so_backend.destroy()
 
         completed.extend(all_beams)
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
@@ -229,3 +188,300 @@ class BeamSearchOnlineMixin(ABC):
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None,
         )
+
+    async def _beam_search_step(
+        self,
+        *,
+        all_beams: list[BeamSearchSequence],
+        completed: list[BeamSearchSequence],
+        prompt: TokensInput | MultiModalInput | EncoderDecoderInput,
+        prompt_text: str | None,
+        prompt_token_ids: list[int],
+        request_id: str,
+        sampling_params: SamplingParams,
+        logprobs_num: int,
+        over_cap_logprobs: int,
+        beam_width: int,
+        temperature: float,
+        eos_token_id: int | None,
+        ignore_eos: bool,
+        include_stop_str_in_output: bool,
+        so_backend: StructuredOutputBackend | None,
+        so_key: tuple | None,
+        so_bitmask,
+        so_trie: ChoiceTrie | None,
+        vocab_size: int,
+        trace_headers: Mapping[str, str] | None,
+        session_id: str | None,
+    ) -> tuple[list[BeamSearchSequence], RequestOutput | None]:
+        """Advance beam search by one token step.
+
+        Finished beams are appended to ``completed`` in place. Returns
+        ``(next_beams, error_output)``: a non-``None`` ``error_output`` means
+        the engine aborted with an error and the caller must yield it and
+        stop; an empty ``next_beams`` means the search is complete.
+        """
+        if so_backend is not None or so_trie is not None:
+            # Grammar compile/accept/fill_bitmask (and the trie walk) are
+            # CPU-bound and run once per beam per step. Offload to a worker
+            # thread so they do not block the API server's asyncio event loop
+            # and stall other concurrent requests, mirroring
+            # StructuredOutputManager's executor offload.
+            #
+            # Keep a handle so cancellation of this coroutine does not race the
+            # caller's `finally: so_backend.destroy()`. A detached thread keeps
+            # dereferencing `so_backend`; destroying it mid-run raises
+            # AttributeError. Shield the task and, on cancellation, wait for the
+            # thread to finish before propagating so the backend is only
+            # destroyed once nothing touches it.
+            so_build_task = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self._build_online_so_params,
+                    all_beams,
+                    logprobs_num,
+                    over_cap_logprobs,
+                    temperature,
+                    so_backend,
+                    so_key,
+                    so_bitmask,
+                    so_trie,
+                    vocab_size,
+                )
+            )
+            try:
+                (
+                    active_beams,
+                    beam_params_list,
+                    allowed_sets,
+                    newly_completed,
+                ) = await asyncio.shield(so_build_task)
+            except asyncio.CancelledError:
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(so_build_task)
+                raise
+            completed.extend(newly_completed)
+            if not active_beams:
+                return [], None
+        else:
+            active_beams = all_beams
+            beam_params_list = [sampling_params] * len(all_beams)
+            allowed_sets = [None] * len(all_beams)
+
+        tasks = []
+        request_id_batch = f"{request_id}-{random_uuid()}"
+
+        for i, beam in enumerate(active_beams):
+            prompt_item = beam.get_prompt()
+            lora_request_item = beam.lora_request
+            request_id_item = f"{request_id_batch}-beam-{i}"
+            task = asyncio.create_task(
+                collect_from_async_generator(
+                    self.engine_client.generate(
+                        prompt_item,
+                        beam_params_list[i],
+                        request_id_item,
+                        lora_request=lora_request_item,
+                        trace_headers=trace_headers,
+                        session_id=session_id,
+                    )
+                )
+            )
+            tasks.append(task)
+
+        output = [x[0] for x in await asyncio.gather(*tasks)]
+
+        for result in output:
+            # check for error finish reason and abort beam search
+            if result.outputs[0].finish_reason == "error":
+                # signal the caller to yield an error output and terminate
+                error_output = RequestOutput(
+                    request_id=request_id,
+                    prompt=prompt_text,
+                    outputs=[
+                        CompletionOutput(
+                            index=0,
+                            text="",
+                            token_ids=[],
+                            cumulative_logprob=None,
+                            logprobs=None,
+                            finish_reason="error",
+                        )
+                    ],
+                    finished=True,
+                    prompt_token_ids=prompt_token_ids,
+                    prompt_logprobs=None,
+                )
+                return all_beams, error_output
+
+        if any(result.outputs[0].finish_reason == "abort" for result in output):
+            for beam in active_beams:
+                beam.finish_reason = "abort"
+                completed.append(beam)
+            return [], None
+
+        candidates = []
+        for i, result in enumerate(output):
+            current_beam = active_beams[i]
+
+            if result.outputs[0].logprobs is not None:
+                logprobs = result.outputs[0].logprobs[0]
+                allowed = allowed_sets[i]
+                beam_produced = False
+                for token_id, logprob_obj in logprobs.items():
+                    if allowed is not None and token_id not in allowed:
+                        continue
+                    candidate_logprob = current_beam.cum_logprob + logprob_obj.logprob
+                    if token_id == eos_token_id and not ignore_eos:
+                        beam_produced = True
+                        completed.append(
+                            BeamSearchSequence(
+                                orig_prompt=prompt,
+                                tokens=current_beam.tokens + [eos_token_id]
+                                if include_stop_str_in_output
+                                else current_beam.tokens,
+                                logprobs=current_beam.logprobs + [logprobs],
+                                cum_logprob=candidate_logprob,
+                                finish_reason="stop",
+                                stop_reason=eos_token_id,
+                            )
+                        )
+                    else:
+                        beam_produced = True
+                        candidates.append(
+                            (
+                                candidate_logprob,
+                                int(token_id),
+                                current_beam,
+                                logprobs,
+                            )
+                        )
+                if (
+                    not beam_produced
+                    and allowed is not None
+                    and len(allowed) > _MAX_NUM_ALLOWED_TOKEN_IDS
+                ):
+                    # Over-cap regime (see _build_online_so_params): the engine
+                    # sampled unconstrained and none of its top logprobs fell
+                    # in the allowed set, so the grammar could not be extended
+                    # for this beam. Rather than silently dropping it, retain
+                    # the grammar-valid prefix as a length-truncated output
+                    # tagged with a distinctive stop_reason so callers can
+                    # detect that the structured-output constraint could not be
+                    # satisfied here.
+                    logger.warning(
+                        "Beam search (request %s): structured-output allowed "
+                        "set has %d tokens (> cap %d), so engine-side "
+                        "constraint was disabled and none of the %d sampled "
+                        "logprobs were valid. Returning this beam as a "
+                        "length-truncated output (stop_reason=%r).",
+                        request_id,
+                        len(allowed),
+                        _MAX_NUM_ALLOWED_TOKEN_IDS,
+                        over_cap_logprobs,
+                        OVER_CAP_STOP_REASON,
+                    )
+                    current_beam.finish_reason = "length"
+                    current_beam.stop_reason = OVER_CAP_STOP_REASON
+                    completed.append(current_beam)
+
+        # Processing non-EOS tokens
+        candidate_logprobs = np.fromiter(
+            (candidate[0] for candidate in candidates),
+            dtype=np.float64,
+            count=len(candidates),
+        )
+        if len(candidates) <= beam_width:
+            topn_idx = np.argsort(-candidate_logprobs)
+        else:
+            topn_idx = np.argpartition(
+                -candidate_logprobs,
+                beam_width - 1,
+            )[:beam_width]
+            topn_idx = topn_idx[np.argsort(-candidate_logprobs[topn_idx])]
+
+        new_beams = []
+        for idx in topn_idx:
+            cum_logprob, token_id, current_beam, logprobs = candidates[int(idx)]
+            new_beams.append(
+                BeamSearchSequence(
+                    orig_prompt=prompt,
+                    tokens=current_beam.tokens + [token_id],
+                    logprobs=current_beam.logprobs + [logprobs],
+                    lora_request=current_beam.lora_request,
+                    cum_logprob=cum_logprob,
+                )
+            )
+
+        return new_beams, None
+
+    def _build_online_so_params(
+        self,
+        beams: list[BeamSearchSequence],
+        logprobs_num: int,
+        over_cap_logprobs: int,
+        temperature: float,
+        so_backend: StructuredOutputBackend | None,
+        so_key: tuple | None,
+        so_bitmask,
+        so_trie: ChoiceTrie | None,
+        vocab_size: int,
+    ) -> tuple[
+        list[BeamSearchSequence],
+        list[SamplingParams],
+        list[set[int] | None],
+        list[BeamSearchSequence],
+    ]:
+        """Build per-beam params and allowed sets under structured output.
+
+        Returns ``(active_beams, params, allowed_sets, completed)``. Beams
+        whose grammar has terminated (or whose trie node is terminal/off-trie)
+        are dropped from ``active_beams`` and returned in ``completed`` when
+        they have generated at least one token. The trie path is
+        O(generation_length) per beam and independent of the choice count, so
+        it stays fast even for very large choice sets.
+        """
+        active_beams: list[BeamSearchSequence] = []
+        params: list[SamplingParams] = []
+        allowed_sets: list[set[int] | None] = []
+        completed: list[BeamSearchSequence] = []
+        for beam in beams:
+            if so_trie is not None:
+                allowed_ids = get_trie_allowed_token_ids(beam, so_trie)
+            else:
+                assert so_backend is not None and so_key is not None
+                allowed_ids = get_beam_allowed_token_ids(
+                    beam, so_backend, so_key, so_bitmask, vocab_size
+                )
+            if not allowed_ids:
+                # Grammar/trie reached a terminal state (no EOS emitted), so
+                # this beam is a completed valid output, not a truncation.
+                if beam.logprobs:
+                    beam.finish_reason = "stop"
+                    completed.append(beam)
+                continue
+            # The engine caps the size of allowed_token_ids. When the allowed
+            # set exceeds the cap (e.g. a trie root over thousands of choices),
+            # skip the engine-side constraint and rely on the logprobs
+            # filtering via allowed_sets instead.
+            #
+            # In this over-cap regime the engine samples unconstrained and
+            # returns `over_cap_logprobs` logprobs, which are filtered against
+            # allowed_sets. Requesting more logprobs widens that filter: with
+            # max_logprobs == -1 the full vocabulary is returned and no valid
+            # beam can be dropped; otherwise, if none of the returned logprobs
+            # are valid, the beam is retained as a length-truncated output (see
+            # _beam_search_step) rather than silently dropped. This mirrors the
+            # offline path.
+            over_cap = len(allowed_ids) > _MAX_NUM_ALLOWED_TOKEN_IDS
+            beam_params = SamplingParams(
+                logprobs=over_cap_logprobs if over_cap else logprobs_num,
+                max_tokens=1,
+                temperature=temperature,
+                watermarking=False,
+                detokenize=False,
+                allowed_token_ids=None if over_cap else allowed_ids,
+            )
+            active_beams.append(beam)
+            params.append(beam_params)
+            allowed_sets.append(set(allowed_ids))
+        return active_beams, params, allowed_sets, completed

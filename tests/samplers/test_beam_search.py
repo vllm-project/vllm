@@ -40,6 +40,17 @@ EXTRA_ENGINE_KWARGS: dict = (
     else dict(async_scheduling=False, max_num_seqs=1)
 )
 
+# The structured-output tests below require ``forked`` isolation (the
+# fork-after-threads workaround for #21073). On XPU, forking a child that
+# initializes a device engine leaks Level-Zero memory on child exit, which
+# fails the per-test memory-clear gate for every subsequent test in the suite.
+# The constrained beam-search logic under test is platform-independent and
+# fully covered on CUDA/ROCm, so skip these on XPU.
+skip_so_on_xpu = pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="fork isolation (#21073 workaround) leaks XPU device memory",
+)
+
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
@@ -305,10 +316,17 @@ def test_beam_search_passes_multimodal_data(
 # tests/models/multimodal/generation/test_whisper.py
 
 
+# ``forked`` isolates each structured-output engine in its own process:
+# configuring a structured-output backend starts compiler threads in the
+# parent, after which the next engine's forked EngineCore subprocess segfaults
+# during weight load (fork-after-threads). See GH issue #21073.
+@skip_so_on_xpu
+@pytest.mark.forked
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
 def test_beam_search_structured_output(
+    vllm_runner,
     model: str,
     dtype: str,
     beam_width: int,
@@ -324,17 +342,6 @@ def test_beam_search_structured_output(
         "additionalProperties": False,
     }
 
-    llm = LLM(
-        model=model,
-        dtype=dtype,
-        max_model_len=512,
-        structured_outputs_config=dict(
-            backend="xgrammar",
-            disable_any_whitespace=True,
-        ),
-        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
-    )
-
     params = BeamSearchParams(
         beam_width=beam_width,
         max_tokens=64,
@@ -345,7 +352,17 @@ def test_beam_search_structured_output(
         "Generate a JSON object for a person with name and age:",
     ]
 
-    outputs = llm.beam_search(prompts, params)
+    with vllm_runner(
+        model,
+        dtype=dtype,
+        max_model_len=512,
+        structured_outputs_config=dict(
+            backend="xgrammar",
+            disable_any_whitespace=True,
+        ),
+        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
+    ) as vllm_model:
+        outputs = vllm_model.llm.beam_search(prompts, params)
 
     assert len(outputs) == len(prompts)
     for output in outputs:
@@ -361,3 +378,108 @@ def test_beam_search_structured_output(
             print(f"Generated JSON: {generated!r}")
             parsed = json.loads(generated)
             jsonschema.validate(instance=parsed, schema=json_schema)
+
+
+# forked: see note on ``test_beam_search_structured_output`` above (#21073).
+@skip_so_on_xpu
+@pytest.mark.forked
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+def test_beam_search_structured_output_auto_backend(
+    vllm_runner,
+    model: str,
+    dtype: str,
+    beam_width: int,
+) -> None:
+    """Beam search structured output resolves the default ``auto`` backend.
+
+    Guards against the offline path crashing with "Unsupported structured
+    output backend: auto" when the engine is left on the default backend.
+    """
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+        },
+        "required": ["name", "age"],
+        "additionalProperties": False,
+    }
+
+    params = BeamSearchParams(
+        beam_width=beam_width,
+        max_tokens=64,
+        structured_outputs=StructuredOutputsParams(json=json_schema),
+    )
+
+    prompts = ["Generate a JSON object for a person with name and age:"]
+
+    with vllm_runner(
+        model,
+        dtype=dtype,
+        max_model_len=512,
+        structured_outputs_config=dict(backend="auto"),
+        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
+    ) as vllm_model:
+        outputs = vllm_model.llm.beam_search(prompts, params)
+
+    assert len(outputs) == 1
+    for seq in outputs[0].sequences:
+        assert seq.text is not None
+        gen_start = seq.text.find("{")
+        assert gen_start != -1, f"No JSON found in output: {seq.text!r}"
+        generated = seq.text[gen_start:].replace("</s>", "").strip()
+        parsed, _ = json.JSONDecoder().raw_decode(generated)
+        jsonschema.validate(instance=parsed, schema=json_schema)
+
+
+# forked: see note on ``test_beam_search_structured_output`` above (#21073).
+@skip_so_on_xpu
+@pytest.mark.forked
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+def test_beam_search_structured_output_choice(
+    vllm_runner,
+    model: str,
+    dtype: str,
+    beam_width: int,
+) -> None:
+    """Beam search over a CHOICE set funnels into the prefix trie.
+
+    Every returned beam must be one of the choices and report
+    ``finish_reason == "stop"`` (a constrained completion), never the
+    default ``"length"`` that would signal truncation.
+    """
+    choices = ["Python", "Java", "JavaScript", "C++", "Ruby", "Go"]
+
+    params = BeamSearchParams(
+        beam_width=beam_width,
+        max_tokens=16,
+        structured_outputs=StructuredOutputsParams(choice=choices),
+    )
+
+    prompt = "The best language for type-safe systems programming is "
+    prompts = [prompt]
+
+    with vllm_runner(
+        model,
+        dtype=dtype,
+        max_model_len=512,
+        structured_outputs_config=dict(backend="auto"),
+        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
+    ) as vllm_model:
+        outputs = vllm_model.llm.beam_search(prompts, params)
+
+    assert len(outputs) == 1
+    sequences = outputs[0].sequences
+    assert 0 < len(sequences) <= beam_width
+    for seq in sequences:
+        assert seq.text is not None
+        # Offline ``seq.text`` includes the prompt; the trie-constrained
+        # completion is the suffix after it.
+        text = seq.text.replace("</s>", "").strip()
+        completion = text.removeprefix(prompt.strip()).strip()
+        assert completion in choices, f"Expected one of {choices}, got: {text!r}"
+        assert seq.finish_reason == "stop"
