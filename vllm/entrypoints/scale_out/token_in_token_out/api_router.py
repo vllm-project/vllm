@@ -68,7 +68,14 @@ async def generate(request: GenerateRequest, raw_request: Request):
         )
 
     elif isinstance(generator, GenerateResponseBase):
-        return JSONResponse(content=generator.model_dump())
+        # ``logprobs.sampled`` exists only for return_token_logprobs requests;
+        # keep the response schema unchanged for everyone else.
+        exclude = (
+            None
+            if request.return_token_logprobs
+            else {"choices": {"__all__": {"logprobs": {"sampled"}}}}
+        )
+        return JSONResponse(content=generator.model_dump(exclude=exclude))
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 

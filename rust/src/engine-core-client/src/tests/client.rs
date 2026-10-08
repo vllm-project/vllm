@@ -2858,6 +2858,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
                         prompt_token_id_logprobs: None,
+                        new_sampled_logprobs: None,
                     },
                 ],
                 scheduler_stats: None,
