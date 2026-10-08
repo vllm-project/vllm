@@ -45,7 +45,7 @@ from vllm.reasoning.cohere_command_reasoning_parser import (
     BaseCohereCommandReasoningParser,
 )
 from vllm.renderers.cohere import POSITION_TO_SOURCE_KEY
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import StructuredOutputsParams, check_json_nesting
 from vllm.tool_parsers.cohere_command_tool_parser import BaseCohereCommandToolParser
 
 if TYPE_CHECKING:
@@ -127,22 +127,20 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     tool_dictionary: dict[str, str] = {}
     for tool in tool_schema:
         tool_name = tool["name"]
-        tool_parameters = json.dumps(tool["parameters"])
-        json_schema = f"""{{
-                        "type": "object",
-                        "properties": {{
-                            "tool_call_id": {{
-                                "type": "string",
-                                "pattern": "^[0-9]+$"
-                            }},
-                            "tool_name": {{
-                                "type": "string",
-                                "const": "{tool_name}"
-                            }},
-                            "parameters": {tool_parameters}
-                            }}
-                            }}"""
-        tool_grammar = str(xgr.Grammar.from_json_schema(json_schema))
+        check_json_nesting(tool["parameters"])
+        tool_parameters = dict(tool["parameters"])
+        json_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "tool_call_id": {"type": "string", "pattern": "^[0-9]+$"},
+                "tool_name": {"type": "string", "const": tool_name},
+                "parameters": tool_parameters,
+            },
+        }
+        for defs_key in ("$defs", "definitions"):
+            if defs_key in tool_parameters:
+                json_schema[defs_key] = tool_parameters.pop(defs_key)
+        tool_grammar = str(xgr.Grammar.from_json_schema(json.dumps(json_schema)))
         for match in re.findall(r"\b(\w+)\s*::=", tool_grammar):
             tool_grammar = re.sub(
                 rf"\b{re.escape(match)}\b", tool_name + match, tool_grammar
@@ -169,8 +167,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
 def _tool_definitions_to_schema_list(
     tools: str | list[Any],
 ) -> list[CohereNormalizedTool]:
-    """
-    Build the list of ``CohereNormalizedTool`` dicts expected by
+    """Build the list of ``CohereNormalizedTool`` dicts expected by
     ``collect_tool_schema``.
 
     Accepts:
@@ -214,8 +211,7 @@ def _tool_definitions_to_schema_list(
 def _has_effective_tools(
     tools: str | list[Any] | None,
 ) -> TypeGuard[str | list[Any]]:
-    """
-    True when ``tools`` contains at least one tool definition to convert.
+    """True when ``tools`` contains at least one tool definition to convert.
 
     ``ResponsesRequest`` defaults ``tools`` to ``[]``; ``ChatCompletionRequest``
     uses ``None``. Both mean "no tools" here. Strings (e.g. a JSON blob) are
@@ -236,8 +232,7 @@ def convert_schema_to_structural_tags(
     tools: str | list[Any] | None = None,
     model_architecture: str | None = None,
 ) -> str | None:
-    """
-    Returns a response_format string accepted by xgrammar's structural tag format.
+    """Returns a response_format string accepted by xgrammar's structural tag format.
     Uses the canonical shape: {"type": "structural_tag", "format": {...}} with
     format.type "triggered_tags" and tag content type "json_schema" or "grammar".
 
@@ -325,8 +320,7 @@ def _unwrap_nested_schema(candidate: Any) -> dict | None:
 
 
 def _schema_from_json_schema_field(js_wr: Any) -> dict | None:
-    """
-    Extract the JSON Schema object from Chat Completions ``json_schema`` payload.
+    """Extract the JSON Schema object from Chat Completions ``json_schema`` payload.
 
     Accepts:
     - ``JsonSchemaResponseFormat`` (Pydantic) with ``schema`` / ``json_schema`` field
@@ -411,6 +405,7 @@ def _schema_dict_from_structured_outputs(
     if isinstance(raw, str):
         if not raw.strip():
             raise ValueError("structured_outputs.json cannot be empty.")
+        check_json_nesting(raw)
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError as e:
@@ -565,6 +560,15 @@ class CohereCommandParser(DelegatingParser):
             rf_type = _response_format_type(rf)
             if rf_type in ("json_schema", "json_object"):
                 request.response_format = None
+        return request
+
+    def _apply_structural_tag(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        # Note(arpera):
+        # No need to go through _apply_structural_tag in abstract_parser.py
+        # since we have already go through _apply_structural_tags here
+        # So, override this method to return request as is
         return request
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:

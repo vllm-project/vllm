@@ -44,7 +44,12 @@ def get_quark_ocp_mx_group_size(
         return None
 
     assert weight_quant is not None
-    return int(weight_quant["group_size"])
+    group_size = weight_quant.get("group_size")
+    if group_size is None:
+        block_size = weight_quant.get("block_size")
+        if isinstance(block_size, list | tuple) and len(block_size) >= 2:
+            group_size = block_size[1]
+    return int(group_size) if group_size is not None else None
 
 
 def is_shared_expert_quant_fse_compatible(
@@ -63,6 +68,7 @@ def is_shared_expert_quant_fse_compatible(
 
     Returns:
         A compatibility flag and, when incompatible, the reason.
+
     """
     if projection_names is None:
         projection_names = ["gate_up_proj", "down_proj"]
@@ -303,13 +309,11 @@ def is_equal_or_regex_match(
     check_contains: bool = False,
     use_fnmatch: bool = False,
 ) -> bool:
-    """
-    Checks whether a value is exactly equal or a regex match for target
+    """Checks whether a value is exactly equal or a regex match for target
     if target starts with 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
     If use_fnmatch is set, supports shell-style patterns in target.
     """
-
     if target.startswith("re:"):
         pattern = target[3:]
         if re.match(pattern, value):
