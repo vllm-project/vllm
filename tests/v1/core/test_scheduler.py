@@ -1715,6 +1715,99 @@ def test_scheduler_reset_prefix_cache():
         assert scheduler.waiting[i] == request
 
 
+@pytest.mark.parametrize("reset_connector", [False, True])
+def test_reset_prefix_cache_preserves_inflight_remote_kv(reset_connector: bool):
+    """An in-flight KV load makes reset retryable without releasing its blocks."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=True),
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    manager = scheduler.kv_cache_manager
+    block_ids = manager.get_block_ids(request.request_id)
+    free_blocks = manager.block_pool.get_num_free_blocks()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert block_ids[0]
+
+    assert scheduler.connector is not None
+    scheduler.connector.reset_cache = Mock(return_value=True)
+    assert scheduler.reset_prefix_cache() is False
+    assert (
+        scheduler.reset_prefix_cache(
+            reset_running_requests=True, reset_connector=reset_connector
+        )
+        is False
+    )
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert manager.get_block_ids(request.request_id) == block_ids
+    assert manager.block_pool.get_num_free_blocks() == free_blocks
+    scheduler.connector.reset_cache.assert_not_called()
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            kv_connector_output=KVConnectorOutput(
+                finished_recving={request.request_id}
+            ),
+        ),
+    )
+    output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+        ),
+    )
+
+    assert (
+        scheduler.reset_prefix_cache(
+            reset_running_requests=True, reset_connector=reset_connector
+        )
+        is True
+    )
+    assert request.status == RequestStatus.PREEMPTED
+    assert list(request.output_token_ids) == [1000]
+    assert not manager.get_block_ids(request.request_id)[0]
+    assert scheduler.connector.reset_cache.call_count == int(reset_connector)
+
+
+@pytest.mark.parametrize("sleep", [False, True], ids=["pause", "sleep"])
+def test_cache_clearing_pause_rejects_inflight_remote_kv(sleep: bool):
+    """A failed reset must still stop cache-clearing pause and device sleep."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=True),
+    )
+    request = create_requests(num_requests=1, num_tokens=64)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    assert scheduler.connector is not None
+    scheduler.connector.reset_cache = Mock(return_value=True)
+    core = object.__new__(EngineCore)
+    core.scheduler = scheduler
+    core.model_executor = Mock()
+    core.mm_receiver_cache = None
+
+    with pytest.raises(RuntimeError, match="Failed to reset the KV connector cache"):
+        if sleep:
+            core.sleep(level=1, mode="keep")
+        else:
+            core.pause_scheduler(mode="keep", clear_cache=True)
+
+    scheduler.connector.reset_cache.assert_not_called()
+    core.model_executor.sleep.assert_not_called()
+
+
 @pytest.mark.parametrize("reset_successful", [False, True])
 def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
     scheduler = create_scheduler(enable_prefix_caching=True)
