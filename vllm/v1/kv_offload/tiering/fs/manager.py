@@ -16,6 +16,7 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 
 import functools
 import json
+import mmap
 import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
@@ -38,7 +39,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
 )
-from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.file_mapper import FileMapper, ShardedFileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
@@ -117,13 +118,14 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        path_sharding: str | None = None,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
             blocks_per_chunk.
         primary_kv_view: Memoryview of the primary tier's CPU KV cache.
         tier_type: Tier type identifier, set by SecondaryTierFactory.
-        root_dir: Root directory for block files.
+        root_dir: Root directory for block files, or comma-separated roots.
         n_read_threads: Number of read-priority I/O threads.
         n_write_threads: Number of write-priority I/O threads.
         enable_kv_events: Emit BlockStored KV events for blocks
@@ -132,6 +134,8 @@ class FileSystemTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        path_sharding: Set to ``"by_block_hash"`` to shard blocks across
+            multiple storage roots.
 
         """
         super().__init__(
@@ -157,13 +161,8 @@ class FileSystemTierManager(SecondaryTierManager):
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
         # Block count per in-flight job, used to report transfer_bytes.
         self._job_block_counts: dict[JobId, int] = {}
-        # Per load job: how many blocks loaded before a failure (partial keep).
-        # Written by the pool worker inside the load task before it raises (so
-        # before task_done publishes the job); read on the scheduler thread in
-        # get_finished_jobs only for job ids the finished queue returned. Under
-        # the GIL that read cannot observe the finished job without the prior
-        # write, so no extra lock is needed (get_finished is itself lock-free).
-        self._load_progress: dict[JobId, int] = {}
+        # Per load job: whether each key loaded successfully before a failure.
+        self._load_success: dict[JobId, list[bool]] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -171,33 +170,71 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._block_size: int = primary_kv_view.strides[0]
 
-        # Opt in; FileMapper enables it only for a parallelism-invariant block.
-        self.file_mapper = FileMapper.from_offloading_spec(
-            root_dir=root_dir,
-            offloading_spec=offloading_spec,
-            blocks_per_file=offloading_spec.blocks_per_chunk,
-            parallel_agnostic=True,
-        )
+        if path_sharding not in (None, "by_block_hash"):
+            raise ValueError(
+                "path_sharding must be omitted or set to 'by_block_hash', got "
+                f"{path_sharding!r}"
+            )
+        if "," in root_dir and path_sharding != "by_block_hash":
+            raise ValueError(
+                "multiple root_dir paths require path_sharding='by_block_hash'"
+            )
 
-        # Write config file
-        config_path = self.file_mapper.get_config_file_path()
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        if not os.path.exists(config_path):
-            with open(config_path, "w") as f:
-                json.dump(
-                    self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
-                )
+        if path_sharding == "by_block_hash" or "," in root_dir:
+            self.file_mapper: FileMapper = ShardedFileMapper.from_offloading_spec(
+                root_dir=root_dir,
+                offloading_spec=offloading_spec,
+                blocks_per_file=offloading_spec.blocks_per_chunk,
+                parallel_agnostic=True,
+                path_sharding="by_block_hash",
+            )
+        else:
+            self.file_mapper = FileMapper.from_offloading_spec(
+                root_dir=root_dir,
+                offloading_spec=offloading_spec,
+                blocks_per_file=offloading_spec.blocks_per_chunk,
+                parallel_agnostic=True,
+            )
+
+        # Write config file(s)
+        config_paths = self.file_mapper.get_config_file_paths()
+        for config_path in config_paths:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            if not os.path.exists(config_path):
+                with open(config_path, "w") as f:
+                    json.dump(
+                        self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
+                    )
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
-        # rather than failing every block.
-        self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
+        # or when block size is not aligned to the system page size.
+        o_direct_supported = all(
+            probe_o_direct(os.path.dirname(cp)) for cp in config_paths
+        )
+        is_aligned = self._block_size % mmap.PAGESIZE == 0
+        self._use_o_direct = o_direct_supported and is_aligned
         if not self._use_o_direct:
-            logger.warning(
-                "O_DIRECT is not supported at '%s'; falling back to buffered "
-                "I/O for the '%s' KV offload tier.",
-                root_dir,
-                tier_type,
+            if not o_direct_supported:
+                logger.warning(
+                    "O_DIRECT is not supported at '%s'; falling back to buffered "
+                    "I/O for the '%s' KV offload tier.",
+                    root_dir,
+                    tier_type,
+                )
+            elif not is_aligned:
+                logger.warning(
+                    "Block size (%d) is not a multiple of page size (%d); "
+                    "falling back to buffered I/O for the '%s' KV offload tier.",
+                    self._block_size,
+                    mmap.PAGESIZE,
+                    tier_type,
+                )
+
+        if self.file_mapper.num_shards > 1:
+            logger.info(
+                "Configured whole-block hash sharding across %d FS roots",
+                self.file_mapper.num_shards,
             )
 
         self._pool = DualQueueThreadPool(
@@ -224,56 +261,68 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
-        task = functools.partial(
-            batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
-            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
-            self._block_size,
-            self._use_o_direct,
+        shards = self.file_mapper.group_by_shard(
+            keys, job_metadata.chunk_ids, self._block_size
         )
+        tasks = [
+            functools.partial(
+                batch_store_block,
+                paths,
+                self._primary_kv_view,
+                offsets,
+                self._block_size,
+                self._use_o_direct,
+            )
+            for paths, offsets, _ in shards
+        ]
         self._job_block_counts[job_metadata.job_id] = len(keys)
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+        self._pool.enqueue_store(job_metadata.job_id, len(tasks), tasks)
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
-        # Track this load's keys so a failed promotion can mark only its failed
-        # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
+        self._load_success[job_id] = [False] * len(keys)
         self._job_block_counts[job_id] = len(keys)
-        paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
+        shards = self.file_mapper.group_by_shard(
+            keys, job_metadata.chunk_ids, self._block_size
+        )
+        tasks = []
+        for paths, offsets, indices in shards:
 
-        def load_task() -> None:
-            try:
-                batch_load_block(
-                    paths,
-                    self._primary_kv_view,
-                    offsets,
-                    self._block_size,
-                    self._use_o_direct,
-                )
-            except OSError as exc:
-                # Runs on the pool worker thread. Record how many blocks loaded
-                # before the failure so get_finished_jobs can keep them; this
-                # write precedes task_done, so the scheduler reads it safely
-                # under the GIL once the finished queue hands back this job.
-                num_succeeded = getattr(exc, "num_succeeded", 0)
-                self._load_progress[job_id] = num_succeeded
-                # Surfaces errno (e.g. EMFILE "Too many open files") for both
-                # the C and Python load paths.
-                logger.debug(
-                    "Load of %d blocks for job %s failed at block %d: %s",
-                    len(paths),
-                    job_id,
-                    num_succeeded,
-                    exc,
-                )
-                raise
+            def load_task(
+                paths: list[str] = paths,
+                offsets: list[int] = offsets,
+                indices: list[int] = indices,
+            ) -> None:
+                try:
+                    batch_load_block(
+                        paths,
+                        self._primary_kv_view,
+                        offsets,
+                        self._block_size,
+                        self._use_o_direct,
+                    )
+                except OSError as exc:
+                    num_succeeded = getattr(exc, "num_succeeded", 0)
+                    for idx in indices[:num_succeeded]:
+                        self._load_success[job_id][idx] = True
+                    logger.debug(
+                        "Load of %d blocks for job %s failed at block %d: %s",
+                        len(paths),
+                        job_id,
+                        num_succeeded,
+                        exc,
+                    )
+                    raise
+                else:
+                    for idx in indices:
+                        self._load_success[job_id][idx] = True
 
-        self._pool.enqueue_load(job_id, 1, [load_task])
+            tasks.append(load_task)
+
+        self._pool.enqueue_load(job_id, len(tasks), tasks)
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -295,14 +344,15 @@ class FileSystemTierManager(SecondaryTierManager):
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
-            num_succeeded = self._load_progress.pop(job_id, 0)
+            load_success = self._load_success.pop(job_id, None)
             if load_keys is not None and not success:
-                # A batched load stops at the first bad block and reports how
-                # many loaded before it. Those earlier blocks are kept in the
-                # primary tier (reported via successful_keys); only this block
-                # and the ones after it are marked a miss and recomputed.
-                successful = load_keys[:num_succeeded]
-                failed = load_keys[num_succeeded:]
+                assert load_success is not None
+                successful = [
+                    key for key, loaded in zip(load_keys, load_success) if loaded
+                ]
+                failed = [
+                    key for key, loaded in zip(load_keys, load_success) if not loaded
+                ]
                 self._lookup_manager.mark_miss(failed)
                 results.append(
                     JobResult(
