@@ -197,7 +197,7 @@ async fn collect_completion(
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
-    let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
+    let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None);
 
     if enable_log_requests {
         info!(
@@ -361,6 +361,7 @@ async fn completion_chunk_stream(
                                 Usage::from_token_usage(
                                     finished.usage,
                                     enable_prompt_tokens_details,
+                                    None,
                                 ),
                             )))
                             .await;
@@ -413,7 +414,11 @@ async fn completion_chunk_stream(
                     if include_usage {
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
-                            Usage::from_token_usage(finished.usage, enable_prompt_tokens_details),
+                            Usage::from_token_usage(
+                                finished.usage,
+                                enable_prompt_tokens_details,
+                                None,
+                            ),
                         )))
                         .await;
                     }

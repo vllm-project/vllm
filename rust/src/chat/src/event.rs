@@ -123,6 +123,12 @@ impl [AssistantContentBlock] {
     }
 }
 
+/// Multimodal placeholder token counts per modality, keyed by the wire modality
+/// name (`image`, `audio`, `video`).
+///
+/// Reported through `usage.prompt_tokens_details.multimodal_tokens`.
+pub type MultimodalTokenCounts = std::collections::BTreeMap<String, usize>;
+
 /// Chat-level token usage for one completed request.
 ///
 /// Extends the engine-level [`TokenUsage`] with reasoning attribution measured

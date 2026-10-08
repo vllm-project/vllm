@@ -18,7 +18,7 @@ pub use backend::{
 pub use error::{Error, Result};
 pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
-    AssistantToolCall, ChatEvent, ChatTokenUsage,
+    AssistantToolCall, ChatEvent, ChatTokenUsage, MultimodalTokenCounts,
 };
 use futures::{StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
@@ -367,14 +367,32 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
+        Ok(self.chat_with_metadata(request).await?.0)
+    }
+
+    /// Render, tokenize, and submit one chat request, also returning the
+    /// multimodal placeholder token counts measured while rendering.
+    ///
+    /// The counts describe the placeholder spans the renderer expanded, so they
+    /// only exist once the prompt is final. Callers that report usage attach
+    /// them to `usage.prompt_tokens_details`.
+    pub async fn chat_with_metadata(
+        &self,
+        request: ChatRequest,
+    ) -> Result<(ChatEventStream, Option<MultimodalTokenCounts>)> {
         let (text_request, output_processor) =
             self.processor.prepare(request, self.text.request_processor()).await?;
+        let multimodal_tokens =
+            multimodal::count_multimodal_tokens(text_request.mm_features.as_deref());
         let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
 
-        Ok(ChatEventStream::new(request_id, structured_stream))
+        Ok((
+            ChatEventStream::new(request_id, structured_stream),
+            multimodal_tokens,
+        ))
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
