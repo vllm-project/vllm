@@ -1208,6 +1208,47 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
     torch.testing.assert_close(captured["indices"], reference, rtol=0, atol=0)
 
 
+def test_flashmla_hisparse_resident_mixed_batch_skips_host_staging():
+    """A resident prefill batched with decodes reads resident KV in one kernel
+    instead of staging its whole history from host."""
+    num_tokens = 6
+    q = torch.zeros(num_tokens, 4, 576, dtype=torch.bfloat16, device=DEVICE_TYPE)
+    topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=DEVICE_TYPE)
+    counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=DEVICE_TYPE)
+    kernel_rows: list[int] = []
+
+    def kernel(q, kv, indices, lengths, actual_num_heads):  # noqa: ARG001
+        kernel_rows.append(q.shape[0])
+        return q[..., :512], None
+
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.caches = [SimpleNamespace(all_context_pages_resident=True)]
+    index_group.convert_logical_to_physical_topk = MagicMock(
+        return_value=(topk, counts)
+    )
+    index_group.physical_kv_cache = MagicMock(
+        return_value=torch.empty(1, device=DEVICE_TYPE)
+    )
+    index_group.stage_prefill_rows = MagicMock(side_effect=AssertionError)
+    impl = SimpleNamespace(
+        _bf16_flash_mla_kernel=kernel,
+        index_group=index_group,
+        index_group_index=0,
+    )
+    metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32),
+        block_table=torch.zeros((2, 1), dtype=torch.int32),
+        num_decode_tokens=2,
+    )
+
+    out, _ = FlashMLASparseImpl._forward_bf16_kv(
+        impl, q, torch.empty(1, device=DEVICE_TYPE), topk, metadata, q.shape[1]
+    )
+
+    assert kernel_rows == [num_tokens]
+    assert out.shape == (num_tokens, 4, 512)
+
+
 @pytest.mark.parametrize(
     "seq_lens,max_buf,expected",
     [
@@ -3096,6 +3137,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     kv_pool = kv_cache.squeeze(1).cpu().pin_memory()
     cache_handle.runtime.bind_source_cache(kv_pool)
     cache_handle.source_block_table = metadata.block_table
+    cache_handle.all_context_pages_resident = False
 
     staging_calls = []
     original_gather = cache_handle.runtime.gather_prefill_cache
@@ -3302,6 +3344,9 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
             num_decodes, 1, dtype=torch.int32, device=device
         ),
         swap_in=MagicMock(side_effect=swap_in),
+        all_context_pages_resident=True,
+        num_decode_tokens=num_tokens,
+        num_actual_tokens=num_tokens,
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -3409,6 +3454,56 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     assert kernel_shapes == [q.shape]
     assert output.shape == (num_tokens, 2, 1)
     assert lse is None
+
+
+def test_flashinfer_hisparse_resident_mixed_batch_skips_host_staging():
+    """A resident prefill batched with decodes reads resident KV in one kernel
+    instead of staging its whole history from host."""
+    device = torch.device("cpu")
+    num_tokens = 6
+    q = torch.randn(num_tokens, 2, 4, device=device)
+    topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=device)
+    valid_counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=device)
+    kernel_shapes: list[torch.Size] = []
+
+    def convert(self, layer_index, logical_topk_indices, *args, **kwargs):  # noqa: ARG001
+        return logical_topk_indices, valid_counts[: logical_topk_indices.shape[0]]
+
+    def prepare_kernel(self, *args, **kwargs):  # noqa: ARG001
+        pass
+
+    def run_kernel(self, q, cache, indices, counts):  # noqa: ARG001
+        kernel_shapes.append(q.shape)
+        return q[..., :1], None
+
+    cache_handle = SimpleNamespace(
+        all_context_pages_resident=True,
+        runtime=SimpleNamespace(
+            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
+        ),
+    )
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.caches = [cache_handle]
+    index_group.convert_logical_to_physical_topk = MethodType(convert, index_group)
+    index_group.stage_prefill_rows = MagicMock(side_effect=AssertionError)
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.topk_indices_buffer = topk
+    impl.index_group = index_group
+    impl.index_group_index = 0
+    impl._prepare_mqa_kernel = MethodType(prepare_kernel, impl)
+    impl._run_mqa_kernel = MethodType(run_kernel, impl)
+    metadata = SimpleNamespace(num_decode_tokens=2)
+
+    output, _ = FlashInferMLASparseImpl.forward_mqa(
+        impl,
+        q,
+        torch.empty(1, device=device),
+        metadata,
+        SimpleNamespace(),
+    )
+
+    assert kernel_shapes == [q.shape]
+    assert output.shape == (num_tokens, 2, 1)
 
 
 @pytest.mark.skipif(
@@ -3603,16 +3698,23 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     impl._run_mqa_kernel.assert_called_once()
 
 
-def test_hisparse_resident_prefill_uses_attention_block_stride():
+@pytest.mark.parametrize("workspace_rows", [1, 4], ids=["prefill_sized", "mixed"])
+def test_hisparse_resident_prefill_uses_attention_block_stride(workspace_rows):
+    """Resident batches with prefill rows read resident pages directly, even when
+    they fit the decode residency workspace."""
     expected = torch.tensor([[19]], dtype=torch.int32)
     cache_handle = SimpleNamespace(
         all_context_pages_resident=True,
+        num_decode_tokens=1,
+        num_actual_tokens=2,
         view=SimpleNamespace(block_size=64, attention_block_stride=832),
         block_table=torch.tensor([[3]], dtype=torch.int32),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache_handle]
-    index_group.physical_topk_indices = torch.empty((1, 1), dtype=torch.int32)
+    index_group.physical_topk_indices = torch.empty(
+        (workspace_rows, 1), dtype=torch.int32
+    )
     index_group._convert_once = MagicMock(return_value=expected)
     topk = torch.zeros((2, 1), dtype=torch.int32)
     metadata = SimpleNamespace(
