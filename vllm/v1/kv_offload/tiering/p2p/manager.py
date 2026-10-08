@@ -35,6 +35,7 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -210,6 +211,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     and existing sessions are polled even when no requests are scheduled.
     """
 
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
     serves_external_requests: ClassVar[bool] = True
 
     def __init__(
