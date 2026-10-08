@@ -348,16 +348,16 @@ class ExpertMapManager:
             ValueError: If expert is not on this rank
 
         """
-        if self._expert_map is None:
+        if self._expert_map_cpu is None:
             return global_id
 
-        return self._expert_map[global_id].item()
+        return self._expert_map_cpu[global_id]
 
     def is_local_expert(self, global_id: int) -> bool:
         """Check if expert is assigned to this rank."""
-        if self._expert_map is None:
+        if self._expert_map_cpu is None:
             return True
-        return self._expert_map[global_id] != -1
+        return self._expert_map_cpu[global_id] != -1
 
     def update(
         self,
@@ -447,6 +447,10 @@ class ExpertMapManager:
         )
 
         self._local_num_experts += self.num_fused_shared_experts
+        if self._expert_map is not None:
+            self._expert_map_cpu = self._expert_map.cpu().tolist()
+        else:
+            self._expert_map_cpu = None
 
     def _init_routing_tables(
         self,
