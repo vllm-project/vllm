@@ -379,8 +379,7 @@ class DequantizeAndGatherKCacheKernel(
         return self.CompileKey(
             **compile_key_fields,
             block_table_stride=triton_scalar_specialization_rep(
-                (max_model_len + block_table_block_size - 1)
-                // block_table_block_size
+                (max_model_len + block_table_block_size - 1) // block_table_block_size
             ),
             cache_block_size=cache_block_size,
             block_stride=block_stride,
