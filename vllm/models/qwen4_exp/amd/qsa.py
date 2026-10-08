@@ -252,15 +252,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        mm_config = model_config.multimodal_config
-        text_only = mm_config is None or mm_config.language_model_only
-        self.use_fused_qk_norm_rope_gate = (
-            self.attn_output_gate
-            and getattr(self.rotary_emb, "is_neox_style", False)
-            and current_platform.is_cuda()
-            and text_only
-        )
-
         self.layer_name = f"{prefix}.attn"
         self.attn_type = AttentionType.DECODER
         self.kv_cache_dtype = cache_config.cache_dtype
@@ -298,6 +289,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # the main K/V cache write (see QSAIndexer.forward); otherwise all of
         # them take the separate kernels. The main RoPE reads the indexer's
         # cos/sin table, which is the same rotary_emb.
+        # NVIDIA gates the same launch on use_fused_qk_norm_rope_gate, which
+        # requires is_cuda() and so stays off on ROCm. supports_fused_pre_indexer
+        # already requires NeoX RoPE and a compatible MRoPE section. The
+        # power-of-two head dim is tl.arange(0, MAIN_D) in the main program.
         self.use_fused_qsa_prepare = (
             self.attn_output_gate
             and self.indexer.use_fused_pre_indexer
