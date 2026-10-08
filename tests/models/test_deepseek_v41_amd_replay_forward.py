@@ -159,8 +159,8 @@ def _forward(model):
     return out
 
 
-def test_replay_layers_see_only_the_trailing_window(monkeypatch):
-    model, layers, calls, _saved_aux, _scattered = _model(monkeypatch)
+def test_amd_replay_forward_trims_to_the_window(monkeypatch):
+    model, layers, calls, saved_aux, scattered = _model(monkeypatch)
     assert model.decoder_replay_layers.replay_batch is None
     out = _forward(model)
     replay = model.decoder_replay_layers.replay_batch
@@ -177,13 +177,7 @@ def test_replay_layers_see_only_the_trailing_window(monkeypatch):
     hidden = out["hidden_states"][:, 0, 0]
     assert torch.equal(hidden[ROWS], window_ids)
     assert hidden[: FULL - WINDOW].eq(0).all()
-    assert calls  # the seams below read these
 
-
-def test_final_mhc_post_runs_on_the_replay_window(monkeypatch):
-    model, _layers, calls, _saved_aux, _scattered = _model(monkeypatch)
-    _forward(model)
-    window_ids = torch.arange(FULL, device=DEVICE, dtype=torch.float32)[ROWS]
     # calls[0] is the cut-aux capture. calls[1] is the final mhc_post.
     # Both run inside the replay batch, before the scatter back to FULL.
     assert len(calls) == 2
@@ -191,15 +185,10 @@ def test_final_mhc_post_runs_on_the_replay_window(monkeypatch):
     assert torch.equal(calls[0], window_ids)
     assert torch.equal(calls[1], window_ids)
 
-
-def test_aux_at_the_cut_is_captured_on_the_replay_rows(monkeypatch):
-    model, _layers, _calls, saved_aux, scattered = _model(monkeypatch)
-    _forward(model)
     # The early loop skips this id. The replay loop does not see it either.
     assert saved_aux[0] == []
     assert saved_aux[1] == []
     _hidden, _pre_mix, aux = scattered[0]
-    window_ids = torch.arange(FULL, device=DEVICE, dtype=torch.float32)[ROWS]
     assert aux.shape[0] == FULL
     assert torch.equal(aux[ROWS, 0], window_ids)
     assert aux[: FULL - WINDOW].eq(0).all()
