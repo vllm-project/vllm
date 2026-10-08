@@ -169,6 +169,12 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(single_request, raw_request)
+            chat_template_kwargs = self._effective_chat_template_kwargs(single_request)
+            parser = (
+                self._make_parser(single_request, tokenizer, chat_template_kwargs)
+                if self.parser_cls is not None
+                else None
+            )
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -179,7 +185,12 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
-                    reasoning_ended=None,
+                    **self._engine_reasoning_kwargs(
+                        single_request,
+                        parser,
+                        chat_template_kwargs,
+                        self._extract_prompt_components(engine_prompt).token_ids,
+                    ),
                 )
             )
 

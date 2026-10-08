@@ -233,6 +233,28 @@ class OpenAIServingChat(GenerateBaseServing):
         """
         return chat_template_kwargs
 
+    def _engine_reasoning_kwargs(
+        self,
+        request: ChatCompletionRequest,
+        parser: Parser | None,
+        chat_template_kwargs: dict[str, Any],
+        prompt_token_ids: list[int] | None,
+    ) -> dict[str, Any]:
+        """`reasoning_ended` and `reasoning_parser_kwargs` for `generate()`."""
+        reasoning_parser_kwargs = None
+        if parser is not None and parser.reasoning_parser is not None:
+            reasoning_parser_kwargs = {
+                "chat_template_kwargs": self._engine_chat_template_kwargs(
+                    chat_template_kwargs
+                ),
+            }
+        return {
+            "reasoning_ended": request.resolve_reasoning_ended(
+                parser, prompt_token_ids or []
+            ),
+            "reasoning_parser_kwargs": reasoning_parser_kwargs,
+        }
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
@@ -364,10 +386,6 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                reasoning_ended = request.resolve_reasoning_ended(
-                    parser, prompt_token_ids or []
-                )
-
                 generator = self.engine_client.generate(
                     engine_input,
                     sampling_params,
@@ -377,14 +395,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
-                    reasoning_ended=reasoning_ended,
-                    reasoning_parser_kwargs={
-                        "chat_template_kwargs": self._engine_chat_template_kwargs(
-                            chat_template_kwargs
-                        ),
-                    }
-                    if parser is not None and parser.reasoning_parser is not None
-                    else None,
+                    **self._engine_reasoning_kwargs(
+                        request, parser, chat_template_kwargs, prompt_token_ids
+                    ),
                 )
 
             generators.append(generator)
