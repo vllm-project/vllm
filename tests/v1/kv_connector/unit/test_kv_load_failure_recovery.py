@@ -240,7 +240,7 @@ def test_sync_load_failure_discards_multitoken_async_frames():
     )
     scheduler.add_request(request)
 
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(
             {request.request_id: 2 * scheduler.block_size},
@@ -318,7 +318,7 @@ def test_sync_load_failure_shared_blocks_rewinds_all_async_frames(
     )
     scheduler.add_request(request2)
 
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(
             {request1.request_id: num_external_computed_tokens},
@@ -420,7 +420,7 @@ def _setup_shared_sync_load_failure(
     for sharer in sharers:
         scheduler.add_request(sharer)
 
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
     external_matches = {owner.request_id: num_external_computed_tokens}
     external_matches.update(
         {
@@ -604,8 +604,19 @@ def test_shared_block_recovery_scheduling_boundary_matrix(
 
 
 @pytest.mark.parametrize("aux_output", [False, True])
-def test_shared_block_recovery_reassigns_cancelled_owner(aux_output: bool):
+@pytest.mark.parametrize("sharer_queue", ["running", "kv_holding", "deferred"])
+def test_shared_block_recovery_reassigns_cancelled_owner(
+    aux_output: bool, sharer_queue: str
+):
     scheduler, owner, (sharer,) = _setup_shared_sync_load_failure(aux_output=aux_output)
+    if sharer_queue != "running":
+        scheduler.running.remove(sharer)
+        sharer.status = RequestStatus.WAITING
+        if sharer_queue == "kv_holding":
+            scheduler._enqueue_waiting_request(sharer)
+        # A skipped peer remains tracked even while schedule() holds it in
+        # a temporary queue. Also cover deduplication of a queued deferred peer.
+        scheduler.deferred_waiting.add(sharer)
     owner_block_ids = scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0]
     sharer_block_ids = scheduler.kv_cache_manager.get_block_ids(sharer.request_id)[0]
     owner_only_block_id = next(
@@ -619,17 +630,53 @@ def test_shared_block_recovery_reassigns_cancelled_owner(aux_output: bool):
     scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
 
     assert sharer.num_computed_tokens == 0
+    assert not scheduler._kv_recovery_dependencies
+    assert {
+        owner_id for owner_id, _ in scheduler._kv_recovery_block_owners.values()
+    } == {sharer.request_id}
     assert (
         scheduler.kv_cache_manager.block_pool.blocks[owner_only_block_id].block_hash
         is None
     )
+    if sharer_queue == "deferred":
+        scheduler.kv_holding_waiting.add_request(sharer)
     recovery = scheduler.schedule()
-    assert recovery.num_scheduled_tokens == {sharer.request_id: 32}
+    # With no competing request, the prefill cap no longer limits the budget.
+    assert recovery.num_scheduled_tokens == {
+        sharer.request_id: scheduler.max_num_scheduled_tokens
+    }
+    assert sharer not in scheduler.deferred_waiting
     if aux_output:
         assert recovery.aux_output_connector_metadata is not None
         assert recovery.aux_output_connector_metadata.finished_requests == (
             owner.request_id,
         )
+
+
+def test_shared_block_recovery_transfers_to_deferred_peer_in_stable_order():
+    scheduler, owner, sharers = _setup_shared_sync_load_failure(num_sharers=2)
+    sharers = sorted(sharers, key=lambda req: req.request_id)
+    for sharer in reversed(sharers):
+        scheduler.running.remove(sharer)
+        sharer.status = RequestStatus.WAITING
+        scheduler.deferred_waiting.add(sharer)
+
+    scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+
+    new_owner, dependent = sharers
+    assert new_owner.num_computed_tokens == 0
+    assert dependent.num_computed_tokens == 4 * scheduler.block_size
+    assert scheduler._kv_recovery_dependencies == {
+        dependent.request_id: {new_owner.request_id: 4 * scheduler.block_size}
+    }
+    # Restore the transient queue with the dependent first: it must stay
+    # deferred while the new owner makes progress behind it.
+    for sharer in reversed(sharers):
+        scheduler.kv_holding_waiting.add_request(sharer)
+    recovery = scheduler.schedule()
+    assert recovery.num_scheduled_tokens == {new_owner.request_id: 32}
+    assert list(scheduler.kv_holding_waiting) == [dependent]
+    assert scheduler.deferred_waiting == {dependent}
 
 
 @pytest.mark.parametrize("invalid_block_idx", [0, 2])
@@ -707,10 +754,15 @@ def test_shared_block_recovery_quarantines_optimistic_downstream_blocks():
     )
     scheduler.finish_requests(sharer.request_id, RequestStatus.FINISHED_ABORTED)
 
+    # A solo request bypasses the prefill cap. Limit this frame's budget to
+    # leave the last downstream block unrepaired for the newcomer check.
+    original_token_budget = scheduler.max_num_scheduled_tokens
+    scheduler.max_num_scheduled_tokens = 32
     first_recovery = scheduler.schedule()
     assert first_recovery.num_scheduled_tokens == {owner.request_id: 32}
     _update_prefill_frame(scheduler, first_recovery, [owner])
     assert owner.num_computed_tokens - owner.num_in_flight_tokens == 112
+    scheduler.max_num_scheduled_tokens = original_token_budget
 
     newcomer = create_request(
         num_tokens=10 * scheduler.block_size,
@@ -829,7 +881,7 @@ def test_shared_block_recovery_keeps_independent_owners_parallel():
     for request in requests:
         scheduler.add_request(request)
 
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(
             {
