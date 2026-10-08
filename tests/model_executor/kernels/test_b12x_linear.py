@@ -987,8 +987,11 @@ def _block_weights(n, k, codec):
 
 
 @pytest.mark.parametrize("codec", ["iq2_xs", "iq2_xxs", "q8_0"])
+@pytest.mark.parametrize("profile_first", [False, True])
 @torch.inference_mode()
-def test_b12x_block_quant_dense_compiled_graph(default_vllm_config, codec):
+def test_b12x_block_quant_dense_compiled_graph(
+    default_vllm_config, codec, profile_first
+):
     supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
     if not supported:
         pytest.skip(reason)
@@ -1007,32 +1010,35 @@ def test_b12x_block_quant_dense_compiled_graph(default_vllm_config, codec):
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(raw.cuda(), requires_grad=False)
     method.process_weights_after_loading(layer)
-    try:
-        run = torch.compile(
-            lambda x: method.apply(layer, x), fullgraph=True, dynamic=True
-        )
-        for rows in (1, 4, 17):
-            x = torch.randn(rows, 256, device="cuda", dtype=torch.bfloat16)
-            run(x)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                output = run(x)
-            for _ in range(2):
-                x.normal_()
-                allocated = torch.accelerator.memory_allocated()
-                graph.replay()
-                torch.accelerator.synchronize()
-                assert torch.accelerator.memory_allocated() == allocated
-                expected = (x.float() @ decoded.float().T).bfloat16()
-                torch.testing.assert_close(output, expected, rtol=0.015, atol=0.03125)
-            graph.reset()
-    finally:
-        layer.b12x_block_finalizer()
+    assert layer.b12x_block_plan.prepared is None
+    if profile_first:
+        method.apply(layer, torch.zeros(32, 256, device="cuda", dtype=torch.bfloat16))
+    layer.b12x_warmup_provider.get_b12x_warmup_unit(
+        layer, (1, 4, 32), torch.bfloat16
+    ).compile()
+    assert layer.b12x_block_plan.prepared is not None
+    run = torch.compile(lambda x: method.apply(layer, x), fullgraph=True, dynamic=True)
+    for rows in (1, 4, 17):
+        x = torch.randn(rows, 256, device="cuda", dtype=torch.bfloat16)
+        run(x)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = run(x)
+        for _ in range(2):
+            x.normal_()
+            allocated = torch.accelerator.memory_allocated()
+            graph.replay()
+            torch.accelerator.synchronize()
+            assert torch.accelerator.memory_allocated() == allocated
+            expected = (x.float() @ decoded.float().T).bfloat16()
+            torch.testing.assert_close(output, expected, rtol=0.015, atol=0.03125)
+        graph.reset()
 
 
 @pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("profile_first", [False, True])
 @torch.inference_mode()
-def test_b12x_q8_embedding_graph(default_vllm_config, id_dtype):
+def test_b12x_q8_embedding_graph(default_vllm_config, id_dtype, profile_first):
     supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
     if not supported:
         pytest.skip(reason)
@@ -1052,23 +1058,29 @@ def test_b12x_q8_embedding_graph(default_vllm_config, id_dtype):
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(raw.cuda(), requires_grad=False)
     method.process_weights_after_loading(layer)
-    try:
-        run = torch.compile(
-            lambda x: method.embedding(layer, x), fullgraph=True, dynamic=True
-        )
-        for count in (7, 9, 70):
-            ids = torch.arange(count, device="cuda", dtype=id_dtype)
-            torch._dynamo.mark_dynamic(ids, 0)
-            torch.testing.assert_close(run(ids), decoded[ids.long()], rtol=0, atol=0)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            output = run(ids)
-        ids.add_(20)
-        allocated = torch.accelerator.memory_allocated()
-        graph.replay()
-        torch.accelerator.synchronize()
-        assert torch.accelerator.memory_allocated() == allocated
-        torch.testing.assert_close(output, decoded[ids.long()], rtol=0, atol=0)
-        graph.reset()
-    finally:
-        layer.b12x_block_finalizer()
+    assert all(plan.prepared is None for plan in layer.b12x_embedding_plans.values())
+    if profile_first:
+        method.embedding(layer, torch.zeros(32, device="cuda", dtype=id_dtype))
+    layer.b12x_warmup_provider.get_b12x_warmup_unit(
+        layer, (1, 4, 32), torch.bfloat16
+    ).compile()
+    assert all(
+        plan.prepared is not None for plan in layer.b12x_embedding_plans.values()
+    )
+    run = torch.compile(
+        lambda x: method.embedding(layer, x), fullgraph=True, dynamic=True
+    )
+    for count in (7, 9, 70):
+        ids = torch.arange(count, device="cuda", dtype=id_dtype)
+        torch._dynamo.mark_dynamic(ids, 0)
+        torch.testing.assert_close(run(ids), decoded[ids.long()], rtol=0, atol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = run(ids)
+    ids.add_(20)
+    allocated = torch.accelerator.memory_allocated()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert torch.accelerator.memory_allocated() == allocated
+    torch.testing.assert_close(output, decoded[ids.long()], rtol=0, atol=0)
+    graph.reset()
