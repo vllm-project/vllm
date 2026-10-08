@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import BaseIncrementalDetokenizer
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.outputs import LogprobsLists, SamplingMaskLists
@@ -94,12 +94,45 @@ def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: boo
     expected_text = "abcd" if include_stop_str_in_output else "ab"
     assert detok.output_text == expected_text
 
-    # The skipped final token should still be recorded in token_ids.
-    assert detok.output_token_ids == token_ids
+    # Tokens after the stop string, including the stop token, are dropped.
+    assert detok.output_token_ids == token_ids[:4]
 
     # get_next_output_text should return the full text when finished=True.
     # (Buffering only applies during streaming when finished=False.)
     assert detok.get_next_output_text(finished=True, delta=False) == expected_text
+
+
+@pytest.mark.parametrize(
+    "min_tokens,num_kept",
+    [(0, 2), (1, 2), (2, 4), (3, 4), (4, None)],
+)
+@pytest.mark.parametrize("num_prev_tokens", [0, 1])
+def test_stop_string_min_tokens_within_step(
+    include_stop_str_in_output: bool, min_tokens, num_kept, num_prev_tokens
+):
+    """Stop strings completing within min_tokens are ignored, even when the
+    min_tokens boundary falls in the middle of a multi-token step."""
+    token_ids = [ord(c) for c in "cdcdx"]
+    req = _make_request(
+        stop=["cd"],
+        include_stop_str_in_output=include_stop_str_in_output,
+        min_tokens=min_tokens,
+    )
+    detok = _DummyDetokenizer(req)
+
+    if num_prev_tokens:
+        assert detok.update(token_ids[:num_prev_tokens], False) is None
+    result = detok.update(token_ids[num_prev_tokens:], False)
+
+    if num_kept is None:
+        assert result is None
+        assert detok.output_text == "cdcdx"
+        assert detok.output_token_ids == token_ids
+        return
+    assert result == "cd"
+    text_len = num_kept if include_stop_str_in_output else num_kept - 2
+    assert detok.output_text == "cdcdx"[:text_len]
+    assert detok.output_token_ids == token_ids[:num_kept]
 
 
 @pytest.mark.parametrize(
@@ -110,9 +143,17 @@ def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: boo
         (["ab", "", "c", "", "d", "", "ef"], 5),
     ],
 )
+@pytest.mark.parametrize("stop_terminated", [False, True])
 def test_stop_string_trims_speculative_overflow(
-    include_stop_str_in_output: bool, decoded_tokens, keep, monkeypatch
+    include_stop_str_in_output: bool,
+    decoded_tokens,
+    keep,
+    stop_terminated: bool,
+    monkeypatch,
 ):
+    if stop_terminated:
+        # The engine also stopped on a stop token at the end of the batch.
+        decoded_tokens = decoded_tokens + [""]
     token_ids = list(range(len(decoded_tokens)))
     stop_string = "cd"
     expected_token_ids = token_ids[:keep]
@@ -134,6 +175,7 @@ def test_stop_string_trims_speculative_overflow(
             EngineCoreOutput(
                 request_id=req.request_id,
                 new_token_ids=token_ids,
+                finish_reason=FinishReason.STOP if stop_terminated else None,
                 new_logprobs=LogprobsLists(
                     np.array(token_ids).reshape(-1, 1),
                     np.zeros((len(token_ids), 1)),
@@ -143,6 +185,7 @@ def test_stop_string_trims_speculative_overflow(
                 new_sampling_mask=SamplingMaskLists(
                     np.array(token_ids), np.arange(len(token_ids) + 1)
                 ),
+                routed_experts=np.array(token_ids).reshape(-1, 1, 1),
             )
         ]
     )
@@ -157,3 +200,5 @@ def test_stop_string_trims_speculative_overflow(
     assert len(result.logprobs) == len(expected_token_ids)
     assert result.sampling_mask is not None
     assert result.sampling_mask.token_ids == [[token] for token in expected_token_ids]
+    assert result.routed_experts is not None
+    assert result.routed_experts.ravel().tolist() == expected_token_ids

@@ -746,7 +746,7 @@ class OutputProcessor:
                     stop_reason = stop_string
                     # Mirror detokenizer trimming on delta outputs and logprobs.
                     keep = req_state.detokenizer.num_output_tokens() - num_tokens_before
-                    if keep < len(new_token_ids):
+                    if (num_dropped := len(new_token_ids) - keep) > 0:
                         del new_token_ids[keep:]
                         if engine_core_output.new_logprobs is not None:
                             engine_core_output.new_logprobs = (
@@ -758,6 +758,11 @@ class OutputProcessor:
                                     0, keep
                                 )
                             )
+                        routed_experts = engine_core_output.routed_experts
+                        if routed_experts is not None:
+                            req_state.routed_experts_chunks[-1] = routed_experts[
+                                : max(len(routed_experts) - num_dropped, 0)
+                            ]
 
                 if engine_core_output.new_sampling_mask is not None:
                     req_state.sampling_mask_chunks.append(
