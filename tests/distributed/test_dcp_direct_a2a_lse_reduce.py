@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 import vllm.v1.attention.ops.cp_common as cp_common
 import vllm.v1.attention.ops.dcp as dcp
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -847,8 +848,15 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         total_heads = world_size * heads_per_rank
         active_ubatch = [0]
         dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
-        workspace = dcp.DirectDCPA2AWorkspace(
-            dist.group.WORLD,
+        # ROCm exchanges IPC handles over the DCP group's CPU (gloo) group.
+        if current_platform.is_rocm():
+            workspace_cls = dcp.RocmDirectDCPA2AWorkspace
+            workspace_group = dist.new_group(backend="gloo")
+        else:
+            workspace_cls = dcp.DirectDCPA2AWorkspace
+            workspace_group = dist.group.WORLD
+        workspace = workspace_cls(
+            workspace_group,
             device,
             max_num_tokens,
             heads_per_rank,
@@ -956,7 +964,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             query_start_loc = torch.cat(
                 (
                     query_lens_tensor.new_zeros(1),
-                    query_lens_tensor.cumsum(0),
+                    query_lens_tensor.cumsum(0, dtype=torch.int32),
                 )
             )
             empty_rows = torch.repeat_interleave(seq_lens == 0, query_lens_tensor)
@@ -1077,6 +1085,12 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             4,
             marks=pytest.mark.skipif(
                 torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
+            ),
+        ),
+        pytest.param(
+            8,
+            marks=pytest.mark.skipif(
+                torch.accelerator.device_count() < 8, reason="Need at least 8 GPUs."
             ),
         ),
     ],
