@@ -1747,7 +1747,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the fused finalize epilogue of the FlashInfer CUTLASS fused-MoE kernel.
     # The fused epilogue reduces the top-k expert outputs with atomics and is not
     # deterministic: identical requests can produce different logits. Set to 0
-    # for a bit-reproducible (slightly slower) unfused finalize.
+    # for a bit-reproducible (slightly slower) unfused finalize. FlashInfer (0.7)
+    # keys its autotune cache on this setting, so the first start after changing
+    # it tunes the MoE again.
     "VLLM_FLASHINFER_MOE_FUSED_FINALIZE": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_MOE_FUSED_FINALIZE", "1"))
     ),
