@@ -372,6 +372,13 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
             self._first_ranks.view(),
         )
 
+    def sampled_logprobs(self) -> list[float]:
+        """Logprob of each position's first entry: the sampled token's, as
+        the engine appends it."""
+        ends = self._ends_range(0, len(self))
+        starts = np.concatenate(([0], ends[:-1]))
+        return self._logprobs.view()[starts[starts < ends]].tolist()
+
     def first_token_ids(self, start: int, stop: int) -> list[int]:
         """Token id of the first entry of each position in ``[start, stop)``
         that has entries."""

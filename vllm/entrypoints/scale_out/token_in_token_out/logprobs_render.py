@@ -247,6 +247,20 @@ def render_tokens_logprobs(
     return parts
 
 
+def append_sampled_logprobs(
+    parts: list[bytes], sampled: list[float]
+) -> list[bytes] | None:
+    """Add ``"sampled": sampled`` (clamped floats) as the last key of the
+    rendered logprobs object ``parts``, or None when a value is not finite
+    (the caller then uses the per-entry path, which raises like json)."""
+    values = np.array(sampled, dtype=np.float64)
+    if not np.isfinite(values).all():
+        return None
+    floats = format_float_reprs(values) if len(values) else []
+    parts[-1] = parts[-1][:-1]  # the closing brace
+    return [*parts, b',"sampled":[', b",".join(floats), b"]}"]
+
+
 def _dumps(content: Any) -> bytes:
     """Same serialization as ``starlette.responses.JSONResponse.render``."""
     return json.dumps(

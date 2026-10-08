@@ -254,6 +254,17 @@ class GenerateRequest(BaseModel):
 
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    return_token_logprobs: bool = False
+    """Return the sampled token's logprob per generated position as the flat
+    float list ``logprobs.sampled`` (see ``GenerateLogProbs``). Intended for RL
+    rollout collection, where the trainer needs one float per token and the
+    per-token objects dominate API-server CPU time. Sets
+    ``sampling_params.logprobs = 0`` when it is unset; with ``logprobs=0`` no
+    per-token entries are built and ``logprobs.content`` is ``None``, with
+    ``logprobs > 0`` ``content`` is returned alongside. Non-streaming and
+    ``output_mode="tokens"`` only; requires ``--logprobs-mode raw_logprobs`` or
+    ``processed_logprobs``. Values are clamped to ``>= -9999.0`` like
+    ``content``."""
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -388,10 +399,16 @@ class GenerateLogProbsContent(GenerateLogProb):
 class GenerateLogProbs(BaseModel):
     """Output logprobs for one choice.
 
-    ``content`` holds one entry per generated token.
+    ``content`` holds one entry per generated token. ``content=None`` is the
+    normal state of the sampled-only mode (``return_token_logprobs`` with
+    ``logprobs=0``), where only ``sampled`` is returned; it is not an error.
     """
 
     content: list[GenerateLogProbsContent] | None = None
+    sampled: list[float] | None = None
+    """The sampled token's logprob per generated position, set only for
+    ``return_token_logprobs`` requests (and omitted from the response
+    otherwise)."""
 
 
 class GenerateChoiceBase(BaseModel):

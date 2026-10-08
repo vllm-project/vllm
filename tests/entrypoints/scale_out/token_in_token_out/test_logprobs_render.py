@@ -80,13 +80,14 @@ def _final(outputs, finish_reason="length"):
     )
 
 
-def _body(serving, k, outputs, finish_reason="length"):
+def _body(serving, k, outputs, finish_reason="length", **fields):
     """The response body as the router sends it, and whether it was
     rendered from the rows."""
     request = GenerateRequest(
         token_ids=[1, 2, 3],
         sampling_params=SamplingParams(max_tokens=10, logprobs=k),
         model=MODEL_NAME,
+        **fields,
     )
     response = serving._build_full_response(
         request, _final(outputs, finish_reason), "r", MODEL_NAME, 1700000000
@@ -94,7 +95,12 @@ def _body(serving, k, outputs, finish_reason="length"):
     if isinstance(response, RenderedGenerateResponse):
         return response.body, True
     assert isinstance(response, GenerateResponseBase)
-    return JSONResponse(content=response.model_dump()).body, False
+    exclude = (
+        None
+        if request.return_token_logprobs
+        else {"choices": {"__all__": {"logprobs": {"sampled"}}}}
+    )
+    return JSONResponse(content=response.model_dump(exclude=exclude)).body, False
 
 
 def _outcome(serving, k, choices, finish_reason="length"):
@@ -211,6 +217,35 @@ def test_sampled_entry_and_top_logprobs_follow_dict_semantics(k, row, expected_t
     assert [
         (e["token_id"], e["logprob"], e["rank"]) for e in entry["top_logprobs"]
     ] == expected_top
+
+
+@pytest.mark.parametrize("name,k,choices", _cases(), ids=[c[0] for c in _cases()])
+def test_return_token_logprobs_with_top_k_matches_the_per_entry_path(
+    name, k, choices, monkeypatch
+):
+    """With return_token_logprobs and k > 0, ``sampled`` comes from slot 0 of
+    the rows and ``content`` from the fast render: the same bytes (or error)
+    as the per-entry path of return_token_logprobs."""
+    if k <= 0:
+        return
+    serving = _build_serving_tokens(_mock_engine())
+    fast_render = serving_mod.render_tokens_logprobs
+    results = []
+    for fast in (False, True):
+        monkeypatch.setattr(
+            serving_mod,
+            "render_tokens_logprobs",
+            fast_render if fast else (lambda *args: None),
+        )
+        outputs = [(tokens, _stored(k, *steps, flat=True)) for tokens, steps in choices]
+        try:
+            results.append(_body(serving, k, outputs, return_token_logprobs=True)[0])
+        except ValueError as e:
+            results.append(f"{type(e).__name__}: {e}")
+    assert results[1] == results[0]
+    if isinstance(results[0], bytes):
+        logprobs = json.loads(results[0])["choices"][0]["logprobs"]
+        assert list(logprobs) == ["content", "sampled"]
 
 
 def test_aborted_choice_without_tokens():
