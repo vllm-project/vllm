@@ -363,14 +363,8 @@ def _token_sizes(max_tokens: int) -> list[int]:
     return sizes
 
 
-def _threshold(measurements: list[SPMeasurement]) -> tuple[str, int | None, str]:
-    winning = [
-        m.lower_benefit_ms > max(0.05, 0.02 * m.conventional_ms) for m in measurements
-    ]
-    if not winning[-1]:
-        return "disabled", None, "no reliable benefit at max_batched_tokens"
-    first = next(i for i in range(len(winning)) if all(winning[i:]))
-    return "enabled", measurements[first].tokens, ""
+def _beneficial(measurement: SPMeasurement) -> bool:
+    return measurement.lower_benefit_ms > max(0.05, 0.02 * measurement.conventional_ms)
 
 
 def _screen_score(samples: list[float]) -> float:
@@ -640,15 +634,24 @@ def profile_sp_config(
         )
 
     measurements: list[SPMeasurement] = []
-    for tokens in _token_sizes(max_batched_tokens):
+    threshold = None
+    sizes = _token_sizes(max_batched_tokens)
+    streak = 0
+    for tokens in sizes:
         result = measure_size(tokens)
         if result is None:
             return inconclusive(
                 "measurement time budget exceeded", measurements, candidate_results
             )
         measurements.append(result)
-
-    status, threshold, reason = _threshold(measurements)
+        streak = streak + 1 if _beneficial(result) else 0
+        if streak == min(3, len(sizes)):
+            threshold = measurements[-streak].tokens
+            break
+    status = "enabled" if threshold is not None else "disabled"
+    reason = (
+        "" if threshold is not None else "no sustained benefit with 128-token steps"
+    )
     profile = SPProfile(
         tp_size,
         hidden_size,
