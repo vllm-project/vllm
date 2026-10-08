@@ -68,6 +68,35 @@ def test_exposes_eagle3_aux_hidden_states(model_cls):
     assert model.language_model.model.aux_hidden_state_layers == (1, 2)
 
 
+def test_v47_does_not_read_drop_vision_last_layer():
+    """MiniCPMV4_7Config drops the field the 4.6 constructor reads.
+
+    The shared 4.6 ``__init__`` builds the vision tower, so 4.7 overrides the
+    hook instead of the base class tolerating a missing field. 4.6 keeps
+    reading the config directly.
+    """
+    from types import SimpleNamespace
+
+    def make(cls, config):
+        model = cls.__new__(cls)
+        nn.Module.__init__(model)
+        model.config = config
+        return model
+
+    class NoSuchField:
+        """Stands in for MiniCPMV4_7Config, which has no such attribute."""
+
+    v47 = make(MiniCPMV4_7ForConditionalGeneration, NoSuchField())
+    assert v47._drop_vision_last_layer() is False
+
+    for value in (True, False):
+        v46 = make(
+            MiniCPMV4_6ForConditionalGeneration,
+            SimpleNamespace(drop_vision_last_layer=value),
+        )
+        assert v46._drop_vision_last_layer() is value
+
+
 def test_vit_merger_qkv_is_stacked_before_load():
     mapped = list(
         _stack_vit_merger_qkv(

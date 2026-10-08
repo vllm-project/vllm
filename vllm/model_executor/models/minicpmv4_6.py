@@ -1206,7 +1206,7 @@ class MiniCPMV4_6ForConditionalGeneration(
                 apply_encoder_attention_mask=True,
                 prefix=maybe_prefix(prefix, "vpm"),
             )
-            if config.drop_vision_last_layer:
+            if self._drop_vision_last_layer():
                 self.vpm.encoder.layers = self.vpm.encoder.layers[:-1]
 
             self.vit_merger = MiniCPMV4_6ViTWindowAttentionMerger(
@@ -1236,6 +1236,14 @@ class MiniCPMV4_6ForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+    def _drop_vision_last_layer(self) -> bool:
+        """Whether the last vision encoder layer is dropped.
+
+        MiniCPM-V 4.6 checkpoints always define this. 4.7's config no longer
+        carries the field, so it overrides this.
+        """
+        return self.config.drop_vision_last_layer
 
     # ----- Multimodal parsing -----
 

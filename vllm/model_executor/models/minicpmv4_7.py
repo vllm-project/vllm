@@ -104,6 +104,11 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self._init_canvas_mrope(vllm_config)
 
+    def _drop_vision_last_layer(self) -> bool:
+        # MiniCPMV4_7Config no longer carries this field (transformers marks it
+        # removed), and 4.7 keeps every vision encoder layer.
+        return False
+
     def _init_canvas_mrope(self, vllm_config: VllmConfig) -> None:
         config = self.config
         uses_canvas = bool(getattr(config, "uses_mrope_canvas", False))
