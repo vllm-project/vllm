@@ -446,8 +446,15 @@ def test_select_cuda_deepep_ht_falls_back_from_trtllm(
     "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
     return_value=True,
 )
+@pytest.mark.parametrize(
+    "routing_method",
+    [RoutingMethodType.Renormalize, RoutingMethodType.MiniMax2],
+)
+@pytest.mark.parametrize("moe_backend", ["auto", "flashinfer_trtllm"])
 def test_select_cuda_flashinfer_trtllm_ag_rs_uses_monolithic(
     mock_supports_current_device,
+    routing_method,
+    moe_backend,
 ):
     """Test AG/RS stays on BF16 TRTLLM monolithic when TRTLLM is supported."""
     with (
@@ -462,8 +469,8 @@ def test_select_cuda_flashinfer_trtllm_ag_rs_uses_monolithic(
         ),
     ):
         moe_config = make_dummy_moe_config(num_experts=4, num_local_experts=2)
-        moe_config.moe_backend = "flashinfer_trtllm"
-        moe_config.routing_method = RoutingMethodType.Renormalize
+        moe_config.moe_backend = moe_backend
+        moe_config.routing_method = routing_method
         moe_config.moe_parallel_config.use_ep = True
         moe_config.moe_parallel_config.dp_size = 2
         moe_config.moe_parallel_config.ep_size = 2
