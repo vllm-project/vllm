@@ -47,7 +47,7 @@ from vllm.v1.core.hidden_state_record import (
     RECORD_ENCODING_EXPANSION,
     RecordLayout,
     get_record_carrier_group,
-    get_record_head_bytes,
+    get_record_layers,
     get_record_layout,
     get_record_tail_tokens,
 )
@@ -142,13 +142,12 @@ class HiddenStateHandoff:
         # layers, in each head.
         self.group_id = group_id = get_record_carrier_group(kv_cache_config)
         self.tail_tokens = get_record_tail_tokens(vllm_config, kv_cache_config)
-        views: dict[int, torch.Tensor] = {}
-        for name in kv_cache_config.kv_cache_groups[group_id].layer_names:
-            cache = kv_caches[name]
-            views.setdefault(cache.data_ptr(), cache.view(torch.uint8))
-        self.layer_views = list(views.values())
-        self.head_bytes = sum(v.shape[-1] for v in self.layer_views)
-        assert self.head_bytes == get_record_head_bytes(kv_cache_config, group_id)
+        record_layers = get_record_layers(kv_cache_config)
+        self.layer_views = [
+            kv_caches[name].view(torch.uint8) for name, _ in record_layers
+        ]
+        self.head_bytes = sum(size for _, size in record_layers)
+        assert self.head_bytes == sum(v.shape[-1] for v in self.layer_views)
         assert (
             self.tail_tokens * self.head_bytes
             >= self.record_bytes * RECORD_ENCODING_EXPANSION

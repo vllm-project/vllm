@@ -2941,6 +2941,15 @@ def get_kv_cache_configs(
             vllm_config.parallel_config.decode_context_parallel_size,
         )
 
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is not None and kv_transfer_config.hidden_state_handoff:
+        from vllm.v1.core.hidden_state_record import get_record_layers
+
+        for kv_cache_config in kv_cache_configs:
+            kv_cache_config.hidden_state_record_layers = get_record_layers(
+                kv_cache_config
+            )
+
     return kv_cache_configs
 
 
