@@ -175,9 +175,6 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 // DSV3 fused A GEMM: conditionally compiled so declaration and impl
 // registration are in the source file (dsv3_fused_a_gemm.cu)
 
-// AllSpark ops: declarations are in the source files
-// (allspark_repack.cu and allspark_qgemm_w8a16.cu)
-
 #endif
 
 // CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
@@ -271,7 +268,8 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
     torch::stable::Tensor const& position_ids,
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size, bool apply_q_norm, bool kv_mxfp8);
+    double eps, int64_t cache_block_size, bool apply_q_norm, bool kv_mxfp8,
+    bool apply_q_rope, bool is_q_interleaved);
 
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& kv,
@@ -383,7 +381,9 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> q_out,
     std::optional<torch::stable::Tensor> index_q_out,
     const std::string& kv_cache_dtype, bool skip_index_branch,
-    std::optional<torch::stable::Tensor> q_fp8_out, double q_fp8_scale);
+    std::optional<torch::stable::Tensor> q_fp8_out, double q_fp8_scale,
+    std::optional<torch::stable::Tensor> kv_k_scale,
+    std::optional<torch::stable::Tensor> kv_v_scale);
 
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
 void fused_kda_decode(
@@ -529,6 +529,10 @@ void mnnvl_lamport_reduce_scatter(fptr_t _fa, torch::stable::Tensor& inp,
                                   torch::stable::Tensor& out,
                                   fptr_t local_buffer, fptr_t epoch_buffer,
                                   int64_t stage_sz_bytes);
+void mnnvl_multimem_reduce_scatter(fptr_t _fa, torch::stable::Tensor& inp,
+                                   torch::stable::Tensor& out,
+                                   fptr_t local_buffer, fptr_t multicast_buffer,
+                                   int64_t stage_sz_bytes, int64_t block_limit);
 void dispose(fptr_t _fa);
 int64_t meta_size();
 void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
@@ -678,7 +682,7 @@ void hisparse_resolve_residency(
     torch::stable::Tensor& device_global_indices,
     torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
-    int64_t region_stride,
+    int64_t region_stride, int64_t max_union_rows,
     std::optional<torch::stable::Tensor> const& miss_mask,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
