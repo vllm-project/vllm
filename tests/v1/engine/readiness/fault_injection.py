@@ -9,6 +9,7 @@ through the dev ``/collective_rpc`` endpoint, which only forwards strings.
 """
 
 import os
+from typing import Any
 
 import torch
 
@@ -17,6 +18,18 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 FAULT_DIR_ENV = "VLLM_READY_FAULT_DIR"
 SCHEDULER_STALL = "scheduler_stall"
+
+
+def _launch_illegal_memory_access() -> None:
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def _oob_store(ptr, offset):
+        tl.store(ptr + offset, 1.0)
+
+    buf = torch.empty(1, device="cuda", dtype=torch.float32)
+    _oob_store[(1,)](buf, 1 << 42)
 
 
 class FaultInjectionScheduler(AsyncScheduler):
@@ -44,6 +57,7 @@ class FaultInjectionScheduler(AsyncScheduler):
 
 class FaultInjectionWorkerExtension:
     vllm_config: VllmConfig
+    model_runner: Any
 
     def _fault_targets_me(self, dp_ranks: str) -> bool:
         # Dense DP engines keep data_parallel_rank=0; the index is the DP rank.
@@ -58,15 +72,19 @@ class FaultInjectionWorkerExtension:
         """
         if not self._fault_targets_me(dp_ranks):
             return
-        import triton
-        import triton.language as tl
+        _launch_illegal_memory_access()
 
-        @triton.jit
-        def _oob_store(ptr, offset):
-            tl.store(ptr + offset, 1.0)
+    def fault_ima_on_next_forward(self, dp_ranks: str) -> None:
+        """Launch an illegal memory access at the end of the next forward
+        pass, so the fault belongs to the readiness probe's own GPU work."""
+        if not self._fault_targets_me(dp_ranks):
+            return
 
-        buf = torch.empty(1, device="cuda", dtype=torch.float32)
-        _oob_store[(1,)](buf, 1 << 42)
+        def hook(*_):
+            handle.remove()
+            _launch_illegal_memory_access()
+
+        handle = self.model_runner.get_model().register_forward_hook(hook)
 
     def fault_dp_mismatched_collective(self, dp_ranks: str) -> None:
         """Enter a DP all-reduce that the other ranks never join (#36594)."""

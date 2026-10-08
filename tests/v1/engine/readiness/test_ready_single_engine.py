@@ -38,11 +38,12 @@ def test_scheduler_stall(server):
     assert server.wait_until_ready()
 
 
-def test_latent_cuda_error_while_idle(tmp_path):
-    """An async CUDA fault that nothing has synchronized on yet is only
-    surfaced by the idle GPU probe."""
+@pytest.mark.parametrize("fault", ["fault_ima_now", "fault_ima_on_next_forward"])
+def test_cuda_error_while_idle(tmp_path, fault: str):
+    """An async CUDA fault that nothing has synchronized on yet, raised before
+    or during the probe's own forward pass, fails that same `/ready` call."""
     with ready_probe_server(MODEL, [], tmp_path) as srv:
         assert srv.status() == 200
-        srv.rpc("fault_ima_now", "0")
+        srv.rpc(fault, "0")
         assert srv.status("/health") == 200
-        assert srv.wait_until_unready() is not None
+        assert srv.status() == 503

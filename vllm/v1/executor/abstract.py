@@ -278,6 +278,9 @@ class Executor(ABC):
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch")
 
+    def check_health_gpu(self) -> None:
+        self.collective_rpc("check_health_gpu")
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]

@@ -331,7 +331,7 @@ def make_core() -> EngineCore:
     core.scheduler = SimpleNamespace(has_requests=Mock(return_value=False))
     core.batch_queue = None
     core.is_sleeping = Mock(return_value=False)  # type: ignore[method-assign]
-    core.model_executor = SimpleNamespace(execute_dummy_batch=Mock())
+    core.model_executor = SimpleNamespace(check_health_gpu=Mock())
     core._last_health_dummy_batch_at = 0.0
     core._ready_progress_seq = 0
     return core
@@ -347,7 +347,7 @@ def test_engine_core_idle_probe_cache(monkeypatch: pytest.MonkeyPatch):
     now = 111.0
     core.check_health_gpu(10)
 
-    assert core.model_executor.execute_dummy_batch.call_count == 2
+    assert core.model_executor.check_health_gpu.call_count == 2
 
 
 def test_engine_core_busy_probe_does_not_run_dummy():
@@ -356,7 +356,7 @@ def test_engine_core_busy_probe_does_not_run_dummy():
 
     core.check_health_gpu(10)
 
-    core.model_executor.execute_dummy_batch.assert_not_called()
+    core.model_executor.check_health_gpu.assert_not_called()
 
 
 def test_engine_core_sleeping_probe_does_not_run_dummy():
@@ -365,7 +365,7 @@ def test_engine_core_sleeping_probe_does_not_run_dummy():
 
     core.check_health_gpu(10)
 
-    core.model_executor.execute_dummy_batch.assert_not_called()
+    core.model_executor.check_health_gpu.assert_not_called()
 
 
 def test_engine_core_dp_wave_does_not_run_probe_dummy():
@@ -374,18 +374,18 @@ def test_engine_core_dp_wave_does_not_run_probe_dummy():
 
     core.check_health_gpu(10)
 
-    core.model_executor.execute_dummy_batch.assert_not_called()
+    core.model_executor.check_health_gpu.assert_not_called()
 
 
 def test_engine_core_probe_failure_is_not_cached():
     core = make_core()
-    core.model_executor.execute_dummy_batch.side_effect = [RuntimeError(), None]
+    core.model_executor.check_health_gpu.side_effect = [RuntimeError(), None]
 
     with pytest.raises(RuntimeError):
         core.check_health_gpu(10)
     core.check_health_gpu(10)
 
-    assert core.model_executor.execute_dummy_batch.call_count == 2
+    assert core.model_executor.check_health_gpu.call_count == 2
 
 
 def test_engine_core_progress_sequence():
@@ -447,11 +447,11 @@ def test_engine_core_broadcasts_busy_and_throttles_progress(
 def test_dp_engine_core_probe_is_liveness_only():
     """A dummy batch outside the wave loop could deadlock MoE DP peers."""
     core = object.__new__(DPEngineCoreProc)
-    core.model_executor = SimpleNamespace(execute_dummy_batch=Mock())
+    core.model_executor = SimpleNamespace(check_health_gpu=Mock())
 
     core.check_health_gpu(10)
 
-    core.model_executor.execute_dummy_batch.assert_not_called()
+    core.model_executor.check_health_gpu.assert_not_called()
 
 
 def test_engine_core_publishes_operation_around_utility_call():

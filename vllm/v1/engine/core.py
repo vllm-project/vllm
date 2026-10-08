@@ -1060,7 +1060,7 @@ class EngineCore:
         ):
             return
 
-        self.execute_dummy_batch()
+        self.model_executor.check_health_gpu()
         self._last_health_dummy_batch_at = time.monotonic()
 
     def compute_weight_checksums(self) -> list[dict[str, str]]:
