@@ -452,8 +452,9 @@ def test_engine_core_no_schedule_ahead_of_uncapped_lone_prefill():
     )
     assert engine_core.step_with_batch_queue()[0] is None
     scheduler_output = engine_core.batch_queue[0][1]
-    # req0 picked up one sampled token: 12 + 1 - 10 computed.
-    assert scheduler_output.num_scheduled_tokens["0"] == 3
+    # req0 got no sampled token: the runner discards samples taken on a
+    # partial prefill chunk, so 12 prompt tokens - 10 computed remain.
+    assert scheduler_output.num_scheduled_tokens["0"] == 2
     assert scheduler_output.num_scheduled_tokens["1"] == 5
     assert not scheduler_output.has_uncapped_lone_prefill
 
