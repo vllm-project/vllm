@@ -90,6 +90,8 @@ remain unchanged; they differ from Ollaya's Jev wire responses.
 conditional softmax. Use 1 when the required scale is folded into the exported
 weights. An additional validation-fitted temperature in `calibration.json` is
 external: set `decision_temperature` to that value for that calibrated variant.
+Temperature changes conditional answer probabilities; `confidence` retains the
+winning label's original full-vocabulary probability from the engine read.
 Preserve the exported
 Gemma logit-softcap configuration. Loading an unrelated Gemma4 checkpoint does
 not make it Winnow-trained.

@@ -80,7 +80,7 @@ class OpenAIServingDecisions(BaseServingDecisions):
         return DecisionResponse(
             model=self.models.model_name(lora_request),
             answers=[
-                make_answer(question, read.probs, read.label_mass)
+                make_answer(question, read.probs, read.label_mass, read.confidence)
                 for question, read in zip(request.questions, reads)
             ],
             usage=OpenAIDecisionUsage(

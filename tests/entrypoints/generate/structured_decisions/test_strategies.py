@@ -565,3 +565,54 @@ def test_winnow_route_uses_independent_fixed_prompts(decision_server, monkeypatc
     ]
     assert all(text.count("Question:") == 1 for text in texts)
     assert all('State:\n"Evidence"' in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_winnow_temperature_preserves_full_vocabulary_confidence(
+    decision_server, monkeypatch
+):
+    from vllm.entrypoints.openai.decisions import winnow
+    from vllm.entrypoints.openai.decisions.adapters import (
+        make_answer,
+        make_read_question,
+    )
+    from vllm.entrypoints.openai.decisions.protocol import ChoiceAnswer, ChoiceQuestion
+
+    server = decision_server
+    monkeypatch.setattr(server.tokenizer, "bos_token_id", 0)
+    server.engine.model_config.max_model_len = 8192
+    server.engine.model_config.hf_config = SimpleNamespace(decision_temperature=2.0)
+    strategy = winnow.WinnowStrategy(
+        ReadContext(server.engine, server.renderer, None, "auto", {})
+    )
+    question = ChoiceQuestion(
+        type="choice", instructions="Route?", choices=[{"value": "a"}, {"value": "b"}]
+    )
+
+    async def read_labels(engine, inputs, params, request_id, **kwargs):
+        return [
+            SimpleNamespace(
+                logprobs=[math.log(0.1), math.log(0.4)],
+                result=SimpleNamespace(
+                    outputs=[SimpleNamespace(token_ids=[strategy.label_ids[1]])],
+                    prompt_token_ids=inputs[0]["prompt_token_ids"],
+                    num_cached_tokens=0,
+                    num_cache_creation_tokens=0,
+                ),
+            )
+        ]
+
+    monkeypatch.setattr(winnow, "next_token_label_reads", read_labels)
+    (read,) = await strategy.read(
+        [make_read_question(0, question)],
+        None,
+        "Evidence",
+        request_id="test",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    answer = make_answer(question, read.probs, read.label_mass, read.confidence)
+    assert isinstance(answer, ChoiceAnswer)
+    assert answer.probabilities[1].probability == pytest.approx(2 / 3)
+    assert answer.confidence == pytest.approx(0.4)

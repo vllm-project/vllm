@@ -69,12 +69,16 @@ def make_read_question(
 
 
 def make_answer(
-    question: DecisionQuestion, probs: list[float], label_mass: float
+    question: DecisionQuestion,
+    probs: list[float],
+    label_mass: float,
+    confidence: float | None = None,
 ) -> DecisionAnswer:
     if isinstance(question, PredicateQuestion):
         return PredicateAnswer(name=question.name, probability=probs[1])
     top = argmax(probs)
-    confidence = probs[top] * label_mass
+    if confidence is None:
+        confidence = probs[top] * label_mass
     if isinstance(question, ChoiceQuestion):
         return ChoiceAnswer(
             name=question.name,

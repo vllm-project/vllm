@@ -134,6 +134,7 @@ class WinnowStrategy(ReadStrategy):
             QuestionRead(
                 probs=label_softmax([lp / self.temperature for lp in read.logprobs]),
                 label_mass=sum(math.exp(lp) for lp in read.logprobs),
+                confidence=math.exp(max(read.logprobs)),
                 argmax_is_label=bool(read.result.outputs[0].token_ids)
                 and read.result.outputs[0].token_ids[0] in ids,
                 input_tokens=len(read.result.prompt_token_ids or ()),

@@ -60,6 +60,7 @@ class QuestionRead:
     output_tokens: int
     cached_tokens: int = 0
     cache_write_tokens: int = 0
+    confidence: float | None = None
 
 
 class ReadPromptRequest(OpenAIBaseModel):
