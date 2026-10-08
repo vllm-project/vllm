@@ -1,6 +1,6 @@
 # Decisions API
 
-vLLM provides a text-only implementation of OpenAI's
+vLLM provides an implementation of OpenAI's
 [`POST /v1/decisions`](https://developers.openai.com/api/docs/guides/decisions)
 API. Start a supported model:
 
@@ -39,7 +39,7 @@ print(decision.answers)
 
 Use OpenAI Python SDK 3.26.0 or newer for `client.decisions.create`.
 `input` accepts a string or an array of user messages with string content or
-`input_text` parts. Answers retain question order and echo `name`, including
+`input_text` and `input_image` parts. Answers retain question order and echo `name`, including
 `null` for unnamed questions. Choice values preserve strings and booleans.
 Scores are probability-weighted averages of zero-based level indices.
 
@@ -64,7 +64,7 @@ Probabilities are normalized over the supplied options. `confidence` is the
 winning label's probability over the full vocabulary; it is not calibrated
 to OpenAI's models. Thinking is disabled for these reads.
 
-Image inputs, other message roles, tools, streaming, and per-question refusal
+Other message roles, tools, streaming, and per-question refusal
 scoring are outside this MVP. Unsupported request fields and input types are
 rejected. The `/v1/systemone` endpoint retains its existing request format and
 is available by default.

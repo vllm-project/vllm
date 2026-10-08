@@ -13,227 +13,18 @@
       "requests": 5,
       "decisions": 15,
       "repeated_probability_max_abs_delta": 2.2224553308802797e-09,
-      "cases": [
-        {
-          "name": "red",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.9902915238677297
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "red",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.9953904269296614
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.0046095730703385246
-                }
-              ],
-              "confidence": 0.9933813718017573
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.8175744828610095,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.18242551713899047
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.8175744828610095
-                }
-              ],
-              "confidence": 0.798105308379895
-            }
-          ]
-        },
-        {
-          "name": "blue",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.005911068599032975
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "blue",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.0006667022304399739
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.9993332977695599
-                }
-              ],
-              "confidence": 0.9960739389321734
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.7310585727705126,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.2689414272294874
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.7310585727705126
-                }
-              ],
-              "confidence": 0.7127765413789514
-            }
-          ]
-        },
-        {
-          "name": "red-blue",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.9924227597336231
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "red",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.9953904280022373
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.004609571997762798
-                }
-              ],
-              "confidence": 0.9927707430854154
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.8354835309589073,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.16451646904109268
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.8354835309589073
-                }
-              ],
-              "confidence": 0.8009704181018441
-            }
-          ]
-        },
-        {
-          "name": "blue-red",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.005554924981504303
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "blue",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.0015978457139056669
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.9984021542860945
-                }
-              ],
-              "confidence": 0.995040696109721
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.754914975839675,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.24508502416032488
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.754914975839675
-                }
-              ],
-              "confidence": 0.7188181678401546
-            }
-          ]
-        },
-        {
-          "name": "repeat-red",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.990291524727308
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "red",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.9953904273420263
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.004609572657973725
-                }
-              ],
-              "confidence": 0.9934752543833726
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.8175744850834649,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.18242551491653522
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.8175744850834649
-                }
-              ],
-              "confidence": 0.7991890518671614
-            }
-          ]
-        }
+      "functional_cases": [
+        "red",
+        "blue",
+        "red-blue",
+        "blue-red",
+        "repeat-red"
+      ],
+      "assertions_passed": [
+        "image content changes probabilities",
+        "swapping images changes first-image answer",
+        "repeating image preserves probabilities within 1e-6",
+        "predicate, choice and score responses validated"
       ]
     },
     {
@@ -245,226 +36,115 @@
       "requests": 5,
       "decisions": 15,
       "repeated_probability_max_abs_delta": 0.0,
-      "cases": [
+      "functional_cases": [
+        "red",
+        "blue",
+        "red-blue",
+        "blue-red",
+        "repeat-red"
+      ],
+      "assertions_passed": [
+        "image content changes probabilities",
+        "swapping images changes first-image answer",
+        "repeating image preserves probabilities within 1e-6",
+        "predicate, choice and score responses validated"
+      ]
+    }
+  ],
+  "cpu_processor_prefix_verification": [
+    {
+      "family": "gemma",
+      "actual_processor": "MULTIMODAL_REGISTRY native processor on CPU",
+      "scope": "Direct processor placeholder expansion, not full chat rendering or inference",
+      "two_images": true,
+      "same_images_private_questions_same_hashes": true,
+      "swapped_images_reverse_hashes": true,
+      "shared_token_prefix": 524,
+      "image_spans": [
         {
-          "name": "red",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.9914225164870603
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "red",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.99968496124491
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.0003150387550898698
-                }
-              ],
-              "confidence": 0.8398883152724917
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.9890130573694068,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.01098694263059318
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.9890130573694068
-                }
-              ],
-              "confidence": 0.8553575632079949
-            }
-          ]
+          "offset": 0,
+          "length": 258
         },
         {
-          "name": "blue",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.0005884087922684929
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "blue",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.0008559006494882242
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.9991440993505118
-                }
-              ],
-              "confidence": 0.8308463668373375
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.8354835330070839,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.16451646699291617
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.8354835330070839
-                }
-              ],
-              "confidence": 0.7303622631698
-            }
-          ]
+          "offset": 259,
+          "length": 258
+        }
+      ],
+      "image_prefix_end": 517
+    },
+    {
+      "family": "qwen",
+      "actual_processor": "MULTIMODAL_REGISTRY native processor on CPU",
+      "scope": "Direct processor placeholder expansion, not full chat rendering or inference",
+      "two_images": true,
+      "same_images_private_questions_same_hashes": true,
+      "swapped_images_reverse_hashes": true,
+      "shared_token_prefix": 140,
+      "image_spans": [
+        {
+          "offset": 1,
+          "length": 64
         },
         {
-          "name": "red-blue",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.9914225156000332
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "red",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.9992903296431691
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.0007096703568309563
-                }
-              ],
-              "confidence": 0.768743400594472
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.9740426409184302,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.025957359081569886
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.9740426409184302
-                }
-              ],
-              "confidence": 0.8053508723992571
-            }
-          ]
+          "offset": 68,
+          "length": 64
+        }
+      ],
+      "image_prefix_end": 132
+    }
+  ],
+  "native_online_renderer_prefix_verification": [
+    {
+      "family": "gemma",
+      "cases": 3,
+      "engine_keys": [
+        "type",
+        "prompt_token_ids",
+        "mm_kwargs",
+        "mm_hashes",
+        "mm_placeholders",
+        "prompt",
+        "arrival_time"
+      ],
+      "image_hash_order_and_repeat_verified": true,
+      "private_suffixes_verified": true,
+      "shared_token_prefix": 582,
+      "image_prefix_end": 570,
+      "image_spans": [
+        {
+          "offset": 53,
+          "length": 258
         },
         {
-          "name": "blue-red",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.0015011822567369915
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "blue",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.005220125074519377
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.9947798749254807
-                }
-              ],
-              "confidence": 0.750021917045771
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.9465966702001757,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.053403329799824234
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.9465966702001757
-                }
-              ],
-              "confidence": 0.7529417120784295
-            }
-          ]
+          "offset": 312,
+          "length": 258
+        }
+      ]
+    },
+    {
+      "family": "qwen",
+      "cases": 3,
+      "engine_keys": [
+        "type",
+        "prompt_token_ids",
+        "mm_kwargs",
+        "mm_hashes",
+        "mm_placeholders",
+        "prompt",
+        "arrival_time"
+      ],
+      "image_hash_order_and_repeat_verified": true,
+      "private_suffixes_verified": true,
+      "shared_token_prefix": 141,
+      "image_prefix_end": 137,
+      "image_spans": [
+        {
+          "offset": 7,
+          "length": 64
         },
         {
-          "name": "repeat-red",
-          "answers": [
-            {
-              "type": "predicate",
-              "name": "red",
-              "probability": 0.9914225164870603
-            },
-            {
-              "type": "choice",
-              "name": "color",
-              "choice": "red",
-              "probabilities": [
-                {
-                  "value": "red",
-                  "probability": 0.99968496124491
-                },
-                {
-                  "value": "blue",
-                  "probability": 0.0003150387550898698
-                }
-              ],
-              "confidence": 0.8398883152724917
-            },
-            {
-              "type": "score",
-              "name": "brightness",
-              "score": 0.9890130573694068,
-              "probabilities": [
-                {
-                  "value": 0,
-                  "label": "dark",
-                  "probability": 0.01098694263059318
-                },
-                {
-                  "value": 1,
-                  "label": "bright",
-                  "probability": 0.9890130573694068
-                }
-              ],
-              "confidence": 0.8553575632079949
-            }
-          ]
+          "offset": 73,
+          "length": 64
         }
       ]
     }
