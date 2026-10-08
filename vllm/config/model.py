@@ -305,6 +305,14 @@ class ModelConfig:
     predetermined token sequence while still computing real logprobs. Reserved
     for debugging and RL workflows: enabling it reserves a per-request trace
     buffer, so it is off by default."""
+    screened_greedy_lm_head: bool = False
+    """Whether to compute the logits of all-greedy batches from an FP8 copy of
+    the lm_head that screens out the rows that provably cannot be the argmax,
+    plus exact logits for the rest. Sampled tokens match the full lm_head (up
+    to sub-ulp ties) while the step reads about half its bytes. Batches with
+    logprobs, logits processors or structured outputs use the full lm_head.
+    Requires an unquantized, unsharded lm_head and raises otherwise. Adds an
+    FP8 copy of the lm_head to model memory."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -477,6 +485,7 @@ class ModelConfig:
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
+            "screened_greedy_lm_head",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",

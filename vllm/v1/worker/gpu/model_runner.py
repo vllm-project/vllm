@@ -146,6 +146,7 @@ from vllm.v1.worker.gpu.sample.logits_processor import build_custom_logits_proce
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.screened_head import ScreenedGreedyHead
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
@@ -330,6 +331,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
         self.batch_sharder: BatchSharder | None = None
+        self.screened_head: ScreenedGreedyHead | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
@@ -499,6 +501,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
+            if self.model_config.screened_greedy_lm_head:
+                self.screened_head = ScreenedGreedyHead.from_model(
+                    self.model,
+                    self.sampler,
+                    self.vocab_size,
+                    self.max_num_reqs * self.decode_query_len,
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -559,6 +568,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
         GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
+        if self.screened_head is not None:
+            self.screened_head.refresh()
 
     def update_config(self, *args, **kwargs) -> None:
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
@@ -1598,7 +1609,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states)
+            if (
+                self.screened_head is not None
+                and grammar_output is None
+                and self.screened_head.is_eligible(
+                    input_batch.idx_mapping_np, sample_hidden_states.shape[0]
+                )
+            ):
+                logits = self.screened_head(sample_hidden_states)
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
 
         invalid_drafts = None
         # A diffusion prefill has no logit rows even when a bitmask row
