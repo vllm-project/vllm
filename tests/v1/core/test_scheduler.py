@@ -1978,7 +1978,8 @@ def test_schedule_spec_decoding_stats(
 
 
 @pytest.mark.parametrize(
-    "request_state", ["active", "finished_removed", "finished_retained"]
+    "request_state",
+    ["active", "grammar_invalid", "finished_removed", "finished_retained"],
 )
 def test_adaptive_verification_stats_count_actual_budget(request_state):
     scheduler = create_scheduler(num_speculative_tokens=5)
@@ -1996,7 +1997,11 @@ def test_adaptive_verification_stats_count_actual_budget(request_state):
     )
     scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[1, 2, 3, 4, 5]]))
     output = scheduler.schedule()
-    if request_state == "finished_removed":
+    if request_state == "grammar_invalid":
+        # Async grammar validation happens after scheduling; invalid draft
+        # positions can still be sent to the verifier.
+        output.num_invalid_spec_tokens = {req_id: 2}
+    elif request_state == "finished_removed":
         scheduler.finish_requests(req_id, RequestStatus.FINISHED_STOPPED)
     elif request_state == "finished_retained":
         request.status = RequestStatus.FINISHED_STOPPED
@@ -2006,14 +2011,17 @@ def test_adaptive_verification_stats_count_actual_budget(request_state):
             req_ids=[req_id],
             req_id_to_index=req_id_to_index,
             sampled_token_ids=[[1, 2, 3]],
-            num_verified_draft_tokens_per_req=[2],
+            num_verified_draft_tokens_per_req=[4],
         ),
     )
 
     stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
     if request_state == "active":
         assert stats.num_draft_tokens == 5
-        assert stats.num_verified_draft_tokens == 2
+        assert stats.num_verified_draft_tokens == 4
+    elif request_state == "grammar_invalid":
+        assert stats.num_draft_tokens == 3
+        assert stats.num_verified_draft_tokens == 4
     else:
         assert stats is None
 

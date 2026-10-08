@@ -104,3 +104,8 @@ counts draft-token positions sent to the target verifier for the same requests c
 For example, a five-token proposal shortened to three verification positions
 adds five to the draft counter and three to the verified counter. The mean
 verified draft width can be estimated by dividing the verified draft tokens by the draft steps over the same time window.
+
+With async scheduling and structured outputs, grammar-invalid draft positions may
+still be sent to the target verifier. These positions are excluded from
+`num_draft_tokens` but included in the verified counter, so the verified count
+can exceed `num_draft_tokens`.
