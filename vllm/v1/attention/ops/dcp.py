@@ -1587,7 +1587,32 @@ class MLADCPManager:
                 self._direct_workspace_query_gather,
                 direct_workspace,
             )
+        # Only created on ROCm when aiter is enabled for the group
+        aiter_comm = getattr(self.group.device_communicator, "aiter_ag_comm", None)
+        if aiter_comm is not None:
+            logger.info_once("Using AITER custom all-gather for the MLA DCP query.")
+            return functools.partial(self._aiter_query_gather, aiter_comm)
         return self._gather_query
+
+    def _aiter_query_gather(self, aiter_comm: Any, query: torch.Tensor) -> torch.Tensor:
+        num_tokens, num_heads, head_dim = query.shape
+        # aiter gathers only on the last dim, so flattenning the query makes it gather
+        # the heads
+        rows = query.reshape(num_tokens, num_heads * head_dim)
+        # aiter has no fp8 gather. The copy only moves bytes, so view fp8 pairs as bf16
+        if rows.element_size() == 1 and rows.shape[1] % 2 == 0:
+            rows = rows.view(torch.bfloat16)
+        if (
+            num_tokens == 0
+            or rows.element_size() == 1
+            or not aiter_comm.should_custom_ag(rows)
+        ):
+            return self._gather_query(query)
+        gathered = aiter_comm.custom_all_gather(rows, dim=-1)
+        query = gathered.view(query.dtype).view(num_tokens, -1, head_dim)
+        if self.padded_num_heads is not None:
+            query = reserve_query_head_storage(query, self.padded_num_heads)
+        return query
 
     def _gather_query(self, query: torch.Tensor) -> torch.Tensor:
         query = self.group.all_gather(query, dim=1)
