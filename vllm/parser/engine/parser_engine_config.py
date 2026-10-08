@@ -109,6 +109,14 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Terminals that confirm a tool-call opener. When non-empty, a transition
+    # from CONTENT or REASONING into TOOL_PREAMBLE is held back, together with
+    # the text after it, until one of these terminals arrives (the call is
+    # real) or a terminal that has a transition from the original state, or
+    # prose followed by the end of output, shows the opener was quoted text.
+    # Quoted openers and their following text stay in their original channel.
+    tool_start_confirm_terminals: frozenset[str] = field(default_factory=frozenset)
+
     def terminal_literal(self, name: str) -> str | None:
         """Canonical spelling of terminal *name*, or ``None`` if undeclared."""
         value = self.terminals.get(name)
