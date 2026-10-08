@@ -49,14 +49,17 @@ pub fn decode_byte_level<'a, I: IntoIterator<Item = &'a str>>(tokens: I) -> Stri
     let (lower, _) = iter.size_hint();
     let mut bytes: Vec<u8> = Vec::with_capacity(lower.saturating_mul(4));
     for token in iter {
+        let start = bytes.len();
         for c in token.chars() {
             if let Some(&Some(b)) = CHAR_TO_BYTE.get(c as usize) {
                 bytes.push(b);
             } else {
-                // Non-GPT2 codepoints (e.g. DeepSeek's U+FF5C, U+2581) pass through,
-                // as do raw characters in added tokens (e.g. `\n</parameter>`).
-                let mut buf = [0u8; 4];
-                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                // As in HF, a token with any non-GPT2 codepoint is raw text and
+                // passes through whole: DeepSeek's U+FF5C and U+2581, or raw
+                // characters in added tokens (e.g. `\n</parameter>`).
+                bytes.truncate(start);
+                bytes.extend_from_slice(token.as_bytes());
+                break;
             }
         }
     }
@@ -137,5 +140,13 @@ mod tests {
             decode_byte_level(toks),
             "<parameter name=\"city\">\n</parameter>\t\u{7F}\u{A0}\u{AD}",
         );
+    }
+
+    #[test]
+    fn decode_passes_through_whole_token_with_raw_chars() {
+        // Characters that the GPT-2 table does emit (`Ġ`, `é`) stay verbatim
+        // in a raw token instead of decoding to bytes 0x20 and 0xE9.
+        assert_eq!(decode_byte_level(["\u{120}x\n"]), "\u{120}x\n");
+        assert_eq!(decode_byte_level(["\ncafé"]), "\ncafé");
     }
 }
