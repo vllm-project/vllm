@@ -1067,3 +1067,38 @@ async def test_abort_requests_is_served_without_tokens_only(client):
         "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
     )
     assert resp.status_code == 404
+
+
+def test_stream_chunks_never_carry_sampled():
+    """Streaming never sets logprobs.sampled, so a chunk must not grow a
+    "sampled": null key that the Rust frontend does not emit."""
+    import json
+
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        GenerateLogProbs,
+        GenerateLogProbsContent,
+        GenerateTokensStreamChoice,
+        GenerateTokensStreamResponse,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import (
+        _stream_exclude,
+    )
+
+    chunk = GenerateTokensStreamResponse(
+        request_id="r",
+        choices=[
+            GenerateTokensStreamChoice(
+                index=0,
+                token_ids=[7],
+                logprobs=GenerateLogProbs(
+                    content=[GenerateLogProbsContent(token_id=7, logprob=-0.1)]
+                ),
+            ),
+            GenerateTokensStreamChoice(index=1, token_ids=[8], logprobs=None),
+        ],
+    )
+    data = json.loads(chunk.model_dump_json(exclude=_stream_exclude(chunk)))
+    assert "sampled" not in data["choices"][0]["logprobs"]
+    assert data["choices"][0]["logprobs"]["content"][0]["token_id"] == 7
+    assert data["choices"][1]["logprobs"] is None
+    assert "prompt_token_ids" not in data

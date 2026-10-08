@@ -85,6 +85,21 @@ def _clamp_logprob(logprob: float) -> float:
     return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
 
 
+def _stream_exclude(
+    chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse,
+) -> dict[str, Any]:
+    """Fields to leave out of a token-bearing stream chunk: the ones absent from
+    it, and ``logprobs.sampled``, which streaming never sets
+    (``return_token_logprobs`` is non-streaming only)."""
+    exclude: dict[str, Any] = {
+        name: True
+        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
+        if getattr(chunk, name) is None
+    }
+    exclude["choices"] = {"__all__": {"logprobs": {"sampled"}}}
+    return exclude
+
+
 def _logprob_token(
     token_id: int, logprob: Logprob | None, tokenizer: TokenizerLike | None
 ) -> tuple[str, list[int] | None]:
@@ -227,7 +242,7 @@ class ServingTokens(GenerateBaseServing):
                 # Only the sampled token's logprob is needed: transport one
                 # float per token from the scheduler and skip per-token
                 # Logprob entries and detokenization entirely.
-                sampling_params.sampled_logprobs_only = True
+                sampling_params._sampled_logprobs_only = True
             else:
                 # Top logprobs were also requested: keep the object path and
                 # read the sampled column from the flat representation.
@@ -707,13 +722,8 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    # Omit fields that are absent from token-bearing chunks.
-                    exclude = {
-                        name
-                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
-                        if getattr(chunk, name) is None
-                    }
-                    yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
+                    data = chunk.model_dump_json(exclude=_stream_exclude(chunk))
+                    yield f"data: {data}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(
