@@ -185,8 +185,7 @@ class PrepareUniformDecodeKernel(
         )
 
 
-# Keep the replicated path for short prefills; on TP4 sharding starts at 64K
-# rows, where the all-gather overhead is amortized by the saved MQA work.
+# Below this many rows per rank, stay replicated (TP4 engages at 64K rows).
 MIN_TP_SHARD_ROWS_PER_RANK = 16_384
 
 
@@ -215,8 +214,8 @@ def balanced_prefill_row_shard(
 
     targets = torch.arange(1, tp_size) * total // tp_size
     bounds = [0, *torch.searchsorted(cost, targets).tolist(), num_rows]
-    # Ensure every rank owns at least one row (the threshold above leaves ample
-    # room); this also handles repeated costs from pool compression.
+    # Keep >= 1 row per rank (the floor above leaves ample room); this also
+    # handles repeated costs from pool compression.
     for i in range(1, tp_size):
         bounds[i] = max(bounds[i], bounds[i - 1] + 1)
     for i in range(tp_size - 1, 0, -1):
@@ -673,8 +672,7 @@ class BuildPrefillChunkMetadataKernel(
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
-    # Contiguous per-TP-rank row counts for replicated indexer prefill, or
-    # None to retain the zero-communication path.
+    # Per-TP-rank contiguous row counts, or None for the replicated path.
     row_shard_sizes: list[int] | None = None
 
 
@@ -953,19 +951,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             else 0
         )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
-
-        self.enable_tp_prefill_row_sharding = tp_prefill_row_sharding_supported(
-            self.vllm_config,
-            self.dcp_world_size,
-            self.use_pcp,
-            get_tensor_model_parallel_world_size(),
-        )
-        if self.enable_tp_prefill_row_sharding:
-            logger.info_once(
-                "DSA indexer TP prefill row sharding enabled "
-                "(engages at >= %d prefill rows per rank)",
-                MIN_TP_SHARD_ROWS_PER_RANK,
-            )
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -1493,30 +1478,24 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
+            tp_size = get_tensor_model_parallel_world_size()
             row_shard_sizes = None
-            # Do not pay an all-gather for dense-MHA short prefills: their
-            # sparse indexer is skipped entirely. GLM-5.3 has index_kpool=4,
-            # so the cost model uses compressed rows while the trigger stays
-            # in token units (matching index_topk semantics).
-            prefill_max_seq_len = int(
-                seq_lens_cpu[num_decodes : num_decodes + num_prefills].max().item()
-            )
-            index_topk = getattr(
-                self.vllm_config.model_config.hf_config, "index_topk", 0
-            )
-            prefill_uses_mqa = prefill_max_seq_len > index_topk or getattr(
-                self.vllm_config.attention_config, "sparse_mla_force_mqa", False
-            )
-            if self.enable_tp_prefill_row_sharding and prefill_uses_mqa:
+            if tp_prefill_row_sharding_supported(
+                self.vllm_config, self.dcp_world_size, self.use_pcp, tp_size
+            ):
                 row_shard_sizes = balanced_prefill_row_shard(
-                    seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                    seq_lens_cpu[num_decodes:],
                     prefill_query_lens_cpu,
                     self.compress_ratio,
-                    get_tensor_model_parallel_world_size(),
+                    tp_size,
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
-                max_prefill_seq_len=(prefill_max_seq_len if num_prefills > 0 else 0),
+                max_prefill_seq_len=(
+                    int(seq_lens_cpu[num_decodes:].max().item())
+                    if num_prefills > 0
+                    else 0
+                ),
                 row_shard_sizes=row_shard_sizes,
             )
 

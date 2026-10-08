@@ -322,6 +322,46 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+class PrefillRowShard:
+    """One TP rank's contiguous slice of the replicated prefill rows.
+
+    Rows are independent, so each rank scores only its slice and the group
+    exchanges final int32 top-k indices instead of the logits."""
+
+    def __init__(self, num_decode_tokens: int, sizes: list[int], rank: int):
+        self.num_decode_tokens = num_decode_tokens
+        self.sizes = sizes
+        self.start = num_decode_tokens + sum(sizes[:rank])
+        self.stop = self.start + sizes[rank]
+
+    @classmethod
+    def from_metadata(
+        cls, prefill_metadata, num_decode_tokens: int
+    ) -> "PrefillRowShard | None":
+        sizes = getattr(prefill_metadata, "row_shard_sizes", None)
+        if sizes is None:
+            return None
+        return cls(num_decode_tokens, sizes, get_tensor_model_parallel_rank())
+
+    def narrow(self, chunk) -> "tuple[int, int, torch.Tensor, torch.Tensor] | None":
+        """Row window and narrowed causal bounds of ``chunk`` for this rank."""
+        start = max(chunk.token_start, self.start)
+        end = min(chunk.token_end, self.stop)
+        if start >= end:
+            return None
+        lo, hi = start - chunk.token_start, end - chunk.token_start
+        return start, end, chunk.cu_seqlen_ks[lo:hi], chunk.cu_seqlen_ke[lo:hi]
+
+    def exchange_topk(self, topk_buffer: torch.Tensor, width: int) -> None:
+        """Gather per-rank final indices back into global row order."""
+        # The local input must outlive the async PyNCCL gather's enqueued copy.
+        local = topk_buffer[self.start : self.stop, :width].contiguous()
+        end = self.num_decode_tokens + sum(self.sizes)
+        topk_buffer[self.num_decode_tokens : end, :width] = get_tp_group().all_gatherv(
+            local, dim=0, sizes=self.sizes
+        )
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -517,21 +557,12 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        # Score one contiguous row window per rank; metadata is replicated.
-        shard_sizes = prefill_metadata.row_shard_sizes
-        if candidate_blocks is not None:
-            # DSV4.1 candidate sources must publish every row on every TP rank;
-            # the row-shard exchange only gathers token top-k, not candidates.
-            # Masked consumers also require candidates aligned to their rows.
-            # Keep both replicated without mutating shared prefill metadata.
-            shard_sizes = None
-        shard_start = shard_stop = 0
-        if shard_sizes is not None:
-            assert dcp_world_size == 1 and not use_pcp
-            assert forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
-            tp_rank = get_tensor_model_parallel_rank()
-            shard_start = num_decode_tokens + sum(shard_sizes[:tp_rank])
-            shard_stop = shard_start + shard_sizes[tp_rank]
+        # One row window per rank; DSV4.1 candidate rows stay replicated.
+        row_shard = (
+            None
+            if candidate_blocks is not None
+            else PrefillRowShard.from_metadata(prefill_metadata, num_decode_tokens)
+        )
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
@@ -550,15 +581,11 @@ def sparse_attn_indexer(
             # Narrow scoring to this rank; KV gathers remain unconditional for
             # continuation chunks that reuse the workspace.
             row_start, row_end = chunk.token_start, chunk.token_end
-            if shard_sizes is not None:
-                row_start = max(row_start, shard_start)
-                row_end = min(row_end, shard_stop)
-                if row_start >= row_end:
+            if row_shard is not None:
+                narrowed = row_shard.narrow(chunk)
+                if narrowed is None:
                     continue
-                lo = row_start - chunk.token_start
-                hi = row_end - chunk.token_start
-                cu_seqlen_ks = cu_seqlen_ks[lo:hi]
-                cu_seqlen_ke = cu_seqlen_ke[lo:hi]
+                row_start, row_end, cu_seqlen_ks, cu_seqlen_ke = narrowed
 
             # PCP + DCP KV all-gather.
             deinterleave_idx = chunk.pcp_deinterleave_idx
@@ -664,20 +691,9 @@ def sparse_attn_indexer(
                     row_starts=cu_seqlen_ks,
                 )
 
-        if shard_sizes is not None:
+        if row_shard is not None:
             # Rows are already fully ranked, so this is a layout gather.
-            prefill_end = num_decode_tokens + sum(shard_sizes)
-            local_topk = topk_indices_buffer[
-                shard_start:shard_stop, :topk_tokens
-            ].contiguous()
-            gathered_topk = get_tp_group().all_gatherv(
-                local_topk,
-                dim=0,
-                sizes=shard_sizes,
-            )
-            topk_indices_buffer[num_decode_tokens:prefill_end, :topk_tokens] = (
-                gathered_topk
-            )
+            row_shard.exchange_topk(topk_indices_buffer, topk_tokens)
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode

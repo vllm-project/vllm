@@ -6,12 +6,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
-from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
+from vllm.model_executor.layers.sparse_attn_indexer import PrefillRowShard
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
     _build_decode_scatter_indices,
@@ -242,19 +242,6 @@ def sparse_attn_indexer_kpool(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # Score one contiguous row shard per rank and exchange final indices.
-        shard_sizes = getattr(prefill_metadata, "row_shard_sizes", None)
-        shard_start = shard_stop = 0
-        if shard_sizes is not None:
-            assert not current_platform.is_rocm()
-            forward_cudagraph_mode = getattr(
-                get_forward_context(), "cudagraph_runtime_mode", CUDAGraphMode.NONE
-            )
-            assert forward_cudagraph_mode != CUDAGraphMode.FULL
-            tp_rank = get_tensor_model_parallel_rank()
-            shard_start = num_decode_tokens + sum(shard_sizes[:tp_rank])
-            shard_stop = shard_start + shard_sizes[tp_rank]
-
         # Short sequences select every pool, so skip sparse scoring and fill
         # the top-k buffer with all causal token indices. The index-K cache was
         # already written above.
@@ -284,10 +271,12 @@ def sparse_attn_indexer_kpool(
             _pos = positions[num_decode_tokens:num_tokens].to(torch.int32)
             _buf = topk_indices_buffer[num_decode_tokens:num_tokens]
             _fill_causal_indices(_buf, _pos)
-            # Short prefills skip MQA scoring entirely, so there is no local
-            # row-sharded result to exchange. This can occur with forced MQA,
-            # which keeps row_shard_sizes populated in shared metadata.
-            shard_sizes = None
+        # Short prefills score nothing locally; suppress the shard there.
+        row_shard = None
+        if not short_prefill:
+            row_shard = PrefillRowShard.from_metadata(
+                prefill_metadata, num_decode_tokens
+            )
 
         # Get the full shared workspace buffers once (will allocate on first use).
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
@@ -315,18 +304,12 @@ def sparse_attn_indexer_kpool(
                 )
 
             row_start, row_end = chunk.token_start, chunk.token_end
-            if shard_sizes is not None:
-                row_start = max(row_start, shard_start)
-                row_end = min(row_end, shard_stop)
-                if row_start >= row_end:
+            cu_seqlen_ks, cu_seqlen_ke = chunk.cu_seqlen_ks, chunk.cu_seqlen_ke
+            if row_shard is not None:
+                narrowed = row_shard.narrow(chunk)
+                if narrowed is None:
                     continue
-                lo = row_start - chunk.token_start
-                hi = row_end - chunk.token_start
-                cu_seqlen_ks = chunk.cu_seqlen_ks[lo:hi]
-                cu_seqlen_ke = chunk.cu_seqlen_ke[lo:hi]
-            else:
-                cu_seqlen_ks = chunk.cu_seqlen_ks
-                cu_seqlen_ke = chunk.cu_seqlen_ke
+                row_start, row_end, cu_seqlen_ks, cu_seqlen_ke = narrowed
 
             q_slice = q_quant[row_start:row_end]
             q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
@@ -392,28 +375,11 @@ def sparse_attn_indexer_kpool(
                     )
                 topk_indices_buffer[row_start:row_end, : expanded.shape[-1]] = expanded
 
-        if shard_sizes is not None:
-            prefill_end = num_decode_tokens + sum(shard_sizes)
-            # K-pool expansion appends the request's incomplete tail after the
-            # logical top-k history.  Those ``index_kpool - 1`` entries are
-            # part of the attention index and must be exchanged as well.
-            exchange_width = topk_tokens + (index_kpool - 1 if index_kpool > 1 else 0)
-            # Keep the contiguous local input alive until the NCCL operation's
-            # dependent copy has been enqueued.  In particular, PyNCCL's
-            # variable-size gather is asynchronous and the temporary created
-            # inline here could otherwise be released immediately after the
-            # collective call.
-            local_topk = topk_indices_buffer[
-                shard_start:shard_stop, :exchange_width
-            ].contiguous()
-            gathered_topk = get_tp_group().all_gatherv(
-                local_topk,
-                dim=0,
-                sizes=shard_sizes,
-            )
-            topk_indices_buffer[num_decode_tokens:prefill_end, :exchange_width] = (
-                gathered_topk
-            )
+        if row_shard is not None:
+            # The k-pool expansion appends the request's incomplete tail
+            # (index_kpool - 1 entries) after the logical top-k history; those
+            # columns are part of the attention index and are exchanged too.
+            row_shard.exchange_topk(topk_indices_buffer, topk_tokens + index_kpool - 1)
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
