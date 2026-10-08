@@ -5,8 +5,8 @@ import functools
 import json
 import logging
 import os
+import secrets
 import tempfile
-import uuid
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
@@ -52,11 +52,10 @@ def _tpu_pathways_default() -> bool:
 
 
 def _generate_shm_name() -> str:
-    import pybase64
-
-    # Fit macOS's 30-character limit without truncating the UUID.
-    encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
-    return "vllm_mm_" + encoded_uuid.rstrip("=")
+    # Stdlib only: this runs on every MediaSettings construction, including
+    # docs builds that mock third-party modules such as pybase64. 16 random
+    # bytes -> 22 urlsafe chars, fitting macOS's 30-character limit.
+    return "vllm_mm_" + secrets.token_urlsafe(16)
 
 
 def _env_set(name: str) -> bool:

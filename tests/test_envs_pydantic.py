@@ -105,6 +105,18 @@ def test_object_storage_shm_buffer_autogen():
     assert os.environ["VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"] == name
 
 
+def test_object_storage_shm_buffer_autogen_with_mocked_pybase64(monkeypatch):
+    # The autogen runs on every MediaSettings construction. The docs build
+    # mocks third-party modules missing from requirements/docs.txt, so it must
+    # not depend on pybase64.
+    from unittest.mock import MagicMock
+
+    monkeypatch.setitem(sys.modules, "pybase64", MagicMock(name="pybase64"))
+    envs = _reload_envs()
+    assert isinstance(envs.VLLM_MEDIA_LOADING_THREAD_COUNT, int)
+    assert envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME.startswith("vllm_mm_")
+
+
 def test_use_precompiled_via_wheel_location(monkeypatch):
     monkeypatch.setenv("VLLM_PRECOMPILED_WHEEL_LOCATION", "/tmp/some.whl")
     envs = _reload_envs()
