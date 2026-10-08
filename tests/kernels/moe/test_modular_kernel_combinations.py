@@ -1003,7 +1003,9 @@ def test_aiter_moe_padding_matrix_mxfp4():
 # a1 quant scale (when applicable) is fixed once in run_modular_kernel()'s
 # FusedMoEQuantConfig construction, from hidden_states_scale computed inside
 # RankTensors.make() *before* garbage rows are injected, so it cannot be
-# inflated by a garbage row's magnitude either.
+# inflated by a garbage row's magnitude either -- EXCEPT "fp8_tensor_token",
+# whose a1_scale AITER computes live from the (garbage-injected)
+# hidden_states. See the skip below for why it's excluded from inf modes.
 
 # {mode name -> {row index: fill value}}. Covers multiple garbage-row counts
 # and positions, and both inf and nan.
@@ -1102,6 +1104,26 @@ def test_aiter_moe_token_padding_garbage_rows(
     )
 
     garbage_rows = _TOKEN_PADDING_GARBAGE_MODES[garbage_mode]
+
+    # fp8_tensor_token falls back to AITER's dynamic per-tensor activation
+    # quant (rocm_aiter_moe.py ignores per_act_token_quant when weights are
+    # per-tensor), whose scale is a max-abs reduction over the whole batch --
+    # a real inf garbage row poisons every real row's scale too. Upstream
+    # bug: https://github.com/ROCm/aiter/issues/6275.
+    is_fp8_tensor_token = (
+        quant_config is not None
+        and not quant_config.per_out_ch_quant
+        and quant_config.per_act_token_quant
+        and quant_config.block_shape is None
+    )
+    if is_fp8_tensor_token and any(
+        v in (float("inf"), float("-inf")) for v in garbage_rows.values()
+    ):
+        pytest.skip(
+            "Batch-wide dynamic per-tensor quant scale is poisoned by a "
+            "real inf garbage row. See "
+            "https://github.com/ROCm/aiter/issues/6275."
+        )
 
     # Reuses 4b's already-confirmed 128-aligned ("padded") K/N -- these are
     # known to work across all 5 quant schemes here, including AITER's
