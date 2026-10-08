@@ -19,7 +19,6 @@ from typing import Any
 import msgspec
 import numpy as np
 
-from vllm.exceptions import GenerationError
 from vllm.logprobs import ArrayLogprobs
 
 # Rows rendered per batch; bounds the per-entry lists and index arrays.
@@ -168,11 +167,8 @@ def render_tokens_logprobs(
 
     Returns None when the rows do not map to that shape directly (sampled id
     not in slot 0, repeated top-k ids, fewer entries than requested, a value
-    JSON cannot represent): the caller then uses the per-entry path. Raises
-    GenerationError if storing the rows failed.
+    JSON cannot represent): the caller then uses the per-entry path.
     """
-    if container.broken:
-        raise GenerationError("Storing sample logprobs failed for this request")
     if not container.is_regular:
         return None
     token_ids, logprobs, engine_ranks = container.arrays()
