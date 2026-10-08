@@ -1245,8 +1245,9 @@ mod tests {
             let logprobs = Logprobs {
                 positions: positions.clone(),
             };
+            let logprobs = raw_logprobs_to_generate(&logprobs, *requested).expect("convert");
             response.choices[0].logprobs =
-                Some(raw_logprobs_to_generate(&logprobs, *requested).expect("convert"));
+                Some(serde_json::value::to_raw_value(&logprobs).unwrap());
         }
         // Serialized from the same value (map iteration order included).
         let expected = serde_json::to_vec(&response).expect("serialize reference");
@@ -1321,7 +1322,10 @@ mod tests {
             (
                 collected_output(Some(tricky_positions()), FinishReason::Length),
                 "top-0",
-                logprobs(0),
+                ResponseOptions {
+                    include_prompt_logprobs: false,
+                    ..logprobs(0)
+                },
                 None,
             ),
             (
@@ -1363,6 +1367,47 @@ mod tests {
                 render_with_reference(collected, request_id, options, mm_placeholders).await;
             assert_eq!(actual, expected, "request_id={request_id}");
         }
+    }
+
+    /// Logprobs go to the first choice; other choices serialize as usual.
+    #[tokio::test]
+    async fn direct_render_with_several_choices_is_byte_identical_to_serde_reference() {
+        let rows = tricky_positions();
+        let mut response = collect_generate(
+            collected_output(None, FinishReason::Abort),
+            "choices".to_string(),
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+            None,
+        )
+        .expect("response");
+        let mut second = response.choices[0].clone();
+        second.index = 1;
+        second.finish_reason = Some("stop".to_string());
+        response.choices.push(second);
+        let reference = raw_logprobs_to_generate(
+            &Logprobs {
+                positions: rows.clone(),
+            },
+            2,
+        )
+        .expect("convert");
+        response.choices[0].logprobs = Some(serde_json::value::to_raw_value(&reference).unwrap());
+        let expected = serde_json::to_vec(&response).expect("serialize reference");
+        response.choices[0].logprobs = None;
+
+        let response = generate_response(
+            response,
+            ChoiceLogprobs::Generate {
+                positions: rows,
+                requested: 2,
+            },
+        );
+        let actual = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(
+            String::from_utf8(actual.to_vec()).unwrap(),
+            String::from_utf8(expected).unwrap()
+        );
     }
 
     fn step(

@@ -23,11 +23,12 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use http_body::Frame;
 use serde::Serialize;
+use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{PositionLogprobs, TokenLogprob};
 
-use super::types::{GenerateResponse, GenerateResponseChoice};
+use super::types::GenerateResponse;
 use super::{top_logprob_entries, wire_rank};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
 
@@ -82,61 +83,23 @@ pub(super) fn generate_response(response: GenerateResponse, logprobs: ChoiceLogp
     response
 }
 
-/// Serialize `response` around its single choice's `logprobs` value: the bytes
-/// before the value and the bytes after it. Destructured exhaustively so a new
-/// response field cannot be missed here.
-fn split_response(response: GenerateResponse) -> (Vec<u8>, Vec<u8>) {
-    let GenerateResponse {
-        request_id,
-        choices,
-        prompt_logprobs,
-        prompt_token_id_logprobs,
-        prompt_token_ids,
-        mm_placeholders,
-        kv_transfer_params,
-        ec_transfer_params,
-        metrics,
-    } = response;
-    let [
-        GenerateResponseChoice {
-            index,
-            logprobs: _,
-            finish_reason,
-            token_ids,
-            sampling_mask,
-        },
-    ] = <[_; 1]>::try_from(choices).expect("raw generate responses have one choice");
-
-    let mut head = Vec::new();
-    head.extend_from_slice(b"{\"request_id\":");
-    json(&mut head, &request_id);
-    head.extend_from_slice(b",\"choices\":[{\"index\":");
-    json(&mut head, &index);
-    head.extend_from_slice(b",\"logprobs\":");
-
-    let mut tail = Vec::new();
-    tail.extend_from_slice(b",\"finish_reason\":");
-    json(&mut tail, &finish_reason);
-    tail.extend_from_slice(b",\"token_ids\":");
-    json(&mut tail, &token_ids);
-    tail.extend_from_slice(b",\"sampling_mask\":");
-    json(&mut tail, &sampling_mask);
-    tail.extend_from_slice(b"}],\"prompt_logprobs\":");
-    json(&mut tail, &prompt_logprobs);
-    tail.extend_from_slice(b",\"prompt_token_id_logprobs\":");
-    json(&mut tail, &prompt_token_id_logprobs);
-    tail.extend_from_slice(b",\"prompt_token_ids\":");
-    json(&mut tail, &prompt_token_ids);
-    tail.extend_from_slice(b",\"mm_placeholders\":");
-    json(&mut tail, &mm_placeholders);
-    tail.extend_from_slice(b",\"kv_transfer_params\":");
-    json(&mut tail, &kv_transfer_params);
-    tail.extend_from_slice(b",\"ec_transfer_params\":");
-    json(&mut tail, &ec_transfer_params);
-    tail.extend_from_slice(b",\"metrics\":");
-    json(&mut tail, &metrics);
-    tail.push(b'}');
-
+/// Serialize `response` around the first choice's `logprobs` value: the bytes
+/// before the value and the bytes after it. The value is serialized as a random
+/// placeholder, which no client-supplied string can reproduce.
+fn split_response(mut response: GenerateResponse) -> (Vec<u8>, Vec<u8>) {
+    let placeholder = format!("\"vllm-logprobs-{}\"", uuid::Uuid::new_v4());
+    response.choices[0].logprobs =
+        Some(RawValue::from_string(placeholder.clone()).expect("a JSON string"));
+    let mut head = serde_json::to_vec(&response).expect("generate response must serialize");
+    let mut matches = head
+        .windows(placeholder.len())
+        .enumerate()
+        .filter(|(_, window)| *window == placeholder.as_bytes());
+    let (Some((start, _)), None) = (matches.next(), matches.next()) else {
+        unreachable!("the logprobs placeholder occurs exactly once");
+    };
+    let tail = head.split_off(start + placeholder.len());
+    head.truncate(start);
     (head, tail)
 }
 
@@ -268,6 +231,7 @@ fn json<T: Serialize + ?Sized>(out: &mut Vec<u8>, value: &T) {
 mod tests {
     use serde_json::Value;
 
+    use super::super::types::GenerateResponseChoice;
     use super::*;
 
     thread_local! {

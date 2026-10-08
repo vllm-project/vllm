@@ -26,7 +26,7 @@ prost-types.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 serde_with.workspace = true
 sha2.workspace = true
 socket2.workspace = true
