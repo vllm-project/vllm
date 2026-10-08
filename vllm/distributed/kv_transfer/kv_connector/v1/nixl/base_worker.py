@@ -1615,6 +1615,20 @@ class NixlBaseConnectorWorker:
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
 
+        # A whole row of a group that also holds head-sharded draft pages would
+        # carry TP-dependent bytes, so P and D rows could not match.
+        sharded_row_groups: set[int] = set()
+        if self._whole_row_regions:
+            group_by_layer = self.kv_cache_config.transfer_group_index_by_layer
+            sharded_row_groups = {
+                group_by_layer[name]
+                for name, spec in layer_specs.items()
+                if name in group_by_layer
+                and self._is_head_sharded_draft_layer(
+                    name, isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                )
+            }
+
         track_region_layers = self._tracks_region_layers()
         region_layers: list[list[str]] = []
         packed_member_layouts: dict[str, tuple[int, int]] = {}
@@ -1776,6 +1790,20 @@ class NixlBaseConnectorWorker:
                     and storage_is_block_major
                     and is_mla_region
                 )
+                if (
+                    storage_is_block_major
+                    and self._whole_row_regions
+                    and is_mla_region
+                    and group_id in sharded_row_groups
+                ):
+                    raise ValueError(
+                        "whole_row_regions cannot register a block row that also "
+                        f"holds head-sharded draft pages (layer {layer_name}, group "
+                        f"{group_id}): the row size depends on the TP size, so P and "
+                        "D rows would differ. Keep the draft in its own KV cache "
+                        "group (do not combine with "
+                        "--disable-hybrid-kv-cache-manager) or drop the flag."
+                    )
                 if virtual_transfer_pages:
                     # A compressed kernel row can contain multiple NIXL transfer pages.
                     region_specs = [

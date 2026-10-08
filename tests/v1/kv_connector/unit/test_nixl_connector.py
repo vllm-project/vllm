@@ -73,6 +73,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheLayout,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -2773,11 +2774,16 @@ def _register_blhnc_mla_target_with_gqa_draft(
     tp_rank: int,
     whole_row: bool = False,
     kv_buffer_device: str | None = None,
+    packed_draft: bool = False,
 ):
     """Register an MLA target (group 0) and a GQA draft (group 1) laid out as the
     block-outermost allocator lays them out: one block row sized to the larger
     group, with every group's pages starting at byte 0 of that row. The first
     draft page therefore shares its base address with the first target page.
+
+    With ``packed_draft``, target and draft share one group and the draft pages
+    follow the target pages in the row, as when the hybrid KV cache manager is
+    disabled.
     """
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
@@ -2800,17 +2806,32 @@ def _register_blhnc_mla_target_with_gqa_draft(
         f"draft_model.model.layers.{i}.self_attn.attn"
         for i in range(_BLHNC_DRAFT_LAYERS)
     ]
-    row = max(
-        _BLHNC_MLA_LAYERS * mla_spec.page_size_bytes,
-        _BLHNC_DRAFT_LAYERS * draft_spec.page_size_bytes,
-    )
+    target_bytes = _BLHNC_MLA_LAYERS * mla_spec.page_size_bytes
+    draft_bytes = _BLHNC_DRAFT_LAYERS * draft_spec.page_size_bytes
+    if packed_draft:
+        row = target_bytes + draft_bytes
+        draft_offset = target_bytes
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                target_names + draft_names,
+                UniformTypeKVCacheSpecs(
+                    block_size=_BLHNC_BLOCK_SIZE,
+                    kv_cache_specs={name: mla_spec for name in target_names}
+                    | {name: draft_spec for name in draft_names},
+                ),
+            )
+        ]
+    else:
+        row = max(target_bytes, draft_bytes)
+        draft_offset = 0
+        kv_cache_groups = [
+            KVCacheGroupSpec(target_names, mla_spec),
+            KVCacheGroupSpec(draft_names, draft_spec),
+        ]
     kv_cache_config = KVCacheConfig(
         num_blocks=_BLHNC_NUM_BLOCKS,
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(target_names, mla_spec),
-            KVCacheGroupSpec(draft_names, draft_spec),
-        ],
+        kv_cache_groups=kv_cache_groups,
     )
     vllm_config = create_vllm_config(
         attention_backend="TRITON_ATTN",
@@ -2825,9 +2846,13 @@ def _register_blhnc_mla_target_with_gqa_draft(
         row * _BLHNC_NUM_BLOCKS, dtype=torch.int8, device=current_platform.device_type
     )
 
-    def page_views(names: list[str], page: int) -> dict[str, torch.Tensor]:
+    def page_views(
+        names: list[str], page: int, offset: int = 0
+    ) -> dict[str, torch.Tensor]:
         return {
-            name: raw.as_strided((_BLHNC_NUM_BLOCKS, page), (row, 1), idx * page)
+            name: raw.as_strided(
+                (_BLHNC_NUM_BLOCKS, page), (row, 1), offset + idx * page
+            )
             for idx, name in enumerate(names)
         }
 
@@ -2855,7 +2880,7 @@ def _register_blhnc_mla_target_with_gqa_draft(
         worker._head_sharded_draft_kv_heads = _BLHNC_DRAFT_KV_HEADS
         worker.register_kv_caches(
             page_views(target_names, mla_spec.page_size_bytes)
-            | page_views(draft_names, draft_spec.page_size_bytes)
+            | page_views(draft_names, draft_spec.page_size_bytes, draft_offset)
         )
     meta = NixlAgentMetadata(
         engine_id=engine_id,
@@ -2944,6 +2969,17 @@ def test_whole_row_regions_rejects_host_buffer(default_vllm_config, dist_init):
     with pytest.raises(ValueError, match="whole_row_regions"):
         _register_blhnc_mla_target_with_gqa_draft(
             "decode", 1, 0, whole_row=True, kv_buffer_device="cpu"
+        )
+
+
+def test_whole_row_regions_rejects_draft_packed_into_target_row(
+    default_vllm_config, dist_init
+):
+    """With the hybrid KV cache manager off, BLHNC packs head-sharded draft
+    pages into the target's row, so a whole row differs between TP sizes."""
+    with pytest.raises(ValueError, match="head-sharded draft pages"):
+        _register_blhnc_mla_target_with_gqa_draft(
+            "decode", 4, 0, whole_row=True, packed_draft=True
         )
 
 
