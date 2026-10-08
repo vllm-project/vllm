@@ -18,10 +18,14 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 from transformers import PreTrainedConfig
+
+if TYPE_CHECKING:
+    from vllm.models.minimax_m3.amd.mono import M3Mono
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -1368,6 +1372,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self._mono: M3Mono | None = None
+        if envs.VLLM_ROCM_USE_ATOM_M3_MONO and not vllm_config.use_v2_model_runner:
+            raise ValueError("MiniMax-M3 ATOM mono requires the V2 model runner")
 
         self.vocab_size = config.vocab_size
 
@@ -1485,8 +1492,15 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         # EAGLE3 is not yet compatible with pipeline parallel
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        mono = self._mono
+        use_mono = mono is not None and mono.begin_forward(hidden_states.shape[0])
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            if use_mono and mono is not None and idx in mono.layer_ids:
+                hidden_states, residual = mono.forward_layer(
+                    idx - mono.layer_ids[0], hidden_states, residual, positions
+                )
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )

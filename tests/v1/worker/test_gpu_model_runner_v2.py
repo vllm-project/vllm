@@ -22,6 +22,33 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 
 
+def test_atom_mono_rejects_weight_transfer_before_loading(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_ATOM_M3_MONO", "1")
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = SimpleNamespace(weight_transfer_config=object())
+    # No loader or GPU state is initialized: rejection must precede mutation.
+    with pytest.raises(ValueError, match="does not support weight transfer"):
+        runner.load_model()
+
+
+def test_atom_mono_rejects_weight_reload_before_mutation(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_ATOM_M3_MONO", "1")
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    with pytest.raises(ValueError, match="does not support weight reloading"):
+        runner.reload_weights()
+
+
+def test_native_weight_reload_remains_available(monkeypatch):
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
+
+    monkeypatch.setenv("VLLM_ROCM_USE_ATOM_M3_MONO", "0")
+    reload_weights = Mock()
+    monkeypatch.setattr(GPUModelRunnerV1, "reload_weights", reload_weights)
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.reload_weights()
+    reload_weights.assert_called_once_with(runner)
+
+
 def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.is_last_pp_rank = False

@@ -365,6 +365,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return tuple(tasks)
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        if (
+            envs.VLLM_ROCM_USE_ATOM_M3_MONO
+            and self.vllm_config.weight_transfer_config is not None
+        ):
+            raise ValueError("MiniMax-M3 ATOM mono does not support weight transfer")
         time_before_load = time.perf_counter()
         if load_dummy_weights:
             self.load_config.load_format = "dummy"
@@ -549,6 +554,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return speculator.model
 
     def reload_weights(self, *args, **kwargs) -> None:
+        if envs.VLLM_ROCM_USE_ATOM_M3_MONO:
+            raise ValueError("MiniMax-M3 ATOM mono does not support weight reloading")
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
@@ -772,6 +779,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        if envs.VLLM_ROCM_USE_ATOM_M3_MONO and not is_profiling:
+            from vllm.models.minimax_m3.amd.mono import prepare_model
+
+            prepare_model(self.model, self.vllm_config, self.kv_cache_config)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -2336,6 +2347,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 clear_layer_kv_caches(draft_model.modules())
             self.speculator = None
         if hasattr(self, "model"):
+            if envs.VLLM_ROCM_USE_ATOM_M3_MONO:
+                from vllm.models.minimax_m3.amd.mono import release_model
+
+                release_model(self.model)
             clear_layer_kv_caches(self.model.modules())
             del self.model
 
