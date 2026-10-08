@@ -385,6 +385,16 @@ LOGPROBS_MODES = frozenset({"raw_logprobs", "processed_logprobs"})
 
 def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy]:
     """Raise ValueError when the model cannot serve structured decisions."""
+    config = getattr(model_config, "hf_config", None)
+    protocol = getattr(config, "decision_read_strategy", None)
+    if protocol == "winnow":
+        from .winnow import WinnowStrategy
+
+        if model_config.architecture != "Gemma4ForCausalLM":
+            raise ValueError("Winnow requires Gemma4ForCausalLM")
+        if model_config.logprobs_mode != "raw_logprobs":
+            raise ValueError("Winnow requires raw_logprobs")
+        return WinnowStrategy
     strategy = READ_STRATEGIES.get(model_config.architecture)
     if strategy is None:
         raise ValueError(

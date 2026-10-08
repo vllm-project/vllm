@@ -68,3 +68,38 @@ Image inputs, other message roles, tools, streaming, and per-question refusal
 scoring are outside this MVP. Unsupported request fields and input types are
 rejected. The `/v1/systemone` endpoint retains its existing request format and
 is available by default.
+
+## Winnow checkpoints
+
+Winnow-trained Gemma4 checkpoints use a fixed turn serialization and candidate
+labels rather than the generic chat prompt. Opt in explicitly:
+
+```bash
+vllm serve /path/to/winnow-checkpoint \
+  --hf-overrides '{"decision_read_strategy":"winnow","decision_temperature":1.0}' \
+  --logprobs-mode raw_logprobs --enable-prefix-caching
+```
+
+This uses the shared Decisions API and label-read backend. Each question is
+scheduled independently with the same state prefix. Request-specific chat
+instructions or chat-template overrides are rejected. The upstream limits of
+64 questions and 26 options apply. The API's confidence and response schemas
+remain unchanged; they differ from Ollaya's Jev wire responses.
+
+`decision_temperature` divides candidate log probabilities before their
+conditional softmax. Use 1 when the required scale is folded into the exported
+weights. An additional validation-fitted temperature in `calibration.json` is
+external: set `decision_temperature` to that value for that calibrated variant.
+Preserve the exported
+Gemma logit-softcap configuration. Loading an unrelated Gemma4 checkpoint does
+not make it Winnow-trained.
+
+The checkpoint must be compatible with the installed engine's model and
+quantization loaders. This strategy does not add or change model loaders.
+
+The Decisions API accepts text. For a checkpoint deployment that interprets
+input as a JSON state, set `decision_state_format` to `json` in `--hf-overrides`
+and send a JSON document as the `input` string. The strategy parses that document
+before applying Winnow's canonical state serialization. This preserves object
+and array states when comparing against Ollaya. The default `text` mode treats
+input literally. Invalid JSON in `json` mode fails before inference.

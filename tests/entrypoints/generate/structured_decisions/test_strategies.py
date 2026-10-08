@@ -474,3 +474,94 @@ def test_prompts_retain_question_order(decision_server):
     assert response.status_code == 200, response.text
     for i, prompt in enumerate(server.engine.generated):
         assert f"Question {i}" in server.tokenizer.decode(prompt["prompt_token_ids"])
+
+
+def test_winnow_requires_explicit_protocol_and_raw_scores():
+    from vllm.entrypoints.openai.decisions.winnow import WinnowStrategy
+
+    config = model("Gemma4ForCausalLM")
+    with pytest.raises(ValueError, match="does not support"):
+        select_read_strategy(config)
+    config.hf_config = SimpleNamespace(decision_read_strategy="winnow")
+    assert select_read_strategy(config) is WinnowStrategy
+    config.logprobs_mode = "processed_logprobs"
+    with pytest.raises(ValueError, match="raw_logprobs"):
+        select_read_strategy(config)
+
+
+def test_winnow_option_strings_preserve_trained_semantics():
+    from vllm.entrypoints.openai.decisions.adapters import make_read_question
+    from vllm.entrypoints.openai.decisions.protocol import (
+        ChoiceQuestion,
+        PredicateQuestion,
+        ScoreQuestion,
+    )
+
+    choice = ChoiceQuestion(
+        type="choice",
+        instructions="Route?",
+        choices=[
+            {"value": "billing"},
+            {"value": "support", "description": "Help"},
+        ],
+    )
+    assert make_read_question(0, choice).winnow_options == (
+        "billing",
+        "support: Help",
+    )
+    predicate = PredicateQuestion(type="predicate", instructions="Valid?")
+    assert make_read_question(1, predicate).winnow_options == ("false", "true")
+    score = ScoreQuestion(
+        type="score",
+        instructions="Rate",
+        levels=[
+            {"label": "bad"},
+            {"label": "good"},
+        ],
+    )
+    assert make_read_question(2, score).winnow_options == ("bad", "good")
+
+
+def test_winnow_route_uses_independent_fixed_prompts(decision_server, monkeypatch):
+    from vllm.entrypoints.openai.decisions.winnow import WinnowStrategy
+
+    server = decision_server
+    monkeypatch.setattr(server.tokenizer, "bos_token_id", 0)
+    server.engine.model_config.max_model_len = 8192
+    server.engine.model_config.hf_config = SimpleNamespace(decision_temperature=1.0)
+    strategy = WinnowStrategy(
+        ReadContext(server.engine, server.renderer, None, "auto", {})
+    )
+    server.client.app.state.openai_serving_decisions.strategy = strategy
+    body = {
+        "model": "test-model",
+        "input": "Evidence",
+        "questions": [
+            {"type": "predicate", "instructions": "Is it valid?", "name": "valid"},
+            {
+                "type": "choice",
+                "instructions": "Route?",
+                "name": "route",
+                "choices": [{"value": "a"}, {"value": "b"}],
+            },
+            {
+                "type": "score",
+                "instructions": "Rate?",
+                "name": "rating",
+                "levels": [{"label": "low"}, {"label": "high"}],
+            },
+        ],
+    }
+    response = server.client.post("/v1/decisions", json=body)
+    assert response.status_code == 200, response.text
+    assert [answer["name"] for answer in response.json()["answers"]] == [
+        "valid",
+        "route",
+        "rating",
+    ]
+    assert len(server.engine.generated) == 3
+    texts = [
+        server.tokenizer.decode(p["prompt_token_ids"]) for p in server.engine.generated
+    ]
+    assert all(text.count("Question:") == 1 for text in texts)
+    assert all('State:\n"Evidence"' in text for text in texts)
