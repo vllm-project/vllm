@@ -628,9 +628,7 @@ class Gemma4DecoderLayer(nn.Module):
         )
 
         # MoE (Mixture of Experts) — router + expert block parallel to MLP
-        self.enable_moe_block = getattr(config, "enable_moe_block", False) or getattr(
-            config, "use_second_mlp_block", False
-        )
+        self.enable_moe_block = getattr(config, "num_experts", None) is not None
         self.router: Gemma4Router | None
         self.experts: MoERunner | None
         self.post_feedforward_layernorm_1: RMSNorm | None

@@ -10,12 +10,11 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
-from transformers import PreTrainedConfig
+from transformers import DiffusionGemmaConfig, PreTrainedConfig
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.config.model_arch import ModelArchitectureConfig
-from vllm.transformers_utils.configs.diffusion_gemma import DiffusionGemmaConfig
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
