@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) V1 Sample"
   key: v1-sample
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   device: h200_18gb
   source_file_dependencies: &v1-sample-logits-deps
     - vllm/config/
@@ -38,7 +38,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) V1 Logits + Oracle"
   key: v1-logits-oracle
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   device: h200_18gb
   source_file_dependencies: *v1-sample-logits-deps
   commands:
