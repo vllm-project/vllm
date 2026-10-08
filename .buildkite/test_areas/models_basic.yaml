@@ -194,8 +194,8 @@ steps:
         "master_server_address": f"127.0.0.1:{port}",
         "protocol": "rdma",
         "device_name": os.getenv("MOONCAKE_DEVICE_NAME", "mlx5_12"),
-        "global_segment_size": "32GB",
-        "local_buffer_size": "4GB",
+        "global_segment_size": "4GB",
+        "local_buffer_size": "1GB",
     }
     Path(os.environ["MOONCAKE_CONFIG_PATH"]).write_text(json.dumps(config))
     print(port, metrics_port)
