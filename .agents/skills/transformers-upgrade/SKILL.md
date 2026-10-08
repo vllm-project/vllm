@@ -47,7 +47,9 @@ It lists:
 - `_CONFIG_REGISTRY` overrides of upstream types;
 - registered processors that collide with upstream class names or models;
 - version-gated code at or below the floor;
-- code that reads the installed Transformers version, whatever its threshold.
+- code that reads the installed Transformers version, whatever its threshold;
+- patches citing a Transformers issue or PR (with whether a referenced PR is
+  in the floor release) or a future minimum version.
 
 It finds candidates by name only. Every hit still needs a verdict.
 
@@ -154,6 +156,16 @@ Version gates from the inventory need a decision:
 - **`min_transformers_version`** at or below the floor is removed.
 - **`max_transformers_version`** below the floor means CI never tests that
   model; report it rather than deleting it silently.
+- **Patches citing a Transformers issue or PR:**
+    - Delete the patch when its fix is in the floor release.
+    - For an issue, find the PR that closed it and check that PR. A closed
+      issue is not a fixed one: #43329 was closed while the bug was still in
+      5.16.1.
+    - Re-run the patched behaviour before deleting. A fix in the release does
+      not always cover vLLM's path: #47924 made Emu3's processor add BOS, but
+      vLLM tokenizes without the processor.
+    - Links that only explain a design choice (e.g. a float32 RoPE note) are
+      not patches; leave them.
 
 ## Testing
 

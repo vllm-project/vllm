@@ -7,9 +7,12 @@ Run with the Transformers version under test, from the vLLM repo root:
     uv run --no-project --with transformers==<version> \
         python .agents/skills/transformers-upgrade/scripts/find_upstreamed.py
 
-Imports nothing from vLLM, so no vLLM install is needed.
+Imports nothing from vLLM, so no vLLM install is needed. Uses the `gh` CLI, if
+available, to check whether referenced Transformers PRs are in this release.
 """
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +29,10 @@ UPSTREAM_NAMES = set(dir(transformers))
 MODEL_TYPE = re.compile(r'model_type\s*(?::\s*str\s*)?=\s*"([^"]+)"')
 REGISTRY_KEY = re.compile(r'^\s+(?:\*\*\{)?"?([\w-]+)"?(?:=|": )"(\w+)"', re.M)
 CLASS_KEY = re.compile(r'^\s+"(\w+)": ', re.M)
+UPSTREAM_REF = re.compile(
+    r"huggingface/transformers(?:/(?:issues|pull)/|#)(\d+)"
+    r"|(?:once|until|when) [Tt]ransformers [\d.]+ is the minimum"
+)
 VERSIONED = re.compile(
     r"(?:min_transformers_version|max_transformers_version|check_version|Version)"
     r'\(?\s*=?\s*"([45]\.\d+(?:\.\d+)?)[^"]*"'
@@ -93,8 +100,48 @@ def version_gates() -> None:
                 print(f"- {path.relative_to(ROOT)}:{lineno}: {line.strip()}")
 
 
+def upstream_status(number: str) -> str:
+    """Whether Transformers issue/PR `number` is resolved in this release."""
+
+    def gh(path: str) -> dict | None:
+        try:
+            out = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+        except FileNotFoundError:
+            return None
+        return json.loads(out.stdout) if out.returncode == 0 else None
+
+    repo = "repos/huggingface/transformers"
+    if (issue := gh(f"{repo}/issues/{number}")) is None:
+        return "status unknown"
+    if "pull_request" not in issue:
+        return f"issue {issue['state']}, check which PR fixed it"
+    pr = gh(f"{repo}/pulls/{number}")
+    if pr is None or not pr["merged_at"]:
+        return "PR not merged"
+    compare = gh(f"{repo}/compare/v{FLOOR}...{pr['merge_commit_sha']}")
+    included = compare and compare["status"] in ("behind", "identical")
+    return f"PR merged, {'in' if included else 'not in'} v{FLOOR}"
+
+
+def upstream_refs() -> None:
+    section("Patches referencing Transformers issues/PRs or a future minimum")
+    files = sorted([*ROOT.glob("vllm/**/*.py"), *ROOT.glob("tests/**/*.py")])
+    statuses: dict[str, str] = {}
+    for path in files:
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if (match := UPSTREAM_REF.search(line)) is None:
+                continue
+            note = ""
+            if number := match.group(1):
+                if number not in statuses:
+                    statuses[number] = upstream_status(number)
+                note = f" [#{number}: {statuses[number]}]"
+            print(f"- {path.relative_to(ROOT)}:{lineno}:{note} {line.strip()}")
+
+
 if __name__ == "__main__":
     print(f"# Transformers {FLOOR}")
     vendored_configs()
     vendored_processors()
     version_gates()
+    upstream_refs()
