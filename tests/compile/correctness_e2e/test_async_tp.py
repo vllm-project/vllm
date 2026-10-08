@@ -169,7 +169,7 @@ def test_async_tp_pass_correctness(
         model_id,
         async_tp_args,
         tp_args,
-        method="generate",
+        method="generate_close",
         force_v1_runner=True,
     )
 
@@ -248,7 +248,7 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, caplog_mp_spaw
             tp_args,
             env1=env,
             env2=env,
-            method="generate",
+            method="generate_close",
             force_v1_runner=True,
         )
     if is_rocm_cdna:

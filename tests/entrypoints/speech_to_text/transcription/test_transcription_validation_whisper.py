@@ -64,7 +64,7 @@ _ATTN_IDS = [b or "default" for b in _ATTN_BACKENDS]
 @pytest.fixture(scope="module", params=_ATTN_BACKENDS, ids=_ATTN_IDS)
 def server(request):
     args = [*_ROCM_ARGS]
-    env_dict = None
+    env_dict = {"VLLM_BATCH_INVARIANT": "1"}
     if request.param is not None:
         args += ["--attention-backend", request.param]
         if "AITER" in request.param:

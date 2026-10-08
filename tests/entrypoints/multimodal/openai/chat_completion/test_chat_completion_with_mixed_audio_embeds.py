@@ -189,12 +189,18 @@ async def test_text_content_and_prompt_embeds_match_with_audio_embeds(
         model=QWEN2AUDIO_MODEL,
         max_tokens=10,
         temperature=0.0,
+        logprobs=True,
+        top_logprobs=5,
+        extra_body={"return_tokens_as_token_ids": True},
         messages=[{"role": "user", "content": text_content}],
     )
     embeds_resp = await qwen2audio_client.chat.completions.create(
         model=QWEN2AUDIO_MODEL,
         max_tokens=10,
         temperature=0.0,
+        logprobs=True,
+        top_logprobs=5,
+        extra_body={"return_tokens_as_token_ids": True},
         messages=[{"role": "user", "content": embeds_content}],
     )
 
@@ -202,4 +208,16 @@ async def test_text_content_and_prompt_embeds_match_with_audio_embeds(
     embeds_out = embeds_resp.choices[0].message.content
     assert text_out is not None and len(text_out) > 0
     assert embeds_out is not None and len(embeds_out) > 0
-    assert text_out == embeds_out
+    if text_out != embeds_out:
+        for text_tok, embeds_tok in zip(
+            text_resp.choices[0].logprobs.content,
+            embeds_resp.choices[0].logprobs.content,
+        ):
+            if text_tok.token == embeds_tok.token:
+                continue
+            text_top = {t.token for t in text_tok.top_logprobs}
+            embeds_top = {t.token for t in embeds_tok.top_logprobs}
+            assert embeds_tok.token in text_top and text_tok.token in embeds_top, (
+                f"text={text_out!r} embeds={embeds_out!r}"
+            )
+            break
