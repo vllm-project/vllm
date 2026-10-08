@@ -168,13 +168,7 @@ class KVBlockZeroer:
                     continue
                 if group.kernel_block_stride:
                     # Bound views address kernel blocks; zero by manager block.
-                    assert group.kernel_block_size is not None
-                    bpk = spec.block_size // group.kernel_block_size
-                    kv = kv.as_strided(
-                        (num_blocks, *kv.shape[1:-2], kv.shape[-2] * bpk)
-                        + kv.shape[-1:],
-                        (kv.stride(0) * group.kernel_block_stride, *kv.stride()[1:]),
-                    )
+                    kv = group.map_kv_cache_to_manager_blocks(kv, num_blocks)
                 if kv.device.type != self.device.type:
                     continue
                 dp = kv.data_ptr()
@@ -264,7 +258,7 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
-@dataclass
+@dataclass(eq=False)
 class AttentionGroup:
     backend: type[AttentionBackend]
     layer_names: list[str]
@@ -401,7 +395,7 @@ class AttentionGroup:
         return out
 
     def map_kv_cache_to_kernel_blocks(self, kv_cache: torch.Tensor) -> torch.Tensor:
-        """Views a packed cache, allocated in manager blocks, in kernel blocks."""
+        """Views a packed cache in manager blocks as kernel blocks."""
         assert self.kernel_block_size is not None
         spec = self.kv_cache_spec
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
@@ -432,6 +426,18 @@ class AttentionGroup:
         return kv_cache.as_strided(
             (num_pages, *kv_cache.shape[1:-2], kernel_rows, kv_cache.shape[-1]),
             (page_stride, *kv_cache.stride()[1:]),
+        )
+
+    def map_kv_cache_to_manager_blocks(
+        self, kv_cache: torch.Tensor, num_blocks: int
+    ) -> torch.Tensor:
+        """Views a packed cache in kernel blocks as manager blocks."""
+        assert self.kernel_block_stride
+        spec = self.kv_cache_spec
+        rows = spec.get_num_kernel_states(spec.block_size)
+        return kv_cache.as_strided(
+            (num_blocks, *kv_cache.shape[1:-2], rows, kv_cache.shape[-1]),
+            (kv_cache.stride(0) * self.kernel_block_stride, *kv_cache.stride()[1:]),
         )
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
