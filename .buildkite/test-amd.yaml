@@ -827,9 +827,7 @@ steps:
   - examples/features/data_parallel/data_parallel_offline.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
-  - csrc/custom_quickreduce.cu
-  - csrc/ops.h
-  - csrc/torch_bindings.cpp
+  - csrc/rocm/quickreduce/
   - vllm/model_executor/layers/
   - vllm/entrypoints/llm.py
   - vllm/config/parallel.py
@@ -3460,9 +3458,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/custom_quickreduce.cu
-  - csrc/ops.h
-  - csrc/torch_bindings.cpp
+  - csrc/rocm/quickreduce/
   - vllm/distributed/
   - vllm/model_executor/layers/
   - vllm/entrypoints/llm.py

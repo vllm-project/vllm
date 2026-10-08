@@ -2,7 +2,7 @@
 #include "../../torch_utils.h"
 
 #include "../../dispatch_utils.h"
-#include "../../../core/batch_invariant.hpp"
+#include "core/utils.hpp"
 #include "layernorm_utils.cuh"
 #include "quant_conversions.cuh"
 

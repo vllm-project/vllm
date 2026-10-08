@@ -20,7 +20,7 @@
  */
 #pragma once
 
-#include "attention_generic.cuh"
+#include "dtype_generic.cuh"
 #include "dtype_float32.cuh"
 
 #ifdef USE_ROCM

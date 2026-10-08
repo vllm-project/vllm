@@ -1,15 +1,9 @@
 #pragma once
 
-#include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
-#include "cutlass_extensions/epilogue/broadcast_load_epilogue_array_c3x.hpp"
+#include "broadcast_load_epilogue_c3x.hpp"
+#include "broadcast_load_epilogue_array_c3x.hpp"
 
-// This header is shared by both _C (unstable ABI) and _C_stable_libtorch
-// (stable ABI) targets. When compiled under the stable ABI target,
-// TORCH_TARGET_VERSION is defined and Tensor is unavailable, so we
-// use torch::stable::Tensor instead.
-#ifdef TORCH_TARGET_VERSION
-  #include <torch/csrc/stable/tensor.h>
-#endif
+#include <torch/csrc/stable/tensor.h>
 
 /*
    This file defines custom epilogues for fusing channel scales, token scales,
@@ -23,11 +17,7 @@
 
 namespace vllm::c3x {
 
-#ifdef TORCH_TARGET_VERSION
 using TensorType = torch::stable::Tensor;
-#else
-using TensorType = torch::Tensor;
-#endif
 
 using namespace cute;
 

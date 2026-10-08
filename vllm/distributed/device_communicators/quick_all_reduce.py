@@ -28,7 +28,7 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402, F401
 
 
 class QuickReduceRegime(Enum):
-    # Keep integer ids aligned with csrc/quickreduce/quick_reduce.h
+    # Keep integer ids aligned with csrc/rocm/quickreduce/quick_reduce.h
     FP = 0
     INT8 = 1
     INT6 = 2

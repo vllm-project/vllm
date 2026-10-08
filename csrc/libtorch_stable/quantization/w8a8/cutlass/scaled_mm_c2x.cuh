@@ -22,7 +22,7 @@
 #include "cutlass/epilogue/threadblock/fusion/visitors.hpp"
 #include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
 
-#include "libtorch_stable/core/math.hpp"
+#include "core/utils.hpp"
 #include "libtorch_stable/cutlass_extensions/common.hpp"
 // clang-format on
 
@@ -30,7 +30,7 @@ using namespace cute;
 
 /*
    Epilogues defined in,
-   csrc/cutlass_extensions/epilogue/scaled_mm_epilogues_c2x.hpp
+   csrc/libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c2x.hpp
    must contain a public type named EVTCompute of type Sm80EVT,
    as well as a static prepare_args function that constructs an
    EVTCompute::Arguments struct.

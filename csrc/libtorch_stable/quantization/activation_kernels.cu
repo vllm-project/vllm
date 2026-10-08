@@ -2,10 +2,10 @@
 
 #include <cmath>
 
-#include "libtorch_stable/core/math.hpp"
-#include "cuda_compat.h"
+#include "core/utils.hpp"
+#include "core/cuda_compat.h"
 #include "libtorch_stable/dispatch_utils.h"
-#include "quantization/w8a8/fp8/common.cuh"
+#include "libtorch_stable/quantization/w8a8/fp8/common.cuh"
 
 #ifndef USE_ROCM
   #include <cuda_bf16.h>

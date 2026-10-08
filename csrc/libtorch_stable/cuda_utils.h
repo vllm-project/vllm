@@ -4,16 +4,10 @@
 
 #if defined(__HIPCC__)
   #define HOST_DEVICE_INLINE __host__ __device__
-  #define DEVICE_INLINE __device__
-  #define HOST_INLINE __host__
 #elif defined(__CUDACC__) || defined(_NVHPC_CUDA)
   #define HOST_DEVICE_INLINE __host__ __device__ __forceinline__
-  #define DEVICE_INLINE __device__ __forceinline__
-  #define HOST_INLINE __host__ __forceinline__
 #else
   #define HOST_DEVICE_INLINE inline
-  #define DEVICE_INLINE inline
-  #define HOST_INLINE inline
 #endif
 
 #define CUDA_CHECK(cmd)                                             \

@@ -24,7 +24,7 @@
 
 #include <cuda_fp8.h>
 
-#include "cuda_utils.h"
+#include "libtorch_stable/cuda_utils.h"
 #include "libtorch_stable/launch_bounds_utils.h"
 
 // Define before including nvfp4_utils.cuh so the header

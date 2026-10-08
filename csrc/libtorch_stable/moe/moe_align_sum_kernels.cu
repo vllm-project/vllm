@@ -8,8 +8,8 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
 
-#include "../../cuda_compat.h"
-#include "libtorch_stable/core/math.hpp"
+#include "core/cuda_compat.h"
+#include "core/utils.hpp"
 #include "libtorch_stable/dispatch_utils.h"
 #include "libtorch_stable/quantization/vectorization.cuh"
 #include "libtorch_stable/torch_utils.h"

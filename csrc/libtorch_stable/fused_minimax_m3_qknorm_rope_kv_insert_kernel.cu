@@ -54,15 +54,15 @@
 
 #include "torch_utils.h"
 
-#include "../cuda_compat.h"
+#include "core/cuda_compat.h"
 #include "type_convert.cuh"
-#include "../attention/dtype_fp8.cuh"
+#include "core/vec_dtypes/dtype_fp8.cuh"
 #include "dispatch_utils.h"
 
 #ifdef USE_ROCM
-  #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
+  #include "libtorch_stable/quantization/w8a8/fp8/amd/quant_utils.cuh"
 #else
-  #include "../quantization/w8a8/fp8/nvidia/quant_utils.cuh"
+  #include "libtorch_stable/quantization/w8a8/fp8/nvidia/quant_utils.cuh"
 #endif
 
 // Direct float -> E4M3 FP8 conversion for the indexer Q / index-K outputs.

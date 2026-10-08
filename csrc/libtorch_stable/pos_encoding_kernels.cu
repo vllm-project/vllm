@@ -1,6 +1,6 @@
 #include "torch_utils.h"
 
-#include "../cuda_compat.h"
+#include "core/cuda_compat.h"
 #include "dispatch_utils.h"
 
 namespace vllm {

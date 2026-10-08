@@ -14,13 +14,13 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
-#include "libtorch_stable/core/math.hpp"
+#include "core/utils.hpp"
 #include "libtorch_stable/cutlass_extensions/common.hpp"
 // clang-format on
 
 /*
   Epilogues defined in,
-  csrc/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp,
+  csrc/libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp,
   must contain a public type named EVTCompute of type Sm90EVT, as well as a
   static prepare_args function that constructs an EVTCompute::Arguments struct.
 */

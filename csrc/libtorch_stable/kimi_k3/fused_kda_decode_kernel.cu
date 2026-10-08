@@ -9,7 +9,7 @@
 #include <optional>
 
 #include "../torch_utils.h"
-#include "../../cuda_compat.h"
+#include "core/cuda_compat.h"
 
 namespace {
 

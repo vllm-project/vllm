@@ -1,6 +1,6 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
-#include "cuda_utils.h"
+#include "libtorch_stable/cuda_utils.h"
 #include "libtorch_stable/cutlass_extensions/common.hpp"
 
 template <typename Fp8Func, typename Int8Func, typename BlockwiseFunc>

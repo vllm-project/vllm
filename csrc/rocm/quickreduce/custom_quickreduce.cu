@@ -5,7 +5,7 @@
 
 #ifdef USE_ROCM
 
-  #include "quickreduce/quick_reduce.h"
+  #include "rocm/quickreduce/quick_reduce.h"
 
 quickreduce::fptr_t init_custom_qr(int64_t rank, int64_t world_size,
                                    std::optional<int64_t> qr_max_size) {
