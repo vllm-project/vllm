@@ -52,7 +52,7 @@ steps:
     amd:
       label: ":amd: (MI300) Basic Correctness Sleep Mode"
       dind: false
-      device: mi300_2
+      device: mi300_1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
