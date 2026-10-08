@@ -74,8 +74,9 @@ class NgramMTPSpeculator(MTPSpeculator):
     """MTP drafting that copies from the context on an n-gram match.
 
     The MTP draft prefill always runs, so the draft KV cache stays complete.
-    The MTP decode steps are skipped when every request matched; deciding that
-    waits for the lookup while the draft prefill runs on the GPU.
+    The MTP decode steps are skipped when every request matched. Deciding that
+    waits for the lookup, overlapped with the draft prefill, and only while the
+    previous round matched every request.
     """
 
     def __init__(
@@ -99,17 +100,21 @@ class NgramMTPSpeculator(MTPSpeculator):
         )
         # Skipping draft forwards on one DP rank would desync the others.
         self.can_skip_decode = self.dp_size == 1
-        self.all_matched_cpu = torch.zeros(1, dtype=torch.bool, pin_memory=True)
-        self.all_matched_event = torch.cuda.Event()
-        self.all_matched_pending = False
+        # Double-buffered so the previous round's flag can be read while this
+        # round's copy is in flight.
+        self.all_matched_cpu = torch.zeros(2, dtype=torch.bool, pin_memory=True)
+        self.all_matched_events = (torch.cuda.Event(), torch.cuda.Event())
+        self.round = 0
+        self.wait_for_lookup = False
 
     def num_draft_steps(self, num_speculative_tokens: int) -> int:
-        if not self.all_matched_pending:
+        if not self.wait_for_lookup:
             return num_speculative_tokens
-        self.all_matched_pending = False
+        self.wait_for_lookup = False
+        cur = self.round % 2
         with gpu_sync_allowed():
-            self.all_matched_event.synchronize()
-        return 1 if self.all_matched_cpu.item() else num_speculative_tokens
+            self.all_matched_events[cur].synchronize()
+        return 1 if self.all_matched_cpu[cur] else num_speculative_tokens
 
     @torch.inference_mode()
     def propose(
@@ -142,11 +147,19 @@ class NgramMTPSpeculator(MTPSpeculator):
                 num_reqs,
             )
             if self.can_skip_decode:
+                # Wait for this round's lookup only while the previous round
+                # matched every request, read without blocking: batches
+                # without matches never wait.
+                prev = self.round % 2
+                self.wait_for_lookup = bool(
+                    self.all_matched_events[prev].query() and self.all_matched_cpu[prev]
+                )
+                self.round += 1
+                cur = self.round % 2
                 # Requests that sampled nothing (chunked prefill) need no draft.
                 all_matched = (has_match | (num_sampled == 0)).all()
-                self.all_matched_cpu.copy_(all_matched, non_blocking=True)
-                self.all_matched_event.record()
-                self.all_matched_pending = True
+                self.all_matched_cpu[cur].copy_(all_matched, non_blocking=True)
+                self.all_matched_events[cur].record()
 
         draft_tokens = super().propose(
             input_batch,
@@ -167,7 +180,7 @@ class NgramMTPSpeculator(MTPSpeculator):
             is_profile=is_profile,
             num_speculative_tokens=num_speculative_tokens,
         )
-        self.all_matched_pending = False
+        self.wait_for_lookup = False
         if dummy_run:
             return draft_tokens
         torch.where(has_match[:, None], ngram_drafts, draft_tokens, out=draft_tokens)

@@ -325,9 +325,10 @@ def _make_ngram_mtp(min_n: int, max_n: int, k: int):
         min_n, max_n, k, ngram.max_num_reqs, ngram.max_model_len, DEVICE
     )
     speculator.can_skip_decode = True
-    speculator.all_matched_cpu = torch.zeros(1, dtype=torch.bool, pin_memory=True)
-    speculator.all_matched_event = torch.cuda.Event()
-    speculator.all_matched_pending = False
+    speculator.all_matched_cpu = torch.zeros(2, dtype=torch.bool, pin_memory=True)
+    speculator.all_matched_events = (torch.cuda.Event(), torch.cuda.Event())
+    speculator.round = 0
+    speculator.wait_for_lookup = False
     return speculator
 
 
@@ -335,11 +336,11 @@ def _make_ngram_mtp(min_n: int, max_n: int, k: int):
     ("rows", "num_sampled", "expected_drafts", "expected_steps"),
     [
         # One request without a match: the MTP chain runs in full.
-        ([[1, 2, 3, 1, 2], [4, 5, 6]], [1, 1], [[3, 1, 2], [9, 9, 9]], 3),
-        # Every request matched: only the draft prefill runs.
-        ([[1, 2, 3, 1, 2], [7, 8, 7]], [1, 1], [[3, 1, 2], [8, 7, 9]], 1),
+        ([[1, 2, 3, 1, 2], [4, 5, 6]], [1, 1], [[3, 1, 2], [9, 9, 9]], [3, 3]),
+        # Every request matched: from the second round only the prefill runs.
+        ([[1, 2, 3, 1, 2], [7, 8, 7]], [1, 1], [[3, 1, 2], [8, 7, 9]], [3, 1]),
         # A request that sampled nothing (chunked prefill) needs no draft.
-        ([[1, 2, 3, 1, 2], [4, 5, 6]], [1, 0], [[3, 1, 2], [9, 9, 9]], 1),
+        ([[1, 2, 3, 1, 2], [4, 5, 6]], [1, 0], [[3, 1, 2], [9, 9, 9]], [3, 1]),
     ],
 )
 def test_ngram_mtp_uses_lookup_first_and_skips_mtp_decode(
@@ -348,6 +349,9 @@ def test_ngram_mtp_uses_lookup_first_and_skips_mtp_decode(
     fake = _FakeMTPPropose(fill=9)
     fake.install(monkeypatch)
     speculator = _make_ngram_mtp(min_n=1, max_n=2, k=3)
-    drafts = _propose(speculator, rows, num_sampled=num_sampled, last_sampled=[9, 9])
-    assert fake.draft_steps == [expected_steps]
-    assert drafts == expected_drafts
+    for _ in range(2):
+        drafts = _propose(
+            speculator, rows, num_sampled=num_sampled, last_sampled=[9, 9]
+        )
+        assert drafts == expected_drafts
+    assert fake.draft_steps == expected_steps
