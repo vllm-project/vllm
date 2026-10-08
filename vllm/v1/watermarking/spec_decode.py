@@ -7,6 +7,7 @@ from vllm.config.watermarking import WatermarkConfig, WatermarkContextScope
 from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
+from vllm.v1.watermarking.red_green import RedGreenWatermarker
 from vllm.v1.watermarking.watermarker import (
     RandomSampler,
     SupportsSpeculativeDecoding,
@@ -209,9 +210,13 @@ def speculative_target_watermark_key(
     if watermark_config is None:
         return None
 
-    return _resolve_watermark_key(
-        create_speculative_target_watermarker(create_watermarker(watermark_config))
+    watermarker = create_speculative_target_watermarker(
+        create_watermarker(watermark_config)
     )
+    if isinstance(watermarker, RedGreenWatermarker):
+        # Verified against its watermarked logits; recovery needs no key.
+        return None
+    return _resolve_watermark_key(watermarker)
 
 
 def watermarked_rejection_sample(

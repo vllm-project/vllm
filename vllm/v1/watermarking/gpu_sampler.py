@@ -9,6 +9,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.watermarking.red_green import RedGreenWatermarker
 from vllm.v1.watermarking.watermarker import RandomSampler, Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -114,6 +115,34 @@ class GPUWatermarkSampler(Sampler):
             sampled,
         )
         return sampled, output_logits
+
+    def watermark_verification_logits(
+        self,
+        processed_logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        draft_sampled: torch.Tensor,
+    ) -> torch.Tensor:
+        """Red-green watermark the logits rejection sampling verifies.
+
+        Each row's context ends with the drafted tokens before it, so every
+        emitted token, accepted draft or not, follows the watermarked
+        distribution. Opted-out, greedy and deduplicated rows keep their logits.
+        """
+        assert isinstance(self.watermarker, RedGreenWatermarker)
+        contexts = self._get_contexts(
+            expanded_idx_mapping, expanded_local_pos, draft_sampled
+        )
+        enabled = self.watermarking.gpu[expanded_idx_mapping] & (
+            self.sampling_states.temperature.gpu[expanded_idx_mapping] != 0
+        )
+        if self.deduplicate_contexts != "none":
+            enabled &= ~self._get_repeated_contexts(
+                expanded_idx_mapping, contexts, expanded_local_pos
+            )
+        return self.watermarker.watermark_logits(
+            processed_logits, contexts, skip_mask=~enabled
+        )
 
     def _get_repeated_contexts(
         self,
