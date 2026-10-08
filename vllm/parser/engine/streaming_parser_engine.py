@@ -196,6 +196,42 @@ class StreamingParserEngine:
         self._array_started: bool = False
         self._array_in_element: bool = False
 
+    def _reset_pending_tool_start(self) -> None:
+        # A tool-call opener seen in CONTENT/REASONING whose transition is
+        # held back until it is known to open a real call (see
+        # ``ParserEngineConfig.tool_start_confirm_terminals``), plus the text
+        # that followed it in the meantime.
+        self._pending_tool_start: Transition | None = None
+        self._pending_tool_start_value: str = ""
+        self._pending_tool_start_token_count: int = 0
+        self._pending_tool_start_held: str = ""
+        self._pending_tool_start_held_token_count: int = 0
+
+    def _hold_after_pending_tool_start(self, text: str, token_count: int) -> None:
+        self._pending_tool_start_held += text
+        self._pending_tool_start_held_token_count += token_count
+
+    def _abandon_pending_tool_start(self) -> list[SemanticEvent]:
+        """The held opener was quoted text: emit it, and everything held
+        after it, in the channel it appeared in."""
+        text = self._pending_tool_start_value + self._pending_tool_start_held
+        token_count = (
+            self._pending_tool_start_token_count
+            + self._pending_tool_start_held_token_count
+        )
+        self._reset_pending_tool_start()
+        return self._emit_for_state(text, token_count)
+
+    def _commit_pending_tool_start(self) -> list[SemanticEvent]:
+        """The held opener starts a real call: apply its transition. Text held
+        after it was tool-preamble text, which TOOL_PREAMBLE discards."""
+        transition = self._pending_tool_start
+        assert transition is not None
+        value = self._pending_tool_start_value
+        token_count = self._pending_tool_start_token_count
+        self._reset_pending_tool_start()
+        return self._apply_transition(transition, value, token_count)
+
     def reset(self, initial_state: ParserState | None = None) -> None:
         """Reset mutable state for reuse across requests.
 
@@ -220,6 +256,7 @@ class StreamingParserEngine:
         self._in_skipped_tool_span = False
         self._reset_args_state()
         self._reset_array_state()
+        self._reset_pending_tool_start()
 
     def feed(
         self,
@@ -293,6 +330,18 @@ class StreamingParserEngine:
 
     def finish(self) -> list[SemanticEvent]:
         events = self._process_scanner_items(self._scanner.flush_pending())
+
+        if self._pending_tool_start is not None:
+            # Output ended before the opener was resolved. Prose after it
+            # means it was quoted; whitespace alone (or a partial
+            # ``<function`` still in the lexer) is a call cut off by
+            # max_tokens or a stop string, dropped as before.
+            if self._pending_tool_start_held.isspace() or (
+                not self._pending_tool_start_held
+            ):
+                events.extend(self._commit_pending_tool_start())
+            else:
+                events.extend(self._abandon_pending_tool_start())
 
         events.extend(self._process_lex_tokens(self._lexer.flush()))
 
@@ -409,6 +458,19 @@ class StreamingParserEngine:
     def _on_terminal(
         self, terminal: str, value: str, token_count: int = 0
     ) -> list[SemanticEvent]:
+        if self._pending_tool_start is not None:
+            if terminal in self.config.tool_start_confirm_terminals:
+                events = self._commit_pending_tool_start()
+            elif (self.state, terminal) in self.config.transitions:
+                # A structural marker of the enclosing channel (``</think>``,
+                # another opener) shows the held opener was quoted text.
+                events = self._abandon_pending_tool_start()
+            else:
+                self._hold_after_pending_tool_start(value, token_count)
+                return []
+            events.extend(self._on_terminal(terminal, value, token_count))
+            return events
+
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
@@ -478,9 +540,22 @@ class StreamingParserEngine:
         if transition.skip_in_token_id_mode and self._ever_had_token_ids:
             return self._emit_for_state(value, token_count)
 
+        if (
+            self.config.tool_start_confirm_terminals
+            and self.state in self._PLAIN_STATES
+            and transition.next_state == ParserState.TOOL_PREAMBLE
+        ):
+            self._pending_tool_start = transition
+            self._pending_tool_start_value = value
+            self._pending_tool_start_token_count = token_count
+            return []
+
         return self._apply_transition(transition, value, token_count)
 
     def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        if self._pending_tool_start is not None:
+            self._hold_after_pending_tool_start(text, token_count)
+            return []
         if self.state == ParserState.MESSAGE_HEADER:
             self._message_header_buffer += text
             self._message_header_token_count += token_count
