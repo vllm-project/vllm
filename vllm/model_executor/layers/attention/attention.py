@@ -12,6 +12,7 @@ from vllm.config import (
     CacheConfig,
     get_current_vllm_config,
 )
+from vllm.config.cache import CacheDType
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -59,9 +60,9 @@ logger = init_logger(__name__)
 
 
 def _resolve_kv_cache_dtype_from_quant_config(
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     kv_cache_scheme: dict[str, Any] | None,
-) -> str:
+) -> CacheDType:
     if kv_cache_scheme is None or kv_cache_dtype != "auto":
         return kv_cache_dtype
 

@@ -21,6 +21,7 @@ import vllm.model_executor.layers.attention.attention as attention_module
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm.config import set_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
@@ -439,9 +440,9 @@ def test_compressed_tensors_fp8_kv_cache_auto_selection(
     monkeypatch,
     is_rocm: bool,
     supports_fp8: bool,
-    requested_dtype: str,
+    requested_dtype: CacheDType,
     has_kv_cache_scheme: bool,
-    expected_dtype: str,
+    expected_dtype: CacheDType,
     should_warn: bool,
 ) -> None:
     platform = SimpleNamespace(
