@@ -24,6 +24,10 @@ if TYPE_CHECKING:
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import (
+        MLAPrefillSelectorConfig,
+    )
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -903,6 +907,57 @@ class RocmPlatform(Platform):
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
+    def get_mla_prefill_backend_cls(
+        cls,
+        mla_selector_config: "MLAPrefillSelectorConfig",
+    ) -> "type[MLAPrefillBackend]":
+        """On ROCm, prefer the AITER FlashAttention backend, falling back to
+        FlashAttention.
+
+        Raises:
+            ValueError: If neither backend is valid for the configuration.
+
+        """
+        from vllm.v1.attention.backends.mla.prefill.registry import (
+            MLAPrefillBackendEnum,
+        )
+
+        device_capability = cls.get_device_capability()
+        all_invalid_reasons: dict[str, list[str]] = {}
+        for backend_enum in (
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ):
+            try:
+                backend_cls = backend_enum.get_class()
+                invalid_reasons = backend_cls.validate_configuration(
+                    device_capability, mla_selector_config
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if not invalid_reasons:
+                return backend_cls
+            all_invalid_reasons[backend_enum.name] = invalid_reasons
+
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{name}: [{', '.join(reasons)}]"
+                for name, reasons in all_invalid_reasons.items()
+            )
+            + "}"
+        )
+        logger.debug_once(
+            "Some MLA prefill backends are not valid with %s. Reasons: %s.",
+            repr(mla_selector_config),
+            reasons_str,
+        )
+        raise ValueError(
+            f"No valid MLA prefill backend found with {mla_selector_config!r}. "
+            f"Reasons: {reasons_str}."
+        )
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

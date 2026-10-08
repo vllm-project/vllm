@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     FlexibleArgumentParser = object
@@ -428,6 +430,88 @@ class Platform:
             f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
         )
         return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
+    def get_mla_prefill_backend_cls(
+        cls,
+        mla_selector_config: "MLAPrefillSelectorConfig",
+    ) -> "type[MLAPrefillBackend]":
+        """Get the MLA prefill backend class of a device.
+
+        Platforms that have a single, fixed MLA prefill backend can override
+        this to return it directly. The default implementation selects the
+        best backend from a device-capability-based priority list.
+
+        Returns:
+            The selected backend class.
+
+        Raises:
+            ValueError: If no MLA prefill backend is valid for the
+                configuration.
+
+        """
+        from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
+        from vllm.v1.attention.backends.mla.prefill.registry import (
+            MLAPrefillBackendEnum,
+        )
+
+        device_capability = cls.get_device_capability()
+        if device_capability is None:
+            return MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+
+        if device_capability.major == 10:  # Blackwell
+            if mla_selector_config.mla_dimensions == MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ):
+                priorities = [
+                    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                    MLAPrefillBackendEnum.FLASH_ATTN,
+                    MLAPrefillBackendEnum.FLASHINFER,
+                    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+                ]
+            else:
+                priorities = [
+                    MLAPrefillBackendEnum.FLASH_ATTN,
+                    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                    MLAPrefillBackendEnum.FLASHINFER,
+                    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+                ]
+        else:  # Hopper (SM90) and older
+            priorities = [MLAPrefillBackendEnum.FLASH_ATTN]
+
+        all_invalid_reasons: dict[str, list[str]] = {}
+
+        for backend_enum in priorities:
+            try:
+                backend_cls = backend_enum.get_class()
+                invalid_reasons = backend_cls.validate_configuration(
+                    device_capability, mla_selector_config
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if not invalid_reasons:
+                return backend_cls
+            all_invalid_reasons[backend_enum.name] = invalid_reasons
+
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{name}: [{', '.join(reasons)}]"
+                for name, reasons in all_invalid_reasons.items()
+            )
+            + "}"
+        )
+        logger.debug_once(
+            "Some MLA prefill backends are not valid with %s. Reasons: %s.",
+            repr(mla_selector_config),
+            reasons_str,
+        )
+        raise ValueError(
+            f"No valid MLA prefill backend found with {mla_selector_config!r}. "
+            f"Reasons: {reasons_str}."
+        )
 
     @classmethod
     def get_device_capability(

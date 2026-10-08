@@ -43,8 +43,11 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         return "TRTLLM_RAGGED"
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
-        return device_capability.major == 10
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
+        return device_capability is not None and device_capability.major == 10
 
     @classmethod
     def is_available(cls) -> bool:

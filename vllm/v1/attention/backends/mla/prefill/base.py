@@ -49,7 +49,10 @@ class MLAPrefillBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
         return True
 
     @classmethod
@@ -90,16 +93,19 @@ class MLAPrefillBackend(ABC):
     @classmethod
     def validate_configuration(
         cls,
-        device_capability: "DeviceCapability",
+        device_capability: "DeviceCapability | None",
         selector_config: "MLAPrefillSelectorConfig",
     ) -> list[str]:
         invalid_reasons: list[str] = []
 
         if not cls.supports_compute_capability(device_capability):
-            invalid_reasons.append(
-                f"compute capability {device_capability.major}."
-                f"{device_capability.minor} not supported"
-            )
+            if device_capability is None:
+                invalid_reasons.append("device capability not available")
+            else:
+                invalid_reasons.append(
+                    f"compute capability {device_capability.major}."
+                    f"{device_capability.minor} not supported"
+                )
 
         if not cls.supports_dtype(selector_config.dtype):
             invalid_reasons.append(f"dtype {selector_config.dtype} not supported")
