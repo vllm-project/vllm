@@ -1382,7 +1382,7 @@ def rocm_aiter_sparse_attn_indexer(
             num_rows = logits.shape[0]
             decode_candidates = candidate_blocks[:num_rows]
 
-            def row_bounds():
+            def row_bounds() -> tuple[torch.Tensor, torch.Tensor]:
                 # The zero row starts and the int64 row ends of vLLM's
                 # candidate kernels. Only the branches below that run those
                 # kernels make them, so a layer whose call the gfx942
@@ -1405,9 +1405,11 @@ def rocm_aiter_sparse_attn_indexer(
                     candidate_block_size,
                     decode_candidates,
                 ):
+                    row_starts, row_ends = row_bounds()
                     _select_candidate_blocks(
                         logits,
-                        *row_bounds(),
+                        row_starts,
+                        row_ends,
                         decode_candidates.shape[1],
                         candidate_block_size,
                         decode_candidates,
@@ -1430,9 +1432,11 @@ def rocm_aiter_sparse_attn_indexer(
                 # the top-k then read the whole row.
                 candidates_done = True
             else:
+                row_starts, row_ends = row_bounds()
                 _apply_candidate_mask_strided(
                     logits,
-                    *row_bounds(),
+                    row_starts,
+                    row_ends,
                     decode_candidates,
                     candidate_block_size,
                 )

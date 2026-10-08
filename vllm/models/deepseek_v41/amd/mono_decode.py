@@ -400,6 +400,7 @@ class MonoDecodeLayer:
 
         f = layer.ffn
         e, sh = f.experts.routed_experts, f.shared_experts
+        assert sh is not None, "DeepSeek-V4.1 layers have a shared expert"
         w13, w13_s, w2, w2_s = e.mono942
         sgu, sgu_s = linear_copy(sh.gate_up_proj.weight, sh.gate_up_proj.weight_scale)
         sw2, sw2_s = linear_copy(sh.down_proj.weight, sh.down_proj.weight_scale)
@@ -598,13 +599,18 @@ class MonoDecodeLayer:
             w = self.weights(layer)
             runner.index_front(w, *seam, positions, *swa_args, x_n, qr)
             _vllm_indexer(attn, x_n, qr, positions)
+            topk_buffer = attn.topk_indices_buffer
+            assert topk_buffer is not None, "an index layer has a top-k buffer"
             if shadow:
-                topk_mine = attn.topk_indices_buffer[: x.shape[0]].clone()
+                topk_mine = topk_buffer[: x.shape[0]].clone()
+                # A view, so that the report reads what vLLM's own indexer
+                # writes into the buffer during the shadow reference below.
+                topk_vllm = topk_buffer[: x.shape[0]]
             out = runner.index_back(
                 w,
                 positions,
                 *swa_args,
-                attn.topk_indices_buffer,
+                topk_buffer,
                 comp_cache,
                 comp.block_table,
             )
@@ -630,7 +636,7 @@ class MonoDecodeLayer:
                     attn.layer_id,
                     steps,
                     topk_mine,
-                    attn.topk_indices_buffer[: x.shape[0]],
+                    topk_vllm,
                 )
             return ref
         return out

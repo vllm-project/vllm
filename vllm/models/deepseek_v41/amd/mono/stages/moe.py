@@ -1253,8 +1253,9 @@ def gemv_fp4_pair_942(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, col):
                     c, w, ws, e, n_rows, k, rg0, kb0 + UG_ROUND_942 * (r + UG_AHEAD_942)
                 )
             )
+        wds, scs = ops[r]
         accs = ug_round_942(
-            accs, *ops[r], kb0 + UG_ROUND_942 * r, xl, xsl, col, x_row, s_row, j
+            accs, wds, scs, kb0 + UG_ROUND_942 * r, xl, xsl, col, x_row, s_row, j
         )
         # Without this barrier LLVM moves the next round's FP4 conversions and
         # MFMAs, which do not depend on the pinned accumulators, up into this

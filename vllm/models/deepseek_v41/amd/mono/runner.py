@@ -394,6 +394,7 @@ class DSV41MonoLayer:
         (KT, KLEN). An index layer's K1 writes x_out and qr_out instead of the
         keys, and gets no top-k (None for the three compressed arguments)."""
         a = w.attn
+        assert a is not None, "K1 runs only on layers with attention weights"
         ratio = a.ratio
         st = torch.cuda.current_stream()
         for t_ in (x, residual, post_mix, res_mix, pre_mix, positions, slot_mapping):
@@ -456,8 +457,8 @@ class DSV41MonoLayer:
             token_to_req.data_ptr(),
             self.kt.data_ptr(),
             self.klen.data_ptr(),
-            x_out.data_ptr() if index else 0,
-            qr_out.data_ptr() if index else 0,
+            x_out.data_ptr() if x_out is not None else 0,
+            qr_out.data_ptr() if qr_out is not None else 0,
             self.scratch(x.shape[0]).data_ptr(),
             self.epoch.data_ptr(),
             self.tl1.data_ptr() if self.timeline else 0,
@@ -553,6 +554,7 @@ class DSV41MonoLayer:
         post_a, comb_a, pre_a) and the MoE. ``comp`` is (the compressed
         cache or a dummy, its block stride, its rows a block)."""
         a = w.attn
+        assert a is not None, "K2 runs only on layers with attention weights"
         comp_cache, comp_stride, comp_block = comp
         out, res_out, post_out, comb_out, pre_out = outs
         k2(

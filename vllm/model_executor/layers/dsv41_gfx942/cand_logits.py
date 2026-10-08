@@ -19,7 +19,7 @@ This is what gatherCandidates writes.
 Each logit is computed with the code of AITER's gfx942 kernel
 (_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle in
 aiter/ops/triton/gluon/pa_mqa_logits.py). It uses the same MFMA layout. It
-multiplies the 64 heads' queries with the column's key starting from zero,
+multiplies the queries of all heads with the column's key starting from zero,
 multiplies by the key's scale, applies ReLU, multiplies by the head weights,
 and adds the heads up with the same reduction. The sum over the heads runs
 inside one wave, along the heads of one column, so its order does not depend
@@ -29,11 +29,16 @@ kernel's logit of that position (tests/kernels/test_dsv41_gfx942_cand_logits.py)
 """
 
 import torch
-import triton.language as tl
 from aiter.ops.triton.gluon import pa_mqa_logits as _aiter_logits
 from aiter.ops.triton.gluon.pa_decode_gluon import get_cdna_version
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
+
+from vllm.triton_utils import tl
+
+# vLLM has no wrapper for Gluon, so the kernel uses the Gluon modules that
+# AITER's dense kernel was built with. Gluon's constexpr is Triton's
+# tl.constexpr, so the kernel's annotations use tl.constexpr.
+gluon = _aiter_logits.gluon
+gl = _aiter_logits.gl
 
 # The same reduction function and the same MFMA layout choice as the dense
 # kernel. Both are taken from AITER's module so that the two kernels cannot
@@ -73,30 +78,30 @@ def _cand_logits_kernel(
     out_ids,
     row_len,
     splits_per_row,
-    SeqLensIs2D: gl.constexpr,
-    StagesPerProgram: gl.constexpr,
-    ChunkQ: gl.constexpr,
-    HiddenDim: gl.constexpr,
-    KVBlockSize: gl.constexpr,
-    CandBlock: gl.constexpr,
-    CDNA_VERSION: gl.constexpr,
+    SeqLensIs2D: tl.constexpr,
+    StagesPerProgram: tl.constexpr,
+    ChunkQ: tl.constexpr,
+    HiddenDim: tl.constexpr,
+    KVBlockSize: tl.constexpr,
+    CandBlock: tl.constexpr,
+    CDNA_VERSION: tl.constexpr,
 ):
     # The layouts of the dense gfx942 kernel with ChunkK = 256.
-    NumWarps: gl.constexpr = 4
-    ThreadsPerWarp: gl.constexpr = 64
-    ChunkKPerStage: gl.constexpr = 128
-    MFMAPerWarp: gl.constexpr = ChunkKPerStage // 16 // NumWarps
-    ValQMPerThread: gl.constexpr = ChunkQ // (
+    NumWarps: tl.constexpr = 4
+    ThreadsPerWarp: tl.constexpr = 64
+    ChunkKPerStage: tl.constexpr = 128
+    MFMAPerWarp: tl.constexpr = ChunkKPerStage // 16 // NumWarps
+    ValQMPerThread: tl.constexpr = ChunkQ // (
         NumWarps * ThreadsPerWarp // (HiddenDim // 16)
     )
-    layout_q: gl.constexpr = gl.BlockedLayout(
+    layout_q: tl.constexpr = gl.BlockedLayout(
         size_per_thread=[ValQMPerThread, 16],
         threads_per_warp=[ThreadsPerWarp // (HiddenDim // 16), HiddenDim // 16],
         warps_per_cta=[NumWarps, 1],
         order=[1, 0],
     )
     if _Use_2d_instr_shape_mfma_layout:
-        mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
+        mfma_layout: tl.constexpr = gl.amd.AMDMFMALayout(
             version=CDNA_VERSION,
             instr_shape=[16, 16],
             transposed=False,
@@ -104,25 +109,25 @@ def _cand_logits_kernel(
             tiles_per_warp=[1, MFMAPerWarp],
         )
     else:
-        mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
+        mfma_layout: tl.constexpr = gl.amd.AMDMFMALayout(  # type: ignore[no-redef]
             version=CDNA_VERSION,
             instr_shape=[16, 16, 32],
             transposed=False,
             warps_per_cta=[1, NumWarps],
             tiles_per_warp=[1, MFMAPerWarp],
         )
-    mfma_layout_a: gl.constexpr = gl.DotOperandLayout(
+    mfma_layout_a: tl.constexpr = gl.DotOperandLayout(
         operand_index=0, parent=mfma_layout, k_width=16
     )
-    mfma_layout_b: gl.constexpr = gl.DotOperandLayout(
+    mfma_layout_b: tl.constexpr = gl.DotOperandLayout(
         operand_index=1, parent=mfma_layout, k_width=16
     )
-    layout_scale: gl.constexpr = gl.SliceLayout(1, mfma_layout)
-    layout_col_b: gl.constexpr = gl.SliceLayout(0, mfma_layout_b)
-    layout_col: gl.constexpr = gl.SliceLayout(0, mfma_layout)
+    layout_scale: tl.constexpr = gl.SliceLayout(1, mfma_layout)
+    layout_col_b: tl.constexpr = gl.SliceLayout(0, mfma_layout_b)
+    layout_col: tl.constexpr = gl.SliceLayout(0, mfma_layout)
     # The cache stores each page of KVBlockSize keys shuffled in groups of 16
     # keys, the layout the dense kernel's offset_k_fixed reads.
-    ShuffleRows: gl.constexpr = 16
+    ShuffleRows: tl.constexpr = 16
 
     pid = tl.program_id(0)
     row = pid // splits_per_row

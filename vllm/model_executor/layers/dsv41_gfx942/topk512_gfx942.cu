@@ -607,8 +607,8 @@ __global__ __launch_bounds__(kNumThreads) void topK512Decode(
     logits += static_cast<int64_t>(rowIdx) * stride0;
     if (blocks == 1) {
       vllm::topKPerRowJob<kNumThreads, kNumBins, true, false, false, false,
-                          true>(nullptr, logits, 0, rowEnd, outIndices,
-                                nullptr, 1, kTopK);
+                          true>(nullptr, logits, 0, rowEnd, outIndices, nullptr,
+                                1, kTopK);
       return;
     }
     const int blockSize = rowEnd / blocks;
@@ -816,7 +816,7 @@ __device__ inline uint32_t blockExclusiveSum(uint32_t v, SelectSmem& s,
 // With lastBinOf > 0 the last bin was not counted, and its count is
 // lastBinOf minus the counts of all other bins.
 __device__ __noinline__ void findCutBin(SelectSmem& s, int needed,
-                                                 int lastBinOf) {
+                                        int lastBinOf) {
   const int t = threadIdx.x;
   const int lane = t % 64;
   const int wave = t / 64;
@@ -862,8 +862,9 @@ __device__ __noinline__ void findCutBin(SelectSmem& s, int needed,
 // the first histogram and 2 after the cut.
 template <int kItems, int kStop = 3>
 __device__ void selectFromRegisters(const uint32_t (&keys)[kItems],
-                               const int (&ids)[kItems], int k, SelectSmem& s,
-                               int* out, uint32_t* outKeys = nullptr) {
+                                    const int (&ids)[kItems], int k,
+                                    SelectSmem& s, int* out,
+                                    uint32_t* outKeys = nullptr) {
   for (int b = threadIdx.x; b < kNumBins; b += kNumThreads) s.hist[b] = 0;
   if constexpr (kStop == 0) {
     uint32_t m = 0;
@@ -1257,21 +1258,20 @@ void top_k_per_row_decode_512(const torch::Tensor& logits, int64_t next_n,
           static_cast<int>(indices.stride(0)), static_cast<int>(next_n),
           seqLensIs2D, static_cast<int>(max_blocks),
           static_cast<int>(min_chunk));
-  topk942::topK512Decode<true>
-      <<<numRows, topk942::kNumThreads, topk942::kTopK * sizeof(int32_t),
-         stream>>>(nullptr, seq_lens.data_ptr<int>(), indices.data_ptr<int>(),
-                   aux_indices.data_ptr<int>(), aux_logits.data_ptr<float>(),
-                   0, static_cast<int>(indices.stride(0)),
-                   static_cast<int>(next_n), seqLensIs2D,
-                   static_cast<int>(max_blocks), static_cast<int>(min_chunk));
+  topk942::topK512Decode<true><<<numRows, topk942::kNumThreads,
+                                 topk942::kTopK * sizeof(int32_t), stream>>>(
+      nullptr, seq_lens.data_ptr<int>(), indices.data_ptr<int>(),
+      aux_indices.data_ptr<int>(), aux_logits.data_ptr<float>(), 0,
+      static_cast<int>(indices.stride(0)), static_cast<int>(next_n),
+      seqLensIs2D, static_cast<int>(max_blocks), static_cast<int>(min_chunk));
 }
 
 // top_k_per_row_decode_512 with selectFromRegisters (topK512DecodeChunks and
 // topK512MergeChunks). The same contract and the same index sets, except for
 // ties at the cut, for rows of at most 64 chunks of 16384 columns.
 void top_k_per_row_decode_512_regs(const torch::Tensor& logits, int64_t next_n,
-                                  const torch::Tensor& seq_lens,
-                                  torch::Tensor& indices) {
+                                   const torch::Tensor& seq_lens,
+                                   torch::Tensor& indices) {
   TORCH_CHECK(logits.scalar_type() == at::kFloat && logits.stride(1) == 1,
               "logits must be float32 with unit column stride");
   TORCH_CHECK(logits.stride(0) % 4 == 0 &&
@@ -1288,16 +1288,15 @@ void top_k_per_row_decode_512_regs(const torch::Tensor& logits, int64_t next_n,
   if (numRows == 0) return;
   const at::cuda::OptionalCUDAGuard guard(logits.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  const int maxChunks = static_cast<int>(
-      std::max<int64_t>(1, (logits.size(1) + topk942::kDecodeChunk - 1) /
-                               topk942::kDecodeChunk));
+  const int maxChunks = static_cast<int>(std::max<int64_t>(
+      1, (logits.size(1) + topk942::kDecodeChunk - 1) / topk942::kDecodeChunk));
   auto aux_ids = torch::empty({numRows, maxChunks, topk942::kTopK},
                               logits.options().dtype(at::kInt));
   auto aux_keys = torch::empty({numRows, maxChunks, topk942::kTopK},
                                logits.options().dtype(at::kInt));
   const int seqLensIs2D = seq_lens.dim() == 2 ? 1 : 0;
-  topk942::topK512DecodeChunks<<<dim3(numRows, maxChunks),
-                                 topk942::kNumThreads, 0, stream>>>(
+  topk942::topK512DecodeChunks<<<dim3(numRows, maxChunks), topk942::kNumThreads,
+                                 0, stream>>>(
       logits.data_ptr<float>(), seq_lens.data_ptr<int>(),
       indices.data_ptr<int>(), aux_ids.data_ptr<int>(),
       reinterpret_cast<uint32_t*>(aux_keys.data_ptr<int>()),
@@ -1403,9 +1402,9 @@ void compact_top_k_512(const torch::Tensor& compact_logits,
 // compact_top_k_512 with selectFromRegisters instead of vLLM's radix job. The
 // same arguments and the same index sets, except for ties at the cut.
 void compact_top_k_512_regs(const torch::Tensor& compact_logits,
-                           const torch::Tensor& compact_ids,
-                           const torch::Tensor& seq_lens, int64_t next_n,
-                           torch::Tensor& indices) {
+                            const torch::Tensor& compact_ids,
+                            const torch::Tensor& seq_lens, int64_t next_n,
+                            torch::Tensor& indices) {
   TORCH_CHECK(compact_logits.scalar_type() == at::kFloat &&
                   compact_logits.is_contiguous(),
               "compact_logits must be contiguous float32");
@@ -1420,9 +1419,9 @@ void compact_top_k_512_regs(const torch::Tensor& compact_logits,
                   indices.size(0) >= compact_logits.size(0),
               "indices must be int32 with unit column stride and 512 columns");
   const int64_t len = compact_logits.size(1);
-  TORCH_CHECK(len > topk942::kTopK && len <= 32 * topk942::kNumThreads &&
-                  len % 4 == 0,
-              "a compact row must hold 516 to 32768 positions, a multiple of 4");
+  TORCH_CHECK(
+      len > topk942::kTopK && len <= 32 * topk942::kNumThreads && len % 4 == 0,
+      "a compact row must hold 516 to 32768 positions, a multiple of 4");
   const int numRows = static_cast<int>(compact_logits.size(0));
   if (numRows == 0) return;
   const at::cuda::OptionalCUDAGuard guard(compact_logits.device());
@@ -1445,9 +1444,9 @@ void compact_top_k_512_regs(const torch::Tensor& compact_logits,
 // Runs topK512CompactRegs<16> only up to a phase (see selectFromRegisters's
 // kStop), to time it.
 void compact_top_k_512_regs_phase(const torch::Tensor& compact_logits,
-                                 const torch::Tensor& compact_ids,
-                                 const torch::Tensor& seq_lens,
-                                 torch::Tensor& indices, int64_t stop) {
+                                  const torch::Tensor& compact_ids,
+                                  const torch::Tensor& seq_lens,
+                                  torch::Tensor& indices, int64_t stop) {
   TORCH_CHECK(compact_logits.size(1) == 16 * topk942::kNumThreads,
               "the phase timing takes rows of 16384");
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -1481,8 +1480,7 @@ void candidate_blocks(const torch::Tensor& logits, const torch::Tensor& visible,
               "out must be int32 with unit column stride, one row for each "
               "logits row");
   TORCH_CHECK(block_size >= 1, "block_size must be at least 1");
-  TORCH_CHECK(row_repeat >= 1 &&
-                  visible.numel() * row_repeat >= logits.size(0),
+  TORCH_CHECK(row_repeat >= 1 && visible.numel() * row_repeat >= logits.size(0),
               "visible must hold an end for every logits row");
   const int numRows = static_cast<int>(logits.size(0));
   const int topkBlocks = static_cast<int>(out.size(1));
@@ -1490,8 +1488,8 @@ void candidate_blocks(const torch::Tensor& logits, const torch::Tensor& visible,
   const at::cuda::OptionalCUDAGuard guard(logits.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int width = static_cast<int>(logits.size(1));
-  const int nblocks = (width + static_cast<int>(block_size) - 1) /
-                      static_cast<int>(block_size);
+  const int nblocks =
+      (width + static_cast<int>(block_size) - 1) / static_cast<int>(block_size);
   auto scores = torch::empty({numRows, max(nblocks, 1)}, logits.options());
   topk942::candidateBlocks<<<numRows, topk942::kNumThreads,
                              topkBlocks * sizeof(int32_t), stream>>>(

@@ -20,8 +20,8 @@ compares the result with a reference built in torch.
 """
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 from .attention.plan import KEYS, TOPK, WINDOW
 
