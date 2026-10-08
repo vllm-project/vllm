@@ -4158,7 +4158,12 @@ def rocm_sparse_attn_prefill(
             return
 
     pa_prefill_sparse = _get_aiter_pa_prefill_sparse()
-    if pa_prefill_sparse is not None:
+    if (
+        pa_prefill_sparse is not None
+        and q.shape[0] >= _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES
+        and q.dtype in (torch.bfloat16, torch.float16)
+        and kv.dtype == q.dtype
+    ):
         if ragged_indices is None or ragged_indptr is None:
             assert indices is not None
             indices_2d = indices.reshape(indices.shape[0], -1)
