@@ -1537,3 +1537,88 @@ class TestParameterWhitespace:
                     streamed += tool_call.function.arguments
 
         assert json.loads(streamed)["content"] == EXPECTED_CONTENT
+
+
+REF_TOOLS = [
+    ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition(
+            name="get_weather",
+            parameters={
+                "type": "object",
+                "$defs": {
+                    "Options": {
+                        "type": "object",
+                        "properties": {
+                            "unit": {"type": "string"},
+                            "forecast": {"type": "boolean"},
+                        },
+                    }
+                },
+                "properties": {
+                    "city": {"type": "string"},
+                    "options": {"$ref": "#/$defs/Options"},
+                },
+            },
+        ),
+    )
+]
+
+REF_MODEL_OUTPUT = """<tool_call>
+<function=get_weather>
+<parameter=city>
+Berlin
+</parameter>
+<parameter=options>
+{"unit": "celsius", "forecast": true}
+</parameter>
+</function>
+</tool_call>"""
+
+
+def test_streaming_resolves_tool_properties_once(qwen3_tokenizer, monkeypatch):
+    """Ref resolution walks the schema; it must not rerun on every delta."""
+    from vllm.parser.engine import parser_engine
+
+    calls = []
+    real = parser_engine.find_tool_properties
+
+    def counting(tools, name):
+        calls.append(name)
+        return real(tools, name)
+
+    monkeypatch.setattr(parser_engine, "find_tool_properties", counting)
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=REF_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=REF_TOOLS)
+    deltas = list(
+        stream_delta_message_generator(
+            parser, qwen3_tokenizer, REF_MODEL_OUTPUT, request
+        )
+    )
+
+    assert len(deltas) > 1
+    assert calls == ["get_weather"]
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_ref_argument_decodes_as_object(qwen3_tokenizer, streaming):
+    """A ``$ref``-ed nested argument must not come back as a JSON string."""
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=REF_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=REF_TOOLS)
+
+    if streaming:
+        arguments = "".join(
+            tc.function.arguments or ""
+            for delta in stream_delta_message_generator(
+                parser, qwen3_tokenizer, REF_MODEL_OUTPUT, request
+            )
+            for tc in delta.tool_calls or []
+        )
+    else:
+        extracted = parser.extract_tool_calls(REF_MODEL_OUTPUT, request=request)
+        arguments = extracted.tool_calls[0].function.arguments
+
+    assert json.loads(arguments) == {
+        "city": "Berlin",
+        "options": {"unit": "celsius", "forecast": True},
+    }

@@ -40,6 +40,7 @@ from vllm.parser.engine.registered_adapters import (
     DeepSeekV4ParserReasoningAdapter,
     DeepSeekV4ParserToolAdapter,
 )
+from vllm.tool_parsers.utils import find_tool_properties
 
 _THINK_START_ID = 50
 _THINK_END_ID = 51
@@ -735,8 +736,7 @@ class TestWrapperUnwrapping:
 
         result = _unwrap_wrapper_args(
             '{"arguments": {"location": "Beijing"}}',
-            [tool],
-            "get_weather",
+            find_tool_properties([tool], "get_weather"),
         )
         assert json.loads(result) == {"location": "Beijing"}
 
@@ -758,8 +758,7 @@ class TestWrapperUnwrapping:
 
         result = _unwrap_wrapper_args(
             '{"input": {"location": "Beijing"}}',
-            [tool],
-            "get_weather",
+            find_tool_properties([tool], "get_weather"),
         )
         assert json.loads(result) == {"location": "Beijing"}
 
@@ -781,16 +780,14 @@ class TestWrapperUnwrapping:
 
         result = _unwrap_wrapper_args(
             '{"arguments": "some value"}',
-            [tool],
-            "func",
+            find_tool_properties([tool], "func"),
         )
         assert json.loads(result) == {"arguments": "some value"}
 
     def test_no_unwrap_when_no_tools(self):
         result = _unwrap_wrapper_args(
             '{"arguments": {"location": "Beijing"}}',
-            None,
-            "get_weather",
+            {},
         )
         assert json.loads(result) == {"arguments": {"location": "Beijing"}}
 
@@ -812,8 +809,7 @@ class TestWrapperUnwrapping:
 
         result = _unwrap_wrapper_args(
             '{"arguments": "{\\"location\\": \\"Beijing\\"}"}',
-            [tool],
-            "get_weather",
+            find_tool_properties([tool], "get_weather"),
         )
         assert json.loads(result) == {"location": "Beijing"}
 

@@ -141,4 +141,6 @@ class DeepSeekV32Parser(ParserEngine):
         if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
-        return _unwrap_wrapper_args(result, self._tools, func_name)
+        if not func_name:
+            return result
+        return _unwrap_wrapper_args(result, self._tool_properties(func_name))
