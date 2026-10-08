@@ -355,7 +355,8 @@ __global__ void __launch_bounds__(UM_T)
     hc_up_mix_kernel(const _Float16* __restrict__ dl, const int ld_dl,
                      const _Float16* __restrict__ wu,
                      const _Float16* __restrict__ xn,
-                     _Float16* __restrict__ out, const int M) {
+                     _Float16* __restrict__ out, _Float16* __restrict__ inj_out,
+                     const int M) {
 #ifdef QWEN4_HC_WMMA
   __shared__ _Float16 s_lds[NT * 16][UM_SLD];
   __shared__ float g_lds[2][HC][UM_CH][NT * 16 + 1];
@@ -378,6 +379,10 @@ __global__ void __launch_bounds__(UM_T)
     a[c] = __builtin_shufflevector(lo8, hi8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
                                    11, 12, 13, 14, 15);
   }
+
+  // The injection logits dl[:, R:R+HC], contiguous for the next combine.
+  if (blockIdx.x == 0 && tid < M * HC)
+    inj_out[tid] = dl[(int64_t)(tid / HC) * ld_dl + R + tid % HC];
 
   // s = silu(dl / HC) for the M tokens (zeros for the padding rows), 8
   // halves per load.
@@ -499,15 +504,18 @@ std::vector<torch::Tensor> qwen4_hc_mix_xn(const torch::Tensor& xn,
   return {out, inj_out};
 }
 
-// up + gate mix from the down projection dl [M, >= R] (row stride allowed) and
-// xn [M, HC*H], for 1 <= M <= 32. Returns the block input [M, H].
-torch::Tensor qwen4_hc_up_mix(const torch::Tensor& dl, const torch::Tensor& xn,
-                              const torch::Tensor& wu) {
+// up + gate mix from the down projection dl [M, >= R + HC] (row stride
+// allowed) and xn [M, HC*H], for 1 <= M <= 32. Returns (block input [M, H],
+// injection logits dl[:, R:R+HC] made contiguous).
+std::vector<torch::Tensor> qwen4_hc_up_mix(const torch::Tensor& dl,
+                                           const torch::Tensor& xn,
+                                           const torch::Tensor& wu) {
   const int M = xn.size(0);
   TORCH_CHECK(M >= 1 && M <= UM_MMAX, "qwen4_hc_up_mix: 1 <= M <= 32");
-  TORCH_CHECK(dl.dim() == 2 && dl.size(0) == M && dl.size(1) >= R &&
-                  dl.stride(1) == 1 && dl.scalar_type() == at::kHalf,
-              "qwen4_hc_up_mix: dl [M, >= R] fp16 with unit column stride");
+  TORCH_CHECK(
+      dl.dim() == 2 && dl.size(0) == M && dl.size(1) >= R + HC &&
+          dl.stride(1) == 1 && dl.scalar_type() == at::kHalf,
+      "qwen4_hc_up_mix: dl [M, >= R + HC] fp16 with unit column stride");
   TORCH_CHECK(
       xn.size(1) == D && xn.is_contiguous() && xn.scalar_type() == at::kHalf,
       "qwen4_hc_up_mix: xn [M, HC*H] fp16 contiguous");
@@ -516,6 +524,8 @@ torch::Tensor qwen4_hc_up_mix(const torch::Tensor& dl, const torch::Tensor& xn,
               "qwen4_hc_up_mix: bad up weight");
   const at::cuda::OptionalCUDAGuard guard(device_of(xn));
   auto out = torch::empty({M, H}, xn.options());
+  auto inj = torch::empty({M, HC}, xn.options());
+  auto* ip = reinterpret_cast<_Float16*>(inj.data_ptr());
   auto st = at::cuda::getCurrentCUDAStream().stream();
   const auto* dp = reinterpret_cast<const _Float16*>(dl.data_ptr());
   const auto* wp = reinterpret_cast<const _Float16*>(wu.data_ptr());
@@ -526,8 +536,8 @@ torch::Tensor qwen4_hc_up_mix(const torch::Tensor& dl, const torch::Tensor& xn,
                   reinterpret_cast<uintptr_t>(dl.data_ptr()) % 16 == 0,
               "qwen4_hc_up_mix: dl rows must be 16-byte aligned");
   if (M <= 16)
-    hc_up_mix_kernel<1><<<H / UM_CH, UM_T, 0, st>>>(dp, ld, wp, xp, op, M);
+    hc_up_mix_kernel<1><<<H / UM_CH, UM_T, 0, st>>>(dp, ld, wp, xp, op, ip, M);
   else
-    hc_up_mix_kernel<2><<<H / UM_CH, UM_T, 0, st>>>(dp, ld, wp, xp, op, M);
-  return out;
+    hc_up_mix_kernel<2><<<H / UM_CH, UM_T, 0, st>>>(dp, ld, wp, xp, op, ip, M);
+  return {out, inj};
 }

@@ -462,8 +462,7 @@ def _hc_combine_and_mix(
         and xn.dtype == torch.float16
         and up_weight.is_contiguous()
     ):
-        block_input = torch.ops._rocm_C.qwen4_hc_up_mix(down, xn, up_weight)
-        injection = down[:, lora_rank : lora_rank + hc_count].contiguous()
+        block_input, injection = torch.ops._rocm_C.qwen4_hc_up_mix(down, xn, up_weight)
         return hidden, block_input, injection
     lora = _hc_silu(down[:, :lora_rank], hc_count)
     gate = rocm_unquantized_gemm_impl(lora, up_weight)
