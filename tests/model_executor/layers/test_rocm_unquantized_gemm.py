@@ -45,7 +45,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch, m):
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only kernel test")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("n", range(1, 6))
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 6, 16, 24])
 def test_rocm_unquantized_gemm_single_output_real_kernel(dtype, n):
     torch.manual_seed(0)
     x = torch.randn(n, 2048, device="cuda", dtype=dtype)

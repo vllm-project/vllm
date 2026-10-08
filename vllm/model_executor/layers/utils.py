@@ -352,6 +352,12 @@ def rocm_unquantized_gemm_impl(
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
+        # A single output row (e.g. a shared-expert gate) above N = 5 would go
+        # to hipBLASLt, which takes ~120 us for it on gfx1100.
+        if m == 1 and n > 5 and bias is None and on_gfx1x():
+            x_view = x.reshape(-1, x.size(-1))
+            out = torch.sum(x_view.float() * weight, -1, keepdim=True)
+            return out.to(x.dtype).reshape(*x.shape[:-1], 1)
         elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
             x_view = x.reshape(-1, x.size(-1)).contiguous()
             out = ops.LLMM1(weight, x_view, 4)
