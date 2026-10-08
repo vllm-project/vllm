@@ -665,7 +665,10 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
     worker.block_size, worker.num_blocks, worker.attn_backends = 1152, 2, []
     worker._physical_blocks_per_logical_kv_block = 1
     worker.vllm_config = SimpleNamespace(
-        compilation_config=SimpleNamespace(static_forward_context=layers)
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
+        compilation_config=SimpleNamespace(static_forward_context=layers),
     )
     worker.kv_cache_config = KVCacheConfig(
         2, [], [KVCacheGroupSpec(list(specs), UniformTypeKVCacheSpecs(1152, specs))]
