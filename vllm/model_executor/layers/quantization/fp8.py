@@ -747,7 +747,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             act_dtype,
             moe_parallel_config,
         )
-        if self.block_quant:
+        if self.block_quant and self.weight_scale_refine is None:
             assert self.weight_block_size is not None
             if all(
                 intermediate_size_per_partition % block_size == 0
