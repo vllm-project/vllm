@@ -2554,6 +2554,13 @@ class VllmConfig:
                 cudagraph_capture_sizes += [
                     size for size in uniform_decode_sizes if size <= max_num_tokens
                 ]
+                # Capture the explicit compile_sizes as well; the dispatcher
+                # rejects a compile size that padding would change.
+                cudagraph_capture_sizes += [
+                    size
+                    for size in self.compilation_config.compile_sizes or []
+                    if isinstance(size, int) and size <= max_cudagraph_capture_size
+                ]
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 

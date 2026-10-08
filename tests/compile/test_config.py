@@ -785,6 +785,33 @@ def test_default_cudagraph_capture_size_without_speculation(max_num_seqs):
     )
 
 
+def test_default_capture_sizes_include_compile_sizes():
+    """An explicit compile size inside the default capture range is captured.
+
+    The dispatcher rejects a compile size that padding would change, so 100 at
+    `max_num_seqs=8` must be a capture size once the 512-token floor applies.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE, compile_sizes=[100, 4096]
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=8,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=8192,
+        compilation_config=compilation_config,
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
+
+    assert 100 in compilation_config.cudagraph_capture_sizes
+    assert compilation_config.cudagraph_capture_sizes[-1] == 512
+
+
 def test_single_speculative_token_does_not_raise_default_capture_size():
     """One speculative token must not raise the default capture ceiling.
 
