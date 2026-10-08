@@ -156,6 +156,20 @@ def test_single_read_answers(server, state, questions, expected):
     assert {qid: a["choice"] for qid, a in answers.items()} == expected
 
 
+def test_images_need_a_vision_model(server):
+    response = post(
+        server,
+        {
+            "model": MODEL_NAME,
+            "state": "x",
+            "images": ["data:image/png;base64,AAAA"],
+            "questions": {"q": choice("Which?", "a", "b")},
+        },
+    )
+    assert response.status_code == 400
+    assert "text only" in response.json()["error"]["message"]
+
+
 def test_option_limit(server):
     body = {
         "model": MODEL_NAME,

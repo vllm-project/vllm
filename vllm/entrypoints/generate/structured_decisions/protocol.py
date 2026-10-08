@@ -29,6 +29,10 @@ class StructuredDecisionRequest(OpenAIBaseModel):
     instructions: str | None = Field(
         default=None, description="Context placed ahead of the questions."
     )
+    images: list[str] = Field(
+        default_factory=list,
+        description="Image URLs or data URLs that are part of the state.",
+    )
     chat_template_kwargs: dict[str, Any] | None = None
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
     request_id: str = Field(default_factory=random_uuid)

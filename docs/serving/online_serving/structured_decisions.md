@@ -37,6 +37,25 @@ question prefills only its own text, then reads one token.
 A choice has at least one option, a score at least two levels. A question id
 is a non-empty string.
 
+## Supported models
+
+| architecture | prompt |
+| --- | --- |
+| `Qwen3ForCausalLM`, `Qwen3_5ForConditionalGeneration`, `Qwen3_5MoeForConditionalGeneration` | the generic prompt described above |
+| `Lfm2VlForConditionalGeneration` | Liquid's decision prompt, for [`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B) |
+
+For Liquid models the server writes the prompt and reads the label tokens the
+way the `prompt.py` shipped with the checkpoint does, so answers match
+`model.system_one()`. A `null` state leaves the images as the whole state, and
+a `score` has at most 10 levels.
+
+```bash
+vllm serve LiquidAI/d1-3B
+```
+
+When each request carries one question over a state that changes from request
+to request, `--no-enable-prefix-caching` lowers latency on this model.
+
 ## Example
 
 ```bash
@@ -133,6 +152,7 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | `state` | what the questions are about: a string, or JSON that is sent as its JSON text |
 | `questions` | question id to `{type, instructions, criteria}`, asked in this order |
 | `instructions` | optional context placed ahead of the questions |
+| `images` | optional list of image URLs or data URLs, read before the state by a vision model |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 
 A question with any field other than `type`, `instructions` and `criteria` is
