@@ -40,6 +40,7 @@ class Question:
 
 class QuestionType(ABC):
     name: ClassVar[str]
+    reply_instruction: ClassVar[str] = "Answer with the letter of one option only."
 
     @abstractmethod
     def parse_options(self, qid: str, criteria: Any) -> list[Option]: ...
@@ -52,16 +53,24 @@ class QuestionType(ABC):
         ``question.labels[i]`` among the labels, and the list sums to 1.
         ``label_mass`` is the labels' total probability over the vocabulary."""
 
+    def labels(self, options: list[Option]) -> tuple[str, ...]:
+        """The label for each option. A single capital letter is one token at
+        the start of a reply for the tokenizers tested; every read checks it."""
+        return LABELS[: len(options)]
+
+    def reply_line(self, label: str, option: Option) -> str:
+        return (
+            f"{label}: {option.name} - {option.description}"
+            if option.description
+            else f"{label}: {option.name}"
+        )
+
     def prompt(self, question: Question) -> str:
         """The question as the model reads it, after the state."""
         lines = [f"Question: {question.instructions}"] if question.instructions else []
         for label, o in zip(question.labels, question.options):
-            lines.append(
-                f"{label}: {o.name} - {o.description}"
-                if o.description
-                else f"{label}: {o.name}"
-            )
-        lines.append("Answer with the letter of one option only.")
+            lines.append(self.reply_line(label, o))
+        lines.append(self.reply_instruction)
         return "\n".join(lines)
 
 
@@ -112,7 +121,7 @@ def build_question(
         type=qtype,
         instructions=instructions,
         options=tuple(options),
-        labels=LABELS[: len(options)],
+        labels=qtype.labels(options),
     )
 
 
@@ -156,5 +165,79 @@ class ChoiceQuestion(QuestionType):
             "probabilities": {a.name: p for a, p in zip(question.options, probs)},
             # The chosen label's probability over the whole vocabulary, so a
             # read that mostly wanted a non-label token reports low confidence.
+            "confidence": probs[top] * label_mass,
+        }
+
+
+@register_question_type
+class NoulQuestion(QuestionType):
+    """Yes or no. ``criteria`` may describe what true and false mean."""
+
+    name = "noul"
+    reply_instruction = "Answer with yes or no only."
+
+    def parse_options(self, qid: str, criteria: Any) -> list[Option]:
+        if criteria is not None and not isinstance(criteria, dict):
+            raise StructuredDecisionError(
+                f"question {qid!r}: noul criteria must be an object with true and false"
+            )
+        criteria = criteria or {}
+        true = criteria.get("true")
+        false = criteria.get("false")
+        return [
+            Option("yes", None if true is None else str(true)),
+            Option("no", None if false is None else str(false)),
+        ]
+
+    def labels(self, options: list[Option]) -> tuple[str, ...]:
+        return ("yes", "no")
+
+    def reply_line(self, label: str, option: Option) -> str:
+        return f"{label}: {option.description}" if option.description else label
+
+    def answer(
+        self, question: Question, probs: list[float], label_mass: float
+    ) -> dict[str, Any]:
+        return {
+            "type": self.name,
+            "noul": probs[0],
+            "probabilities": {"yes": probs[0], "no": probs[1]},
+            # The chosen label's probability over the whole vocabulary, like a
+            # choice's confidence.
+            "confidence": max(probs) * label_mass,
+        }
+
+
+@register_question_type
+class ScoreQuestion(QuestionType):
+    """Rate the state on an ordered scale. ``criteria`` is the ordered list of
+    level names, from the first to the last level of the scale."""
+
+    name = "score"
+    reply_instruction = "Answer with the number of one option only."
+
+    def parse_options(self, qid: str, criteria: Any) -> list[Option]:
+        if not isinstance(criteria, list) or len(criteria) < 2:
+            raise StructuredDecisionError(
+                f"question {qid!r}: score criteria must be an ordered list of levels"
+            )
+        return [Option(str(level)) for level in criteria]
+
+    def labels(self, options: list[Option]) -> tuple[str, ...]:
+        if len(options) <= 9:
+            return tuple(str(i + 1) for i in range(len(options)))
+        return LABELS[: len(options)]
+
+    def answer(
+        self, question: Question, probs: list[float], label_mass: float
+    ) -> dict[str, Any]:
+        top = argmax(probs)
+        return {
+            "type": self.name,
+            # The expected level, 0-indexed, so a level's index in the request's
+            # criteria is its value.
+            "score": sum(i * p for i, p in enumerate(probs)),
+            "legend": {str(i): o.name for i, o in enumerate(question.options)},
+            "probabilities": {str(i): p for i, p in enumerate(probs)},
             "confidence": probs[top] * label_mass,
         }
