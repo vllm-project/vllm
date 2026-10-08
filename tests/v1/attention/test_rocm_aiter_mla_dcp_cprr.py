@@ -11,7 +11,11 @@ routes built; it is marked and skipped when unavailable.
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
+import torch
 
 rocm_aiter_mla = pytest.importorskip(
     "vllm.v1.attention.backends.mla.rocm_aiter_mla",
@@ -26,9 +30,15 @@ NATIVE = rocm_aiter_mla._NATIVE_CPRR_HEADS
 MIN_QLEN = rocm_aiter_mla._MIN_CPRR_QLEN
 
 
-def test_dcp_verify_env_defaults_to_segmented(monkeypatch):
+def test_dcp_verify_env_defaults_to_auto(monkeypatch):
     monkeypatch.delenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", raising=False)
-    assert rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY == "segmented"
+    assert rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY == "auto"
+
+
+@pytest.mark.parametrize("route", ["auto", "asm", "segmented"])
+def test_dcp_verify_env_accepts_routes(monkeypatch, route):
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", route)
+    assert route == rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY
 
 
 def test_dcp_verify_env_rejects_unknown_route(monkeypatch):
@@ -114,6 +124,126 @@ def test_route_needs_gfx950(monkeypatch):
     assert _configured(dcp_world_size=8, cp_interleave=1, multi_token_decode=True) is (
         False
     )
+
+
+# --------------------------------------------------------------------------
+# AiterMLAMetadataBuilder -- the route the env value resolves to
+# --------------------------------------------------------------------------
+
+DCP = 8
+
+
+def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
+    """Run the real builder __init__ on CPU at TP8/DCP8 with speculative decoding.
+
+    Stubs only what needs a GPU, AITER, or a DCP group, so the route decision
+    under test is the one the builder actually makes.
+    """
+
+    def init_common_builder(self, *args, **kwargs):
+        self.num_heads = gathered_heads // DCP
+        self.dcp_world_size = DCP
+        self.reorder_batch_threshold = 5
+
+    monkeypatch.setattr(
+        rocm_aiter_mla.MLACommonMetadataBuilder, "__init__", init_common_builder
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "_segmented_dcp_verify_supported",
+        lambda *args: segmented_supported,
+    )
+    monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
+    monkeypatch.setattr(
+        rocm_aiter_mla, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0)
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: SimpleNamespace(multi_processor_count=256),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(
+            dtypes=SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16"),
+            get_mla_metadata_info_v1=lambda *args, **kwargs: tuple(
+                (1, torch.int32) for _ in range(6)
+            ),
+        ),
+    )
+    if route is None:
+        monkeypatch.delenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", route)
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(num_speculative_tokens=4),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=DCP, cp_kv_cache_interleave_size=1
+        ),
+        model_config=SimpleNamespace(max_model_len=16, dtype=torch.bfloat16),
+        scheduler_config=SimpleNamespace(max_num_seqs=2),
+        cache_config=SimpleNamespace(cache_dtype="fp8_e4m3", num_gpu_blocks=None),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False)
+        ),
+    )
+    return rocm_aiter_mla.AiterMLAMetadataBuilder(
+        kv_cache_spec=SimpleNamespace(block_size=1, dtype=torch.bfloat16),
+        layer_names=["layer.0"],
+        vllm_config=config,
+        device=torch.device("cpu"),
+    )
+
+
+@pytest.mark.parametrize("route", [None, "auto", "AUTO"])
+def test_auto_selects_cprr_for_k3_gathered_heads(on_gfx950, monkeypatch, route):
+    """K3 at TP8/DCP8 gathers 96 heads; auto must take cprr padded to 128."""
+    builder = _build(monkeypatch, route, gathered_heads=96)
+    assert builder._asm_dcp_verify
+    assert builder._asm_dcp_verify_heads == 128
+    assert builder._num_attention_heads == 128
+
+
+def test_auto_falls_back_to_segmented_above_largest_native(on_gfx950, monkeypatch):
+    builder = _build(monkeypatch, "auto", gathered_heads=256)
+    assert not builder._asm_dcp_verify
+    assert builder._supports_segmented_dcp_verify
+
+
+def test_auto_without_any_route_names_the_missing_segmented_build(
+    on_gfx950, monkeypatch
+):
+    with pytest.raises(ValueError) as exc:
+        _build(monkeypatch, "auto", gathered_heads=256, segmented_supported=False)
+    assert "VLLM_ROCM_AITER_MLA_DCP_VERIFY=auto" in str(exc.value)
+    assert "lacks segmented MLA decode" in str(exc.value)
+
+
+@pytest.mark.parametrize("route", ["asm", "ASM"])
+def test_explicit_asm_is_case_insensitive(on_gfx950, monkeypatch, route):
+    """env_with_choices returns the raw string; ASM used to mean segmented."""
+    assert _build(monkeypatch, route, gathered_heads=96)._asm_dcp_verify
+
+
+def test_explicit_asm_refuses_unservable_heads(on_gfx950, monkeypatch):
+    with pytest.raises(ValueError) as exc:
+        _build(monkeypatch, "ASM", gathered_heads=256)
+    assert "VLLM_ROCM_AITER_MLA_DCP_VERIFY=asm" in str(exc.value)
+    assert "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented" in str(exc.value)
+
+
+@pytest.mark.parametrize("route", ["segmented", "SEGMENTED"])
+def test_explicit_segmented_never_selects_cprr(on_gfx950, monkeypatch, route):
+    assert not _build(monkeypatch, route, gathered_heads=96)._asm_dcp_verify
+
+
+def test_auto_off_gfx950_stays_segmented(monkeypatch):
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: False)
+    assert not _build(monkeypatch, "auto", gathered_heads=96)._asm_dcp_verify
 
 
 # --------------------------------------------------------------------------
