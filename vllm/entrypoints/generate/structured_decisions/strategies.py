@@ -205,7 +205,11 @@ class NextTokenStrategy(ReadStrategy):
 
 
 NEXT_TOKEN_ARCHITECTURES = frozenset(
-    {"Qwen3ForCausalLM", "Qwen3_5MoeForConditionalGeneration"}
+    {
+        "Qwen3ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
 )
 
 
