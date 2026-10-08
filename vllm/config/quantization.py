@@ -48,6 +48,12 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
 }
 
 
+def quant_key_name(key: QuantKey | None) -> str:
+    if key is None:
+        return "bf16"
+    return next((n for n, k in QUANT_KEY_NAMES.items() if k == key), str(key))
+
+
 def _coerce_quant_key(v: Any) -> QuantKey | None:
     if v is None or isinstance(v, QuantKey):
         return v
@@ -89,19 +95,7 @@ class QuantSpec:
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
 
     def __str__(self) -> str:
-        def quant_key_str(quant_key: QuantKey | None) -> str:
-            if quant_key is None:
-                return "None"
-            return next(
-                (
-                    name
-                    for name, known_quant_key in QUANT_KEY_NAMES.items()
-                    if known_quant_key == quant_key
-                ),
-                str(quant_key),
-            )
-
-        return quant_key_str(self.weight)
+        return "None" if self.weight is None else quant_key_name(self.weight)
 
 
 @config

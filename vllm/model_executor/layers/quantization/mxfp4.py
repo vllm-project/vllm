@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
+    user_moe_activation_override,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -548,6 +549,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
         self.experts_cls: type[mk.FusedMoEExperts] | None
         if self.is_k3_situ_aiter or self.is_k3_situ_int4_gfx942:
+            if user_moe_activation_override() is not None:
+                raise ValueError(
+                    "Kimi-K3 SiTU MoE on AITER runs BF16 activations only; "
+                    "unset quantization_config.moe.activation."
+                )
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
             if self.is_k3_situ_int4_gfx942:
@@ -570,6 +576,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
                 moe
             )
+        self.humming_activation_key = user_moe_activation_override()
 
         self.max_capture_size = moe.max_capture_size
 
@@ -822,6 +829,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 _cache_permute_indices=self._cache_permute_indices,
                 activation=self.moe.activation,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
+                humming_activation_key=self.humming_activation_key,
             )
         )
 
