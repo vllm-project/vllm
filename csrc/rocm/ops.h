@@ -41,6 +41,15 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
+std::vector<torch::Tensor> qwen4_hc_combine_mix(
+    const torch::Tensor& h, const torch::Tensor& block_out,
+    const torch::Tensor& inj, const torch::Tensor& norm_w,
+    const torch::Tensor& wd, const torch::Tensor& wu, double eps);
+
+std::vector<torch::Tensor> qwen4_hc_mix_xn(const torch::Tensor& xn,
+                                           const torch::Tensor& wd,
+                                           const torch::Tensor& wu);
+
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,

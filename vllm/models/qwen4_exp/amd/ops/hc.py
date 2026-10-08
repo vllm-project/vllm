@@ -375,6 +375,98 @@ def _hc_combine_norm(
     return out, y
 
 
+# Fused decode path (csrc/rocm/qwen4_hc_rdna3.cu, gfx1100 only), built for
+# (hc_count, hidden_size, lora_rank). Measured at 96 calls per step with cold
+# weights: M=1 2.85 -> 2.18 ms, M=4 3.36 -> 2.87 ms; slower from M=5.
+_HC_FUSED_SHAPE = (4, 2560, 320)
+_HC_FUSED: bool | None = None
+
+
+def _hc_combine_and_mix(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection_logits: torch.Tensor,
+    norm_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    eps: float,
+    hc_count: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``GatedResidual.combine_and_mix`` with ``use_combine``, as one op.
+
+    Decode batches of up to four tokens take the fused HIP kernel; everything
+    else runs the unfused chain (combine+RMSNorm, skinny GEMM, SiLU, skinny
+    GEMM, gate mix), which is what the module did before.
+    """
+    global _HC_FUSED
+    from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
+
+    if _HC_FUSED is None:
+        _HC_FUSED = hasattr(torch.ops, "_rocm_C") and hasattr(
+            torch.ops._rocm_C, "qwen4_hc_combine_mix"
+        )
+    num_tokens = residual.shape[0]
+    lora_rank = up_weight.shape[1]
+    if (
+        _HC_FUSED
+        and 1 <= num_tokens <= 4
+        and (hc_count, block_output.shape[1], lora_rank) == _HC_FUSED_SHAPE
+        and residual.dtype == torch.float16
+        and norm_weight.is_contiguous()
+        and down_weight.is_contiguous()
+        and up_weight.is_contiguous()
+    ):
+        residual = residual.contiguous()
+        block_output = block_output.contiguous()
+        injection_logits = injection_logits.contiguous()
+        if num_tokens <= 2:
+            hidden, block_input, injection = torch.ops._rocm_C.qwen4_hc_combine_mix(
+                residual,
+                block_output,
+                injection_logits,
+                norm_weight,
+                down_weight,
+                up_weight,
+                eps,
+            )
+            return hidden, block_input, injection
+        hidden, xn = _hc_combine_norm(
+            residual, block_output, injection_logits, norm_weight, eps, hc_count
+        )
+        block_input, injection = torch.ops._rocm_C.qwen4_hc_mix_xn(
+            xn, down_weight, up_weight
+        )
+        return hidden, block_input, injection
+
+    hidden, xn = _hc_combine_norm(
+        residual, block_output, injection_logits, norm_weight, eps, hc_count
+    )
+    down = rocm_unquantized_gemm_impl(xn, down_weight)
+    lora = _hc_silu(down[:, :lora_rank], hc_count)
+    gate = rocm_unquantized_gemm_impl(lora, up_weight)
+    block_input = _hc_gate_mix(xn, gate, hc_count)
+    injection = down[:, lora_rank : lora_rank + hc_count].contiguous()
+    return hidden, block_input, injection
+
+
+def _hc_combine_and_mix_fake(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection_logits: torch.Tensor,
+    norm_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    eps: float,
+    hc_count: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_tokens = residual.shape[0]
+    return (
+        residual.new_empty(residual.shape),
+        residual.new_empty((num_tokens, block_output.shape[1])),
+        residual.new_empty((num_tokens, hc_count)),
+    )
+
+
 def _same_shape_fake(x: torch.Tensor, *args) -> torch.Tensor:
     return x.new_empty(x.shape)
 
@@ -433,6 +525,11 @@ direct_register_custom_op(
     op_func=_hc_combine_norm,
     fake_impl=_hc_combine_norm_fake,
 )
+direct_register_custom_op(
+    op_name="qwen4_exp_hc_combine_and_mix",
+    op_func=_hc_combine_and_mix,
+    fake_impl=_hc_combine_and_mix_fake,
+)
 
 
 def grouped_gemma_rmsnorm(
@@ -478,9 +575,32 @@ def hc_combine_norm(
     )
 
 
+def hc_combine_and_mix(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection_logits: torch.Tensor,
+    norm_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    eps: float,
+    hc_count: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops.vllm.qwen4_exp_hc_combine_and_mix(
+        residual,
+        block_output,
+        injection_logits,
+        norm_weight,
+        down_weight,
+        up_weight,
+        eps,
+        hc_count,
+    )
+
+
 __all__ = [
     "grouped_gemma_rmsnorm",
     "hc_combine",
+    "hc_combine_and_mix",
     "hc_combine_norm",
     "hc_gate_mix",
     "hc_silu",
