@@ -162,3 +162,12 @@ accuracy or image-specific calibration.
 
 Compact runtime evidence is in
 `benchmarks/decision_models/vision-verification.json`.
+
+On the refreshed API stack, Gemma passed the strict repeat check with prefix
+caching enabled. Qwen passed with `--no-enable-prefix-caching`; with caching
+enabled, all requests and color/order checks succeeded but repeated probabilities
+differed by up to 0.00128. Native renderer checks confirmed identical repeated
+token IDs and image hashes. This is a measured runtime limitation, not a claim of
+batch-invariant probabilities. `VLLM_BATCH_INVARIANT=1` was rejected by Qwen's
+`GDN_ATTN` backend in the tested runtime. Use the verified no-prefix-cache
+configuration when reproducing the strict Qwen repeat check.
