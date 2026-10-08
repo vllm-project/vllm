@@ -1311,6 +1311,74 @@ def get_vllm_version() -> str:
     return version
 
 
+def _check_requirements_preinstalled(requirements: list[str]) -> None:
+    """`python setup.py develop` satisfies missing `install_requires` via
+    setuptools' legacy easy_install path instead of pip's wheel-aware
+    resolver. That path has repeatedly tried (and failed) to compile old
+    sdists of fast-moving C-extension packages such as aiohttp from source
+    against the running Python's headers, e.g.
+    https://github.com/vllm-project/vllm/issues/34073. Fail fast with an
+    actionable message instead of a cryptic compiler error.
+
+    Skipped under `--no-deps`, which makes setuptools skip `install_requires`
+    processing entirely, so the easy_install path this guards against is
+    unreachable anyway.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import requires as installed_requires
+    from importlib.metadata import version as installed_version
+
+    from packaging.requirements import Requirement
+
+    missing = []
+    checked = set()
+
+    def _check(req_str: str, extra: str | None = None) -> None:
+        # Strip inline "# comment" suffixes (as pip does when reading
+        # requirements files); packaging.Requirement cannot parse them.
+        req_str = re.split(r"\s+#", req_str, maxsplit=1)[0].strip()
+        try:
+            req = Requirement(req_str)
+        except Exception:
+            return
+        # `extra` is only set when recursing into an extra's own deps
+        # below; it selects which `; extra == "..."` markers apply.
+        if req.marker is not None and not req.marker.evaluate(
+            {"extra": extra} if extra else None
+        ):
+            return
+        if (req.name, extra) in checked:
+            return
+        checked.add((req.name, extra))
+        try:
+            installed = installed_version(req.name)
+        except PackageNotFoundError:
+            missing.append(req_str)
+            return
+        if req.specifier and not req.specifier.contains(installed, prereleases=True):
+            missing.append(f"{req_str} (found {req.name}=={installed})")
+            return
+        # A requested extra (e.g. "fastapi[standard]") pulls in packages
+        # that easy_install resolves too, so check those as well.
+        for extra_name in req.extras:
+            for dep in installed_requires(req.name) or []:
+                _check(dep, extra=extra_name)
+
+    for req_str in requirements:
+        _check(req_str)
+
+    if missing:
+        raise RuntimeError(
+            "The following dependencies are missing or outdated:\n  "
+            + "\n  ".join(missing)
+            + "\n\n`python setup.py develop` cannot reliably install these "
+            "itself (see https://github.com/vllm-project/vllm/issues/34073). "
+            "Install them with pip first, e.g.:\n"
+            "  pip install -r requirements/rocm.txt\n"
+            "then re-run `python setup.py develop`."
+        )
+
+
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
     requirements_dir = ROOT_DIR / "requirements"
@@ -1355,6 +1423,8 @@ def get_requirements() -> list[str]:
         requirements = modified_requirements
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
+        if "develop" in sys.argv[1:] and "--no-deps" not in sys.argv[1:]:
+            _check_requirements_preinstalled(requirements)
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
