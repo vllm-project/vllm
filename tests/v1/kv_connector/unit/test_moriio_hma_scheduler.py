@@ -53,6 +53,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     attributes read by the method under test are set."""
 
     def __init__(self, **attrs):
+        self.mode = MoRIIOMode.READ
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
         self._num_ssm_scratch_blocks = 0
@@ -340,14 +341,16 @@ def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize("read_mode", [True, False])
 @pytest.mark.parametrize(
     "dcp_size,dcp_sharded,expected_tail", [(1, True, 4), (4, True, 1), (4, False, 4)]
 )
 def test_scheduler_accepts_dspark_with_wrapped_full_attention(
-    dcp_size, dcp_sharded, expected_tail
+    dcp_size, dcp_sharded, expected_tail, read_mode
 ):
     config = _dspark_wrapped_attention_config(dcp_sharded=dcp_sharded)
     vllm_config = _gate_vllm_config(
+        read_mode=read_mode,
         speculative_config=_spec_config("dspark"),
         block_size=4,
         num_lookahead_tokens=7,
@@ -397,7 +400,7 @@ def test_hybrid_write_clamps_attention_and_excludes_scratch_slots():
     )
     assert sched._clamp_to_prompt_blocks(
         SimpleNamespace(num_prompt_tokens=9), [[10, 11, 12, 13], [1, 2, 3, 4]]
-    ) == [[1, 2], [11]]
+    ) == [[11], [1, 2]]
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
@@ -416,7 +419,7 @@ def test_hybrid_write_resolves_current_state_instead_of_cached_block_ids():
         SimpleNamespace(request_id="req", num_prompt_tokens=9),
         [[10, 11, 12], [1]],
         SimpleNamespace(kv_connector_block_state=state),
-    ) == [[31, 32], [51]]
+    ) == [[51], [31, 32]]
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
@@ -448,7 +451,7 @@ def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
         sched.send_notify_block.assert_called_once_with(
             req_id="req",
             transfer_id="tx",
-            block_notify_list=[[1, 2, 3], [10]],
+            block_notify_list=[[10], [1, 2, 3]],
             host="127.0.0.2",
             port=7000,
         )
@@ -457,6 +460,54 @@ def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
         sched.send_notify_block.assert_not_called()
         sched._send_transfer_release.assert_called_once_with("tx", "127.0.0.2", 7000)
     assert not req.kv_transfer_params["do_remote_prefill"]
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_hybrid_write_keeps_separate_draft_groups_and_their_block_spans():
+    config = _dspark_wrapped_attention_config()
+    # A disabled cache is absent from the wire. Target and draft may have
+    # different token spans, and neither can borrow the other's block IDs.
+    draft = SimpleNamespace(
+        enable_kv_transfer=True,
+        kv_cache_spec=FullAttentionSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=2,
+            dtype=torch.float32,
+            dcp_sharded=False,
+        ),
+    )
+    disabled = SimpleNamespace(enable_kv_transfer=False, kv_cache_spec=object())
+    config.kv_cache_groups.insert(1, disabled)
+    config.kv_cache_groups.append(draft)
+    config.transfer_groups = tuple(
+        g for g in config.kv_cache_groups if g.enable_kv_transfer
+    )
+    config.select_transfer_block_ids = lambda blocks: (blocks[0], blocks[2], blocks[3])
+    sched = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(
+            read_mode=False, dcp_size=2, speculative_config=_spec_config("dspark")
+        ),
+        "engine",
+        config,
+    )
+    req = _mk_request(
+        list(range(9)),
+        params={
+            "do_remote_decode": True,
+            "transfer_id": "tx",
+        },
+    )
+    req.request_id = "req"
+    req.status = moriio_connector.RequestStatus.FINISHED_LENGTH_CAPPED
+    blocks = ([10, 11, 12, 13], [99], [20, 21, 22], [30, 31, 32, 33])
+    expected = [[11], [20, 21], [30, 31, 32]]
+    assert sched._clamp_to_prompt_blocks(req, blocks) == expected
+    # Exercise the connector entry point too: completion must not flatten
+    # a multi-group WRITE payload through READ's single-attention helper.
+    delay_free, params = _FakeConnector(sched).request_finished_all_groups(req, blocks)
+    assert delay_free
+    assert params["remote_block_ids"] == expected
 
 
 def test_split_block_groups_rejects_non_hybrid_use():

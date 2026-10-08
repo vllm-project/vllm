@@ -7,6 +7,7 @@ import threading
 from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -345,6 +346,8 @@ def test_write_transfer_plan_caches_offsets_per_layer_geometry():
     calls: list[str] = []
 
     class FakeWorker:
+        _has_mamba: bool
+        layer_to_group: dict[str, int]
         kv_caches: dict[str, torch.Tensor]
         layer_name_to_local_kv_cache_metadata: dict[str, list[Any]]
 
@@ -411,6 +414,26 @@ def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
 
     assert request_info.writes_expected == 2
     assert writer._sealed_writes["xfer"] == 2
+
+
+def test_hybrid_write_attention_uses_its_own_group_not_the_first_group():
+    worker = SimpleNamespace(
+        _has_mamba=True,
+        kv_caches={"draft": torch.empty((8, 1, 4, 3))},
+        layer_to_group={"draft": 2},
+        _region_session_indices=lambda _: [5],
+        _compute_block_transfer_offsets=Mock(return_value=([1], [2], [3])),
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task("draft")
+    task.local_block_ids = [[10], [20], [30, 31]]
+    remote = RemoteAllocInfo(block_ids=[[40], [50], [60, 61, 62]])
+    meta = _remote_meta()
+    plan = writer._prepare_transfer_plan(task, remote, meta)
+    worker._compute_block_transfer_offsets.assert_called_once_with(
+        "draft", [30, 31], [60, 61], meta, remote_engine_id=task.dst_engine_id
+    )
+    assert plan.sess_idx == 5
 
 
 def test_hybrid_write_posts_both_regions_before_layer_completion():

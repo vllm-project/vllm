@@ -405,11 +405,7 @@ class MoRIIOWriter:
         key = (task.layer_name, *_get_write_geometry_key(layer_cache))
         offsets = request_info.transfer_offsets.get(key)
         if offsets is None:
-            group = (
-                0
-                if self.worker._has_mamba
-                else self.worker.layer_to_group[task.layer_name]
-            )
+            group = self.worker.layer_to_group[task.layer_name]
             assert request_info.block_ids is not None
             local_blocks = task.local_block_ids[group]
             remote_blocks = request_info.block_ids[group]

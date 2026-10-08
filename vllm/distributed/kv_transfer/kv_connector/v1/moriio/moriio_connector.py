@@ -330,7 +330,10 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        if self.connector_scheduler._has_mamba:
+        if (
+            self.connector_scheduler._has_mamba
+            and self.connector_scheduler.mode == MoRIIOMode.READ
+        ):
             attn_block_ids, mamba_block_groups = (
                 self.connector_scheduler.split_block_groups(block_ids)
             )
@@ -510,9 +513,11 @@ class MoRIIOConnectorScheduler:
         self._has_mamba = bool(self._mamba_group_ids)
         mamba_spec = None
         if self._has_mamba:
-            if len(self._attn_group_ids) != 1:
+            if not self._attn_group_ids:
+                raise MoRIIOError("MoRIIO hybrid transfer requires an attention group")
+            if self.mode == MoRIIOMode.READ and len(self._attn_group_ids) != 1:
                 raise MoRIIOError(
-                    "MoRIIO hybrid transfer requires exactly one transferable "
+                    "MoRIIO hybrid READ requires exactly one transferable "
                     "attention group, got "
                     f"{len(self._attn_group_ids)}; a drafter that owns a "
                     "separate attention group is not supported, give it the "
@@ -524,13 +529,6 @@ class MoRIIOConnectorScheduler:
             ]
             mamba_spec = _validate_mamba_specs(mamba_specs)
             _validate_hybrid_speculation(vllm_config)
-            if (
-                self.mode == MoRIIOMode.WRITE
-                and vllm_config.speculative_config is not None
-            ):
-                raise MoRIIOError(
-                    "MoRIIO hybrid WRITE speculative decoding is not supported"
-                )
         self._num_ssm_scratch_blocks = (
             mamba_spec.num_speculative_blocks if mamba_spec is not None else 0
         )
@@ -1175,8 +1173,11 @@ class MoRIIOConnectorScheduler:
 
                     block_notify_list: list[int] | list[list[int]]
                     if self._has_mamba and num_external_tokens > 0:
-                        attn, mamba = self.split_block_groups(blocks.get_block_ids())
-                        block_notify_list = [attn, *mamba]
+                        block_notify_list = list(
+                            self._clamp_to_prompt_blocks(
+                                request, blocks.get_block_ids()
+                            )
+                        )
                     else:
                         block_notify_list = (
                             blocks.get_block_ids()[0] if num_external_tokens else []
@@ -1237,16 +1238,25 @@ class MoRIIOConnectorScheduler:
 
         """
         if self._has_mamba:
-            attn, mamba = self.split_block_groups(block_ids)
-            spec = self.kv_cache_config.transfer_groups[
-                self._attn_group_ids[0]
-            ].kv_cache_spec
-            block_size = spec.block_size
-            if spec.dcp_sharded:
-                block_size *= (
-                    self.vllm_config.parallel_config.decode_context_parallel_size
-                )
-            return [attn[: cdiv(req.num_prompt_tokens, block_size)], *mamba]
+            # WRITE preserves transfer-group order, including a separate drafter
+            # attention group. READ retains its attention-first wire format.
+            transfer_blocks = self.kv_cache_config.select_transfer_block_ids(block_ids)
+            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+            clamped_hybrid: list[list[int]] = []
+            for group, blocks in zip(
+                self.kv_cache_config.transfer_groups, transfer_blocks, strict=True
+            ):
+                spec = group.kv_cache_spec
+                if isinstance(spec, MambaSpec):
+                    clamped_hybrid.append(
+                        clip_ssm_state_blocks(list(blocks), spec.num_speculative_blocks)
+                    )
+                else:
+                    block_size = spec.block_size * (dcp_size if spec.dcp_sharded else 1)
+                    clamped_hybrid.append(
+                        list(blocks[: cdiv(req.num_prompt_tokens, block_size)])
+                    )
+            return clamped_hybrid
         clamped = list(block_ids)
         changed = False
         for g, group_blocks in enumerate(block_ids):
@@ -1460,7 +1470,7 @@ class MoRIIOConnectorScheduler:
         """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
 
-        ``block_ids`` normally contains all cache groups. Hybrid callers from
+        ``block_ids`` normally contains all cache groups. Hybrid READ callers from
         ``request_finished_all_groups`` pass a flat attention list and the
         recurrent-state groups separately in ``mamba_block_groups``.
         """
@@ -1529,6 +1539,10 @@ class MoRIIOConnectorScheduler:
                 list(cast(list[int], block_ids)),
                 *[list(group) for group in mamba_block_groups],
             ]
+        elif self._has_mamba and self.mode == MoRIIOMode.WRITE:
+            computed_block_ids = self._clamp_to_prompt_blocks(
+                request, cast(BlockIds, block_ids)
+            )
         elif self._has_mamba:
             raise MoRIIOError("Hybrid request completion requires all KV cache groups")
         else:
@@ -1694,7 +1708,7 @@ class MoRIIOConnectorWorker:
         _, mamba_transfer_group_ids = _split_kv_cache_group_kinds(kv_cache_config)
         self._num_mamba_transfer_groups = len(mamba_transfer_group_ids)
         self._mamba_payload_index_by_layer = {
-            layer_name: payload_index
+            layer_name: group_id if self.mode == MoRIIOMode.WRITE else payload_index
             for payload_index, group_id in enumerate(mamba_transfer_group_ids, start=1)
             for layer_name in kv_cache_config.transfer_groups[group_id].layer_names
         }
