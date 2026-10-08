@@ -359,12 +359,9 @@ class CuMemAllocator:
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
                 elif current_platform.is_rocm():
-                    # amdgpu <6.14 can hand back stale VRAM (#44972); newer
-                    # drivers scrub on release, so this can go once they're the floor.
-                    libcudart.cudaMemset(ptr, 0, handle[1])
-        if current_platform.is_rocm():
-            # hipMemset is async to other streams; finish it before they run.
-            torch.accelerator.synchronize()
+                    # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
+                    stream = torch.cuda.current_stream().cuda_stream
+                    libcudart.cudaMemsetAsync(ptr, 0, handle[1], stream)
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
