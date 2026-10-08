@@ -7546,8 +7546,10 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     assert read.next_decode_eligible_step == 7
 
 
-def test_nan_fault_tolerance_aborts_request():
+def test_nan_fault_tolerance_aborts_request(monkeypatch):
     """NaN fault tolerance aborts requests with NaN logits."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     scheduler = create_scheduler(enable_nan_fault_tolerance=True)
 
     requests = create_requests(num_requests=2)
@@ -7608,8 +7610,10 @@ def test_nan_fault_tolerance_disabled_does_not_abort():
     assert requests[1].num_nans_in_logits == 0
 
 
-def test_nan_fault_tolerance_chunked_prefill():
+def test_nan_fault_tolerance_chunked_prefill(monkeypatch):
     """NaN abort fires during chunked prefill intermediate chunks."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     scheduler = create_scheduler(
         max_num_batched_tokens=15,
         max_num_seqs=15,

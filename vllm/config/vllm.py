@@ -1459,7 +1459,10 @@ class VllmConfig:
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 
-        if self.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance:
+        nan_fault_tolerance_enabled = (
+            self.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance
+        )
+        if nan_fault_tolerance_enabled:
             self.observability_config.enable_detect_nans_in_logits = True
 
         if self.model_config is not None and self.model_config.is_submodel_config:
@@ -1467,6 +1470,12 @@ class VllmConfig:
             # and this view's empty architecture list makes the model-dependent checks
             # below unsafe (e.g. use_mla resolves the architecture registry).
             return
+
+        if nan_fault_tolerance_enabled and not self.use_v2_model_runner:
+            raise ValueError(
+                "NaN fault tolerance requires Model Runner V2; set "
+                "VLLM_USE_V2_MODEL_RUNNER=1."
+            )
 
         self._resolve_mm_encoder_only()
 

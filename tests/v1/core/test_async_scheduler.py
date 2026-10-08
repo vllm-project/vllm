@@ -228,8 +228,10 @@ def test_prefix_caching_for_prefill_dedup():
     assert scheduler.get_num_unfinished_requests() == 0
 
 
-def test_nan_fault_tolerance_commits_prefix_cache_after_async_output():
+def test_nan_fault_tolerance_commits_prefix_cache_after_async_output(monkeypatch):
     """Unvalidated async KV must not be visible to another request."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     scheduler = create_scheduler(
         async_scheduling=True,
         enable_prefix_caching=True,
@@ -276,8 +278,10 @@ def test_nan_fault_tolerance_commits_prefix_cache_after_async_output():
     assert next_output.num_scheduled_tokens[next_request.request_id] == 16
 
 
-def test_nan_fault_tolerance_caches_only_completed_async_prefill_chunks():
+def test_nan_fault_tolerance_caches_only_completed_async_prefill_chunks(monkeypatch):
     """A later in-flight prefill chunk must remain invisible until validated."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     scheduler = create_scheduler(
         async_scheduling=True,
         enable_prefix_caching=True,
