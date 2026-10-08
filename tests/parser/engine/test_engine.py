@@ -953,3 +953,61 @@ class TestSkipToolParsingFromMessageHeader:
         assert types[0] == EventType.TEXT_CHUNK
         assert events[0].value == "<tool_call>"
         assert engine._message_header_buffer == ""
+
+
+# ── Terminals with several spellings ──────────────────────────────────
+
+
+def _alias_config() -> ParserEngineConfig:
+    """``TOOL_START`` has a canonical spelling and one corrupted alias."""
+    return ParserEngineConfig(
+        name="alias_test",
+        terminals={"TOOL_START": ("<tc>", "<tcx>"), "TOOL_END": "</tc>"},
+        transitions={
+            (ParserState.CONTENT, "TOOL_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+        },
+        content_events={
+            ParserState.CONTENT: EventType.TEXT_CHUNK,
+            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+        },
+        tool_args_json=False,
+    )
+
+
+class TestTerminalAliases:
+    def test_terminal_defs_expand_every_spelling(self):
+        defs = terminals_from_literals({"A": ("x", "y"), "B": "z"})
+        assert [(d.name, d.literal) for d in defs] == [
+            ("A", "x"),
+            ("A", "y"),
+            ("B", "z"),
+        ]
+
+    def test_terminal_literal_is_canonical_spelling(self):
+        cfg = _alias_config()
+        assert cfg.terminal_literal("TOOL_START") == "<tc>"
+        assert cfg.terminal_literal("TOOL_END") == "</tc>"
+        assert cfg.terminal_literal("MISSING") is None
+        assert cfg.terminal_literals == {"<tc>", "<tcx>", "</tc>"}
+
+    @pytest.mark.parametrize("spelling", ["<tc>", "<tcx>"])
+    @pytest.mark.parametrize("char_by_char", [False, True])
+    def test_every_spelling_shares_transitions(self, spelling, char_by_char):
+        engine = StreamingParserEngine(_alias_config(), None)
+        text = f"{spelling}a</tc>"
+        events = []
+        for chunk in list(text) if char_by_char else [text]:
+            events.extend(engine.feed(chunk, []))
+        events.extend(engine.finish())
+        assert [e.type for e in events] == [
+            EventType.TOOL_CALL_START,
+            EventType.ARG_VALUE_CHUNK,
+            EventType.TOOL_CALL_END,
+        ]

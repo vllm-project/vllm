@@ -28,18 +28,52 @@ _DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
         "FLASHMLA_SPARSE_DSV4",
         "FLASHINFER_MLA_SPARSE_DSV4",
         "ROCM_FLASHMLA_SPARSE_DSV4",
+        "FLASHMLA_SPARSE_DSV41",
+        "FLASHINFER_MLA_SPARSE_DSV41",
         "DEEPSEEK_SPARSE_SWA",
     }
 )
 _FLASHINFER_MLA_SPARSE_BACKENDS = frozenset({"FLASHINFER_MLA_SPARSE_SM120"})
-_DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS = frozenset({"FLASHINFER_MLA_SPARSE_DSV4"})
+_DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS = frozenset(
+    {"FLASHINFER_MLA_SPARSE_DSV4", "FLASHINFER_MLA_SPARSE_DSV41"}
+)
 
 _FLASHINFER_SM120_SPARSE_MLA_DECODE_LABELS = {
     "FLASHINFER_MLA_SPARSE_SM120": "DSv3.2",
     "FLASHINFER_MLA_SPARSE_DSV4": "DSv4",
+    "FLASHINFER_MLA_SPARSE_DSV41": "DSv4.1",
 }
 
 _SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
+
+
+def autotune_hisparse_flashinfer_attention(runner: "GPUModelRunner") -> None:
+    """Autotune each HiSparse FlashInfer sparse-MLA configuration."""
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseImpl,
+    )
+
+    tuned: set[tuple[object, ...]] = set()
+    for layer in runner.vllm_config.compilation_config.static_forward_context.values():
+        impl = getattr(layer, "impl", None)
+        if not isinstance(impl, FlashInferMLASparseImpl):
+            continue
+        if getattr(layer, "hisparse_cache", None) is None:
+            continue
+        if impl.topk_indices_buffer is None:
+            continue
+        key = (
+            impl.kv_cache_dtype,
+            impl.num_heads,
+            impl.qk_nope_head_dim,
+            impl.qk_rope_head_dim,
+            impl.kv_lora_rank,
+            impl.topk_indices_buffer.shape[1],
+        )
+        if key in tuned:
+            continue
+        impl.autotune_hisparse_decode(layer)
+        tuned.add(key)
 
 
 def _attention_backend_name(backend: object) -> str | None:

@@ -58,6 +58,7 @@ from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Request,
     CohereChatV2Response,
     CohereFinishReason,
+    CohereLogprobItem,
     CohereUsage,
     CohereUsageBilledUnits,
     CohereUsageTokens,
@@ -79,6 +80,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionResponseChoice,
     ChatCompletionStreamResponse,
     ChatCompletionToolsParam,
     ChatMessage,
@@ -249,6 +251,7 @@ class CohereServingChatV2(OpenAIServingChat):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
+        tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -265,6 +268,7 @@ class CohereServingChatV2(OpenAIServingChat):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             reasoning_parser=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
@@ -555,10 +559,13 @@ class CohereServingChatV2(OpenAIServingChat):
             temperature=request.temperature,
             top_p=request.p,
             top_k=request.k,
+            watermarking=request.watermarking,
             seed=request.seed,
             frequency_penalty=request.frequency_penalty,
             presence_penalty=request.presence_penalty,
             logprobs=request.logprobs,
+            # Cohere logprob items carry token ids alongside the logprobs.
+            return_token_ids=request.logprobs,
             priority=request.priority or 0,
             kv_transfer_params=request.kv_transfer_params,
             chat_template_kwargs=request.chat_template_kwargs,
@@ -714,8 +721,8 @@ class CohereServingChatV2(OpenAIServingChat):
         # emits, so citation deltas already carry SDK-shape sources by
         # the time they reach the streaming loop. See
         # ``_build_position_to_source`` for the numbering rule and
-        # ``_melody_sources_to_vllm`` in the reasoning parser for the
-        # consumer.
+        # ``_melody_sources_to_vllm`` in ``vllm.parser.cohere_command`` for
+        # the consumer.
         position_to_source = cls._build_position_to_source(request)
         if position_to_source:
             kwargs.setdefault(POSITION_TO_SOURCE_KEY, position_to_source)
@@ -1088,8 +1095,28 @@ class CohereServingChatV2(OpenAIServingChat):
             ),
             message=assistant_msg,
             usage=usage,
+            logprobs=self._build_logprobs(choice),
             kv_transfer_params=response.kv_transfer_params,
         )
+
+    @staticmethod
+    def _build_logprobs(
+        choice: ChatCompletionResponseChoice,
+    ) -> list[CohereLogprobItem] | None:
+        if (
+            choice.logprobs is None
+            or not choice.logprobs.content
+            or choice.token_ids is None
+        ):
+            return None
+        return [
+            CohereLogprobItem(
+                text=entry.token, token_ids=[token_id], logprobs=[entry.logprob]
+            )
+            for entry, token_id in zip(
+                choice.logprobs.content, choice.token_ids, strict=True
+            )
+        ]
 
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
         """Route response construction through the citation-carrying subclass.
@@ -1109,12 +1136,11 @@ class CohereServingChatV2(OpenAIServingChat):
         *,
         parser: Parser | None,
     ) -> ChatMessage:
-        """Copy grounding citations off the reasoning parser onto the message.
+        """Copy grounding citations off the unified parser onto the message.
 
-        The Cohere reasoning parser
-        (:mod:`vllm.reasoning.cohere_command_reasoning_parser`) caches the
-        citations produced by its most recent unary ``extract_reasoning``
-        call on ``last_unary_citations``. We surface them here on
+        :class:`vllm.parser.cohere_command.CohereCommandParser` caches the
+        citations produced by its most recent unary ``parse`` call on
+        ``last_unary_citations``. We surface them here on
         :class:`CohereChatMessage` so downstream response conversion can
         pick them up without the base :class:`OpenAIServingChat` having to
         know about citations.
@@ -1128,11 +1154,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # ``model_dump`` via the extras bucket, so the wire is correct
         # either way.
         message = cast(CohereChatMessage, message)
-        citations = getattr(
-            getattr(parser, "reasoning_parser", None),
-            "last_unary_citations",
-            None,
-        )
+        citations = getattr(parser, "last_unary_citations", None)
         if citations:
             message.citations = citations
         return message
@@ -1143,10 +1165,10 @@ class CohereServingChatV2(OpenAIServingChat):
         :class:`CohereChatMessage` carries a
         ``citations: list[vllm...Citation] | None`` field populated by
         :meth:`_finalize_response_message` (which reads it off the
-        reasoning parser's ``last_unary_citations`` cache). Sources are
+        unified parser's ``last_unary_citations`` cache). Sources are
         already fully resolved by the parser (see
         :func:`_melody_sources_to_vllm` in
-        :mod:`vllm.reasoning.cohere_command_reasoning_parser`) using
+        :mod:`vllm.parser.cohere_command`) using
         the position map forwarded via ``chat_template_kwargs``. This
         method's remaining job is:
 

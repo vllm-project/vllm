@@ -19,8 +19,7 @@ from vllm.platforms import current_platform
 
 
 class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
-    """
-    FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
+    """FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
     (fused router + experts).
 
     Wraps flashinfer_trtllm_mxint4_moe().
@@ -140,6 +139,7 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (  # noqa: E501
             flashinfer_trtllm_mxint4_moe,
@@ -148,10 +148,6 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
 
-        routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
-            device=hidden_states.device,
-        )
         result = flashinfer_trtllm_mxint4_moe(
             x=hidden_states,
             router_logits=router_logits,
@@ -169,8 +165,5 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             e_score_correction_bias=e_score_correction_bias,
             routing_method_type=self.routing_method,
             routing_replay_out=routing_replay_out,
-        )
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
         )
         return result
