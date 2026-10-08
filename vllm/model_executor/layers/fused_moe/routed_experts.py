@@ -553,9 +553,12 @@ class RoutedExperts(PluggableLayer):
             start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
-                # If there is no available weight to load for this TP rank
-                # (can happen on last TP rank with padding), we can skip
-                # loading and return early
+                if shard_id == "w1":
+                    expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+                else:
+                    assert shard_id == "w3"
+                    expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+                expert_data.zero_()
                 return
             narrow_size = min(loaded_per_rank, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
@@ -604,9 +607,7 @@ class RoutedExperts(PluggableLayer):
             start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
-                # If there is no available weight to load for this TP rank
-                # (can happen on last TP rank with padding), we can skip
-                # loading and return early
+                expert_data.zero_()
                 return
             narrow_size = min(loaded_per_rank, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
