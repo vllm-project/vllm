@@ -9,6 +9,7 @@ import shutil
 import sys
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
@@ -472,6 +473,12 @@ class Handle:
     remote_addr_ipv6: bool = False
 
 
+def _close_zmq(context: zmq.Context, sockets: list[zmq.Socket]) -> None:
+    for socket in sockets:
+        socket.close(linger=0)
+    context.term()
+
+
 class MessageQueue:
     def __init__(
         self,
@@ -561,8 +568,25 @@ class MessageQueue:
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
         )
+        self._close_zmq_on_collect(context)
 
         logger.debug("vLLM message queue communication handle: %s", self.handle)
+
+    def _close_zmq_on_collect(self, context: zmq.Context) -> None:
+        # pyzmq's Context.__del__ can block forever in term() when the context
+        # and its sockets are collected in the same GC cycle, so the finalizer
+        # keeps them alive and closes the sockets before terminating.
+        sockets = [self.local_socket, self.remote_socket]
+        if self._spin_condition is not None:
+            sockets += [
+                self._spin_condition.local_notify_socket,
+                self._spin_condition.read_cancel_socket,
+                self._spin_condition.write_cancel_socket,
+            ]
+        finalizer = weakref.finalize(
+            self, _close_zmq, context, [s for s in sockets if s is not None]
+        )
+        finalizer.atexit = False  # type: ignore[misc]
 
     def export_handle(self) -> Handle:
         return self.handle
@@ -613,6 +637,7 @@ class MessageQueue:
             self._spin_condition = None  # type: ignore
 
         self.shutting_down = False
+        self._close_zmq_on_collect(context)
         return self
 
     def wait_until_ready(self):
