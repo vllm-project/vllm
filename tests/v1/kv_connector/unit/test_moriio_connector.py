@@ -195,6 +195,20 @@ def _build_meta(
     return scheduler.build_connector_meta(scheduler_output)
 
 
+def _write_consumer_scheduler_for_update_state(tp_size: int = 2):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.is_producer = False
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.tp_size = tp_size
+    scheduler._is_kv_master = True
+    scheduler._global_dp_rank = 0
+    scheduler._reqs_need_save = {}
+    scheduler._req_kv_params = {}
+    scheduler.paths = {}
+    scheduler.map_request_id = MagicMock()
+    return scheduler
+
+
 class FakeMoRIIOWrapper:
     # A fake MoRIIOWrapper for testing purposes
     def __init__(self, *args, **kwargs):
@@ -551,6 +565,36 @@ def test_write_mode_finished_before_alloc_releases_prefill_blocks(
     assert request.kv_transfer_params["do_remote_prefill"] is False
     assert scheduler._reqs_need_recv == {}
     assert notifications == expected_notifications
+
+
+def test_write_mode_sidelined_by_multiconnector_releases_blocks_and_skips_notify():
+    """WRITE mode with num_external_tokens==0 releases producer blocks instead of sending empty notify."""
+    scheduler = _write_consumer_scheduler_for_update_state(tp_size=2)
+    notifications = []
+    scheduler._send_transfer_release = lambda transfer_id, host, port: (
+        notifications.append((transfer_id, host, port))
+    )
+
+    request = create_request(request_id=42, do_remote_prefill=True)
+    request.request_id = "plain-decode-id"
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "transfer_id": "xfer-42",
+        "remote_host": "127.0.0.1",
+        "remote_notify_port": 9000,
+    }
+
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = [[0, 1, 2]]
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
+
+    assert notifications == [
+        ("xfer-42", "127.0.0.1", 9000),
+        ("xfer-42", "127.0.0.1", 9001),
+    ]
+    assert request.kv_transfer_params["do_remote_prefill"] is False
 
 
 def test_send_transfer_release_sends_structured_release_message():
