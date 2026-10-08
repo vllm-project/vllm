@@ -46,6 +46,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -57,6 +58,614 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fused MTP Triton Kernels
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _sparse_gather_gemv_kernel(
+    hidden_states_ptr,
+    lm_head_weight_ptr,
+    selected_indices_ptr,
+    out_ptr,
+    stride_h_t,
+    stride_h_h,
+    stride_w_v,
+    stride_w_h,
+    stride_idx_t,
+    stride_idx_s,
+    stride_out_t,
+    stride_out_s,
+    T: tl.constexpr,
+    S: tl.constexpr,
+    H: tl.constexpr,
+    BLOCK_S: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    pid_t = tl.program_id(0).to(tl.int64)
+    pid_s = tl.program_id(1).to(tl.int64)
+
+    offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
+    mask_s = offs_s < S
+
+    idx_ptrs = selected_indices_ptr + pid_t * stride_idx_t + offs_s * stride_idx_s
+    vocab_idxs = tl.load(idx_ptrs, mask=mask_s, other=0).to(tl.int64)
+
+    acc = tl.zeros((BLOCK_S,), dtype=tl.float32)
+
+    for h_start in range(0, H, BLOCK_H):
+        offs_h = h_start + tl.arange(0, BLOCK_H)
+        mask_h = offs_h < H
+        h_vals = tl.load(
+            hidden_states_ptr + pid_t * stride_h_t + offs_h * stride_h_h,
+            mask=mask_h,
+            other=0.0,
+        ).to(tl.float32)
+        w_ptrs = (
+            lm_head_weight_ptr
+            + vocab_idxs[:, None] * stride_w_v
+            + offs_h[None, :] * stride_w_h
+        )
+        mask_2d = mask_s[:, None] & mask_h[None, :]
+        w_block = tl.load(w_ptrs, mask=mask_2d, other=0.0).to(tl.float32)
+        acc += tl.sum(w_block * h_vals[None, :], axis=1)
+
+    out_ptrs = out_ptr + pid_t * stride_out_t + offs_s * stride_out_s
+    tl.store(out_ptrs, acc.to(out_ptr.dtype.element_ty), mask=mask_s)
+
+
+def fused_mtp_sparse_gather_gemv(
+    hidden_states: torch.Tensor,
+    lm_head_weight: torch.Tensor,
+    selected_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Compute sparse dot products einsum('td,tsd->ts') in-register."""
+    T, H = hidden_states.shape
+    S = selected_indices.shape[1]
+    if T == 0 or S == 0:
+        return torch.empty(
+            (T, S), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+
+    if not HAS_TRITON or not hidden_states.is_cuda:
+        embeddings = lm_head_weight[selected_indices.reshape(-1)].view(T, S, H)
+        return torch.einsum("td,tsd->ts", hidden_states, embeddings)
+
+    if hidden_states.stride(-1) != 1:
+        hidden_states = hidden_states.contiguous()
+    if lm_head_weight.stride(-1) != 1:
+        lm_head_weight = lm_head_weight.contiguous()
+    if selected_indices.stride(-1) != 1:
+        selected_indices = selected_indices.contiguous()
+
+    out = torch.empty((T, S), dtype=hidden_states.dtype, device=hidden_states.device)
+    BLOCK_S = 32
+    BLOCK_H = 512
+
+    grid = (T, triton.cdiv(S, BLOCK_S))
+    _sparse_gather_gemv_kernel[grid](
+        hidden_states,
+        lm_head_weight,
+        selected_indices,
+        out,
+        hidden_states.stride(0),
+        hidden_states.stride(1),
+        lm_head_weight.stride(0),
+        lm_head_weight.stride(1),
+        selected_indices.stride(0),
+        selected_indices.stride(1),
+        out.stride(0),
+        out.stride(1),
+        T=T,
+        S=S,
+        H=H,
+        BLOCK_S=BLOCK_S,
+        BLOCK_H=BLOCK_H,
+    )
+    return out
+
+
+@triton.jit
+def _mtp_q_norm_rope_kernel(
+    q_ptr,
+    positions_ptr,
+    cos_sin_cache_ptr,
+    q_weight_ptr,
+    out_q_ptr,
+    stride_q_m,
+    stride_cache_pos,
+    stride_out_q_m,
+    num_heads: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ROTARY_DIM: tl.constexpr,
+    HALF_ROTARY_DIM: tl.constexpr,
+    BLOCK_HALF: tl.constexpr,
+    PASS_THROUGH_DIM: tl.constexpr,
+    BLOCK_PASS: tl.constexpr,
+    eps: tl.constexpr,
+):
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_h = tl.program_id(1).to(tl.int64)
+
+    head_off = pid_h * HEAD_DIM
+    offs_half = tl.arange(0, BLOCK_HALF)
+    half_mask = offs_half < HALF_ROTARY_DIM
+
+    pos = tl.load(positions_ptr + pid_m)
+    cos = tl.load(
+        cos_sin_cache_ptr + pos * stride_cache_pos + offs_half,
+        mask=half_mask,
+        other=1.0,
+    )
+    sin = tl.load(
+        cos_sin_cache_ptr + pos * stride_cache_pos + HALF_ROTARY_DIM + offs_half,
+        mask=half_mask,
+        other=0.0,
+    )
+
+    x1 = tl.load(
+        q_ptr + pid_m * stride_q_m + head_off + offs_half,
+        mask=half_mask,
+        other=0.0,
+    )
+    x2 = tl.load(
+        q_ptr + pid_m * stride_q_m + head_off + HALF_ROTARY_DIM + offs_half,
+        mask=half_mask,
+        other=0.0,
+    )
+
+    x1_f32 = x1.to(tl.float32)
+    x2_f32 = x2.to(tl.float32)
+    sum_sq = tl.sum(x1_f32 * x1_f32 + x2_f32 * x2_f32, axis=0)
+
+    if PASS_THROUGH_DIM > 0:
+        offs_pass = tl.arange(0, BLOCK_PASS)
+        pass_mask = offs_pass < PASS_THROUGH_DIM
+        x_pass = tl.load(
+            q_ptr + pid_m * stride_q_m + head_off + ROTARY_DIM + offs_pass,
+            mask=pass_mask,
+            other=0.0,
+        )
+        x_pass_f32 = x_pass.to(tl.float32)
+        sum_sq += tl.sum(x_pass_f32 * x_pass_f32, axis=0)
+
+    var = sum_sq / HEAD_DIM
+    r = tl.rsqrt(var + eps)
+
+    out_dtype = out_q_ptr.dtype.element_ty
+    x1_norm = (x1_f32 * r).to(out_dtype)
+    x2_norm = (x2_f32 * r).to(out_dtype)
+
+    w1 = tl.load(q_weight_ptr + offs_half, mask=half_mask, other=1.0)
+    w2 = tl.load(q_weight_ptr + HALF_ROTARY_DIM + offs_half, mask=half_mask, other=1.0)
+    x1_norm = x1_norm * w1
+    x2_norm = x2_norm * w2
+
+    cos_f32 = cos.to(tl.float32)
+    sin_f32 = sin.to(tl.float32)
+    x1_norm_f32 = x1_norm.to(tl.float32)
+    x2_norm_f32 = x2_norm.to(tl.float32)
+    o1 = (x1_norm_f32 * cos_f32 - x2_norm_f32 * sin_f32).to(out_dtype)
+    o2 = (x2_norm_f32 * cos_f32 + x1_norm_f32 * sin_f32).to(out_dtype)
+
+    out_off = pid_m * stride_out_q_m + head_off
+    tl.store(out_q_ptr + out_off + offs_half, o1, mask=half_mask)
+    tl.store(out_q_ptr + out_off + HALF_ROTARY_DIM + offs_half, o2, mask=half_mask)
+
+    if PASS_THROUGH_DIM > 0:
+        offs_pass = tl.arange(0, BLOCK_PASS)
+        pass_mask = offs_pass < PASS_THROUGH_DIM
+        w_pass = tl.load(
+            q_weight_ptr + ROTARY_DIM + offs_pass, mask=pass_mask, other=1.0
+        )
+        o_pass = ((x_pass_f32 * r).to(out_dtype) * w_pass).to(out_dtype)
+        tl.store(out_q_ptr + out_off + ROTARY_DIM + offs_pass, o_pass, mask=pass_mask)
+
+
+def fused_mtp_q_norm_rope(
+    q: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    q_weight: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fuses Q unflatten, per-head RMSNorm, NeoX RoPE, and flatten into 1 launch."""
+    orig_shape = q.shape
+    q_2d = q.reshape(-1, q.shape[-1])
+    M, H = q_2d.shape
+    if M == 0:
+        return torch.empty_like(q)
+
+    rotary_dim = cos_sin_cache.shape[-1]
+    if not HAS_TRITON or not q.is_cuda or H > 16384:
+        q_heads = q.unflatten(-1, (num_heads, head_dim))
+        variance = q_heads.pow(2).mean(-1, keepdim=True)
+        q_normed = (q_heads * torch.rsqrt(variance + eps)).to(q.dtype) * q_weight
+        q_rot = q_normed[..., :rotary_dim]
+        q_pass = q_normed[..., rotary_dim:] if rotary_dim < head_dim else None
+        half_dim = rotary_dim // 2
+        cos_sin = cos_sin_cache[positions]
+        cos = cos_sin[..., :half_dim].unsqueeze(-2)
+        sin = cos_sin[..., half_dim:].unsqueeze(-2)
+        q1 = q_rot[..., :half_dim]
+        q2 = q_rot[..., half_dim:]
+        o1 = (q1.float() * cos.float() - q2.float() * sin.float()).to(q.dtype)
+        o2 = (q2.float() * cos.float() + q1.float() * sin.float()).to(q.dtype)
+        o_rot = torch.cat([o1, o2], dim=-1)
+        o = torch.cat([o_rot, q_pass], dim=-1) if q_pass is not None else o_rot
+        return o.flatten(-2, -1)
+
+    if q_2d.stride(-1) != 1:
+        q_2d = q_2d.contiguous()
+    pos_1d = positions.reshape(-1)
+    if pos_1d.stride(0) != 1:
+        pos_1d = pos_1d.contiguous()
+    if cos_sin_cache.stride(-1) != 1:
+        cos_sin_cache = cos_sin_cache.contiguous()
+    if q_weight.stride(-1) != 1:
+        q_weight = q_weight.contiguous()
+
+    out_q = torch.empty_like(q_2d)
+    half_rotary_dim = rotary_dim // 2
+    pass_through_dim = head_dim - rotary_dim
+    BLOCK_HALF = triton.next_power_of_2(half_rotary_dim)
+    BLOCK_PASS = triton.next_power_of_2(max(1, pass_through_dim))
+
+    grid = (M, num_heads)
+    _mtp_q_norm_rope_kernel[grid](
+        q_2d,
+        pos_1d,
+        cos_sin_cache,
+        q_weight,
+        out_q,
+        q_2d.stride(0),
+        cos_sin_cache.stride(0),
+        out_q.stride(0),
+        num_heads=num_heads,
+        HEAD_DIM=head_dim,
+        ROTARY_DIM=rotary_dim,
+        HALF_ROTARY_DIM=half_rotary_dim,
+        BLOCK_HALF=BLOCK_HALF,
+        PASS_THROUGH_DIM=pass_through_dim,
+        BLOCK_PASS=BLOCK_PASS,
+        eps=eps,
+    )
+    return out_q.reshape(orig_shape)
+
+
+@triton.jit
+def _mtp_post_attn_add_pre_ff_norm_kernel(
+    attn_out_ptr,
+    residual_ptr,
+    post_w_ptr,
+    pre_w_ptr,
+    out_pre_ff_ptr,
+    out_res_ptr,
+    stride_attn_m,
+    stride_res_m,
+    stride_pre_m,
+    stride_out_res_m,
+    H: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    eps: tl.constexpr,
+):
+    m = tl.program_id(0).to(tl.int64)
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < H
+    out_dtype = out_res_ptr.dtype.element_ty
+
+    attn = tl.load(attn_out_ptr + m * stride_attn_m + offs, mask=mask, other=0.0)
+    attn_f32 = attn.to(tl.float32)
+    var1 = tl.sum(attn_f32 * attn_f32, axis=0) / H
+    r1 = tl.rsqrt(var1 + eps)
+    normed_attn = (attn_f32 * r1).to(out_dtype)
+
+    post_w = tl.load(post_w_ptr + offs, mask=mask, other=0.0)
+    normed_attn = normed_attn * post_w
+
+    res = tl.load(residual_ptr + m * stride_res_m + offs, mask=mask, other=0.0)
+    new_res = normed_attn + res
+    tl.store(out_res_ptr + m * stride_out_res_m + offs, new_res, mask=mask)
+
+    new_res_f32 = new_res.to(tl.float32)
+    var2 = tl.sum(new_res_f32 * new_res_f32, axis=0) / H
+    r2 = tl.rsqrt(var2 + eps)
+    normed_res = (new_res_f32 * r2).to(out_dtype)
+
+    pre_w = tl.load(pre_w_ptr + offs, mask=mask, other=0.0)
+    pre_ff = normed_res * pre_w
+    tl.store(out_pre_ff_ptr + m * stride_pre_m + offs, pre_ff, mask=mask)
+
+
+def fused_mtp_post_attn_add_pre_ff_norm(
+    attn_out: torch.Tensor,
+    residual: torch.Tensor,
+    post_w: torch.Tensor,
+    pre_w: torch.Tensor,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuses post_attention_layernorm + residual add + pre_feedforward_layernorm."""
+    orig_shape = attn_out.shape
+    attn_2d = attn_out.reshape(-1, attn_out.shape[-1])
+    res_2d = residual.reshape(-1, residual.shape[-1])
+    M, H = attn_2d.shape
+    if M == 0:
+        return torch.empty_like(attn_out), torch.empty_like(residual)
+
+    if not HAS_TRITON or not attn_out.is_cuda or H > 16384:
+        var1 = attn_out.pow(2).mean(-1, keepdim=True)
+        res = (attn_out * torch.rsqrt(var1 + eps)).to(
+            attn_out.dtype
+        ) * post_w + residual
+        var2 = res.pow(2).mean(-1, keepdim=True)
+        pre_ff = (res * torch.rsqrt(var2 + eps)).to(res.dtype) * pre_w
+        return pre_ff, res
+
+    if attn_2d.stride(-1) != 1:
+        attn_2d = attn_2d.contiguous()
+    if res_2d.stride(-1) != 1:
+        res_2d = res_2d.contiguous()
+    if post_w.stride(-1) != 1:
+        post_w = post_w.contiguous()
+    if pre_w.stride(-1) != 1:
+        pre_w = pre_w.contiguous()
+
+    out_pre_ff = torch.empty_like(attn_2d)
+    out_res = torch.empty_like(res_2d)
+    BLOCK_SIZE = triton.next_power_of_2(H)
+    num_warps = 8 if BLOCK_SIZE >= 4096 else 4
+
+    _mtp_post_attn_add_pre_ff_norm_kernel[(M,)](
+        attn_2d,
+        res_2d,
+        post_w,
+        pre_w,
+        out_pre_ff,
+        out_res,
+        attn_2d.stride(0),
+        res_2d.stride(0),
+        out_pre_ff.stride(0),
+        out_res.stride(0),
+        H=H,
+        BLOCK_SIZE=BLOCK_SIZE,
+        eps=eps,
+        num_warps=num_warps,
+    )
+    return out_pre_ff.reshape(orig_shape), out_res.reshape(orig_shape)
+
+
+@triton.jit
+def _mtp_post_ff_epilogue_kernel(
+    mlp_out_ptr,
+    residual_ptr,
+    post_ff_w_ptr,
+    next_norm_w_ptr,
+    out_res_ptr,
+    out_normed_ptr,
+    layer_scalar_ptr,
+    layer_scalar_val,
+    stride_mlp_m,
+    stride_res_m,
+    stride_out_res_m,
+    stride_normed_m,
+    H: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    eps: tl.constexpr,
+    HAS_NEXT_NORM: tl.constexpr,
+    IS_SCALAR_TENSOR: tl.constexpr,
+):
+    m = tl.program_id(0).to(tl.int64)
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < H
+    out_dtype = out_res_ptr.dtype.element_ty
+
+    scalar = (
+        tl.load(layer_scalar_ptr).to(tl.float32)
+        if IS_SCALAR_TENSOR
+        else layer_scalar_val
+    )
+
+    mlp = tl.load(mlp_out_ptr + m * stride_mlp_m + offs, mask=mask, other=0.0)
+    mlp_f32 = mlp.to(tl.float32)
+    var = tl.sum(mlp_f32 * mlp_f32, axis=0) / H
+    r = tl.rsqrt(var + eps)
+    normed_mlp = (mlp_f32 * r).to(out_dtype)
+
+    post_w = tl.load(post_ff_w_ptr + offs, mask=mask, other=0.0)
+    normed_mlp = normed_mlp * post_w
+
+    res = tl.load(residual_ptr + m * stride_res_m + offs, mask=mask, other=0.0)
+    new_res = ((normed_mlp.to(tl.float32) + res.to(tl.float32)) * scalar).to(out_dtype)
+    tl.store(out_res_ptr + m * stride_out_res_m + offs, new_res, mask=mask)
+
+    if HAS_NEXT_NORM:
+        new_res_f32 = new_res.to(tl.float32)
+        var_next = tl.sum(new_res_f32 * new_res_f32, axis=0) / H
+        r_next = tl.rsqrt(var_next + eps)
+        normed_next = (new_res_f32 * r_next).to(out_dtype)
+
+        next_w = tl.load(next_norm_w_ptr + offs, mask=mask, other=0.0)
+        normed_next = normed_next * next_w
+        tl.store(out_normed_ptr + m * stride_normed_m + offs, normed_next, mask=mask)
+
+
+def fused_mtp_post_ff_epilogue(
+    mlp_out: torch.Tensor,
+    residual: torch.Tensor,
+    post_ff_w: torch.Tensor,
+    layer_scalar: torch.Tensor | float,
+    next_norm_w: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Fuses post_ff norm + residual add + scalar + optional next norm."""
+    orig_shape = mlp_out.shape
+    mlp_2d = mlp_out.reshape(-1, mlp_out.shape[-1])
+    res_2d = residual.reshape(-1, residual.shape[-1])
+    M, H = mlp_2d.shape
+    if M == 0:
+        return (
+            torch.empty_like(mlp_out),
+            torch.empty_like(residual) if next_norm_w is not None else None,
+        )
+
+    is_scalar_tensor = isinstance(layer_scalar, torch.Tensor) and layer_scalar.is_cuda
+    if is_scalar_tensor:
+        layer_scalar_ptr = layer_scalar
+        layer_scalar_val = 1.0
+    else:
+        layer_scalar_ptr = mlp_2d
+        layer_scalar_val = (
+            float(layer_scalar.item())
+            if isinstance(layer_scalar, torch.Tensor)
+            else float(layer_scalar)
+        )
+
+    if not HAS_TRITON or not mlp_out.is_cuda or H > 16384:
+        var = mlp_out.pow(2).mean(-1, keepdim=True)
+        scalar = (
+            layer_scalar if isinstance(layer_scalar, torch.Tensor) else layer_scalar_val
+        )
+        res = (
+            (mlp_out * torch.rsqrt(var + eps)).to(mlp_out.dtype) * post_ff_w + residual
+        ) * scalar
+        if next_norm_w is not None:
+            var_next = res.pow(2).mean(-1, keepdim=True)
+            normed_next = (res * torch.rsqrt(var_next + eps)).to(
+                res.dtype
+            ) * next_norm_w
+            return normed_next, res
+        return res, None
+
+    if mlp_2d.stride(-1) != 1:
+        mlp_2d = mlp_2d.contiguous()
+    if res_2d.stride(-1) != 1:
+        res_2d = res_2d.contiguous()
+    if post_ff_w.stride(-1) != 1:
+        post_ff_w = post_ff_w.contiguous()
+    if next_norm_w is not None and next_norm_w.stride(-1) != 1:
+        next_norm_w = next_norm_w.contiguous()
+
+    out_res = torch.empty_like(res_2d)
+    out_normed = torch.empty_like(mlp_2d) if next_norm_w is not None else mlp_2d
+    BLOCK_SIZE = triton.next_power_of_2(H)
+    num_warps = 8 if BLOCK_SIZE >= 4096 else 4
+
+    _mtp_post_ff_epilogue_kernel[(M,)](
+        mlp_2d,
+        res_2d,
+        post_ff_w,
+        next_norm_w if next_norm_w is not None else post_ff_w,
+        out_res,
+        out_normed,
+        layer_scalar_ptr,
+        layer_scalar_val,
+        mlp_2d.stride(0),
+        res_2d.stride(0),
+        out_res.stride(0),
+        out_normed.stride(0),
+        H=H,
+        BLOCK_SIZE=BLOCK_SIZE,
+        eps=eps,
+        HAS_NEXT_NORM=next_norm_w is not None,
+        IS_SCALAR_TENSOR=is_scalar_tensor,
+        num_warps=num_warps,
+    )
+    if next_norm_w is not None:
+        return out_normed.reshape(orig_shape), out_res.reshape(orig_shape)
+    return out_res.reshape(orig_shape), None
+
+
+@triton.jit
+def _mtp_embed_scale_cat_kernel(
+    raw_embeds_ptr,
+    hidden_states_ptr,
+    out_ptr,
+    normalizer_ptr,
+    normalizer_val,
+    stride_raw_m,
+    stride_hid_m,
+    stride_out_m,
+    H: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    IS_NORM_TENSOR: tl.constexpr,
+):
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_chunk = tl.program_id(1).to(tl.int64)
+
+    offs_h = pid_chunk * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask = offs_h < H
+    out_dtype = out_ptr.dtype.element_ty
+
+    norm = tl.load(normalizer_ptr).to(tl.float32) if IS_NORM_TENSOR else normalizer_val
+
+    raw = tl.load(raw_embeds_ptr + pid_m * stride_raw_m + offs_h, mask=mask, other=0.0)
+    scaled = (raw.to(tl.float32) * norm).to(out_dtype)
+    tl.store(out_ptr + pid_m * stride_out_m + offs_h, scaled, mask=mask)
+
+    hid = tl.load(
+        hidden_states_ptr + pid_m * stride_hid_m + offs_h, mask=mask, other=0.0
+    )
+    tl.store(out_ptr + pid_m * stride_out_m + H + offs_h, hid.to(out_dtype), mask=mask)
+
+
+def fused_mtp_embed_scale_cat(
+    raw_embeds: torch.Tensor,
+    hidden_states: torch.Tensor,
+    normalizer: torch.Tensor | float,
+) -> torch.Tensor:
+    """Fuses raw_embeds * normalizer and concat([scaled, hidden_states], dim=-1)."""
+    orig_shape = raw_embeds.shape
+    raw_2d = raw_embeds.reshape(-1, raw_embeds.shape[-1])
+    hid_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
+    M, H = raw_2d.shape
+    out_shape = (*orig_shape[:-1], 2 * H)
+    if M == 0:
+        return torch.empty(out_shape, dtype=raw_embeds.dtype, device=raw_embeds.device)
+
+    is_norm_tensor = isinstance(normalizer, torch.Tensor) and normalizer.is_cuda
+    if is_norm_tensor:
+        normalizer_ptr = normalizer
+        normalizer_val = 1.0
+    else:
+        normalizer_ptr = raw_2d
+        normalizer_val = (
+            float(normalizer.item())
+            if isinstance(normalizer, torch.Tensor)
+            else float(normalizer)
+        )
+
+    if not HAS_TRITON or not raw_embeds.is_cuda or H > 16384:
+        norm = normalizer if isinstance(normalizer, torch.Tensor) else normalizer_val
+        return torch.cat([raw_embeds * norm, hidden_states], dim=-1)
+
+    if raw_2d.stride(-1) != 1:
+        raw_2d = raw_2d.contiguous()
+    if hid_2d.stride(-1) != 1:
+        hid_2d = hid_2d.contiguous()
+
+    out = torch.empty((M, 2 * H), dtype=raw_embeds.dtype, device=raw_embeds.device)
+    BLOCK_H = 1024
+    grid = (M, triton.cdiv(H, BLOCK_H))
+
+    _mtp_embed_scale_cat_kernel[grid](
+        raw_2d,
+        hid_2d,
+        out,
+        normalizer_ptr,
+        normalizer_val,
+        raw_2d.stride(0),
+        hid_2d.stride(0),
+        out.stride(0),
+        H=H,
+        BLOCK_H=BLOCK_H,
+        IS_NORM_TENSOR=is_norm_tensor,
+    )
+    return out.reshape(out_shape)
 
 
 class Gemma4MTPMaskedEmbedder(nn.Module):
@@ -114,13 +723,11 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
             self.vocab_size_per_centroid,
         )
         selected = clusters[top_k_indices]
-        embeddings = lm_head_weight[selected.reshape(-1)].view(
-            num_tokens,
-            self.num_selected,
-            self.hidden_size,
+        selected_flat = selected.view(num_tokens, -1)
+        logits = fused_mtp_sparse_gather_gemv(
+            hidden_states, lm_head_weight, selected_flat
         )
-        logits = torch.einsum("td,tsd->ts", hidden_states, embeddings)
-        return logits, selected.view(num_tokens, -1)
+        return logits, selected_flat
 
     def forward(
         self,
@@ -241,11 +848,15 @@ class Gemma4MTPAttention(nn.Module):
     ) -> torch.Tensor:
         q, _ = self.q_proj(hidden_states)
 
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-        q = self.q_norm(q)
-        q = q.flatten(-2, -1)
-
-        q, _ = self.rotary_emb(positions, q, None)
+        q = fused_mtp_q_norm_rope(
+            q,
+            positions,
+            self.rotary_emb.cos_sin_cache,
+            self.q_norm.weight,
+            self.num_heads,
+            self.head_dim,
+            eps=self.q_norm.variance_epsilon,
+        )
 
         # Attention reads K/V from the target's cache via KV sharing.
         attn_output = self.attn(q, None, None)
@@ -308,11 +919,13 @@ class Gemma4MTPDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
+        residual: torch.Tensor | None = None,
+        next_norm_weight: torch.Tensor | None = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(residual)
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(residual)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -320,18 +933,24 @@ class Gemma4MTPDecoderLayer(nn.Module):
             **kwargs,
         )
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
-        residual = hidden_states
+        pre_ff, residual = fused_mtp_post_attn_add_pre_ff_norm(
+            hidden_states,
+            residual,
+            self.post_attention_layernorm.weight,
+            self.pre_feedforward_layernorm.weight,
+            eps=self.post_attention_layernorm.variance_epsilon,
+        )
+        mlp_out = self.mlp(pre_ff)
 
-        hidden_states = self.pre_feedforward_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
-
-        hidden_states = hidden_states * self.layer_scalar
-        return hidden_states, None
+        hidden_states, residual = fused_mtp_post_ff_epilogue(
+            mlp_out,
+            residual,
+            self.post_feedforward_layernorm.weight,
+            layer_scalar=self.layer_scalar,
+            next_norm_w=next_norm_weight,
+            eps=self.post_feedforward_layernorm.variance_epsilon,
+        )
+        return hidden_states, residual
 
 
 class Gemma4MultiTokenPredictor(nn.Module):
@@ -404,7 +1023,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -418,20 +1037,35 @@ class Gemma4MultiTokenPredictor(nn.Module):
             hidden-state buffer and fed back as input to the next step.
         """
         if inputs_embeds is None:
-            inputs_embeds = self.embed_input_ids(input_ids)
+            assert input_ids is not None
+            raw_embeds = self.embed_tokens(input_ids)
+            combined = fused_mtp_embed_scale_cat(
+                raw_embeds, hidden_states, self.normalizer
+            )
+        else:
+            combined = torch.cat([inputs_embeds, hidden_states], dim=-1)
 
-        combined = torch.cat([inputs_embeds, hidden_states], dim=-1)
         hidden_states, _ = self.pre_projection(combined)
 
         residual = None
-        for layer in self.layers:
+        num_layers = len(self.layers)
+        for idx, layer in enumerate(self.layers):
+            layer_next_norm_w = (
+                self.layers[idx + 1].input_layernorm.weight
+                if idx + 1 < num_layers
+                else self.norm.weight
+            )
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                next_norm_weight=layer_next_norm_w,
             )
 
-        draft_hidden_states = self.norm(hidden_states)
+        if residual is None:
+            draft_hidden_states = self.norm(hidden_states)
+        else:
+            draft_hidden_states = hidden_states
 
         backbone_hidden_states, _ = self.post_projection(draft_hidden_states)
         return draft_hidden_states, backbone_hidden_states
