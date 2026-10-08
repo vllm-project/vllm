@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-WARNING: This test runs in both single-node (4 GPUs) and multi-node
- (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
- important to set the distributed backend to "mp" to avoid Ray scheduling
- all workers in a node other than the head node, which can cause the test
- to fail.
+"""WARNING: This test runs in both single-node (4 GPUs) and multi-node
+(2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
+important to set the distributed backend to "mp" to avoid Ray scheduling
+all workers in a node other than the head node, which can cause the test
+to fail.
 """
 
 import json
@@ -375,11 +374,16 @@ def test_tp_sp_generation_prompt_embeds(
 
 @create_new_process_for_each_test()
 def test_tp_sp_nvfp4_generation(num_gpus_available: int):
-    if (
-        not current_platform.is_cuda()
-        or not current_platform.is_device_capability_family(100)
-    ):
-        pytest.skip("NVFP4 requires Blackwell")
+    is_blackwell = current_platform.is_cuda() and (
+        current_platform.is_device_capability_family(100)
+    )
+    is_rocm_cdna = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_cdna
+
+        is_rocm_cdna = on_cdna()
+    if not (is_blackwell or is_rocm_cdna):
+        pytest.skip("NVFP4 sequence parallelism requires Blackwell or ROCm CDNA")
 
     comparison = _build_sp_args(
         NVFP4_MODEL_ID,

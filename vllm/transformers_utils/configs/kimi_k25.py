@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Kimi-K2.5 Model Configuration.
+"""Kimi-K2.5 Model Configuration.
 
 This configuration supports video-chunk as an internal modality type.
 A video-chunk is the smallest independently processable unit of video.
 """
 
 from transformers import DeepseekV3Config
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class KimiK25VisionConfig(PretrainedConfig):
+class KimiK25VisionConfig(PreTrainedConfig):
     model_type = "kimi_k25_vision"
 
     def __init__(
@@ -60,7 +59,7 @@ class KimiK25VisionConfig(PretrainedConfig):
         self.projector_ln_eps = projector_ln_eps
 
 
-class KimiK25Config(PretrainedConfig):
+class KimiK25Config(PreTrainedConfig):
     """Kimi-K2.5 model configuration.
 
     Kimi-K2.5 extends Kimi-K2 with vision support using video-chunks.
@@ -73,6 +72,7 @@ class KimiK25Config(PretrainedConfig):
         ignore_index: The ignore index for the loss function.
         media_placeholder_token_id: The token ID for media placeholders.
         pad_token_id: The token ID for padding.
+
     """
 
     model_type = "kimi_k25"

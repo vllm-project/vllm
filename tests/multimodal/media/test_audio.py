@@ -185,9 +185,15 @@ def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
     ref_audio, ref_sr = load_audio(BytesIO(dummy_audio_bytes), sr=None)
     audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend=backend)
     assert sr == ref_sr
-    # Decoders disagree only on codec encoder-delay/padding, so torchcodec may
-    # emit a few extra trailing samples (e.g. ~192 for Ogg Vorbis). Compare the
-    # overlapping region, which must agree to float32 precision.
+    if backend == "torchcodec":
+        # Vorbis encoder padding is trimmed, so torchcodec must match the
+        # soundfile reference exactly, including the waveform length.
+        assert audio.shape == ref_audio.shape
+        np.testing.assert_allclose(ref_audio, audio, atol=1e-4)
+        return
+    # Decoders disagree only on codec encoder-delay/padding, so PyAV may
+    # emit a few extra trailing samples (e.g. ~192 for Ogg Vorbis). Compare
+    # the overlapping region, which must agree to float32 precision.
     n = min(ref_audio.shape[-1], audio.shape[-1])
     assert n > 0
     np.testing.assert_allclose(ref_audio[:n], audio[:n], atol=1e-4)
@@ -199,6 +205,17 @@ def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
     audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None)
     assert sr == expected_sr
     assert audio.shape == expected.shape
+
+
+def test_load_audio_torchcodec_preserves_vorbis_length(dummy_audio_bytes):
+    """Torchcodec must trim Vorbis trailing padding even on FFmpeg < 5.0,
+    matching the soundfile reference exactly."""
+    pytest.importorskip("torchcodec")
+    expected, expected_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    audio, sr = load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
+    assert sr == expected_sr
+    assert audio.shape == expected.shape
+    np.testing.assert_allclose(audio, expected, atol=1e-4)
 
 
 def test_load_audio_unknown_backend_rejected(dummy_audio_bytes):
@@ -218,7 +235,7 @@ def test_load_audio_auto_falls_back_without_torchcodec(dummy_audio_bytes):
 
 
 def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
-    """torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
+    """Torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
     must surface as ImportError so `auto` falls back to soundfile → PyAV."""
     ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
     with patch.object(audio_module, "AudioDecoder", None):
@@ -232,7 +249,7 @@ def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
 def test_load_audio_auto_falls_back_when_libtorchcodec_unloadable(
     dummy_audio_bytes,
 ):
-    """torchcodec loads its ffmpeg-backed core lazily at decoder construction;
+    """Torchcodec loads its ffmpeg-backed core lazily at decoder construction;
     a "Could not load libtorchcodec" RuntimeError there (no system ffmpeg)
     must also surface as ImportError so `auto` falls back."""
 
