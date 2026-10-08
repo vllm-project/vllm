@@ -45,6 +45,7 @@ async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: st
     poolings = PoolingResponse.model_validate(response.json())
     assert len(poolings.data) == 1
     assert len(poolings.data[0].data) == 8
+    assert isinstance(poolings.data[0].data[0], list)
     assert len(poolings.data[0].data[0]) == 2
 
 
