@@ -20,8 +20,7 @@ from vllm.exceptions import VLLMValidationError
 
 
 class TestResponsePreviousInputToHarmony:
-    """
-    Tests for scenarios that are specific to the Responses API
+    """Tests for scenarios that are specific to the Responses API
     response_previous_input_to_harmony function.
     """
 

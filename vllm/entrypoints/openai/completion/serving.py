@@ -98,14 +98,14 @@ class OpenAIServingCompletion(GenerateBaseServing):
         self,
         request: CompletionRequest,
     ) -> list[EngineInput] | ErrorResponse:
-        """
-        Validate the model and preprocess a completion request.
+        """Validate the model and preprocess a completion request.
 
         Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
             A list of engine_inputs on success, or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -125,9 +125,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         See https://platform.openai.com/docs/api-reference/completions/create
         for the API specification. This API mimics the OpenAI Completion API.
 
-        NOTE: Currently we do not support the following feature:
-            - suffix (the language models we currently support do not support
-            suffix)
+        NOTE: suffix is only supported by models that implement FIM rendering.
         """
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_completion(request, raw_request), request, raw_request
@@ -363,6 +361,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
+                    finish_reason = output.finish_reason
+                    self._raise_if_error(finish_reason, request_id)
 
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
@@ -429,10 +429,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                     previous_text_lens[i] += len(delta_text)
                     previous_num_tokens[i] += len(output.token_ids)
-                    finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
-
-                    self._raise_if_error(finish_reason, request_id)
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
