@@ -456,8 +456,12 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                         # undo assign_request_id
                         request_id = request_id.split("-", 1)[0]
                         added_request_ids.add(request_id)
-                        if (metadata := request.get("late_chunking")) is not None:
-                            late_chunking[request_id] = metadata
+                        chunk_params = request["params"].late_chunking_params
+                        if (
+                            chunk_params is not None
+                            and chunk_params.metadata is not None
+                        ):
+                            late_chunking[request_id] = chunk_params.metadata
 
                 step_outputs = self.llm_engine.step()
                 for output in step_outputs:
