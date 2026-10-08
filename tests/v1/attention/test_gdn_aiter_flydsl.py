@@ -122,6 +122,33 @@ def test_kda_style_model_cannot_select_flydsl(backend: str):
     assert _resolve_on_rocm(config) == (backend, "triton")
 
 
+def test_unsupported_reasons_lists_every_reason():
+    """A model that fails several checks reports all of them, not the first."""
+    supported = _make_config()
+    assert (
+        qwen_gdn_linear_attn._aiter_flydsl_unsupported_reasons(supported, 128, 128)
+        == []
+    )
+
+    both = _make_config(dtype=torch.float16)
+    reasons = qwen_gdn_linear_attn._aiter_flydsl_unsupported_reasons(both, 64, 128)
+    assert len(reasons) == 2
+    assert "K=64 V=128" in reasons[0]
+    assert "float16" in reasons[1]
+
+
+def test_explicit_request_warns_with_every_reason():
+    config = _make_config(head_k_dim=64, dtype=torch.float16)
+
+    with patch.object(qwen_gdn_linear_attn.logger, "warning_once") as warning_once:
+        assert _resolve_on_rocm(config) == ("aiter_flydsl", "triton")
+
+    warning_once.assert_called_once()
+    message = warning_once.call_args.args[0] % warning_once.call_args.args[1:]
+    assert "K=64 V=128" in message
+    assert "float16" in message
+
+
 @pytest.mark.parametrize("on_rocm", [True, False], ids=["kernels_missing", "not_rocm"])
 def test_explicit_aiter_flydsl_fails_closed(on_rocm: bool):
     """An explicit request that cannot be honoured is a configuration error.

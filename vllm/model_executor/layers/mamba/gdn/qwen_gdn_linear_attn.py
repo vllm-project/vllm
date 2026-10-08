@@ -90,20 +90,21 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
-def _aiter_flydsl_unsupported_reason(
+def _aiter_flydsl_unsupported_reasons(
     vllm_config: VllmConfig, head_k_dim: int | None, head_v_dim: int | None
-) -> str | None:
-    """Why the AITER FlyDSL GDN prefill kernels cannot serve this model, or
-    None if they can."""
+) -> list[str]:
+    """Every reason the AITER FlyDSL GDN prefill kernels cannot serve this
+    model, or an empty list if they can."""
+    reasons = []
     if head_k_dim != 128 or head_v_dim != 128:
-        return (
+        reasons.append(
             f"linear head dims are K={head_k_dim} V={head_v_dim}; "
             "FlyDSL requires 128/128"
         )
     dtype = vllm_config.model_config.dtype
     if dtype != torch.bfloat16:
-        return f"model dtype is {dtype}; FlyDSL requires bfloat16"
-    return None
+        reasons.append(f"model dtype is {dtype}; FlyDSL requires bfloat16")
+    return reasons
 
 
 def _resolve_gdn_prefill_backend(
@@ -155,14 +156,14 @@ def _resolve_gdn_prefill_backend(
                     "that VLLM_ROCM_USE_AITER=1, that this is a CDNA 3 or "
                     "newer GPU, and that the installed AITER exports them."
                 )
-            reason = _aiter_flydsl_unsupported_reason(
+            reasons = _aiter_flydsl_unsupported_reasons(
                 vllm_config, head_k_dim, head_v_dim
             )
-            if reason is not None:
+            if reasons:
                 logger.warning_once(
                     "GDN prefill backend 'aiter_flydsl' was requested but %s. "
                     "Falling back to Triton/FLA.",
-                    reason,
+                    "; ".join(reasons),
                 )
                 return backend, "triton"
             return backend, "aiter_flydsl"
@@ -171,10 +172,9 @@ def _resolve_gdn_prefill_backend(
 
             if (
                 (on_gfx942() or on_gfx950())
-                and _aiter_flydsl_unsupported_reason(
+                and not _aiter_flydsl_unsupported_reasons(
                     vllm_config, head_k_dim, head_v_dim
                 )
-                is None
                 and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
             ):
                 return backend, "aiter_flydsl"
