@@ -160,15 +160,15 @@ def test_worker_checks_host_ray_floor_before_pool_setup(monkeypatch):
     monkeypatch.setattr(engine_mod, "check_ray_rdt_version", checked.append)
     engine = ShardedRDTWeightTransferEngine.__new__(ShardedRDTWeightTransferEngine)
     engine.parallel_config = SimpleNamespace(enable_eplb=False)
-    engine._configure_ring = Mock()
+    engine._configure_ring = Mock(side_effect=RuntimeError("stop after version check"))
 
-    with pytest.raises(NotImplementedError, match="staging_device"):
+    with pytest.raises(RuntimeError, match="stop after version check"):
         engine.init_transfer_engine(
             ShardedRDTWeightTransferInitInfo(staging_device="host")
         )
 
     assert checked == ["host"]
-    engine._configure_ring.assert_not_called()
+    engine._configure_ring.assert_called_once()
 
 
 def test_trainer_checks_selected_ray_floor_before_remote(monkeypatch):
@@ -201,11 +201,13 @@ def test_trainer_checks_selected_ray_floor_before_remote(monkeypatch):
     assert events == ["host", "remote"]
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("staging_device", "host"), ("stages_in_flight", 2)],
-)
-def test_unbuilt_execution_paths_are_refused_by_field(field, value):
-    info = ShardedRDTWeightTransferInitInfo(**{field: value})
-    with pytest.raises(NotImplementedError, match=field):
+def test_host_staging_execution_path_is_enabled():
+    ShardedRDTWeightTransferEngine._refuse_unbuilt_settings(
+        ShardedRDTWeightTransferInitInfo(staging_device="host")
+    )
+
+
+def test_parallel_stage_scheduler_remains_refused_until_implemented():
+    info = ShardedRDTWeightTransferInitInfo(stages_in_flight=2)
+    with pytest.raises(NotImplementedError, match="stages_in_flight"):
         ShardedRDTWeightTransferEngine._refuse_unbuilt_settings(info)
