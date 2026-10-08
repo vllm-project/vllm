@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.core.hidden_state_record import get_record_tail_tokens
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -110,7 +111,7 @@ class NixlBaseConnectorScheduler:
         )
         # P/D hidden-state handoff: the prefiller computes the whole prompt and
         # hands over the last positions' hidden states in the KV blocks just
-        # past the prompt (see vllm.v1.core.hidden_state_record).
+        # past the prompt (see vllm.v1.worker.gpu.hidden_state_handoff).
         assert vllm_config.kv_transfer_config is not None
         self._hidden_state_handoff = vllm_config.kv_transfer_config.hidden_state_handoff
 
@@ -151,10 +152,17 @@ class NixlBaseConnectorScheduler:
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
+        # P/D hidden-state handoff: the hand-over also covers the record's slots
+        # past the prompt, which extend the window's newest end.
+        record_tail_tokens = (
+            get_record_tail_tokens(vllm_config, kv_cache_config)
+            if self._hidden_state_handoff
+            else 0
+        )
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
         self.blocks_per_sw = [
-            cdiv(n_tokens, block_size) + 1 if n_tokens else 0
+            cdiv(n_tokens + record_tail_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
 

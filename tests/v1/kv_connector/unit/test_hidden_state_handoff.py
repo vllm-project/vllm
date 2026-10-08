@@ -25,9 +25,10 @@ from .utils import (
 
 pytestmark = pytest.mark.cpu_test
 
-# opt-125m: a 768-wide fp16 hidden state, 1536 bytes. Each token slot holds
-# (96 + 96) * 2 bytes per head per layer, 768 over the two layers.
-TAIL_TOKENS = 2
+# opt-125m: a 768-wide fp16 hidden state, 1536 bytes, stored as 3072 (a nibble
+# per byte). Each token slot holds (96 + 96) * 2 bytes per head per layer, 768
+# over the two layers.
+TAIL_TOKENS = 4
 
 
 def _config(block_size):
@@ -176,7 +177,7 @@ def test_record_round_trip_through_kv_slots(num_heads_read):
     from vllm.v1.worker.gpu.hidden_state_handoff import HiddenStateHandoff
 
     torch.manual_seed(0)
-    num_blocks, num_heads, block_size = 8, 2, 4
+    num_blocks, num_heads, block_size = 12, 2, 4
     layout = RecordLayout(hidden_size=24, window=1, num_aux=2)
     # Two layers' [blocks, heads, tokens, head_size (K + V)] fp16 caches.
     caches = [
@@ -190,14 +191,15 @@ def test_record_round_trip_through_kv_slots(num_heads_read):
     handoff.layer_views = [cache.view(torch.uint8) for cache in caches]
     handoff.head_bytes = sum(v.shape[-1] for v in handoff.layer_views)
     handoff.record_bytes = layout.num_slots * layout.hidden_size * 2
-    handoff.tail_tokens = cdiv(handoff.record_bytes, handoff.head_bytes)
-    assert handoff.tail_tokens == 4
+    handoff.tail_tokens = cdiv(2 * handoff.record_bytes, handoff.head_bytes)
+    # 192 bytes, stored as 384, at 48 per token slot.
+    assert handoff.tail_tokens == 8
 
-    # Request r's prompt ends at token 3 of block 2r: its slots run on into
-    # block 2r + 1.
+    # Request r's prompt ends at token 3 of block 4r: its slots run on into
+    # blocks 4r + 1 and 4r + 2.
     def tail_slots(idx_mapping_np, prompt_len_np):
         slots = (
-            torch.from_numpy(idx_mapping_np)[:, None] * 2 * block_size
+            torch.from_numpy(idx_mapping_np)[:, None] * 4 * block_size
             + torch.from_numpy(prompt_len_np)[:, None]
             + torch.arange(handoff.tail_tokens)[None, :]
         )
@@ -207,9 +209,116 @@ def test_record_round_trip_through_kv_slots(num_heads_read):
     records = torch.randn(3, layout.num_slots, layout.hidden_size).half()
     idx_mapping, prompt_len = np.arange(3), np.full(3, 3)
     handoff._write_records(idx_mapping, prompt_len, records)
-    # Token slots up to the prompt's end are untouched.
     for cache in caches:
-        assert not cache[0::2, :, :3].any()
+        # Token slots up to the prompt's end are untouched.
+        assert not cache[0::4, :, :3].any()
+        # Every stored byte is a nibble: finite in any KV cache format.
+        assert cache.view(torch.uint8).max() <= 0xF
     if num_heads_read == 1:
         handoff.layer_views = [v[:, 1:] for v in handoff.layer_views]
     assert torch.equal(handoff._read_records(idx_mapping, prompt_len), records)
+
+
+def test_record_carrier_group():
+    """A full-attention group carries the record if there is one, else a
+    sliding-window one; ring buffers and compressed caches cannot."""
+    from vllm.v1.core.hidden_state_record import get_record_carrier_group
+    from vllm.v1.kv_cache_interface import (
+        CircularBufferSpec,
+        MLAAttentionSpec,
+        RSWASpec,
+        SlidingWindowSpec,
+    )
+
+    common = dict(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16)
+    full = FullAttentionSpec(**common)
+    swa = SlidingWindowSpec(**common, sliding_window=64)
+    rswa = RSWASpec(**common, rswa_window=64)
+    ring = CircularBufferSpec(**common)
+    compressed = MLAAttentionSpec(**common, tokens_per_state=4)
+
+    def carrier(*specs):
+        return get_record_carrier_group(
+            KVCacheConfig(
+                num_blocks=10,
+                kv_cache_tensors=[],
+                kv_cache_groups=[
+                    KVCacheGroupSpec([f"layer{i}"], spec)
+                    for i, spec in enumerate(specs)
+                ],
+            )
+        )
+
+    assert carrier(swa, full) == 1
+    assert carrier(compressed, swa, ring) == 1
+    assert carrier(rswa, swa) == 0
+    with pytest.raises(NotImplementedError):
+        carrier(compressed, ring)
+
+
+def test_sliding_window_clip_covers_record_tail():
+    """NIXL hands over a sliding-window group's last blocks; with the handoff
+    they also cover the record's slots past the prompt."""
+    from .utils import make_kv_cache_config
+
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config={"hidden_state_handoff": True},
+        kv_role="kv_producer",
+    )
+    bs = vllm_config.cache_config.block_size
+    kv_cache_config = make_kv_cache_config(bs, swa_enabled=True, sw_size=128)
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    tail = scheduler.hidden_state_record_tail_tokens
+    # Full group: (16 + 16) * 2 bytes per head, two layers; 3072 stored bytes.
+    assert tail == 24
+    blocks_per_sw = scheduler.connector.connector_scheduler.blocks_per_sw
+    assert blocks_per_sw == [0, cdiv(128 + tail, bs) + 1]
+
+
+def test_sliding_window_carrier_hands_over_record_blocks():
+    """Without a full-attention group, a sliding-window group carries the
+    record: P hands over its window's last blocks, through the record's."""
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config={"hidden_state_handoff": True},
+        kv_role="kv_producer",
+    )
+    bs = vllm_config.cache_config.block_size
+    window = 2 * bs
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0", "layer1"],
+                SlidingWindowSpec(
+                    block_size=bs,
+                    num_kv_heads=2,
+                    head_size=96,
+                    dtype=torch.float16,
+                    sliding_window=window,
+                ),
+            ),
+        ],
+    )
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    assert scheduler.hidden_state_record_group_id == 0
+    assert scheduler.hidden_state_record_tail_tokens == TAIL_TOKENS
+    num_tokens = 3 * bs + bs - 1
+    request = create_request(
+        block_size=bs, num_tokens=num_tokens, do_remote_decode=True
+    )
+    scheduler.add_request(request)
+    so = scheduler.schedule()
+    assert so.num_scheduled_tokens[request.request_id] == num_tokens
+    outs = scheduler.update_from_output(
+        so, create_model_runner_output([request], use_eos=True)
+    )
+    (remote_block_ids,) = outs[0].outputs[0].kv_transfer_params["remote_block_ids"]
+    # The window's last blocks, ending with the one holding the record's end.
+    n_sw = cdiv(window + TAIL_TOKENS, bs) + 1
+    assert len(remote_block_ids) == n_sw
+    blocks = scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
+    last_record_block = (num_tokens + TAIL_TOKENS - 1) // bs
+    assert remote_block_ids[-1] == blocks[last_record_block] != 0
