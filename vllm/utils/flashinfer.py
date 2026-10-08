@@ -11,8 +11,7 @@ import importlib
 import importlib.util
 import os
 import shutil
-from collections.abc import Callable, Iterator
-from contextvars import ContextVar
+from collections.abc import Callable
 from typing import Any, NoReturn
 
 import requests
@@ -27,24 +26,6 @@ from vllm.utils.torch_utils import PIN_MEMORY
 logger = init_logger(__name__)
 
 
-_bf16_autotune_buckets: ContextVar[tuple[int, ...] | None] = ContextVar(
-    "flashinfer_bf16_autotune_buckets", default=None
-)
-
-
-@contextlib.contextmanager
-def autotune_bf16_only(
-    tuning_buckets: tuple[int, ...], *, skip_ops: set[str] | None = None
-) -> Iterator[None]:
-    """Tune BF16 calls with bounded buckets, outside full-model autotuning."""
-    token = _bf16_autotune_buckets.set(tuning_buckets)
-    try:
-        with autotune(tune_mode=False, skip_ops=skip_ops):
-            yield
-    finally:
-        _bf16_autotune_buckets.reset(token)
-
-
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -54,21 +35,14 @@ def flashinfer_bf16_mm(
 ) -> torch.Tensor:
     from flashinfer import mm_bf16
 
-    tuning_buckets = _bf16_autotune_buckets.get()
-    tuning = (
-        autotune(tune_mode=True, tuning_buckets=tuning_buckets)
-        if tuning_buckets is not None
-        else contextlib.nullcontext()
+    return mm_bf16(
+        a,
+        b,
+        bias=bias,
+        pdl=pdl,
+        out_dtype=torch.bfloat16,
+        backend=backend,
     )
-    with tuning:
-        return mm_bf16(
-            a,
-            b,
-            bias=bias,
-            pdl=pdl,
-            out_dtype=torch.bfloat16,
-            backend=backend,
-        )
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -313,6 +287,9 @@ flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
     "xqa_batch_decode_with_kv_cache",
 )
+flashinfer_packed_fused_kda_decode = _lazy_import_wrapper(
+    "flashinfer", "packed_fused_kda_decode"
+)
 flashinfer_recurrent_kda = _lazy_import_wrapper(
     "flashinfer.kda",
     "recurrent_kda",
@@ -335,6 +312,15 @@ autotune = _lazy_import_wrapper(
 def has_flashinfer_comm() -> bool:
     """Return `True` if FlashInfer comm module is available."""
     return has_flashinfer() and importlib.util.find_spec("flashinfer.comm") is not None
+
+
+@functools.cache
+def has_flashinfer_packed_fused_kda_decode() -> bool:
+    """Return whether FlashInfer's packed fused KDA decode API is available."""
+    if not has_flashinfer():
+        return False
+    module = _get_submodule("flashinfer")
+    return bool(module and callable(getattr(module, "packed_fused_kda_decode", None)))
 
 
 @functools.cache
@@ -1283,7 +1269,6 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
-    "autotune_bf16_only",
     "has_flashinfer_bf16_gemm",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",

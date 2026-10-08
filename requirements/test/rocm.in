@@ -19,7 +19,7 @@ httpx
 librosa # required for audio tests
 vector_quantize_pytorch # required for minicpmo_26 test
 vocos # required for minicpmo_26 test
-peft>=0.19.1 # required for phi-4-mm test
+peft>=0.20.0 # required for phi-4-mm test
 pqdm
 ray[cgraph,default]==2.55.1 # Includes worker startup getenv/setenv race fix
 sentence-transformers>=5.2.0 # required for embedding tests
@@ -32,10 +32,11 @@ matplotlib # required for qwen-vl test
 mistral_common[image,audio]>=1.11.6 # required for voxtral test
 num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_common.py
-datamodel_code_generator # required for minicpm3 test
+datamodel_code_generator>=0.64.0 # required for minicpm3 test
+nltk>=3.10.3 # pin transitive rouge-score/lm-eval dep for known GHSAs
 lm-eval[api]>=0.4.12 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
-transformers==5.17.0
+transformers==5.19.0
 schemathesis>=4.0.0 # Required for openai schema test
 # quantization
 bitsandbytes==0.50.0
@@ -78,6 +79,29 @@ datasets>=3.3.0,<=3.6.0
 
 openpyxl # required for perf comparison excel report
 plotly # required for perf comparison html report
+
+# Dependabot GHSA floors for transitive test deps (excl. dependabot.yml ignores).
+# Skipped (no patched release yet): sqlitedict, accelerate, lmcache, nltk GHSA-8mgp-746c-j5xp.
+urllib3>=2.7.0
+cryptography>=50.0.0
+pyjwt>=2.14.0
+pyasn1>=0.6.4
+python-multipart>=0.0.31
+anyio>=4.14.2
+httpx2>=2.12.0
+werkzeug>=3.1.6
+mako>=1.3.12
+black>=26.3.1
+msgpack>=1.2.1
+lxml>=6.1.0
+pyarrow>=23.0.1
+orjson>=3.11.6
+hpack>=4.2.0
+h2>=4.4.1
+pydantic-settings>=2.14.2
+virtualenv>=20.36.1
+fonttools>=4.60.2
+pygments>=2.20.0
 
 # ROCm-specific extras (not in CUDA cuda.in)
 rapidfuzz
