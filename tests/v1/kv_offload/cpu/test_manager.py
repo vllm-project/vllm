@@ -556,6 +556,35 @@ def test_prepare_load_failure_reports_never_stored_key():
     assert "per missing key: [(16, None)]; load end_token range: 16-48" in message
 
 
+def test_prepare_load_failure_eviction_history_is_bounded(monkeypatch):
+    monkeypatch.setattr(CPUOffloadingManager, "EVICTION_HISTORY_SIZE", 1)
+    manager = make_cpu_manager(num_chunks=1)
+    for key in to_keys([1, 2, 3]):
+        manager.prepare_store([key], _EMPTY_REQ_CTX)
+        manager.complete_store([key], _EMPTY_REQ_CTX)
+
+    # Key 1 was evicted first and has left the one-entry history.
+    with pytest.raises(AssertionError) as exc_info:
+        manager.prepare_load([to_key(1)], _EMPTY_REQ_CTX)
+    message = str(exc_info.value)
+    assert "per missing key: [(None, None)]" in message
+    assert "eviction history: 1 keys" in message
+
+
+def test_prepare_load_failure_after_reset_has_no_eviction_history():
+    manager = make_cpu_manager(num_chunks=1)
+    for key in to_keys([1, 2]):
+        manager.prepare_store([key], _EMPTY_REQ_CTX)
+        manager.complete_store([key], _EMPTY_REQ_CTX)
+    manager.reset_cache()
+
+    with pytest.raises(AssertionError) as exc_info:
+        manager.prepare_load([to_key(1)], _EMPTY_REQ_CTX)
+    message = str(exc_info.value)
+    assert "per missing key: [(None, None)]" in message
+    assert "eviction history: 0 keys" in message
+
+
 def test_lru_batch_eviction_failure_is_atomic():
     manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
     policy = manager._policy
