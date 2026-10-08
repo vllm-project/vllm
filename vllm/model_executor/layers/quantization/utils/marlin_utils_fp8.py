@@ -280,6 +280,7 @@ def prepare_fp8_moe_layer_for_marlin(
     # WEIGHT SCALES
     # Permute scales (convert at the original size, then pad to the tile).
     def permute_scales(scales: torch.Tensor, name: str) -> torch.Tensor:
+        """Convert checkpoint scales, pad each shard, and permute for Marlin."""
         scales = scales.to(layer.orig_dtype)
         tensor_list = []
         if "w13" in name:
