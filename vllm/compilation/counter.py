@@ -25,6 +25,8 @@ class CompilationCounter:
     num_inductor_compiles: int = 0
     # EagerAdapter.compile calls
     num_eager_compiles: int = 0
+    # AOTEagerAdaptor.compile calls
+    num_aot_eager_compiles: int = 0
     # The number of time vLLM's compiler cache entry was updated
     num_cache_entries_updated: int = 0
     # The number of standalone_compile compiled artifacts saved
