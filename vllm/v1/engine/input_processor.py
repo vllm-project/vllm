@@ -53,6 +53,12 @@ class InputProcessor:
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
+        # GptOssReasoningParser never gates the grammar, so structured outputs
+        # must be scoped to the Harmony final channel by the grammar itself.
+        self.scope_structured_outputs_to_harmony = (
+            self.structured_outputs_config.reasoning_parser == "openai_gptoss"
+            and not self.structured_outputs_config.enable_in_reasoning
+        )
         self.observability_config = vllm_config.observability_config
         self.diffusion_config = vllm_config.diffusion_config
         # Load the custom logits processor classes once; the returned callable
@@ -134,6 +140,35 @@ class InputProcessor:
             and not watermarking
         )
         params.watermarking = watermarking
+
+    @staticmethod
+    def _scope_structured_outputs_to_harmony(
+        params: SamplingParams | PoolingParams,
+    ) -> SamplingParams | PoolingParams:
+        """Wrap a plain constraint so it applies only to the final channel.
+
+        The OpenAI server already does this; this covers requests that reach
+        the engine directly (e.g. `LLM.generate`). Structural tags are left
+        as-is since they already describe the full Harmony output.
+        """
+        if not isinstance(params, SamplingParams):
+            return params
+        so_params = params.structured_outputs
+        if so_params is None or so_params.structural_tag is not None:
+            return params
+
+        from vllm.parser.harmony import to_harmony_structured_outputs
+
+        try:
+            harmony_params = to_harmony_structured_outputs(so_params)
+        except ValueError:
+            # Leave invalid constraints for _validate_params to report.
+            return params
+        if harmony_params is None:
+            return params
+        params = params.clone()
+        params.structured_outputs = harmony_params
+        return params
 
     def _validate_params(
         self,
@@ -386,6 +421,8 @@ class InputProcessor:
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> EngineCoreRequest:
+        if self.scope_structured_outputs_to_harmony:
+            params = self._scope_structured_outputs_to_harmony(params)
         watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
