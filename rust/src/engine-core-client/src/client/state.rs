@@ -482,10 +482,7 @@ impl UtilityRegistry {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::future::poll_fn;
     use std::num::NonZeroU32;
-
-    use futures::FutureExt as _;
 
     use crate::EngineId;
     use crate::client::state::{
@@ -571,9 +568,10 @@ mod tests {
         receiver: &mut OutputReceiver,
     ) -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
         let mut outputs = Vec::new();
-        while let Some(Some(item)) = poll_fn(|cx| receiver.poll_recv(cx)).now_or_never() {
-            let output = item.unwrap().output;
-            outputs.push((output.new_token_ids, output.finish_reason));
+        while let Ok(delivery) = receiver.try_recv() {
+            for output in delivery.unwrap() {
+                outputs.push((output.output.new_token_ids, output.output.finish_reason));
+            }
         }
         outputs
     }

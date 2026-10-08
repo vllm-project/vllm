@@ -6,17 +6,23 @@
 //!
 //! With a stream interval above one, the sender holds back the outputs after
 //! the first one until they carry at least that many new tokens, then delivers
-//! them in one channel message. The request task is then woken once per
-//! delivery instead of once per engine step. Outputs are never merged,
-//! reordered, or dropped; the receiver still yields them one by one.
+//! them in one channel message, which the stream yields as one
+//! [`EngineCoreStreamDelivery`](crate::EngineCoreStreamDelivery). The request
+//! task is then woken once per delivery instead of once per engine step.
+//!
+//! Outputs are never merged, reordered, or dropped here; the consumer merges a
+//! delivery into one output (see `vllm-llm`). Merging here would hide the raw
+//! outputs that request metrics observe one by one (per-step timestamps for
+//! inter-token latency, prefill stats, lifecycle events), and would have to
+//! combine wire-level fields such as undecoded logprobs tensors and opaque
+//! values.
 
 use std::num::NonZeroU32;
-use std::task::{Context, Poll, ready};
 
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::client::stream::EngineCoreStreamOutput;
+use crate::client::stream::{EngineCoreStreamDelivery as Delivery, EngineCoreStreamOutput};
 use crate::error::{Error, Result};
 
 /// Create the output channel for one request.
@@ -29,23 +35,11 @@ pub(crate) fn output_channel(stream_interval: NonZeroU32) -> (OutputSender, Outp
         buffered: Vec::new(),
         buffered_tokens: 0,
     };
-    let receiver = OutputReceiver {
-        rx,
-        ready: Vec::new().into_iter(),
-    };
-    (sender, receiver)
+    (sender, rx)
 }
 
-/// One channel message, carrying outputs of the same request in order.
-#[derive(Debug)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "unbatched outputs stay inline, avoiding an allocation per engine step"
-)]
-enum Delivery {
-    One(EngineCoreStreamOutput),
-    Batch(Vec<EngineCoreStreamOutput>),
-}
+/// Receiving half of a request's output channel.
+pub(crate) type OutputReceiver = mpsc::UnboundedReceiver<Result<Delivery>>;
 
 /// Sending half of a request's output channel, owned by its registry entry.
 #[derive(Debug)]
@@ -89,7 +83,7 @@ impl OutputSender {
         }
         self.buffered_tokens = 0;
         let outputs = std::mem::take(&mut self.buffered);
-        self.deliver(Delivery::Batch(outputs));
+        self.deliver(Delivery::Many(outputs));
     }
 
     /// Deliver the held-back outputs, then terminate the stream with `error`.
@@ -100,11 +94,10 @@ impl OutputSender {
 
     fn deliver(&self, delivery: Delivery) {
         if let Err(mpsc::error::SendError(Ok(delivery))) = self.tx.send(Ok(delivery)) {
-            let request_id = match &delivery {
-                Delivery::One(output) => &output.request_id,
-                Delivery::Batch(outputs) => &outputs[0].request_id,
-            };
-            debug!(request_id, "request output stream receiver dropped");
+            debug!(
+                request_id = delivery.first().request_id,
+                "request output stream receiver dropped"
+            );
         }
     }
 }
@@ -123,40 +116,8 @@ impl Drop for OutputSender {
     }
 }
 
-/// Receiving half of a request's output channel. Yields outputs one by one.
-#[derive(Debug)]
-pub(crate) struct OutputReceiver {
-    rx: mpsc::UnboundedReceiver<Result<Delivery>>,
-    /// Outputs of the last batched delivery that have not been yielded yet.
-    ready: std::vec::IntoIter<EngineCoreStreamOutput>,
-}
-
-impl OutputReceiver {
-    /// Poll for the next output. Outputs of a batched delivery are yielded
-    /// without returning `Pending` in between.
-    pub fn poll_recv(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<EngineCoreStreamOutput>>> {
-        if let Some(output) = self.ready.next() {
-            return Poll::Ready(Some(Ok(output)));
-        }
-        let item = match ready!(self.rx.poll_recv(cx)) {
-            Some(Ok(Delivery::One(output))) => Some(Ok(output)),
-            Some(Ok(Delivery::Batch(outputs))) => {
-                self.ready = outputs.into_iter();
-                self.ready.next().map(Ok)
-            }
-            Some(Err(error)) => Some(Err(error)),
-            None => None,
-        };
-        Poll::Ready(item)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::future::poll_fn;
     use std::num::NonZeroU32;
 
     use expect_test::expect;
@@ -187,15 +148,18 @@ mod tests {
         output_channel(NonZeroU32::new(stream_interval).unwrap())
     }
 
+    /// Render a delivery as the token ids of its outputs.
+    fn token_ids(delivery: Delivery) -> Vec<Vec<u32>> {
+        delivery.into_iter().map(|output| output.output.new_token_ids).collect()
+    }
+
     /// Drain all pending channel messages, rendering each delivery as the
     /// token ids of its outputs.
     fn deliveries(receiver: &mut OutputReceiver) -> Vec<Vec<Vec<u32>>> {
         let mut deliveries = Vec::new();
         loop {
-            match receiver.rx.try_recv() {
-                Ok(Ok(Delivery::One(output))) => deliveries.push(vec![output.output.new_token_ids]),
-                Ok(Ok(Delivery::Batch(outputs))) => deliveries
-                    .push(outputs.into_iter().map(|output| output.output.new_token_ids).collect()),
+            match receiver.try_recv() {
+                Ok(Ok(delivery)) => deliveries.push(token_ids(delivery)),
                 Ok(Err(error)) => panic!("unexpected error delivery: {error:?}"),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return deliveries,
             }
@@ -347,41 +311,11 @@ mod tests {
         sender.send_error(Error::EngineCoreDead);
 
         let mut items = Vec::new();
-        while let Ok(item) = receiver.rx.try_recv() {
-            items.push(match item {
-                Ok(Delivery::One(_)) => "one",
-                Ok(Delivery::Batch(_)) => "batch",
-                Err(_) => "error",
-            });
+        while let Ok(item) = receiver.try_recv() {
+            items.push(item.map(|delivery| token_ids(delivery).len()).ok());
         }
-        assert_eq!(items, ["one", "batch", "error"]);
-    }
-
-    #[tokio::test]
-    async fn receiver_yields_batched_outputs_one_by_one() {
-        let (mut sender, mut receiver) = channel(2);
-        sender.send(output(&[1]));
-        sender.send(output(&[2]));
-        sender.send(finished(&[3]));
-        drop(sender);
-
-        let mut token_ids = Vec::new();
-        while let Some(item) = poll_fn(|cx| receiver.poll_recv(cx)).await {
-            token_ids.push(item.unwrap().output.new_token_ids);
-        }
-        expect![[r#"
-            [
-                [
-                    1,
-                ],
-                [
-                    2,
-                ],
-                [
-                    3,
-                ],
-            ]
-        "#]]
-        .assert_debug_eq(&token_ids);
+        // One delivery for the first output, one for the held-back output,
+        // then the error.
+        assert_eq!(items, [Some(1), Some(1), None]);
     }
 }

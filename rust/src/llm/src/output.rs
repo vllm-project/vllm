@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::future::Future;
-use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
@@ -17,7 +16,9 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
-use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
+use vllm_engine_core_client::{
+    AbortCause, EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput,
+};
 
 use crate::error::Result;
 use crate::inflight::RequestGuard;
@@ -266,14 +267,6 @@ pub struct GenerateOutputStream {
     pending_prompt_info: Option<Box<GeneratePromptInfo>>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
-    /// Minimum number of new tokens per output after the first one.
-    stream_interval: usize,
-    /// Whether the first output has been yielded.
-    yielded_first: bool,
-    /// Outputs merged since the last yield, held until they reach
-    /// `stream_interval` tokens or the request finishes. Boxed to keep the
-    /// stream, which is embedded in every response future, small.
-    buffered: Option<Box<GenerateOutput>>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -286,7 +279,6 @@ impl GenerateOutputStream {
         prompt_token_ids: Arc<[u32]>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
-        stream_interval: NonZeroU32,
         request_guard: RequestGuard,
     ) -> Self {
         Self {
@@ -297,9 +289,6 @@ impl GenerateOutputStream {
             })),
             raw_stream,
             request_metrics,
-            stream_interval: stream_interval.get() as usize,
-            yielded_first: false,
-            buffered: None,
             _request_guard: request_guard,
         }
     }
@@ -309,14 +298,26 @@ impl GenerateOutputStream {
         self.raw_stream.request_id()
     }
 
-    /// Poll the next output converted from one raw engine-core output.
-    fn poll_next_output(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<GenerateOutput>>> {
-        let raw = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
-            Some(Ok(raw)) => raw,
-            Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
-            None => return Poll::Ready(None),
+    /// Merge the outputs of one delivery into one output, like Python
+    /// `RequestState.make_request_output()` does for outputs held back by
+    /// `stream_interval`. Request metrics still observe every raw output.
+    fn merge_delivery(&mut self, delivery: EngineCoreStreamDelivery) -> Result<GenerateOutput> {
+        // Match rather than iterate, so the common single output is converted
+        // without first being moved into an iterator.
+        let mut outputs = match delivery {
+            EngineCoreStreamDelivery::One(output) => return self.convert_output(output),
+            EngineCoreStreamDelivery::Many(outputs) => outputs.into_iter(),
         };
+        let first = outputs.next().expect("deliveries are never empty");
+        let mut merged = self.convert_output(first)?;
+        for raw in outputs {
+            merged.merge(self.convert_output(raw)?);
+        }
+        Ok(merged)
+    }
 
+    /// Convert one raw engine-core output.
+    fn convert_output(&mut self, raw: EngineCoreStreamOutput) -> Result<GenerateOutput> {
         let received_at = current_unix_timestamp_secs();
         self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
 
@@ -340,11 +341,11 @@ impl GenerateOutputStream {
         if let Some(mask) = sampling_mask.as_ref()
             && mask.rows.len() != raw.new_token_ids.len()
         {
-            return Poll::Ready(Some(Err(crate::Error::SamplingMaskTokenCountMismatch {
+            return Err(crate::Error::SamplingMaskTokenCountMismatch {
                 request_id: raw.request_id,
                 token_count: raw.new_token_ids.len(),
                 row_count: mask.rows.len(),
-            })));
+            });
         }
         let cached_token_count = raw
             .prefill_stats
@@ -370,7 +371,7 @@ impl GenerateOutputStream {
             spec_decode_metrics: raw.spec_decode_metrics,
         };
 
-        Poll::Ready(Some(Ok(output)))
+        Ok(output)
     }
 }
 
@@ -378,37 +379,12 @@ impl Stream for GenerateOutputStream {
     type Item = Result<GenerateOutput>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.stream_interval == 1 {
-            return self.poll_next_output(cx);
-        }
-
-        // Mirror Python `RequestState.make_request_output()`: the first output
-        // is yielded immediately, later outputs are merged until they carry at
-        // least `stream_interval` new tokens, and the terminal output always
-        // flushes. Request metrics still observe every raw output.
-        loop {
-            let output = match ready!(self.poll_next_output(cx)) {
-                Some(Ok(output)) => output,
-                // Errors terminate the request; merged outputs not yet yielded
-                // are dropped with it.
-                other => return Poll::Ready(other),
-            };
-            let output = match self.buffered.take() {
-                Some(mut buffered) => {
-                    buffered.merge(output);
-                    *buffered
-                }
-                None => output,
-            };
-            if !self.yielded_first
-                || output.finished()
-                || output.token_ids.len() >= self.stream_interval
-            {
-                self.yielded_first = true;
-                return Poll::Ready(Some(Ok(output)));
-            }
-            self.buffered = Some(Box::new(output));
-        }
+        let delivery = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
+            Some(Ok(delivery)) => delivery,
+            Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
+            None => return Poll::Ready(None),
+        };
+        Poll::Ready(Some(self.merge_delivery(delivery)))
     }
 }
 

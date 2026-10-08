@@ -30,7 +30,7 @@ mod output_channel;
 mod state;
 mod stream;
 
-pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
+pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.

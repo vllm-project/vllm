@@ -135,7 +135,6 @@ impl Llm {
             prompt_token_ids,
             stream,
             request_metrics,
-            stream_interval,
             guard,
         ))
     }
