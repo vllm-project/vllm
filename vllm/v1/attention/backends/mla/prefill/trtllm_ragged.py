@@ -84,17 +84,14 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         # the old buffer when another user grows the shared workspace.
         current_workspace_manager().get_simultaneous(self._workspace_spec)
 
-    def _workspace_buffer(self) -> torch.Tensor:
-        (workspace_buffer,) = current_workspace_manager().get_simultaneous(
-            self._workspace_spec
-        )
-        return workspace_buffer
-
     def prepare_metadata(
         self,
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
         super().prepare_metadata(prefill_metadata)
+        (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
+            self._workspace_spec
+        )
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
@@ -159,7 +156,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             query=q,
             key=k,
             value=v,
-            workspace_buffer=self._workspace_buffer(),
+            workspace_buffer=self._workspace_buffer,
             seq_lens=self._query_seq_lens,
             max_q_len=self._prefill_metadata.max_query_len,
             max_kv_len=self._prefill_metadata.max_query_len,
@@ -210,7 +207,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             query=q,
             key=k,
             value=v,
-            workspace_buffer=self._workspace_buffer(),
+            workspace_buffer=self._workspace_buffer,
             seq_lens=chunk.seq_lens,
             max_q_len=chunk.max_query_len,
             max_kv_len=chunk.max_seq_len,
