@@ -491,14 +491,14 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # One launch does the indexer prepare, the main QK-norm/RoPE/gate and
         # the main K/V cache write (see QSAIndexer.forward); otherwise all of
         # them take the separate kernels.
-        # On SM80 with an FP8 main cache, use the separate indexer/main
+        # Below SM89 with an FP8 main cache, use the separate indexer/main
         # preparation and the native cache update: the combined writer receives
-        # an FP8 pointer that Triton cannot lower on this GPU. BF16 is unchanged.
+        # an FP8 pointer that Triton cannot lower there. BF16 is unchanged.
         self.use_fused_qsa_prepare = (
             self.use_fused_qk_norm_rope_gate
             and self.indexer.use_fused_pre_indexer
             and not (
-                current_platform.get_device_capability() == (8, 0)
+                not current_platform.has_device_capability(89)
                 and self.kv_cache_torch_dtype == torch.uint8
             )
         )
