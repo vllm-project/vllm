@@ -16,7 +16,6 @@ from transformers import AutoModelForSeq2SeqLM
 from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.llm import LLM
-from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.platforms import current_platform
@@ -131,23 +130,6 @@ def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
     assert len(normal.sequences) == 2
     assert all(len(beam.tokens) == 4 for beam in normal.sequences)
     assert all(beam.finish_reason != "abort" for beam in normal.sequences)
-
-
-def test_beam_search_validates_allowlist_before_grammar() -> None:
-    """Grammar filtering must not hide an invalid request token ID."""
-    llm = LLM.__new__(LLM)
-    llm.llm_engine = Mock()
-    llm.model_config = Mock(get_vocab_size=Mock(return_value=1000))
-    with pytest.raises(VLLMValidationError):
-        llm.beam_search(
-            [{"prompt_token_ids": [1]}],
-            BeamSearchParams(
-                beam_width=1,
-                max_tokens=1,
-                allowed_token_ids=[1000],
-                structured_outputs=StructuredOutputsParams(regex="foo"),
-            ),
-        )
 
 
 @pytest.mark.parametrize("model", MODELS)

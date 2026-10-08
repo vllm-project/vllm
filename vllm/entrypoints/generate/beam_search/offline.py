@@ -85,10 +85,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
         request_allowed_token_ids = params.allowed_token_ids
-        if request_allowed_token_ids is not None:
-            SamplingParams(
-                allowed_token_ids=request_allowed_token_ids
-            )._validate_allowed_token_ids(self.model_config)
         self.llm_engine.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
