@@ -146,7 +146,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
-    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["asm", "segmented"] = "segmented"
+    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
@@ -1320,12 +1320,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
     ),
     # Kernel for causal multi-token (spec-decode) verify steps under decode
-    # context parallelism on gfx950: "asm" uses AITER's round-robin ASM
-    # decode, "segmented" the Triton segmented MLA path.
+    # context parallelism: "asm" uses AITER's round-robin ASM decode (gfx950),
+    # "segmented" the Triton segmented MLA path. "auto" (default) takes "asm"
+    # wherever it can serve the shape and "segmented" otherwise.
     "VLLM_ROCM_AITER_MLA_DCP_VERIFY": env_with_choices(
         "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
-        "segmented",
-        ["asm", "segmented"],
+        "auto",
+        ["auto", "asm", "segmented"],
         case_sensitive=False,
     ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
