@@ -1953,6 +1953,7 @@ class FlashInferImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        """Initialize FlashInfer attention and its KV-cache output conversion state."""
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -2102,6 +2103,7 @@ class FlashInferImpl(AttentionImpl):
     def _copy_nvfp4_output(
         self, output: torch.Tensor, fp8_output: torch.Tensor
     ) -> None:
+        """Copy FP8 scratch output and restore its NVFP4-derived scale."""
         assert self._nvfp4_output_scale is not None
         output.copy_(fp8_output)
         output.mul_(self._nvfp4_output_scale)
