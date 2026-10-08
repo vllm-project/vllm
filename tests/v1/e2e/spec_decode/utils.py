@@ -256,10 +256,10 @@ def check_spec_decode_matches_reference(
         spec_config = vllm_config.speculative_config
         assert spec_config is not None
         assert vllm_config.scheduler_config.async_scheduling
+        assert spec_config.num_speculative_tokens > 0, (
+            spec_config.num_speculative_tokens
+        )
         if target_model is None:
-            assert spec_config.num_speculative_tokens > 0, (
-                spec_config.num_speculative_tokens
-            )
             assert spec_config.model == spec_model, (spec_config.model, spec_model)
             target_model = vllm_config.model_config.model
             assert target_model == expected_target_model, (

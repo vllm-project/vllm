@@ -66,8 +66,6 @@ def check_mtp_correctness(
             compilation_config=CompilationConfig(),
             **extra_kwargs,
         )
-        # Heuristic: expect at least 80% of the prompts to match exactly
-        # Upon failure, inspect the outputs to check for inaccuracy.
         check_spec_decode_matches_reference(
             vllm_runner,
             sampling_config,
@@ -79,6 +77,8 @@ def check_mtp_correctness(
                 **engine_kwargs,
                 "speculative_config": speculative_config,
             },
+            # Heuristic: expect at least 80% of the prompts to match exactly
+            # Upon failure, inspect the outputs to check for inaccuracy.
             prompts_required_matches=int(0.8 * len(test_prompts)) + 1,
             gsm8k_spec_accuracy_threshold=expected_accuracy_threshold,
             gsm8k_target_accuracy_threshold=expected_accuracy_threshold,

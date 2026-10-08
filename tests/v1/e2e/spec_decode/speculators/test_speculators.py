@@ -58,7 +58,6 @@ def test_speculators_model_integration(
         max_model_len=4096,
         gpu_memory_utilization=0.92,
     )
-    # Heuristic: expect at least 66% of prompts to match exactly
     check_spec_decode_matches_reference(
         vllm_runner,
         sampling_config,
@@ -67,6 +66,7 @@ def test_speculators_model_integration(
         target_engine_kwargs=engine_kwargs,
         spec_model=model_path,
         spec_engine_kwargs=engine_kwargs,
+        # Heuristic: expect at least 66% of prompts to match exactly
         prompts_required_matches=int(0.66 * len(test_prompts)),
         gsm8k_spec_accuracy_threshold=expected_accuracy_threshold,
         expected_target_model=expected_target_model,
