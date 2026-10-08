@@ -726,7 +726,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len or desc.uniform_token_count,
                 pcp_manager=pcp_manager,
-                piecewise_cudagraph=desc.cg_mode == CUDAGraphMode.PIECEWISE,
             )
 
             # Capture with dummy rows marked as padding.
@@ -795,7 +794,6 @@ def prepare_inputs_to_capture(
     full_cudagraph: bool,
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
-    piecewise_cudagraph: bool = False,
 ) -> AttentionState:
     if full_cudagraph and max_query_len is None:
         # Mixed graphs can replay a single prefill spanning the entire batch,
@@ -848,12 +846,9 @@ def prepare_inputs_to_capture(
     # In summary: We always generate attention metadata for both FULL and PIECEWISE
     # CUDA graphs, setting for_capture=True for FULL graphs, and for_capture=False
     # for PIECEWISE graphs, to ensure correct execution and capture.
-    # PIECEWISE captures pass their mode, as PIECEWISE steps do at runtime: a model
-    # state may prepare what the graph runs by it (e.g. the DeepSeek-V4.1 decoder
-    # replay batch, whose graph break the PIECEWISE graphs must capture).
     attn_metadata = model_state.prepare_attn(
         input_batch,
-        CUDAGraphMode.PIECEWISE if piecewise_cudagraph else CUDAGraphMode.NONE,
+        CUDAGraphMode.NONE,
         input_block_tables,
         slot_mappings,
         attn_groups,

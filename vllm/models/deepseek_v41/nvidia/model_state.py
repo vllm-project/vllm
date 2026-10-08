@@ -243,8 +243,6 @@ class DeepseekV41ModelState(DefaultModelState):
         layers = self.decoder_replay_layers
         compilation_config = vllm_config.compilation_config
         self.replay_cudagraphs: DecoderReplayCudaGraphManager | None = None
-        # PIECEWISE graphs of this many tokens or more break out to the replay batch.
-        self._trim_threshold: int | None = None
         if (
             layers is not None
             and compilation_config.cudagraph_decoder_replay
@@ -264,7 +262,7 @@ class DeepseekV41ModelState(DefaultModelState):
             self.replay_cudagraphs = DecoderReplayCudaGraphManager(
                 vllm_config, device, layers
             )
-            self._trim_threshold = threshold
+            layers.trim_threshold = threshold
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -455,8 +453,8 @@ class DeepseekV41ModelState(DefaultModelState):
         layers.replay_batch = None
         force_replay_batch = capture_desc is not None or (
             cudagraph_mode == CUDAGraphMode.PIECEWISE
-            and self._trim_threshold is not None
-            and input_batch.num_tokens_after_padding >= self._trim_threshold
+            and layers.trim_threshold is not None
+            and input_batch.num_tokens_after_padding >= layers.trim_threshold
         )
         if cudagraph_mode != CUDAGraphMode.NONE and not force_replay_batch:
             return

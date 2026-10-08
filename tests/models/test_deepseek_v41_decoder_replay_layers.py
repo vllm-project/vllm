@@ -120,6 +120,34 @@ def _graph_context(num_tokens):
     )
 
 
+def test_piecewise_graphs_break_out_by_size():
+    """In a PIECEWISE graph the break, fixed at capture, follows the graph's size,
+    whether or not a replay batch is set (none is at capture); elsewhere it
+    follows the replay batch."""
+    seen = []
+
+    def run_in_graph_break(*states):
+        seen.append("break")
+        return ("break",)
+
+    layers = DecoderReplayLayers(WINDOW, lambda *states: ("whole",), set(), "swa")
+    layers._run_in_graph_break = run_in_graph_break  # type: ignore[method-assign]
+    states = _states(NUM_TOKENS)
+    with override_forward_context(_graph_context(1024)):
+        assert not layers.replays()  # no threshold: the graphs keep the batch
+        layers.trim_threshold = 768
+        assert layers.replays()
+        assert layers(*states) == ("break",)
+    with override_forward_context(_graph_context(576)):
+        assert not layers.replays()
+        assert layers(*states) == ("whole",)
+    with override_forward_context(_context(object())):
+        assert not layers.replays()
+        _set_replay_batch(layers, REPLAY_ROWS, object())
+        assert layers.replays()
+    assert seen == ["break"]
+
+
 def test_replay_graph_matches_eager(monkeypatch):
     """The replay graph of the next captured size pads and runs the rows."""
     monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)

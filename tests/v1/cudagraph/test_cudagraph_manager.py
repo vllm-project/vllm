@@ -8,6 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
+    cudagraph_utils as spec_cudagraph_utils,
+)
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
+    SpeculatorCudaGraphManager,
+)
 
 from vllm.config import (
     CompilationConfig,
@@ -23,12 +29,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.spec_decode.autoregressive import (
-    cudagraph_utils as spec_cudagraph_utils,
-)
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -172,48 +172,6 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
     slot_mappings = model_state.prepare_attn.call_args.args[3]
     assert slot_mappings.shape == (1, num_tokens * pcp_world_size)
     block_tables.get_dummy_slot_mappings.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "full_cudagraph,piecewise_cudagraph,expected_mode",
-    [
-        (True, False, CUDAGraphMode.NONE),
-        (False, True, CUDAGraphMode.PIECEWISE),
-        (False, False, CUDAGraphMode.NONE),
-    ],
-)
-def test_capture_passes_piecewise_mode_to_model_state(
-    full_cudagraph, piecewise_cudagraph, expected_mode
-):
-    """PIECEWISE captures prepare attention as PIECEWISE steps do at runtime."""
-    num_tokens = num_reqs = 8
-    buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
-    block_tables = MagicMock()
-    block_tables.cp_size = 1
-    block_tables.get_dummy_block_tables.return_value = ()
-    block_tables.get_dummy_slot_mappings.return_value = torch.empty(
-        0, num_tokens, dtype=torch.int64
-    )
-    model_state = MagicMock()
-    kv_cache_config = KVCacheConfig(
-        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
-    )
-
-    gpu_cudagraph_utils.prepare_inputs_to_capture(
-        num_reqs,
-        num_tokens,
-        model_state,
-        buffers,
-        block_tables,
-        [],
-        kv_cache_config,
-        full_cudagraph=full_cudagraph,
-        piecewise_cudagraph=piecewise_cudagraph,
-    )
-
-    call = model_state.prepare_attn.call_args
-    assert call.args[1] == expected_mode
-    assert call.kwargs["for_capture"] == full_cudagraph
 
 
 @pytest.mark.parametrize(

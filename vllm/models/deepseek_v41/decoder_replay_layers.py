@@ -23,6 +23,7 @@ import torch
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import (
     ForwardContext,
+    get_forward_context,
     in_piecewise_cudagraph,
     override_forward_context,
 )
@@ -61,14 +62,31 @@ class DecoderReplayLayers:
         self.first_swa_prefix = first_swa_prefix
         # Set by the model state every step; None runs the layers on the batch.
         self.replay_batch: ReplayBatch | None = None
+        # Set by the model state when the replay layers run in graphs: PIECEWISE
+        # model graphs of this many tokens or more break out to the replay batch.
+        self.trim_threshold: int | None = None
         self._break_outputs: list[torch.Tensor] | None = None
 
     def __call__(
         self, hidden_states: torch.Tensor | MoEOutput, *states: torch.Tensor | None
     ) -> tuple[torch.Tensor, ...]:
-        if self.replay_batch is not None and in_piecewise_cudagraph():
+        if in_piecewise_cudagraph() and self.replays():
             return self._run_in_graph_break(hidden_states, *states)
         return self._run(hidden_states, *states)
+
+    def replays(self) -> bool:
+        """Whether this forward runs the replay layers on a replay batch. In a
+        PIECEWISE graph that is fixed when the graph is captured, so it follows
+        the graph's size, as the model state's replay batch does at runtime; the
+        batch itself is set only then. Otherwise a replay batch is set or not."""
+        if in_piecewise_cudagraph():
+            batch_descriptor = get_forward_context().batch_descriptor
+            assert batch_descriptor is not None
+            return (
+                self.trim_threshold is not None
+                and batch_descriptor.num_tokens >= self.trim_threshold
+            )
+        return self.replay_batch is not None
 
     @eager_break_during_capture
     def _run_in_graph_break(

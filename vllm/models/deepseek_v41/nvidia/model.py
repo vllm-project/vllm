@@ -1012,9 +1012,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         late_aux: list[torch.Tensor] = []
         if self.decoder_replay_layers is not None:
-            if self.decoder_replay_layers.replay_batch is not None:
+            if self.decoder_replay_layers.replays():
                 # Every row's KV of the first replay layer, before it runs on
                 # the replay rows: the layers after it and later steps read it.
+                # Decided as the replay layers' graph break is, so a PIECEWISE
+                # graph captures it wherever it breaks out to the replay batch.
                 assert pre_mix is not None and post_mix is not None
                 assert res_mix is not None and residual is not None
                 typing.cast(

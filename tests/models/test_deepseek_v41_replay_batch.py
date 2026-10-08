@@ -64,6 +64,7 @@ def state(monkeypatch):
         replay_batch=None,
         metadata_prefixes=set(),
         first_swa_prefix="swa_first",
+        trim_threshold=None,
     )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
@@ -213,7 +214,7 @@ def test_graph_steps_trim_only_piecewise_at_threshold(state):
     assert replay.rows.tolist() == REPLAY_ROWS
     assert build.cg_mode == CUDAGraphMode.NONE
     assert build.batch.num_tokens_after_padding == len(REPLAY_ROWS)
-    state._trim_threshold = 256
+    state.decoder_replay_layers.trim_threshold = 256
     replay, _ = _prepare(state, batch, CUDAGraphMode.PIECEWISE)
     assert replay is not None and replay.rows.tolist() == REPLAY_ROWS
     assert _prepare(state, batch, CUDAGraphMode.FULL) == (None, None)
