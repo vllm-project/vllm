@@ -51,10 +51,12 @@ def _aggregate_num_nans_per_request_kernel(
     result_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Sum one request's rows from the previous end to its own end.
+    """Sum NaN counts from each request's logits rows.
 
-    Counts [1, 2, 3, 4, 5] with ends [2, 3, 5] yield [3, 3, 9].
-    Counts [1, 2, 3] with ends [2, 2, 3] yield [3, 0, 3].
+    `num_nans` counts NaNs in each row; `cumulative_row_ends` gives each
+    request's exclusive row end. Counts [1, 2, 3, 4, 5] and ends [2, 3, 5]
+    give [3, 3, 9]. Repeated ends mean no rows: [1, 2, 3] and [2, 2, 3]
+    give [3, 0, 3].
     """
     req_idx = tl.program_id(0)
     start = tl.load(
