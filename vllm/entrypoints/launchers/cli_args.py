@@ -163,6 +163,8 @@ class BaseFrontendArgs:
     enable_tokenizer_info_endpoint: bool = False
     """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
+    enable_structured_decisions: bool = False
+    """Enable the `/v1/systemone` structured decisions endpoint."""
     enable_log_outputs: bool = False
     """If set to True, log model outputs (generations). Requires
     `--enable-log-requests`. Output text and finish reasons are logged at INFO,
@@ -207,9 +209,9 @@ class BaseFrontendArgs:
     enable_scale_out: bool = False
     """
     If set to True, register the scale-out endpoints (`/render`, `/derender`,
-    and `/inference/v1/generate`) on `vllm serve`. Has no effect on
-    `vllm launch render` or `vllm serve --tokens-only`, which always register
-    their required endpoints regardless of this flag.
+    `/inference/v1/generate` and `/inference/v1/abort_requests`) on `vllm serve`.
+    Has no effect on `vllm launch render` or `vllm serve --tokens-only` which
+    always register their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.
