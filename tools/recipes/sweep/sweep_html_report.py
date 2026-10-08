@@ -110,6 +110,23 @@ def _resolve_sla(
     return next(iter(non_null), None)
 
 
+def _resolve_minimum_compliance(
+    reports: dict[str, dict[str, Any] | None],
+) -> float | None:
+    values = {
+        _number(report.get("minimum_compliance_ratio"))
+        for report in reports.values()
+        if report is not None
+    }
+    non_null = {value for value in values if value is not None}
+    if len(non_null) > 1:
+        raise ValueError(
+            "Recommendation minimum-compliance values disagree: "
+            + ", ".join(str(value) for value in sorted(non_null))
+        )
+    return next(iter(non_null), None)
+
+
 def _table(headers: list[str], rows: list[list[Any]]) -> str:
     if not rows:
         return '<p class="muted">No completed candidates were found.</p>'
@@ -134,11 +151,51 @@ def _status_badge(value: Any) -> str:
 
 
 def _sla_label(candidate: dict[str, Any]) -> str:
-    if candidate.get("p99_sla_eligible") is True:
+    if candidate.get("sla_eligible") is True:
         return "PASS"
-    if candidate.get("p99_sla_eligible") is False:
+    if candidate.get("sla_eligible") is False:
         return "FAIL"
     return "-"
+
+
+def _sla_reason(
+    candidate: dict[str, Any],
+    *,
+    ttft_sla_ms: float | None,
+    tpot_sla_ms: float | None,
+    minimum_compliance: float | None,
+) -> str:
+    if candidate.get("valid") is False or candidate.get("benchmark_valid") is False:
+        return str(candidate.get("invalid_reason") or "benchmark invalid")
+
+    reasons: list[str] = []
+    ttft = _number(candidate.get("median_p99_ttft_ms"))
+    tpot = _number(candidate.get("median_p99_tpot_ms"))
+    compliance = _number(candidate.get("combined_compliance_ratio"))
+
+    if ttft_sla_ms is not None and (ttft is None or ttft > ttft_sla_ms):
+        reasons.append(
+            "TTFT "
+            + ("missing" if ttft is None else f"{ttft:.1f} ms > {ttft_sla_ms:.1f} ms")
+        )
+    if tpot_sla_ms is not None and (tpot is None or tpot > tpot_sla_ms):
+        reasons.append(
+            "TPOT "
+            + ("missing" if tpot is None else f"{tpot:.1f} ms > {tpot_sla_ms:.1f} ms")
+        )
+    if minimum_compliance is not None and (
+        compliance is None or compliance < minimum_compliance
+    ):
+        reasons.append(
+            "combined compliance "
+            + (
+                "missing"
+                if compliance is None
+                else f"{compliance * 100:.2f}% < {minimum_compliance * 100:.2f}%"
+            )
+        )
+
+    return "PASS" if not reasons else "; ".join(reasons)
 
 
 def _scheduler_value(candidate: dict[str, Any], key: str) -> str:
@@ -196,7 +253,13 @@ def _stage_summary(
     return rows
 
 
-def _parallel_rows(report: dict[str, Any] | None) -> list[list[Any]]:
+def _parallel_rows(
+    report: dict[str, Any] | None,
+    *,
+    ttft_sla_ms: float | None,
+    tpot_sla_ms: float | None,
+    minimum_compliance: float | None,
+) -> list[list[Any]]:
     rows = []
     for candidate in (report or {}).get("candidates", []):
         rows.append(
@@ -210,12 +273,24 @@ def _parallel_rows(report: dict[str, Any] | None) -> list[list[Any]]:
                 _fmt(candidate.get("mean_p99_tpot_ms")),
                 _fmt_percent(candidate.get("combined_compliance_percent")),
                 _sla_label(candidate),
+                _sla_reason(
+                    candidate,
+                    ttft_sla_ms=ttft_sla_ms,
+                    tpot_sla_ms=tpot_sla_ms,
+                    minimum_compliance=minimum_compliance,
+                ),
             ]
         )
     return rows
 
 
-def _concurrency_rows(report: dict[str, Any] | None) -> list[list[Any]]:
+def _concurrency_rows(
+    report: dict[str, Any] | None,
+    *,
+    ttft_sla_ms: float | None,
+    tpot_sla_ms: float | None,
+    minimum_compliance: float | None,
+) -> list[list[Any]]:
     candidates = (report or {}).get("candidates", [])
     candidates = sorted(candidates, key=lambda item: item.get("max_concurrency", 0))
     rows = []
@@ -230,12 +305,24 @@ def _concurrency_rows(report: dict[str, Any] | None) -> list[list[Any]]:
                 _fmt_int(candidate.get("mean_p99_ttft_ms")),
                 _fmt(candidate.get("mean_p99_tpot_ms")),
                 _sla_label(candidate),
+                _sla_reason(
+                    candidate,
+                    ttft_sla_ms=ttft_sla_ms,
+                    tpot_sla_ms=tpot_sla_ms,
+                    minimum_compliance=minimum_compliance,
+                ),
             ]
         )
     return rows
 
 
-def _scheduler_rows(report: dict[str, Any] | None) -> list[list[Any]]:
+def _scheduler_rows(
+    report: dict[str, Any] | None,
+    *,
+    ttft_sla_ms: float | None,
+    tpot_sla_ms: float | None,
+    minimum_compliance: float | None,
+) -> list[list[Any]]:
     rows = []
     for candidate in (report or {}).get("candidates", []):
         rows.append(
@@ -248,6 +335,12 @@ def _scheduler_rows(report: dict[str, Any] | None) -> list[list[Any]]:
                 _fmt(candidate.get("mean_p99_tpot_ms")),
                 _fmt_percent(candidate.get("combined_compliance_percent")),
                 _sla_label(candidate),
+                _sla_reason(
+                    candidate,
+                    ttft_sla_ms=ttft_sla_ms,
+                    tpot_sla_ms=tpot_sla_ms,
+                    minimum_compliance=minimum_compliance,
+                ),
             ]
         )
     return rows
@@ -397,6 +490,7 @@ def generate_report(
 
     ttft_sla_ms = _resolve_sla(reports, "ttft_ms", ttft_sla_ms)
     tpot_sla_ms = _resolve_sla(reports, "tpot_ms", tpot_sla_ms)
+    minimum_compliance = _resolve_minimum_compliance(reports)
 
     runs = {stage: _summary_runs(root / "results" / stage) for stage, _, _ in STAGES}
     meta = _metadata(runs)
@@ -475,6 +569,9 @@ footer { color: #607486; font-size: 12px; text-align: center; }
       <span>TTFT SLA</span></div>
     <div class="card"><strong>{_fmt(tpot_sla_ms)} ms</strong>
       <span>TPOT SLA</span></div>
+    <div class="card"><strong>{_fmt_percent(
+        minimum_compliance * 100 if minimum_compliance is not None else None)}</strong>
+      <span>required combined compliance</span></div>
   </div>
 </header>
 <section>
@@ -524,8 +621,14 @@ footer { color: #607486; font-size: 12px; text-align: center; }
                 "p99 TPOT ms",
                 "Compliance",
                 "SLA",
+                "SLA reason",
             ],
-            _parallel_rows(reports["parallel-layout"]),
+            _parallel_rows(
+                reports["parallel-layout"],
+                ttft_sla_ms=ttft_sla_ms,
+                tpot_sla_ms=tpot_sla_ms,
+                minimum_compliance=minimum_compliance,
+            ),
         )
     }
 </section>
@@ -544,8 +647,14 @@ footer { color: #607486; font-size: 12px; text-align: center; }
                 "p99 TTFT ms",
                 "p99 TPOT ms",
                 "SLA",
+                "SLA reason",
             ],
-            _concurrency_rows(reports["concurrency-tuning"]),
+            _concurrency_rows(
+                reports["concurrency-tuning"],
+                ttft_sla_ms=ttft_sla_ms,
+                tpot_sla_ms=tpot_sla_ms,
+                minimum_compliance=minimum_compliance,
+            ),
         )
     }
 </section>
@@ -564,8 +673,14 @@ footer { color: #607486; font-size: 12px; text-align: center; }
                 "p99 TPOT ms",
                 "Compliance",
                 "SLA",
+                "SLA reason",
             ],
-            _scheduler_rows(reports["runtime-tuning"]),
+            _scheduler_rows(
+                reports["runtime-tuning"],
+                ttft_sla_ms=ttft_sla_ms,
+                tpot_sla_ms=tpot_sla_ms,
+                minimum_compliance=minimum_compliance,
+            ),
         )
     }
 </section>

@@ -307,10 +307,29 @@ For example:
         -> adjacent PASS / FAIL boundary
 ```
 
-A point is SLA-feasible only when every measured run completes without failed
-requests, median P99 TTFT/TPOT satisfy the supplied objectives, and
-duration-weighted combined compliance meets the minimum ratio (`0.99` by
-default).
+A point is SLA-feasible only when all of the following hold:
+
+1. Every measured run completes without failed requests.
+2. Median P99 TTFT is at or below the supplied TTFT objective.
+3. Median P99 TPOT is at or below the supplied TPOT objective.
+4. Duration-weighted combined request compliance is at least the configured
+   minimum (`0.99`, or 99%, by default).
+
+The combined-compliance check is intentionally stricter than looking at the
+TTFT and TPOT P99 columns independently. `vllm bench serve --goodput` counts
+requests that satisfy all supplied latency objectives, and the recommender
+estimates the combined compliant-request fraction across repeated runs as:
+
+```text
+sum(request_goodput * duration) / sum(completed_requests)
+```
+
+Therefore a candidate can have P99 TTFT below 3000 ms and P99 TPOT below
+100 ms but still be SLA-ineligible if fewer than 99% of requests satisfy both
+objectives together. For example, a reported combined compliance of `98.96%`
+fails the default `99.00%` requirement even when both displayed P99 metrics
+pass. The HTML report shows the combined compliance, required threshold, and
+the specific SLA failure reason for each candidate.
 
 Adaptive concurrency uses a `1800` second server-readiness timeout by default,
 which is intentionally longer than the generic benchmark helper default for
@@ -514,11 +533,19 @@ With TTFT/TPOT objectives, benchmark commands use vLLM `--goodput`.
 For TP/DP and scheduler selection, the recommender:
 
 1. Excludes invalid configurations and failed benchmark measurements.
-2. Calculates duration-weighted combined compliance across successful runs.
-3. Requires median P99 TTFT/TPOT objectives and the minimum combined compliance
-   ratio, which defaults to `0.99`.
-4. Establishes the highest mean output-token throughput among eligible
+2. Calculates duration-weighted combined request compliance across successful
+   runs from request goodput and run duration.
+3. Requires the median P99 TTFT and P99 TPOT objectives independently.
+4. Also requires the combined request-compliance ratio to meet
+   `--minimum-compliance`, which defaults to `0.99`.
+5. Establishes the highest mean output-token throughput among eligible
    configurations, then applies the selection policy below.
+
+The P99 checks and combined-compliance check answer different questions. P99
+verifies the tail of each latency metric independently; combined compliance
+verifies that the required fraction of requests satisfy all configured
+objectives together. A candidate must pass both forms of validation to be
+marked SLA eligible.
 
 For a scheduler-only comparison with one fixed TP/DP layout, candidates within
 1% of the highest eligible output-token throughput are treated as practically
