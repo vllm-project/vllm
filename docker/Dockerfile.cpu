@@ -13,7 +13,7 @@
 #   vllm-dev: used for development
 #
 # Build arguments:
-#   PYTHON_VERSION=3.13|3.12 (default)|3.11|3.10
+#   PYTHON_VERSION=3.13|3.12 (default)|3.11
 #   VLLM_CPU_X86=false (default)|true (for cross-compilation)
 #   VLLM_CPU_ARM_BF16=false (default)|true (for cross-compilation)
 #
@@ -27,7 +27,7 @@
 # cache mounts (ccache, cargo registry) aren't exported by `--cache-to
 # type=registry`, so they don't survive a build landing on a different/fresh
 # builder. sccache's cache lives in S3 instead, so it does.
-FROM ubuntu:25.04 AS base
+FROM ubuntu:22.04 AS base
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -52,10 +52,37 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl; \
     fi
 
+######################### BINUTILS BUILD IMAGE #########################
+# Build a newer GNU assembler for the AMX-FP8 instruction set.
+FROM base AS binutils-build
+
+ARG BINUTILS_VERSION=2.47
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        bison \
+        build-essential \
+        flex \
+        texinfo \
+        xz-utils \
+    && curl -fsSLO "https://sourceware.org/pub/binutils/releases/binutils-${BINUTILS_VERSION}.tar.xz" \
+    && tar -xf "binutils-${BINUTILS_VERSION}.tar.xz" \
+    && mkdir binutils-build \
+    && cd binutils-build \
+    && "../binutils-${BINUTILS_VERSION}/configure" --prefix=/opt/binutils --disable-nls --disable-werror \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd .. \
+    && rm -rf binutils-build "/binutils-${BINUTILS_VERSION}" "binutils-${BINUTILS_VERSION}.tar.xz"
+
 ######################### COMMON BASE IMAGE #########################
 FROM base AS base-common
 
 WORKDIR /workspace
+
+COPY --from=binutils-build /opt/binutils /opt/binutils
 
 ARG PYTHON_VERSION=3.12
 
@@ -93,7 +120,8 @@ ENV CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
-ENV PATH="/root/.local/bin:$PATH"
+ENV PATH="/opt/binutils/bin:/root/.local/bin:$PATH"
+ENV COMPILER_PATH="/opt/binutils/bin"
 ENV VIRTUAL_ENV="/opt/venv"
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
@@ -109,6 +137,8 @@ ENV TARGETARCH=${TARGETARCH}
 
 ######################### COMMON BASE IMAGE + PYTHON DEPS #########################
 FROM base-common AS base-common-pydeps
+
+ENV UV_COMPILE_BYTECODE=1
 
 # PyTorch provides its own indexes for standard and nightly builds.
 # PYTORCH_NIGHTLY=1 builds the CPU image against torch nightly (parity with the
@@ -168,7 +198,7 @@ RUN apt-get update -y \
 WORKDIR /workspace
 
 COPY requirements/build/rust.txt requirements/build/rust.txt
-RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements/build/rust.txt
+RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
 
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
@@ -405,10 +435,17 @@ ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
+# cmake/ is needed by tests/test_cmake_utils.py, which includes cmake/utils.cmake.
+ADD ./cmake/ ./cmake/
 # tools/ carries repo-tooling code that a few tests exercise directly
 # (e.g. tests/tools/test_check_test_tethering.py imports
 # tools.pre_commit.check_test_tethering).
 ADD ./tools/ ./tools/
+# tests/test_zentorch_version_pin.py string-matches the zentorch extra in
+# setup.py against the torch pin in requirements/cpu.txt. The wheel does not
+# ship either file, and this stage does not inherit the vllm-src tree.
+ADD ./setup.py ./setup.py
+ADD ./requirements/cpu.txt ./requirements/cpu.txt
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -452,5 +489,6 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 # stage above adds examples/ for testing only, so without this the published
 # vllm-openai-cpu image would not ship examples/*.jinja.
 COPY examples examples
+COPY tools/recipes tools/recipes
 
 ENTRYPOINT ["vllm", "serve"]
