@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -65,6 +66,7 @@ from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
@@ -163,6 +165,23 @@ def _apply_attn_res(
     )
 
 
+class KimiK3GateLinear(GateLinear):
+    """Router gate for Kimi k3"""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._tgemm = None
+        if (on_gfx950() or on_gfx1250()) and rocm_aiter_ops.is_linear_enabled():
+            from aiter.tuned_gemm import tgemm
+
+            self._tgemm = tgemm
+
+    def forward(self, x: torch.Tensor):
+        if self._tgemm is None:
+            return super().forward(x)
+        return self._tgemm.mm(x, self.weight, otype=self.out_dtype), None
+
+
 class KimiMoE(nn.Module):
     def __init__(
         self,
@@ -210,7 +229,7 @@ class KimiMoE(nn.Module):
         )
 
         # Route with fp32 logits for numerically stable expert selection.
-        self.gate = GateLinear(
+        self.gate = KimiK3GateLinear(
             input_size=hidden_size,
             output_size=num_experts,
             bias=False,
