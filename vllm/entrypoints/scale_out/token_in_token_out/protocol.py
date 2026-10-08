@@ -399,8 +399,8 @@ class GenerateChoiceBase(BaseModel):
     index: int
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
-    # Stop string or token id that ended generation; None for any other
-    # finish, including EOS.
+    # Stop string or token id that ended generation (repetition detection
+    # sets it too); None on EOS, length and abort.
     stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     # Per-token expert routing decisions, base64-encoded `.npy` bytes
@@ -443,8 +443,8 @@ class GenerateStreamChoiceBase(BaseModel):
 
     index: int
     finish_reason: str | None = None
-    # Stop string or token id that ended generation; None for any other
-    # finish, including EOS.
+    # Stop string or token id that ended generation (repetition detection
+    # sets it too); None on EOS, length and abort.
     stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
