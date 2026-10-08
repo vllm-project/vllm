@@ -161,6 +161,22 @@ class CPUOffloadingSpec(OffloadingSpec):
         per-rank tensor); replicated-layout dedup is gated on this being True."""
         return current_platform.is_cuda_alike() and not current_platform.is_rocm()
 
+    @property
+    def worker_rank(self) -> int:
+        """Return this worker's rank within its local engine topology."""
+        worker_world_size = self.config.parallel.world_size
+        if self.config.parallel.per_rank_engine:
+            # external_launcher includes all DP engines in world_size, but
+            # each mmap path belongs to one DP engine. Use the topology of
+            # one engine because independent DP setup may reset
+            # data_parallel_size to one before this spec is built.
+            worker_world_size = (
+                self.config.parallel.tp_size
+                * self.config.parallel.pp_size
+                * self.config.parallel.pcp_size
+            )
+        return torch.accelerator.current_device_index() % worker_world_size
+
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
@@ -169,18 +185,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             # Normalize the device index to the current DP engine.  This is
             # separate from `rank`: replicated layout intentionally maps every
             # worker to slot 0, but only worker rank 0 should own unlinking.
-            engine_world_size = self.config.parallel.world_size
-            if self.config.parallel.per_rank_engine:
-                # external_launcher includes all DP engines in world_size, but
-                # each mmap path belongs to one DP engine. Use the topology of
-                # one engine because independent DP setup may reset
-                # data_parallel_size to one before this spec is built.
-                engine_world_size = (
-                    self.config.parallel.tp_size
-                    * self.config.parallel.pp_size
-                    * self.config.parallel.pcp_size
-                )
-            worker_rank = torch.accelerator.current_device_index() % engine_world_size
+            worker_rank = self.worker_rank
             # Replicated layout puts all ranks on slot 0 (single MLA copy);
             # otherwise each rank takes its own slot by physical device index.
             rank = 0 if self.replicated_layout else worker_rank

@@ -54,7 +54,6 @@ Example out-of-tree tier configuration:
 
 from typing import Any
 
-import torch
 from typing_extensions import override
 
 from vllm.logger import init_logger
@@ -448,13 +447,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        world_size = self.config.parallel.world_size
-        if self.replicated_layout:
-            rank = 0
-        else:
-            # Fold the global physical device index into the replica-local
-            # [0, world_size) slot range.
-            rank = torch.accelerator.current_device_index() % world_size
+        rank = 0 if self.replicated_layout else self.worker_rank
         worker_mmap: SharedOffloadRegion | None = None
         try:
             worker_mmap = SharedOffloadRegion(
