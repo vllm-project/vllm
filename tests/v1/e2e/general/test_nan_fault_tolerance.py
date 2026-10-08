@@ -213,7 +213,7 @@ def test_async_cudagraph_speculative_nan_abort_cache_recovery(
     with VllmRunner(
         MODEL,
         dtype="bfloat16",
-        max_model_len=1024,
+        max_model_len=2048,
         max_num_seqs=2,
         max_num_batched_tokens=128,
         num_gpu_blocks_override=32,
