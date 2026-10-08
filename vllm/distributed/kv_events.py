@@ -73,7 +73,6 @@ class BlockStored(KVCacheEvent):
     string and prompt embedding digests for that specific block. These are
     published untagged; the block hash itself uses each value tagged with
     its source, e.g. `("lora", name)` or `("mm", mm_identifier, offset)`.
-    Entries use ``hash_block_size`` granularity when that field is set.
     """
     extra_keys: list[tuple[Any, ...] | None] | None = None
 
@@ -93,8 +92,6 @@ class BlockStored(KVCacheEvent):
     ownership of the underlying block, which may be shared across sessions.
     """
     session_id: str | None = None
-    """Hash recurrence granularity when it differs from ``block_size``."""
-    hash_block_size: int | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -110,7 +107,6 @@ class BlockStored(KVCacheEvent):
                 self.kv_cache_spec_kind,
                 self.kv_cache_spec_sliding_window,
                 self.locality,
-                self.hash_block_size,
                 self.ownership,
                 self.session_id,
             )

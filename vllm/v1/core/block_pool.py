@@ -22,7 +22,6 @@ from vllm.v1.core.kv_cache_utils import (
     generate_request_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
-    get_request_block_hash_event_data,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
@@ -273,15 +272,6 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
-        # Lookahead hashes recur at hash_block_size, so a coarser cache block is
-        # published as one event per block (see _emit_individual_block_stored_events).
-        event_block_indices: list[int] | None = (
-            []
-            if self.enable_kv_cache_events
-            and self.use_lookahead_block_hashes
-            and block_size != self.hash_block_size
-            else None
-        )
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -311,19 +301,8 @@ class BlockPool:
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
-            if event_block_indices is not None:
-                event_block_indices.append(num_cached_blocks + i)
 
         if self.enable_kv_cache_events:
-            if event_block_indices is not None:
-                self._emit_individual_block_stored_events(
-                    request, event_block_indices, block_size, kv_cache_group_id
-                )
-                return
-            # Every new block may be masked out; don't emit an empty event.
-            if not new_hashes:
-                return
-
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
@@ -370,43 +349,6 @@ class BlockPool:
                 )
             )
 
-    def _emit_individual_block_stored_events(
-        self,
-        request: Request,
-        block_indices: Iterable[int],
-        block_size: int,
-        kv_cache_group_id: int,
-    ) -> bool:
-        if not self.use_lookahead_block_hashes or block_size == self.hash_block_size:
-            return False
-
-        for block_idx in block_indices:
-            event_data = get_request_block_hash_event_data(
-                request,
-                block_idx,
-                block_size,
-                self.hash_block_size,
-            )
-            block_hash, parent_hash, block_start, block_end, extra_keys = event_data
-            self.kv_event_queue.append(
-                self._build_block_stored_event(
-                    request,
-                    block_hashes=[maybe_convert_block_hash(block_hash)],
-                    parent_block_hash=(
-                        maybe_convert_block_hash(parent_hash)
-                        if parent_hash is not None
-                        else None
-                    ),
-                    start_token_idx=block_start,
-                    end_token_idx=block_end,
-                    block_size=block_size,
-                    kv_cache_group_id=kv_cache_group_id,
-                    extra_keys_list=extra_keys,
-                    hash_block_size=self.hash_block_size,
-                )
-            )
-        return True
-
     def _build_block_stored_event(
         self,
         request: Request,
@@ -417,7 +359,6 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         extra_keys_list: list[tuple[Any, ...] | None],
-        hash_block_size: int | None = None,
     ) -> BlockStored:
         """Build a ``BlockStored`` KV event for ``request``.
 
@@ -437,7 +378,6 @@ class BlockPool:
                 extra_keys_list, self.use_lookahead_block_hashes
             ),
             group_idx=kv_cache_group_id,
-            hash_block_size=hash_block_size,
             session_id=request.session_id,
         )
 
@@ -467,14 +407,6 @@ class BlockPool:
         block_hashes = resolve_block_hashes(
             request.block_hashes, self.hash_block_size, block_size
         )
-
-        if self._emit_individual_block_stored_events(
-            request,
-            range(num_cached_blocks),
-            block_size,
-            kv_cache_group_id,
-        ):
-            return
 
         # Collect external hashes and extra_keys for cached blocks.
         cached_hashes: list[ExternalBlockHash] = []

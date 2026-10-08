@@ -1002,51 +1002,6 @@ def get_prompt_hash_boundary(
     return num_tokens // hash_block_size * hash_block_size
 
 
-def get_request_block_hash_event_data(
-    request: Request,
-    block_idx: int,
-    block_size: int,
-    hash_block_size: int,
-) -> tuple[
-    BlockHash,
-    BlockHash | None,
-    int,
-    int,
-    list[tuple[Any, ...] | None],
-]:
-    """Build hash metadata for one cache block emitted as a KV event.
-
-    A cache block may span multiple hash units. The event carries the final
-    chained hash, its parent, and each unit's extra keys for reconstruction.
-    """
-    assert block_size > hash_block_size
-    assert block_size % hash_block_size == 0
-
-    hash_start = block_idx * block_size
-    hash_end = hash_start + block_size
-    hash_idx = hash_end // hash_block_size - 1
-    parent_idx = hash_start // hash_block_size - 1
-    parent_hash = request.block_hashes[parent_idx] if parent_idx >= 0 else None
-    extra_keys: list[tuple[Any, ...] | None] = []
-    curr_mm_idx = 0
-    for unit_start in range(hash_start, hash_end, hash_block_size):
-        unit_extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
-            request,
-            unit_start,
-            unit_start + hash_block_size,
-            curr_mm_idx,
-        )
-        extra_keys.append(unit_extra_keys)
-
-    return (
-        request.block_hashes[hash_idx],
-        parent_hash,
-        hash_start,
-        hash_end,
-        extra_keys,
-    )
-
-
 def _check_enough_kv_cache_memory(
     available_memory: int,
     get_needed_memory: Callable[[], int],

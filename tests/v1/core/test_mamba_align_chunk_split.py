@@ -136,7 +136,8 @@ def _split(
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     if use_eagle_block_drop is None:
-        use_eagle_block_drop = use_eagle
+        # The scheduler clears the drop once lookahead hashes are enabled.
+        use_eagle_block_drop = use_eagle and not use_lookahead_block_hashes
     stub = SimpleNamespace(
         block_size=MAMBA_BLOCK_SIZE,
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
