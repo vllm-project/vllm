@@ -220,7 +220,7 @@ def test_amd_kv_cache_layer_returns_inner_mla_attn():
     ]
 
 
-def _yarn_cast_wrapper():
+def _yarn_cast_wrapper(fuse_qk_rope: bool = False):
     """Wrapper whose RoPE returns fp32, matching HIP YaRN."""
     from vllm.model_executor.layers.mla import MLAModules
     from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
@@ -245,6 +245,9 @@ def _yarn_cast_wrapper():
             self.seen_q = q
             self.seen_k_pe = k_pe
             return torch.zeros(output_shape, dtype=q.dtype)
+
+        def fuse_qk_rope_with_cache(self) -> bool:
+            return fuse_qk_rope
 
     class Fp32Rope(nn.Module):
         def forward(self, positions, q_pe, k_pe):
@@ -316,6 +319,187 @@ def test_fused_decode_not_taken_when_rotary_emb_is_set():
     positions = torch.zeros(2, dtype=torch.int64)
     wrapper(positions, hidden)
     assert wrapper.mla_attn.seen_k_pe is not None
+
+
+def test_fused_qk_rope_requires_positions():
+    wrapper = _yarn_cast_wrapper(fuse_qk_rope=True)
+    hidden = torch.zeros(2, 8, dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="positions"):
+        wrapper(None, hidden)
+
+
+def _bare_dspark_attn(monkeypatch: pytest.MonkeyPatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.kimi_k3.amd.mla import KimiK3DSparkMLAAttention
+
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_fused_qk_rope_concat_and_cache_mla_enabled",
+        lambda: True,
+    )
+    attn = KimiK3DSparkMLAAttention.__new__(KimiK3DSparkMLAAttention)
+    attn.non_causal_multi_token_decode = True
+    attn._epilogue_rotary_emb = SimpleNamespace(
+        head_size=2,
+        cos_sin_cache=torch.zeros(8, 4, dtype=torch.float32),
+        is_neox_style=False,
+    )
+    attn._rope_positions = torch.arange(4)
+    attn.use_pcp = False
+    attn.qk_nope_head_dim = 4
+    attn.qk_rope_head_dim = 2
+    attn.kv_lora_rank = 4
+    attn.kv_cache_dtype = "fp8"
+    attn.layer_name = "model.layers.0.self_attn.attn"
+    attn._k_scale = torch.ones(1)
+    attn._q_scale = torch.ones(1)
+    attn.hisparse_cache = None
+    attn.impl = SimpleNamespace(
+        supports_quant_query_input=True,
+        dcp_world_size=1,
+    )
+    return attn
+
+
+def test_fuse_qk_rope_with_cache_refuses_pcp(monkeypatch: pytest.MonkeyPatch):
+    attn = _bare_dspark_attn(monkeypatch)
+    attn.use_pcp = True
+    with pytest.raises(RuntimeError, match="prefill context parallel"):
+        attn.fuse_qk_rope_with_cache()
+
+
+def test_fuse_qk_rope_with_cache_is_false_without_embedding_or_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    attn = _bare_dspark_attn(monkeypatch)
+    attn._epilogue_rotary_emb = None
+    assert attn.fuse_qk_rope_with_cache() is False
+
+    attn._epilogue_rotary_emb = SimpleNamespace()
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_fused_qk_rope_concat_and_cache_mla_enabled",
+        lambda: False,
+    )
+    assert attn.fuse_qk_rope_with_cache() is False
+
+
+def test_decode_only_skips_generic_cache_write(monkeypatch: pytest.MonkeyPatch):
+    attn = _bare_dspark_attn(monkeypatch)
+
+    def fail_if_called(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("generic cache write should be skipped")
+
+    attn.impl.do_kv_cache_update = fail_if_called
+    tokens = 4
+    kv = torch.zeros(tokens, 4)
+    k_pe = torch.zeros(tokens, 1, 2)
+    slots = torch.arange(tokens)
+    metadata = SimpleNamespace(num_decode_tokens=tokens)
+    attn.update_kv_cache(
+        kv,
+        k_pe,
+        torch.zeros(1, 6),
+        slots,
+        metadata,
+        "fp8",
+        attn._k_scale,
+    )
+    assert torch.count_nonzero(k_pe) == 0
+
+
+def test_prefill_k_pe_is_rerotated_for_mha(monkeypatch: pytest.MonkeyPatch):
+    attn = _bare_dspark_attn(monkeypatch)
+
+    def mark(positions, query):
+        del positions
+        query.add_(1)
+
+    attn._apply_fp32_rope = mark
+    kv = torch.zeros(4, 4)
+    k_pe = torch.zeros(4, 1, 2)
+    slots = torch.arange(4)
+    metadata = SimpleNamespace(num_decode_tokens=2)
+    _, cache_k, _ = attn._prepare_kv_cache_update(kv, k_pe, slots, metadata)
+    assert torch.count_nonzero(k_pe) == 0
+    assert torch.equal(cache_k, torch.ones_like(cache_k))
+
+    q = torch.zeros(2, 1, 6)
+    q_for_mha = q.clone()
+    out_q, out_k = attn._prepare_mha_inputs(q_for_mha, k_pe[2:])
+    assert torch.count_nonzero(q) == 0
+    assert torch.count_nonzero(out_q[..., :4]) == 0
+    assert torch.equal(out_q[..., 4:], torch.ones_like(out_q[..., 4:]))
+    assert torch.count_nonzero(k_pe[:2]) == 0
+    assert out_k is k_pe[2:]
+    assert torch.equal(k_pe[2:], torch.ones_like(k_pe[2:]))
+
+
+def test_form_decode_q_matches_backend_query_dtype(monkeypatch: pytest.MonkeyPatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms import current_platform
+
+    attn = _bare_dspark_attn(monkeypatch)
+    seen = {}
+
+    def fake_kernel(*args, **kwargs):
+        del kwargs
+        seen["ql"] = args[0]
+        seen["k_pe"] = args[3]
+        seen["q_out"] = args[5]
+
+    monkeypatch.setattr(
+        rocm_aiter_ops, "fused_qk_rope_concat_and_cache_mla", fake_kernel
+    )
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.amd.mla.get_forward_context",
+        lambda: SimpleNamespace(
+            slot_mapping={
+                attn.layer_name: torch.arange(2),
+            }
+        ),
+    )
+    ql = torch.zeros(2, 2, 8, dtype=torch.bfloat16)[..., :4]
+    q_pe = torch.zeros(2, 2, 2, dtype=torch.bfloat16)
+    k_pe = torch.zeros(2, 1, 2, dtype=torch.bfloat16)
+    cache = attn._epilogue_rotary_emb.cos_sin_cache
+    kv_cache = torch.zeros(1, 1, 6, dtype=torch.uint8)
+
+    attn._form_decode_q(
+        ql,
+        q_pe,
+        torch.zeros(2, 4),
+        k_pe,
+        kv_cache,
+        SimpleNamespace(num_decode_tokens=2),
+        2,
+    )
+    assert seen["ql"].is_contiguous()
+    assert seen["q_out"].dtype == current_platform.fp8_dtype()
+    assert torch.count_nonzero(seen["k_pe"]) == 0
+    assert cache.data_ptr() == attn._epilogue_rotary_emb.cos_sin_cache.data_ptr()
+    assert attn._epilogue_rotary_emb.cos_sin_cache.dtype == torch.float32
+
+    attn.impl.supports_quant_query_input = False
+    attn._form_decode_q(
+        ql.contiguous(),
+        q_pe,
+        torch.zeros(2, 4),
+        k_pe,
+        kv_cache,
+        SimpleNamespace(num_decode_tokens=2),
+        2,
+    )
+    assert seen["q_out"].dtype == torch.bfloat16
+
+
+def test_fused_qk_prep_supported_is_false_when_rotary_emb_is_set():
+    wrapper = _yarn_cast_wrapper()
+    assert wrapper.rotary_emb is not None
+    assert wrapper._fused_qk_prep_supported() is False
 
 
 @pytest.mark.parametrize(

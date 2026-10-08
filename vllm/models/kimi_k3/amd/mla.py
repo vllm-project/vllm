@@ -19,6 +19,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 
 _OPT_KV_LORA_RANK = 512
@@ -263,6 +264,8 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         fuse_qk_rope = bool(
             getattr(self.mla_attn, "fuse_qk_rope_with_cache", lambda: False)()
         )
+        if fuse_qk_rope and positions is None:
+            raise RuntimeError("fused QK RoPE requires positions")
         if self.rotary_emb is not None and not fuse_qk_rope:
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
@@ -340,11 +343,17 @@ class KimiK3DSparkMLAAttention(MLAAttention):
     """
 
     def fuse_qk_rope_with_cache(self) -> bool:
-        return (
+        enabled = (
             self.non_causal_multi_token_decode
             and self._epilogue_rotary_emb is not None
             and bool(rocm_aiter_ops.is_fused_qk_rope_concat_and_cache_mla_enabled())
         )
+        if enabled and self.use_pcp:
+            raise RuntimeError(
+                "fused QK RoPE does not support prefill context parallel: "
+                "the gather changes the row count while positions stay local"
+            )
+        return enabled
 
     def _epilogue_applies_rope(self) -> bool:
         return self.fuse_qk_rope_with_cache() and self._rope_positions is not None
@@ -394,7 +403,9 @@ class KimiK3DSparkMLAAttention(MLAAttention):
         num_tokens = kv_c_normed.shape[0]
         if num_decode >= num_tokens:
             return kv_c_normed[:0], k_pe[:0], slot_mapping.reshape(-1)[:0]
-        k_pe_pf = k_pe[num_decode:]
+        # The cache-update op must not mutate the caller's k_pe. Attention
+        # rotates that same tensor later, inside its own op.
+        k_pe_pf = k_pe[num_decode:].clone()
         self._apply_fp32_rope(positions[num_decode:num_tokens], k_pe_pf)
         if slot_mapping.dim() > 0:
             slot_mapping = slot_mapping[num_decode:]
@@ -409,14 +420,16 @@ class KimiK3DSparkMLAAttention(MLAAttention):
             return super()._prepare_mha_inputs(q, k_pe)
         positions = self._rope_positions
         assert positions is not None
-        # ``q`` is already the prefill slice. Prefill ``k_pe`` was rotated
-        # in ``_prepare_kv_cache_update``.
+        # ``q`` and ``k_pe`` are the prefill slices. The cache write rotated a
+        # clone, so this key is still the unrotated caller tensor.
         num_decode = self._num_decode_tokens(None)
         q = q.clone()
+        rope_positions = positions[num_decode : num_decode + q.shape[0]]
         self._apply_fp32_rope(
-            positions[num_decode : num_decode + q.shape[0]],
+            rope_positions,
             q[..., self.qk_nope_head_dim :],
         )
+        self._apply_fp32_rope(rope_positions, k_pe)
         return q, k_pe
 
     def _form_decode_q(
@@ -429,6 +442,13 @@ class KimiK3DSparkMLAAttention(MLAAttention):
         attn_metadata: MLACommonMetadata,
         num_mqa_tokens: int,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Form the decode query and write rotated decode KV.
+
+        ``ROCM_AITER_MLA`` sizes its decode metadata for an FP8 query whenever
+        the KV cache is FP8 and ``supports_quant_query_input`` is set. ``q_out``
+        is FP8 in that case so the kernel quantizes into it. Triton MLA clears
+        that flag and keeps the absorb dtype, which is bf16.
+        """
         if not self._epilogue_applies_rope():
             return super()._form_decode_q(
                 mqa_ql_nope,
@@ -450,10 +470,18 @@ class KimiK3DSparkMLAAttention(MLAAttention):
         decode_slots = layer_slot_mapping[:num_mqa_tokens]
         if k_pe.dim() == 3:
             k_pe = k_pe.squeeze(1)
+        # The W_UK result can be a transposed view. The kernel reads dense.
+        mqa_ql_nope = mqa_ql_nope.contiguous()
         num_tokens, num_heads, kv_lora_rank = mqa_ql_nope.shape
+        q_out_dtype = (
+            current_platform.fp8_dtype()
+            if is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.impl.supports_quant_query_input
+            else mqa_ql_nope.dtype
+        )
         q_out = torch.empty(
             (num_tokens, num_heads, kv_lora_rank + mqa_q_pe.shape[-1]),
-            dtype=mqa_ql_nope.dtype,
+            dtype=q_out_dtype,
             device=mqa_ql_nope.device,
         )
         if kv_cache.numel() == 0:
