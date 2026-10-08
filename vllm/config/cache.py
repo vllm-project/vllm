@@ -50,6 +50,7 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "ultraquant_4bit",
     "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
@@ -59,7 +60,7 @@ CacheDType = Literal[
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
-MambaCacheMode = Literal["all", "align", "none"]
+MambaCacheMode = Literal["align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -75,8 +76,6 @@ class CacheConfig:
     Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
-    user_specified_mamba_block_size: bool = field(default=False, init=False)
-    """Whether mamba_block_size was explicitly provided. Derived automatically."""
     kv_cache_layout: str | None = field(default=None, init=False)
     """Resolved physical KV cache layout name (a ``KVCacheLayout`` member).
 
@@ -191,7 +190,6 @@ class CacheConfig:
     """The cache strategy for Mamba layers:
 
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size.
     - "align": only cache the mamba state of the last token of each scheduler step and
       when the token is at position i * block_size. This is the default when prefix
       caching is enabled.
@@ -293,7 +291,6 @@ class CacheConfig:
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
-            "user_specified_mamba_block_size",
             "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
@@ -337,20 +334,7 @@ class CacheConfig:
             self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
             self.user_specified_block_size = True
-        if self.mamba_block_size is not None:
-            self.user_specified_mamba_block_size = True
         return self
-
-    @field_validator("mamba_cache_mode", mode="after")
-    @classmethod
-    def _validate_mamba_cache_mode(cls, mode: MambaCacheMode) -> MambaCacheMode:
-        if mode == "all":
-            logger.warning_once(
-                "Mamba cache mode 'all' is deprecated and will be removed in an "
-                "upcoming release. If this is a problem, please open an issue "
-                "at https://github.com/vllm-project/vllm/issues."
-            )
-        return mode
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
