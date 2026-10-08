@@ -38,6 +38,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
 ):
     engine_client = SimpleNamespace(
         errored=False,
+        check_admission=Mock(),
         generate=Mock(side_effect=lambda *_args, **_kwargs: _never_finishes()),
         abort=AsyncMock(),
         is_tracing_enabled=AsyncMock(return_value=False),
@@ -104,6 +105,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
     started_request_ids: list[str] = []
     engine_client = SimpleNamespace(
         errored=False,
+        check_admission=Mock(),
         generate=Mock(
             side_effect=lambda *_args, **_kwargs: _records_start_then_never_finishes(
                 started_request_ids, _args[2]
@@ -196,4 +198,6 @@ async def test_language_detection_cancel_aborts_engine_request():
     with pytest.raises(asyncio.CancelledError):
         await task
 
+    sampling_params = engine_client.generate.call_args.args[1]
+    assert sampling_params.watermarking is False
     engine_client.abort.assert_awaited_once_with(request_id)

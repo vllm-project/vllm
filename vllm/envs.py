@@ -51,6 +51,14 @@ def _tpu_pathways_default() -> bool:
     return "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
 
 
+def _generate_shm_name() -> str:
+    import pybase64
+
+    # Fit macOS's 30-character limit without truncating the UUID.
+    encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
+    return "vllm_mm_" + encoded_uuid.rstrip("=")
+
+
 def _env_set(name: str) -> bool:
     """Case-insensitive ``name in os.environ`` check.
 
@@ -135,6 +143,11 @@ class BuildSettings(BaseSettings):
     skip_precompiled_version_suffix: bool = Field(
         default=False,
         description="If set, skip adding +precompiled suffix to version string.",
+    )
+    skip_version_suffix: bool = Field(
+        default=False,
+        json_schema_extra={"compile_factor": False},
+        description="Whether to skip version suffix when building package.",
     )
     docker_build_context: bool = Field(
         default=False,
@@ -489,16 +502,18 @@ class ServerSettings(BaseSettings):
             "width. Default: 1024."
         ),
     )
-    engine_iteration_timeout_s: int = Field(
-        default=60,
-        json_schema_extra={"compile_factor": False},
-        description="Timeout for each iteration in the engine.",
-    )
     engine_ready_timeout_s: int = Field(
         default=600,
         description=(
             "Timeout in seconds for waiting for engine cores to become ready "
             "during startup. Default is 600 seconds (10 minutes)."
+        ),
+    )
+    chat_template_render_timeout: float = Field(
+        default=30.0,
+        description=(
+            "Maximum wall-clock seconds allowed for a single chat template "
+            "render. Set to 0 to disable the timeout."
         ),
     )
     execute_model_timeout_seconds: int = Field(
@@ -580,7 +595,8 @@ class ServerSettings(BaseSettings):
         default=False,
         description=(
             "If set to 1, expose the Cohere Chat v2 API at "
-            "``POST /cohere/v2/chat``. Default off."
+            "``POST /cohere/v2/chat`` and its render endpoint at "
+            "``POST /cohere/v2/chat/render``. Default off."
         ),
     )
     allow_chunked_local_attn_with_hybrid_kv_cache: bool = Field(
@@ -594,18 +610,6 @@ class ServerSettings(BaseSettings):
             "enable it if they want to (to save on kv-cache memory usage and "
             "enable longer contexts). "
             "TODO(lucas): Remove this flag once latency regression is resolved."
-        ),
-    )
-    prefix_cache_retention_interval: int | None = Field(
-        default=None,
-        description=(
-            "Retain local sliding-window KV checkpoints for prefix caching. "
-            "Unset (default) preserves the dense local checkpointing behavior. "
-            "`0` retains only the latest completed prompt boundary. Positive "
-            "values retain checkpoints at the specified interval boundaries "
-            "(rounded up to the prefix-cache alignment). Applies to "
-            "sliding-window attention for now but not yet Mamba/linear "
-            "attention."
         ),
     )
     process_name_prefix: str = Field(
@@ -795,6 +799,14 @@ class LoggingSettings(BaseSettings):
         json_schema_extra={"compile_factor": False},
         description="Standard unix flag for disabling ANSI color codes.",
     )
+    force_color: bool = Field(
+        default=False,
+        alias="FORCE_COLOR",
+        json_schema_extra={"compile_factor": False},
+        description=(
+            "De-facto standard flag for forcing ANSI color codes (e.g. non-tty case)."
+        ),
+    )
     log_stats_interval: float = Field(
         default=10.0,
         json_schema_extra={"compile_factor": False},
@@ -856,9 +868,9 @@ class LoggingSettings(BaseSettings):
             return 10.0
         return v
 
-    @field_validator("no_color", mode="before")
+    @field_validator("no_color", "force_color", mode="before")
     @classmethod
-    def _parse_no_color(cls, v: Any) -> Any:
+    def _parse_color_flag(cls, v: Any) -> Any:
         # Old logic: os.getenv("NO_COLOR", "0") != "0" — any non-"0" is True.
         if v is None:
             return False
@@ -986,6 +998,13 @@ class DistributedSettings(BaseSettings):
             "Compiled Graph. Otherwise, it uses Ray's NCCL communicator."
         ),
     )
+    xpu_pp_microbatch: bool = Field(
+        default=True,
+        description=(
+            "Using a flag to control microbatch on XPU device, users on XPU "
+            "device can decide to disable it when they needed."
+        ),
+    )
     use_ray_v2_executor_backend: bool = Field(
         default=True,
         description=(
@@ -1049,8 +1068,16 @@ class DistributedSettings(BaseSettings):
         description="Whether to use pytorch symmetric memory for allreduce.",
     )
     allreduce_use_flashinfer: bool = Field(
-        default=False,
+        default=True,
         description="Whether to use FlashInfer allreduce.",
+    )
+    allreduce_use_flashinfer_pcie_ipc: bool = Field(
+        default=False,
+        description=(
+            "Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce. "
+            "This backend has a strict single-stream contract and is opt-in "
+            "while its integration is being qualified."
+        ),
     )
     use_nccl_symm_mem: bool = Field(
         default=False,
@@ -1309,6 +1336,15 @@ class MediaSettings(BaseSettings):
             "Default is 3."
         ),
     )
+    max_media_download_size_mb: int = Field(
+        default=256,
+        description=(
+            "Maximum size in MB for a single remote media download. The limit "
+            "is enforced while streaming the response body so oversized or "
+            "infinite responses cannot grow the API server heap without "
+            "bound. Default is 256."
+        ),
+    )
     media_url_allow_redirects: bool = Field(
         default=True,
         json_schema_extra={"compile_factor": False},
@@ -1329,9 +1365,10 @@ class MediaSettings(BaseSettings):
         default=25,
         json_schema_extra={"compile_factor": False},
         description=(
-            "Maximum filesize in MB for a single audio file when processing "
-            "speech-to-text requests. Files larger than this will be "
-            "rejected. Default is 25 MB."
+            "Maximum filesize in MB for a single audio file. Enforced on all "
+            "audio inputs (multimodal chat, speech-to-text uploads, data: "
+            "URLs, and local file:// paths). Files larger than this will be "
+            "rejected before decoding. Default is 25 MB."
         ),
     )
     max_audio_decode_duration_s: int = Field(
@@ -1353,6 +1390,20 @@ class MediaSettings(BaseSettings):
             "the header sample rate to bypass the duration guard while the "
             "actual frame count still causes a multi-GiB allocation. "
             "Default is 256 MiB (sufficient for 600s mono 48 kHz float32)."
+        ),
+    )
+    max_embed_decode_bytes: int = Field(
+        default=2_147_483_648,
+        json_schema_extra={"compile_factor": False},
+        description=(
+            "Maximum bytes a client-supplied embedding payload "
+            "(`prompt_embeds`, `image_embeds`, `audio_embeds`, "
+            "`video_embeds`) may allocate once it is densified. A sparse "
+            "tensor carries its own declared shape, so a payload of a few "
+            "hundred bytes can expand into hundreds of GiB. The limit is "
+            "checked before `to_dense()` so the memory is never allocated. "
+            "Set to 0 to disable. Default is 2 GiB, which covers a "
+            "128K-token float32 embedding at hidden_size 4096."
         ),
     )
     max_audio_preprocess_workers: int = Field(
@@ -1400,18 +1451,6 @@ class MediaSettings(BaseSettings):
             "AssertionError will be thrown."
         ),
     )
-    mm_hasher_algorithm: Literal["blake3", "sha256", "sha512"] = Field(
-        default="blake3",
-        description=(
-            "Hash algorithm for multimodal content hashing. "
-            '"blake3": Default, fast cryptographic hash (not FIPS 140-3 '
-            "compliant). "
-            '"sha256": FIPS 140-3 compliant, widely supported. '
-            '"sha512": FIPS 140-3 compliant, faster on 64-bit systems. '
-            "Use sha256 or sha512 for FIPS compliance in government/"
-            "enterprise deployments."
-        ),
-    )
     object_storage_shm_buffer_name: str | None = Field(
         default=None,
         json_schema_extra={"compile_factor": False},
@@ -1430,11 +1469,6 @@ class MediaSettings(BaseSettings):
         ),
     )
 
-    @field_validator("mm_hasher_algorithm", mode="before")
-    @classmethod
-    def _lower_mm_hasher(cls, v: Any) -> Any:
-        return v.lower() if isinstance(v, str) else v
-
     @model_validator(mode="after")
     def _autogen_object_storage_shm_buffer_name(self) -> "MediaSettings":
         # If unset, auto-generate a UUID-suffixed name and write it back to
@@ -1444,7 +1478,7 @@ class MediaSettings(BaseSettings):
             if env_val is not None:
                 self.object_storage_shm_buffer_name = env_val
             else:
-                new_name = f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}"
+                new_name = _generate_shm_name()
                 os.environ["VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"] = new_name
                 self.object_storage_shm_buffer_name = new_name
         return self
@@ -1476,6 +1510,10 @@ class CpuSettings(BaseSettings):
             "cores will not be used by OMP threads of a rank."
         ),
     )
+    cpu_ci_env: bool = Field(
+        default=False,
+        description="(CPU backend only) whether vLLM is running in a CI environment.",
+    )
     cpu_attn_split_kv: bool = Field(
         default=True,
         description="(CPU backend only) Whether to enable attention split KV.",
@@ -1483,7 +1521,9 @@ class CpuSettings(BaseSettings):
     cpu_int4_w4a8: bool = Field(
         default=True,
         description=(
-            "(CPU backend only) Whether to use SGLang INT4 W4A8 kernels for AWQ."
+            "(CPU backend only) Whether to use SGLang INT4 W4A8 kernels for "
+            "AWQ, and on Zen CPUs whether to serve int4 checkpoints as DA8W4 "
+            "rather than W4A16."
         ),
     )
     zentorch_weight_prepack: bool = Field(
@@ -1518,7 +1558,17 @@ class RocmSettings(BaseSettings):
         default=True,
         description=(
             "Use AITER's CustomAllreduce as the custom-allreduce backend "
-            "inside vLLM's CudaCommunicator on ROCm."
+            "inside vLLM's CudaCommunicator on ROCm. Also enables AITER AG/RS "
+            "for DP communication."
+        ),
+    )
+    mxfp4_emulation_dequant_at_load: bool = Field(
+        default=False,
+        description=(
+            "Set to 1 to dequantize MXFP4 weights to BF16 once at load time "
+            "and run as a BF16 checkpoint (no per-step weight dequant). This "
+            "improves emulation latency at the cost of additional device "
+            "memory. Default off."
         ),
     )
     mxfp8_emulation_dequant_at_load: bool = Field(
@@ -1551,14 +1601,23 @@ class RocmSettings(BaseSettings):
         default=True,
         description="Whether to use aiter moe ops. By default is enabled.",
     )
-    rocm_use_aiter_moe_situv2_a8w4: bool = Field(
-        default=False,
+    rocm_use_aiter_moe_situv2: Literal["auto", "a4w4", "a8w4", "a16w4", "0", "1"] = (
+        Field(
+            default="auto",
+            description=(
+                "Activation dtype for the Kimi-K3 SiTU MXFP4 MoE (AITER FlyDSL "
+                "SiTUv2): auto (= a4w4), a4w4, a8w4 or a16w4. Legacy 1/0 mean "
+                "a4w4/a16w4."
+            ),
+        )
+    )
+    rocm_use_aiter_moe_a4w4_dsv4: bool | None = Field(
+        default=None,
         description=(
-            "Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) "
-            "gate/up-interleaved flydsl kernels instead of the default a16w4 "
-            "separated path. This is the only flag users need: vLLM picks the "
-            "kernels by passing gate_mode to AITER and sets the AITER-side "
-            "workaround env at init."
+            "Opt-in switch for a4w4 (FP4 activation) MoE on DeepSeek V4.1, "
+            'AITER MXFP4 backend. Default is a8w4 (FP8); set to "1" to '
+            'enable a4w4 ("true" is not accepted -- only "0"/"1"). Raises if '
+            "set for other models."
         ),
     )
     rocm_aiter_moe_dispatch_policy: int = Field(
@@ -1582,6 +1641,16 @@ class RocmSettings(BaseSettings):
         default=True,
         description="Whether to use aiter mla ops. By default is enabled.",
     )
+    rocm_aiter_mla_dcp_verify: Literal["auto", "asm", "segmented"] = Field(
+        default="auto",
+        description=(
+            "Kernel for causal multi-token (spec-decode) verify steps under "
+            'decode context parallelism: "asm" uses AITER\'s round-robin ASM '
+            'decode (gfx950), "segmented" the Triton segmented MLA path. '
+            '"auto" (default) takes "asm" wherever it can serve the shape and '
+            '"segmented" otherwise.'
+        ),
+    )
     rocm_aiter_mla_asm_padding: Literal["auto", "gluon", "asm"] = Field(
         default="auto",
         description=(
@@ -1604,6 +1673,16 @@ class RocmSettings(BaseSettings):
     rocm_use_aiter_fp4_asm_gemm: bool = Field(
         default=False,
         description="Whether to use aiter fp4 gemm asm. By default is disabled.",
+    )
+    rocm_use_aiter_triton_sparse_mla: bool = Field(
+        default=False,
+        description=(
+            "Whether sparse MLA prefill and decode run on aiter's Triton "
+            "kernel, which reads the KV cache as stored (bf16 or fp8, paged "
+            "or flat). Used by the ROCM_AITER_MLA_SPARSE backend (DeepSeek "
+            "V3.2, GLM-5.x) and DeepSeek V4 / V4.1. gfx950 only. By default "
+            "is disabled."
+        ),
     )
     rocm_use_aiter_triton_rope: bool = Field(
         default=False,
@@ -1705,10 +1784,24 @@ class RocmSettings(BaseSettings):
         description="If set, use the fp8 mfma in rocm paged attention.",
     )
 
-    @field_validator("rocm_aiter_mla_asm_padding", mode="before")
+    @field_validator(
+        "rocm_aiter_mla_asm_padding",
+        "rocm_aiter_mla_dcp_verify",
+        "rocm_use_aiter_moe_situv2",
+        mode="before",
+    )
     @classmethod
-    def _lower_aiter_mla_asm_padding(cls, v: Any) -> Any:
+    def _lower_aiter_choices(cls, v: Any) -> Any:
         return v.lower() if isinstance(v, str) else v
+
+    @field_validator("rocm_use_aiter_moe_a4w4_dsv4", mode="before")
+    @classmethod
+    def _parse_a4w4_dsv4(cls, v: Any) -> Any:
+        if v is None or isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return bool(int(v))
+        return v
 
 
 class TpuXpuSettings(BaseSettings):
@@ -1727,13 +1820,26 @@ class TpuXpuSettings(BaseSettings):
         validation_alias=_TPU_PATHWAYS_SENTINEL,
         description="Whether using Pathways.",
     )
-    xpu_enable_xpu_graph: bool = Field(
+    xpu_force_n_contig_weight: bool = Field(
         default=False,
-        description="Whether enable XPU graph on Intel GPU.",
+        description="Force N-contiguous weight layout for all XPU unquantized linears.",
     )
     xpu_use_sampler_kernel: bool = Field(
         default=True,
         description="Whether use xpu specific sample kernel.",
+    )
+    xpu_inc_wna16_backend: Literal["auto", "ark", "w4a16", "w4a8"] = Field(
+        default="auto",
+        description=(
+            "Kernel backend for INC weight-only intN (WNA16) linear layers on "
+            'XPU. "auto" keeps the default preference order (ARK when '
+            'importable, else the oneDNN w4a16 path). "ark" forces the '
+            'auto_round_kernel backend, "w4a16" forces oneDNN '
+            'int4_gemm_w4a16, and "w4a8" additionally quantizes activations '
+            "to per-token int8 (int4_gemm_w4a8) for large token counts. The "
+            "two oneDNN backends are int4-only; ARK also serves int2. Which "
+            "one is fastest is device-dependent, so this is left as an opt-in."
+        ),
     )
     sparse_indexer_max_logits_mb: int = Field(
         default=512,
@@ -1786,6 +1892,15 @@ class FlashInferSettings(BaseSettings):
         default=394 * 1024 * 1024,
         description="Control the workspace buffer size for the FlashInfer backend.",
     )
+    flashinfer_moe_a2a_low_precision_combine: bool = Field(
+        default=False,
+        description=(
+            "Transmit MoE all-to-all combine (expert-output) payloads in FP8 "
+            "instead of BF16, halving NVLink traffic on the combine leg. Only "
+            "takes effect when the installed FlashInfer MoeAlltoAll kernel "
+            "supports it."
+        ),
+    )
     blockscale_fp8_gemm_flashinfer: bool = Field(
         default=True,
         description=(
@@ -1793,6 +1908,10 @@ class FlashInferSettings(BaseSettings):
             "layers. This uses TensorRT-LLM kernels and requires SM90+ "
             "(Hopper)."
         ),
+    )
+    b12x_moe_fp4_force_a16: bool = Field(
+        default=False,
+        description="Force b12x FP4 MoE to use BF16 activations.",
     )
     has_flashinfer_cubin: bool = Field(
         default=False,
@@ -1841,7 +1960,11 @@ class QuantSettings(BaseSettings):
     )
     humming_input_quant_config: Annotated[dict[str, Any] | None, NoDecode] = Field(
         default=None,
-        description="The activation dtype config for humming kernel.",
+        description=(
+            "The activation dtype config for humming kernel. Explicit schemas "
+            'disable fallback unless the config includes "allow_fallback": '
+            "true."
+        ),
     )
     humming_use_f16_accum: bool | None = Field(
         default=False,
@@ -1963,12 +2086,34 @@ class QuantSettings(BaseSettings):
             "default while the effect is measured."
         ),
     )
-    kimi_k3_gemm_rs: bool = Field(
+    kimi_k3_gemm_ar: bool = Field(
+        default=True,
+        description=(
+            "Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 "
+            "row-parallel attention projections. All TP ranks must belong to "
+            "one NVLink domain."
+        ),
+    )
+    enable_gemm_rs: bool = Field(
         default=False,
         description=(
-            "Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 "
-            "sequence-parallel row-parallel projections. All TP ranks must "
-            "belong to one NVLink domain."
+            "Fuse eligible sequence-parallel row-parallel projections with "
+            "their TP reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel "
+            "(Kimi-K3 attention/shared-expert projections, DeepSeek-V4.1 "
+            "``wo_b``). All TP ranks must belong to one NVLink domain."
+        ),
+    )
+    enable_hpc_ops: bool = Field(
+        default=False,
+        description=(
+            "If set to 1, enable the HPC fused kernels (requires the hpc "
+            "package (.so) and an sm100/sm103 device). Covers: the HY V4 iHC "
+            "ops -- each of the eager HYV4HCPreLayer / HYV4HCPostLayer / "
+            "HYV4HCHeadLayer bodies becomes one kernel launch; the gated-MLA "
+            "output gating (attn_out * sigmoid(gate projection)), fused into "
+            "gated_mla_gemm; elementwise gating only. Each op additionally "
+            "checks its own shape / dtype constraints and falls back to the "
+            "eager path when they do not hold."
         ),
     )
     deepep_buffer_size_mb: int = Field(
@@ -1993,7 +2138,12 @@ class QuantSettings(BaseSettings):
     )
     deepep_v2_allow_hybrid_mode: bool = Field(
         default=True,
-        description="DeepEP v2: enable two-tier NVLink+RDMA hybrid mode.",
+        description=(
+            "DeepEP v2: use NVLink+RDMA hybrid communication across NVLink "
+            "domains (hybrid mode = multi-node RDMA; non-hybrid mode = "
+            "NVLink). Set to 1 (the default) to allow DeepEP to autoselect "
+            "hybrid vs non-hybrid. Set to 0 to disable hybrid mode."
+        ),
     )
     deepep_v2_prefer_overlap: bool = Field(
         default=False,
@@ -2041,6 +2191,14 @@ class QuantSettings(BaseSettings):
             "Disables parallel execution of shared_experts via separate cuda stream."
         ),
     )
+    disable_dsv4_megamoe_shared_expert_fusion: bool = Field(
+        default=False,
+        description=(
+            "Emergency rollback for the DeepSeek-V4 NVIDIA MegaMoE path. By "
+            "default, DeepGEMM computes replicated FP8 shared experts in the "
+            "same persistent SM100 kernel as the routed FP4 experts."
+        ),
+    )
     moe_routing_simulation_strategy: str = Field(
         default="",
         description=(
@@ -2051,14 +2209,19 @@ class QuantSettings(BaseSettings):
             "may not produce correct model outputs."
         ),
     )
-    kv_cache_layout: Literal["NHD", "HND"] | None = Field(
+    kv_cache_layout: (
+        Literal["LBNHC", "LBHNC", "LHBNC", "NHD", "HND", "BLHNC", "BLNHC", "BHLNC"]
+        | None
+    ) = Field(
         default=None,
         description=(
             "KV Cache layout used throughout vllm. Some common values are: "
-            "NHD, HND, where N=num_blocks, H=num_heads and D=head_size. "
-            "The default value will leave the layout choice to the "
-            "backend. Mind that backends may only implement and support a "
-            "subset of all possible layouts."
+            "LBNHC, LBHNC, where N=num_states, H=num_heads and "
+            "C=state_content. The default value will leave the layout choice "
+            "to the backend. Mind that backends may only implement and "
+            "support a subset of all possible layouts. LHBNC hoists the head "
+            "dim outside the block dim; backends must opt in via "
+            "AttentionBackend.supported_kv_cache_layouts()."
         ),
     )
     ssm_conv_state_layout: Literal["SD", "DS"] | None = Field(
@@ -2067,7 +2230,7 @@ class QuantSettings(BaseSettings):
             "SSM conv state layout used for Mamba models. "
             "SD: (state_len, dim) -- dim contiguous (default). "
             "DS: (dim, state_len) -- TP-sharded dim on dim1, consistent "
-            "with SSM temporal state and HND KV cache layout."
+            "with SSM temporal state and LBHNC KV cache layout."
         ),
     )
     mla_disable: bool = Field(
@@ -2090,11 +2253,13 @@ class QuantSettings(BaseSettings):
     gpu_sync_check: Literal["warn", "error"] | None = Field(
         default=None,
         description=(
-            "If set, enable PyTorch's GPU<->CPU synchronization debug mode "
-            "around the worker's `execute_model` and `sample_tokens` calls. "
-            'Valid values are "warn" (print a warning on each sync) or '
-            '"error" (raise on sync). Unset disables the check. See '
-            "`torch.cuda.set_sync_debug_mode`."
+            "If set, enable GPU<->CPU synchronization checking around the "
+            "worker's `execute_model` and `sample_tokens` calls, via "
+            "PyTorch's sync debug mode plus wrappers flagging `non_blocking` "
+            "CPU<->CUDA copies that silently block the host (CPU tensors that "
+            'are not pinned or not densely laid out). Valid values are "warn" '
+            '(warn on each sync) or "error" (raise on sync). Unset disables '
+            "the check. See `torch.cuda.set_sync_debug_mode`."
         ),
     )
     compute_nans_in_logits: bool = Field(
@@ -2139,6 +2304,15 @@ class QuantSettings(BaseSettings):
             "capability >= 9.0."
         ),
     )
+    replicate_embed: bool = Field(
+        default=False,
+        description=(
+            "Build the input embedding replicated (``disable_tp``) so the full "
+            "table lives on every rank, unlocking the fused gather+norm "
+            "kernels. Costs a full table per rank at TP>1; unsupported with "
+            "tied word embeddings at TP>1."
+        ),
+    )
     float32_matmul_precision: Literal["highest", "high", "medium"] = Field(
         default="highest",
         description=(
@@ -2169,6 +2343,15 @@ class QuantSettings(BaseSettings):
             "skip benchmarking and select the first valid config. Used to "
             "eliminate autotuning variability when measuring kernel "
             "performance."
+        ),
+    )
+    triton_jit_warmup_num_threads: int = Field(
+        default=4,
+        json_schema_extra={"compile_factor": False},
+        description=(
+            "Maximum compiler threads per worker for registered CUDA Triton "
+            "JIT warmup. Set to 1 for serial warmup. Does not affect runtime "
+            "JIT or autotuning."
         ),
     )
 
@@ -2280,9 +2463,12 @@ class ConnectorSettings(BaseSettings):
             "response."
         ),
     )
-    nixl_ep_max_num_ranks: int = Field(
-        default=32,
-        description="NIXL EP max number of ranks.",
+    mooncake_connector_timeout: float = Field(
+        default=30.0,
+        description=(
+            "Per-request timeout (seconds) when a prefiller worker registers "
+            "with the Mooncake bootstrap server."
+        ),
     )
     mooncake_bootstrap_port: int = Field(
         default=8998,
@@ -2351,6 +2537,7 @@ class ConnectorSettings(BaseSettings):
     )
     elastic_ep_scale_up_launch: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Whether it is a scale up launch engine for elastic EP. Should "
             "only be set by EngineCoreClient."
@@ -2375,6 +2562,15 @@ class ConnectorSettings(BaseSettings):
         default=False,
         description=(
             "Disable using UVA (Unified Virtual Addressing) for CPU offloading."
+        ),
+    )
+    kv_offload_max_batch_descriptors: int = Field(
+        default=0,
+        description=(
+            "Max descriptors per CPU-KV-offload batch-memcpy call. 0 = "
+            "platform default (ROCm chunks at 8192, since hipMemcpyBatchAsync "
+            "faults above that on rocm 7.14/7.15 when batch copy is "
+            "optimized; CUDA uncapped). Set >0 to override."
         ),
     )
     wsl2_enable_pin_memory: bool = Field(
@@ -2461,13 +2657,6 @@ class UsageSettings(BaseSettings):
         default="production",
         description="Label identifying the deployment context reported in usage stats.",
     )
-    test_force_fp8_marlin: bool = Field(
-        default=False,
-        description=(
-            "If set, forces FP8 Marlin to be used for FP8 quantization "
-            "regardless of the hardware support for FP8 compute."
-        ),
-    )
     test_force_load_format: str = Field(
         default="dummy",
         json_schema_extra={"compile_factor": False},
@@ -2481,8 +2670,7 @@ class UsageSettings(BaseSettings):
         default=False,
         json_schema_extra={"compile_factor": False},
         description=(
-            "If true, will load models from ModelScope instead of Hugging "
-            "Face Hub. Note that the value is true or false, not numbers."
+            "If true, will load models from ModelScope instead of Hugging Face Hub."
         ),
     )
     use_fastokens: bool = Field(
@@ -2821,15 +3009,6 @@ def is_set(name: str) -> bool:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def validate_environ(hard_fail: bool) -> None:
-    for env in os.environ:
-        if env.startswith("VLLM_") and env not in _VAR_TO_PATH:
-            if hard_fail:
-                raise ValueError(f"Unknown vLLM environment variable detected: {env}")
-            else:
-                logger.warning("Unknown vLLM environment variable detected: %s", env)
-
-
 def _is_envs_cache_enabled() -> bool:
     """Checked if __getattr__ is wrapped with functools.cache"""
     global __getattr__
@@ -2872,6 +3051,7 @@ def get_vllm_port() -> int | None:
 
     Raises:
         ValueError: If VLLM_PORT is a URI, suggests k8s service discovery issue.
+
     """
     if "VLLM_PORT" not in os.environ:
         return None
@@ -2897,7 +3077,6 @@ def compile_factors() -> dict[str, object]:
     Start with every known vLLM env var; drop those marked
     ``compile_factor=False`` on their field (see ``_non_compile_factors``);
     hash everything else. This keeps the cache key aligned across workers."""
-
     ignored_factors = _NON_COMPILE_FACTORS
 
     from vllm.config.utils import normalize_value

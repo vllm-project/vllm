@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Utility helpers for NVFP4 + FlashInfer fused-MoE path"""
+"""Utility helpers for NVFP4 + FlashInfer fused-MoE path."""
 
 from typing import TYPE_CHECKING
 
@@ -9,8 +9,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    align_fp4_moe_hidden_dim_for_fi,
     align_fp4_moe_weights_for_fi,
-    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
@@ -128,9 +128,9 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
 ]:
     """Prepare weights for the CuteDSL wrapper-based NvFP4 MoE backend.
 
-    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper,
-    and interleaves w13 gate/linear rows for gated activations. Non-gated
-    activations use a single w13 projection and keep its row order unchanged.
+    Pads the runtime expert tensors to the kernel's GEMM alignment, converts
+    weight scale factors to the MMA layout expected by CuteDslMoEWrapper, and
+    interleaves w13 gate/linear rows for gated activations.
     """
     # Global scaling factors (same as other FlashInfer backends).
     num_experts = w13.shape[0]
@@ -140,12 +140,38 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     )
     a2_scale = amax_for_moe_activation_quant(a2_scale, enable_eplb).repeat(num_experts)
 
-    if layer.activation.is_gated:
+    gated = layer.activation.is_gated
+    if gated:
         w13, w13_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
             layer.activation, w13, w13_scale
         )
 
-        # Interleave up/gate rows for w13 weights and scales.
+    # GEMM1's output dimension must be a multiple of 128: 2I for gated
+    # activations (also required by interleaving), but only I for non-gated.
+    # Keep the checkpoint tensors unchanged and pad only the kernel's runtime
+    # representation. Zero rows also make the padded GEMM2 contraction a no-op.
+    w13, w13_scale, w2, w2_scale, padded_intermediate = align_fp4_moe_weights_for_fi(
+        w13,
+        w13_scale,
+        w2,
+        w2_scale,
+        is_act_and_mul=gated,
+        min_alignment=64 if gated else 128,
+    )
+    layer.moe_config.intermediate_size_per_partition = padded_intermediate
+
+    # GEMM1 gathers full 256-element K tiles of activations and their scales
+    # without a K-tail predicate. Pad runtime weights to match; the MoE runner
+    # pads activations and trims the output using the original hidden size.
+    w13, w13_scale, w2, w2_scale, padded_hidden = align_fp4_moe_hidden_dim_for_fi(
+        w13, w13_scale, w2, w2_scale
+    )
+    if layer.moe_config.hidden_dim_unpadded is None:
+        layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim
+    layer.moe_config.hidden_dim = padded_hidden
+
+    if gated:
+        # Interleave up/gate rows for the fused gated activation.
         w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
         w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
 
@@ -190,25 +216,23 @@ def nvfp4_swizzled_scale_to_cutedsl_mma_view(scale: torch.Tensor) -> torch.Tenso
 
 
 def prepare_static_weights_for_trtllm_fp4_moe(
-    # args_dequant,
-    # args,
-    gemm1_weights,
-    gemm2_weights,
-    gemm1_scales_linear_fp4_bytes,
-    gemm2_scales_linear_fp4_bytes,
-    hidden_size,
-    intermediate_size,
-    num_experts,
+    gemm1_weights: torch.Tensor,
+    gemm2_weights: torch.Tensor,
+    gemm1_scales_linear_fp4_bytes: torch.Tensor,
+    gemm2_scales_linear_fp4_bytes: torch.Tensor,
+    hidden_size: int,
+    intermediate_size: int,
+    num_experts: int,
     is_gated_activation: bool,
-):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Shuffle NVFP4 weights into the FlashInfer TRT-LLM layout."""
     from flashinfer import nvfp4_block_scale_interleave
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
         get_w2_permute_indices_with_cache,
     )
 
-    _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-    """Prepare quantized weights for kernel (done offline with weights)."""
+    permute_indices_cache: dict[tuple[object, ...], torch.Tensor] = {}
     epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
     gemm1_intermediate_size = (
         2 * intermediate_size if is_gated_activation else intermediate_size
@@ -231,85 +255,75 @@ def prepare_static_weights_for_trtllm_fp4_moe(
         torch.float8_e4m3fn
     ).reshape(num_experts, hidden_size, intermediate_size // 16)  # fp8 scaling factors
 
-    gemm1_weights_fp4_shuffled = []
-    gemm1_scales_fp4_shuffled = []
-    gemm2_weights_fp4_shuffled = []
-    gemm2_scales_fp4_shuffled = []
-    for i in range(num_experts):
-        # Calculate the permute indices for the following:
-        # 1. Reorder rows of W1 and scales for fused gated activation
-        # 2. Shuffle weights and scaling factors for transposed mma output
-        # for both w3_w1 and w2 weights and scale factors
-        permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-            _cache_permute_indices,
-            gemm1_weights_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-            is_gated_act_gemm=is_gated_activation,
-        )
-        gemm1_weights_fp4_shuffled.append(
-            gemm1_weights_fp4[i]
-            .view(torch.uint8)[permute_indices.to(gemm1_weights_fp4.device)]
-            .contiguous()
-        )
-
-        permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
-            _cache_permute_indices,
-            gemm1_scales_linear_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-            num_elts_per_sf=16,
-            is_gated_act_gemm=is_gated_activation,
-        )
-        gemm1_scales_fp4_shuffled.append(
-            nvfp4_block_scale_interleave(
-                gemm1_scales_linear_fp4[i]
-                .view(torch.uint8)[
-                    permute_sf_indices.to(gemm1_scales_linear_fp4.device)
-                ]
-                .contiguous()
-            )
-        )
-
-        permute_indices = get_w2_permute_indices_with_cache(
-            _cache_permute_indices,
-            gemm2_weights_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-        )
-        gemm2_weights_fp4_shuffled.append(
-            gemm2_weights_fp4[i]
-            .view(torch.uint8)[permute_indices.to(gemm2_weights_fp4.device)]
-            .contiguous()
-        )
-
-        permute_sf_indices = get_w2_permute_indices_with_cache(
-            _cache_permute_indices,
-            gemm2_scales_linear_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-            num_elts_per_sf=16,
-        )
-        gemm2_scales_fp4_shuffled.append(
-            nvfp4_block_scale_interleave(
-                gemm2_scales_linear_fp4[i]
-                .view(torch.uint8)[
-                    permute_sf_indices.to(gemm2_scales_linear_fp4.device)
-                ]
-                .contiguous()
-            )
-        )
-
-    # Stack weights for all experts
-    gemm1_weights_fp4_shuffled = torch.stack(gemm1_weights_fp4_shuffled)
-    gemm1_scales_fp4_shuffled = (
-        torch.stack(gemm1_scales_fp4_shuffled)
-        .view(torch.float8_e4m3fn)
-        .reshape(num_experts, gemm1_intermediate_size, hidden_size // 16)
+    gemm1_weight_indices = _maybe_get_cached_w3_w1_permute_indices(
+        permute_indices_cache,
+        gemm1_weights_fp4[0].view(torch.uint8),
+        epilogue_tile_m,
+        is_gated_act_gemm=is_gated_activation,
+    )
+    gemm1_scale_indices = _maybe_get_cached_w3_w1_permute_indices(
+        permute_indices_cache,
+        gemm1_scales_linear_fp4[0].view(torch.uint8),
+        epilogue_tile_m,
+        num_elts_per_sf=16,
+        is_gated_act_gemm=is_gated_activation,
+    )
+    gemm2_weight_indices = get_w2_permute_indices_with_cache(
+        permute_indices_cache,
+        gemm2_weights_fp4[0].view(torch.uint8),
+        epilogue_tile_m,
+    )
+    gemm2_scale_indices = get_w2_permute_indices_with_cache(
+        permute_indices_cache,
+        gemm2_scales_linear_fp4[0].view(torch.uint8),
+        epilogue_tile_m,
+        num_elts_per_sf=16,
     )
 
-    gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
-    gemm2_scales_fp4_shuffled = (
-        torch.stack(gemm2_scales_fp4_shuffled)
-        .view(torch.float8_e4m3fn)
-        .reshape(num_experts, hidden_size, intermediate_size // 16)
+    gemm1_weights_fp4_shuffled = torch.empty_like(gemm1_weights_fp4, dtype=torch.uint8)
+    gemm1_scales_fp4_shuffled = torch.empty_like(gemm1_scales_linear_fp4)
+    gemm2_weights_fp4_shuffled = torch.empty_like(gemm2_weights_fp4, dtype=torch.uint8)
+    gemm2_scales_fp4_shuffled = torch.empty_like(gemm2_scales_linear_fp4)
+    gemm1_scale_scratch = torch.empty_like(
+        gemm1_scales_linear_fp4[0], dtype=torch.uint8
     )
+    gemm2_scale_scratch = torch.empty_like(
+        gemm2_scales_linear_fp4[0], dtype=torch.uint8
+    )
+
+    for expert_id in range(num_experts):
+        torch.index_select(
+            gemm1_weights_fp4[expert_id].view(torch.uint8),
+            0,
+            gemm1_weight_indices,
+            out=gemm1_weights_fp4_shuffled[expert_id],
+        )
+        torch.index_select(
+            gemm1_scales_linear_fp4[expert_id].view(torch.uint8),
+            0,
+            gemm1_scale_indices,
+            out=gemm1_scale_scratch,
+        )
+        gemm1_scales_fp4_shuffled[expert_id].view(torch.uint8).reshape(-1).copy_(
+            nvfp4_block_scale_interleave(gemm1_scale_scratch)
+        )
+
+        torch.index_select(
+            gemm2_weights_fp4[expert_id].view(torch.uint8),
+            0,
+            gemm2_weight_indices,
+            out=gemm2_weights_fp4_shuffled[expert_id],
+        )
+        torch.index_select(
+            gemm2_scales_linear_fp4[expert_id].view(torch.uint8),
+            0,
+            gemm2_scale_indices,
+            out=gemm2_scale_scratch,
+        )
+        gemm2_scales_fp4_shuffled[expert_id].view(torch.uint8).reshape(-1).copy_(
+            nvfp4_block_scale_interleave(gemm2_scale_scratch)
+        )
+
     return (
         gemm1_weights_fp4_shuffled,
         gemm1_scales_fp4_shuffled,
@@ -330,6 +344,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor,
     is_act_and_mul: bool,
+    trtllm_hidden_alignment: int = 256,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -383,8 +398,12 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-        w13, w13_scale, w2, w2_scale, padded_hidden = (
-            align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
+        w13, w13_scale, w2, w2_scale, padded_hidden = align_fp4_moe_hidden_dim_for_fi(
+            w13,
+            w13_scale,
+            w2,
+            w2_scale,
+            min_alignment=trtllm_hidden_alignment,
         )
         if layer.moe_config.hidden_dim_unpadded is None:
             layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim

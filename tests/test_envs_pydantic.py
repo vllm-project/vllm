@@ -8,7 +8,7 @@ Covers the special-cased fields called out in the refactor design:
 - Side-effect defaults (VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME)
 - Tri-state semantics (VLLM_PLUGINS)
 - Choice validation (VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS)
-- Case-insensitive literals (VLLM_FLOAT32_MATMUL_PRECISION, VLLM_MM_HASHER_ALGORITHM)
+- Case-insensitive literals (VLLM_FLOAT32_MATMUL_PRECISION)
 - Clamping (VLLM_LOG_STATS_INTERVAL)
 - Widened bool accept set (yes/no/on/off)
 - Cache semantics and validate_environ
@@ -101,7 +101,7 @@ def test_object_storage_shm_buffer_autogen():
     # Unset -> UUID generated AND written back to os.environ.
     envs = _reload_envs()
     name = envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME
-    assert name.startswith("VLLM_OBJECT_STORAGE_SHM_BUFFER_")
+    assert name.startswith("vllm_mm_")
     assert os.environ["VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"] == name
 
 
@@ -165,16 +165,6 @@ def test_logging_level_uppercased(monkeypatch):
     assert envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
 
-def test_mm_hasher_case_insensitive_coerced(monkeypatch):
-    # Pre-refactor: env_with_choices(case_sensitive=False) accepted upper-case
-    # but returned the value unchanged. Now coerced to canonical lower-case.
-    # The only consumer (vllm/multimodal/hasher.py) already calls .lower(),
-    # so this is a behavior-equivalent normalization.
-    monkeypatch.setenv("VLLM_MM_HASHER_ALGORITHM", "SHA256")
-    envs = _reload_envs()
-    assert envs.VLLM_MM_HASHER_ALGORITHM == "sha256"
-
-
 def test_float32_precision_case_insensitive_coerced(monkeypatch):
     # Pre-refactor: returned the user-typed casing. torch.set_float32_matmul_precision
     # is case-sensitive and silently warns + no-ops on upper-case input, so the
@@ -212,10 +202,12 @@ def test_is_set_unknown_raises():
 def test_validate_environ_unknown_var_warns(monkeypatch, caplog_vllm):
     import logging as _logging
 
+    from vllm.platforms.interface import Platform
+
     monkeypatch.setenv("VLLM_DEFINITELY_NOT_REAL", "1")
-    envs = _reload_envs()
-    with caplog_vllm.at_level(_logging.WARNING, logger="vllm.envs"):
-        envs.validate_environ(hard_fail=False)
+    _reload_envs()
+    with caplog_vllm.at_level(_logging.WARNING, logger="vllm.platforms.interface"):
+        Platform.validate_environ(hard_fail=False)
 
     assert any(
         "VLLM_DEFINITELY_NOT_REAL" in r.getMessage() for r in caplog_vllm.records
@@ -223,10 +215,12 @@ def test_validate_environ_unknown_var_warns(monkeypatch, caplog_vllm):
 
 
 def test_validate_environ_unknown_var_raises(monkeypatch):
+    from vllm.platforms.interface import Platform
+
     monkeypatch.setenv("VLLM_DEFINITELY_NOT_REAL", "1")
-    envs = _reload_envs()
+    _reload_envs()
     with pytest.raises(ValueError, match="VLLM_DEFINITELY_NOT_REAL"):
-        envs.validate_environ(hard_fail=True)
+        Platform.validate_environ(hard_fail=True)
 
 
 def test_dir_exposes_known_vars():
