@@ -285,14 +285,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.indexer",
         )
-        # One launch does the indexer prepare, the main QK-norm/RoPE/gate and
-        # the main K/V cache write (see QSAIndexer.forward); otherwise all of
-        # them take the separate kernels. The main RoPE reads the indexer's
-        # cos/sin table, which is the same rotary_emb.
-        # NVIDIA gates the same launch on use_fused_qk_norm_rope_gate, which
-        # requires is_cuda() and so stays off on ROCm. supports_fused_pre_indexer
-        # already requires NeoX RoPE and a compatible MRoPE section. The
-        # power-of-two head dim is tl.arange(0, MAIN_D) in the main program.
         self.use_fused_qsa_prepare = (
             self.attn_output_gate
             and self.indexer.use_fused_pre_indexer
