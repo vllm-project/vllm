@@ -295,7 +295,8 @@ def _quantize_dequantize_fp8_ds_mla(
     rope_dim = k_pe.shape[-1]
     num_tokens = kv_c.shape[0]
     num_blocks = max(1, math.ceil(num_tokens / block_size))
-    entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+    # The 64-dim RoPE slot is always there; NoPE rows zero-fill it.
+    entry_size = kv_lora_rank + 4 * 4 + 2 * 64
 
     tmp_cache = torch.zeros(
         num_blocks, block_size, entry_size, dtype=torch.uint8, device=kv_c.device
@@ -413,6 +414,13 @@ def _quantize_dequantize_nvfp4_ds_mla(
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("block_size", [32, 64])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
+@pytest.mark.parametrize(
+    ("total_num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
+    [
+        pytest.param(128, 128, 64, 128, id="deepseek"),
+        pytest.param(64, 256, 0, 256, id="glm53_flash_nope"),
+    ],
+)
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
     dist_init,
@@ -424,8 +432,18 @@ def test_sparse_backend_decode_correctness(
     workspace_init,
     q_scale: float,
     k_scale: float,
+    total_num_heads: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
     monkeypatch,
 ):
+    if qk_rope_head_dim == 0 and (
+        backend_cls != FlashMLASparseBackend
+        or kv_cache_dtype not in ("auto", "fp8_ds_mla")
+        or torch.cuda.get_device_capability()[0] != 9
+    ):
+        pytest.skip("NoPE sparse MLA is served by FlashMLA on SM90 only")
     if (
         batch_name == "large_q_pure_prefill"
         and backend_cls == FlashMLASparseBackend
@@ -484,15 +502,10 @@ def test_sparse_backend_decode_correctness(
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
 
-    # Model hyper-parameters (kept intentionally small for the unit test)
-    total_num_heads = 128
     # Compute per-rank heads for simulated TP
     num_heads = max(1, total_num_heads // tensor_parallel_size)
 
     kv_lora_rank = 512
-    qk_nope_head_dim = 128
-    qk_rope_head_dim = 64
-    v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
     topk_tokens = 128
 
@@ -2565,7 +2578,7 @@ def test_hisparse_multi_step_writes_request_major_output():
 
 
 @requires_hisparse_ops
-def test_hisparse_kv_update_writes_resident_and_staging_caches():
+def test_hisparse_kv_update_writes_resident_cache():
     device = torch.device(DEVICE_TYPE)
     block_size = 4
     row_width = 8
@@ -2584,18 +2597,11 @@ def test_hisparse_kv_update_writes_resident_and_staging_caches():
         block_table=torch.tensor([[1]], dtype=torch.int32, device=device),
         slot_mapping=resident_slots,
     )
-    cache_handle.mirror_staging_cache = torch.empty(
-        (1, block_size, row_width), dtype=torch.float32, device=device
-    )
-    cache_handle.mirror_staging_slots = torch.arange(
-        block_size, dtype=torch.int64, device=device
-    )
     slots = torch.tensor([3, 7, -1], dtype=torch.int64, device=device)
     kv_c = torch.randn(8, row_width - 2, device=device)
     k_pe = torch.randn(8, 1, 2, device=device)
     cache_handle.num_actual_tokens = slots.numel()
     cache_handle.decode_batch = False
-    cache_handle.host_mirror_required = True
     source_cache = torch.zeros_like(cache_handle.view.cache)
     impl = object.__new__(FlashMLASparseImpl)
     layer = SimpleNamespace(
@@ -2622,9 +2628,6 @@ def test_hisparse_kv_update_writes_resident_and_staging_caches():
         expected.to(device),
     )
     torch.testing.assert_close(source_cache, torch.zeros_like(source_cache))
-    staged = cache_handle.mirror_staging_cache.view(-1, row_width)
-    staged_expected = torch.cat([kv_c[:3], k_pe[:3, 0]], dim=-1)
-    torch.testing.assert_close(staged[:3], staged_expected)
 
 
 @requires_hisparse_ops
@@ -3809,6 +3812,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         topk_indices_buffer=topk_indices,
         num_heads=2,
         kv_lora_rank=1,
+        q_head_size=3,
         index_group=None,
         index_group_index=0,
         dcp_world_size=1,
