@@ -888,7 +888,7 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -901,8 +901,11 @@ class Scheduler(SchedulerInterface):
                     step_skipped_waiting.appendleft(request_to_skip)
 
             while token_budget > 0:
-                # Requests holding KV blocks are always drained first.
-                request_queue = self.kv_holding_waiting or self.waiting
+                # Requests holding KV blocks are always drained first, and are
+                # the only ones admitted under PAUSED_NEW (e.g. async KV loads).
+                request_queue = self.kv_holding_waiting
+                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                    request_queue = self.waiting
                 if not request_queue or input_budget <= draft_slots:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
@@ -2834,7 +2837,8 @@ class Scheduler(SchedulerInterface):
             return 0
         num_running, num_waiting = self.get_request_counts()
         if self._pause_state == PauseState.PAUSED_NEW:
-            return num_running
+            # Requests holding KV blocks still drain; queued ones stay queued.
+            num_waiting = len(self.kv_holding_waiting)
         num_waiting -= self.num_waiting_for_streaming_input
         return num_waiting + num_running
 
