@@ -363,6 +363,10 @@ async def test_generate_prompt_token_id_logprobs(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
 async def test_generate_return_token_logprobs(client):
     """Flat per-token sampled logprobs match the OpenAI-style objects."""
     base = {
@@ -387,6 +391,10 @@ async def test_generate_return_token_logprobs(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
 async def test_generate_return_token_logprobs_defaults_logprobs(client):
     """Omitting sampling_params.logprobs still returns the flat array."""
     payload = {
@@ -405,6 +413,10 @@ async def test_generate_return_token_logprobs_defaults_logprobs(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
 async def test_generate_return_token_logprobs_keeps_top_logprobs(client):
     """With logprobs > 0 both representations are returned."""
     payload = {
@@ -425,6 +437,10 @@ async def test_generate_return_token_logprobs_keeps_top_logprobs(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
 @pytest.mark.parametrize("n", [2, 4])
 async def test_generate_return_token_logprobs_n_choices(client, n):
     """Every choice carries its own aligned array; values match the objects."""
@@ -466,7 +482,11 @@ def test_sampled_token_logprobs_clamps_like_object_path():
         ranks=[1, 2, 1, 1, 2],
         decoded_tokens=[None] * 5,
     )
-    assert ServingTokens._sampled_token_logprobs(flat) == [-0.25, -9999.0, -9999.0]
+    assert ServingTokens._sampled_token_logprobs(flat, [5, 7, 1]) == [
+        -0.25,
+        -9999.0,
+        -9999.0,
+    ]
 
 
 def test_sampled_token_logprobs_clamp_nan():
@@ -482,10 +502,60 @@ def test_sampled_token_logprobs_clamp_nan():
         ranks=[0, 1],
         decoded_tokens=[None] * 2,
     )
-    assert ServingTokens._sampled_token_logprobs(flat) == [-9999.0, -0.5]
+    assert ServingTokens._sampled_token_logprobs(flat, [5, 9]) == [-9999.0, -0.5]
+
+
+def test_sampled_token_logprobs_reads_any_per_position_dicts():
+    """Representations other than FlatLogprobs (e.g. a list of dicts or an
+    array-backed sequence of them) are read by the sampled token id instead of
+    failing."""
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+    from vllm.logprobs import Logprob
+
+    positions = [
+        {5: Logprob(-0.25, 1), 9: Logprob(-1.5, 2)},
+        # Sampled token outside the top k: listed first, other ranks follow.
+        {7: Logprob(float("-inf"), 3), 1: Logprob(-0.1, 1)},
+        {2: Logprob(float("nan"), 0)},
+    ]
+    assert ServingTokens._sampled_token_logprobs(positions, [5, 7, 2]) == [
+        -0.25,
+        -9999.0,
+        -9999.0,
+    ]
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("logprobs", [None, 0, 2])
+async def test_generate_return_token_logprobs_rejects_logprob_token_ids(
+    client, logprobs
+):
+    """The sampled-only path drops per-token entries, so the requested token
+    scores would silently come back empty; the combination is rejected."""
+    sampling_params = {"max_tokens": 3, "temperature": 0.0, "logprob_token_ids": [5]}
+    if logprobs is not None:
+        sampling_params["logprobs"] = logprobs
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": sampling_params,
+        "stream": False,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "logprob_token_ids" in resp.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
 async def test_generate_omits_sampled_unless_requested(client):
     """Callers that did not ask for the field must not see it (schema stays)."""
     payload = {
@@ -500,6 +570,10 @@ async def test_generate_omits_sampled_unless_requested(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
 @pytest.mark.parametrize(
     "server",
     [
@@ -546,6 +620,10 @@ async def test_generate_return_token_logprobs_with_speculative_decoding(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
 async def test_generate_return_token_logprobs_rejects_stream(client):
     payload = {
         "model": MODEL_NAME,
@@ -560,6 +638,10 @@ async def test_generate_return_token_logprobs_rejects_stream(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
 async def test_generate_return_token_logprobs_requires_tokens_mode(client):
     """``sampled`` lives on the tokens-mode ``GenerateLogProbs``."""
     payload = {

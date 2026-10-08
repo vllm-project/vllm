@@ -40,7 +40,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
-from vllm.logprobs import FlatLogprobs, Logprob
+from vllm.logprobs import FlatLogprobs, Logprob, SampleLogprobs
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -235,6 +235,13 @@ class ServingTokens(GenerateBaseServing):
                     "return_token_logprobs requires --logprobs-mode raw_logprobs "
                     "or processed_logprobs (server runs "
                     f"{self.model_config.logprobs_mode})"
+                )
+            if sampling_params.logprob_token_ids is not None:
+                # The sampled-only path drops per-token entries, so the
+                # requested token scores would silently disappear.
+                return self.create_error_response(
+                    "return_token_logprobs cannot be combined with "
+                    "sampling_params.logprob_token_ids"
                 )
             if sampling_params.logprobs is None:
                 sampling_params.logprobs = 0
@@ -468,10 +475,8 @@ class ServingTokens(GenerateBaseServing):
                 if output.sampled_logprobs is not None:
                     sampled = [_clamp_logprob(x) for x in output.sampled_logprobs]
                 else:
-                    assert isinstance(out_logprobs, FlatLogprobs), (
-                        "Did not output logprobs"
-                    )
-                    sampled = self._sampled_token_logprobs(out_logprobs)
+                    assert out_logprobs is not None, "Did not output logprobs"
+                    sampled = self._sampled_token_logprobs(out_logprobs, token_ids)
 
             # This is top_logprobs in completions API. With
             # return_token_logprobs the objects are only built when the
@@ -785,17 +790,25 @@ class ServingTokens(GenerateBaseServing):
         return self.renderer.tokenizer
 
     @staticmethod
-    def _sampled_token_logprobs(flat: FlatLogprobs) -> list[float]:
-        """Sampled-token logprob per position from the flat representation.
+    def _sampled_token_logprobs(
+        logprobs: SampleLogprobs, token_ids: GenericSequence[int]
+    ) -> list[float]:
+        """Sampled-token logprob per position.
 
-        The sampler stores the sampled token first at every position, so its
-        logprob is the entry at each position's start index. Every position
-        carries at least that entry whenever ``logprobs`` is requested. Values
-        go through ``_clamp_logprob`` (``-inf`` and NaN become ``-9999.0``), so
-        they stay JSON-representable.
+        From ``FlatLogprobs`` the sampler stores the sampled token first at
+        every position, so its logprob is the entry at each position's start
+        index. Any other representation is read as a sequence of
+        ``{token_id: Logprob}`` per position, where the sampled token is always
+        present. Values go through ``_clamp_logprob`` (``-inf`` and NaN become
+        ``-9999.0``), so they stay JSON-representable.
         """
-        logprobs = flat.logprobs
-        return [_clamp_logprob(logprobs[start]) for start in flat.start_indices]
+        if isinstance(logprobs, FlatLogprobs):
+            values = logprobs.logprobs
+            return [_clamp_logprob(values[start]) for start in logprobs.start_indices]
+        return [
+            _clamp_logprob(position[token_id].logprob)
+            for position, token_id in zip(logprobs, token_ids)
+        ]
 
     def _create_text_logprobs(
         self,
