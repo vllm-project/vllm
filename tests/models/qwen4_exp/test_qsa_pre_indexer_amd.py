@@ -55,9 +55,10 @@ MIXED_BATCH = ([260, 259, 138], [1, 1, 37], [8, 8, 8])
 
 
 def _make_block_table(block_counts):
-    num_blocks = sum(block_counts)
+    # Block 0 is the null block, which no request owns.
+    num_blocks = sum(block_counts) + 1
     table = torch.full((len(block_counts), max(block_counts)), -1, dtype=torch.int32)
-    physical_blocks = torch.randperm(num_blocks)
+    physical_blocks = torch.randperm(sum(block_counts)) + 1
     offset = 0
     for request, count in enumerate(block_counts):
         table[request, :count] = physical_blocks[offset : offset + count]
