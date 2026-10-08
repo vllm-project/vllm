@@ -6,6 +6,7 @@ Same vision/LLM stack as MiniCPM-V 4.6, plus canvas 3D M-RoPE.
 """
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -13,13 +14,14 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalFieldConfig
 
 from .minicpmv import MiniCPMVDummyInputsBuilder
 from .minicpmv4_6 import (
     MiniCPMV4_6ForConditionalGeneration,
     MiniCPMV4_6MultiModalProcessor,
     MiniCPMV4_6ProcessingInfo,
+    _resolve_modality_mm_kwarg,
 )
 
 logger = init_logger(__name__)
@@ -27,8 +29,8 @@ logger = init_logger(__name__)
 
 class MiniCPMV4_7ProcessingInfo(MiniCPMV4_6ProcessingInfo):
     def _mm_max_slice_nums(self, **kwargs: object) -> int | None:
-        merged = self.ctx.get_merged_mm_kwargs(kwargs, modality="image")
-        max_slice = merged.get("max_slice_nums")
+        merged = self.ctx.get_merged_mm_kwargs(kwargs)
+        max_slice = _resolve_modality_mm_kwarg(merged, "image", "max_slice_nums")
         if max_slice is None:
             return None
         return int(max_slice)
@@ -55,6 +57,22 @@ class MiniCPMV4_7ProcessingInfo(MiniCPMV4_6ProcessingInfo):
 
 
 class MiniCPMV4_7MultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
+    def _get_mm_fields_config(
+        self,
+        hf_inputs,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        fields = dict(super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs))
+        # Canvas M-RoPE places slices from `tgt_sizes`. Stripping the payload of
+        # a prefix-cache-covered item only keeps CPU-side metadata, so without
+        # this a cached image loses its target sizes, `image_bounds` and
+        # `target_sizes` disagree, and the whole request silently falls back to
+        # sequential positions.
+        for key, modality in (("tgt_sizes", "image"), ("video_tgt_sizes", "video")):
+            if key in fields:
+                fields[key] = MultiModalFieldConfig.batched(modality, keep_on_cpu=True)
+        return fields
+
     def _video_local_id_prefix(self, video_idx: int) -> str:
         # MiniCPMV4_7Processor emits no local `<image_id>` in front of video
         # placeholders: a video is one temporal sequence and 4.7 was trained

@@ -97,6 +97,78 @@ def test_v47_does_not_read_drop_vision_last_layer():
         assert v46._drop_vision_last_layer() is value
 
 
+def test_canvas_mrope_sizes_survive_prefix_cache_stripping():
+    """A cached image must keep `tgt_sizes`, or canvas M-RoPE falls back.
+
+    `strip_covered_mm_data` drops the payload of a prefix-cache-covered item and
+    keeps only CPU-side metadata. Canvas M-RoPE places slices from `tgt_sizes`,
+    so 4.7 marks it `keep_on_cpu` while the shared 4.6 config stays as it was.
+    """
+    from vllm.model_executor.models.minicpmv4_6 import _minicpmv4_6_field_config
+
+    shared = _minicpmv4_6_field_config({})
+    assert shared["tgt_sizes"].field.keep_on_cpu is False
+    assert shared["video_tgt_sizes"].field.keep_on_cpu is False
+
+    processor = MiniCPMV4_7MultiModalProcessor.__new__(MiniCPMV4_7MultiModalProcessor)
+    fields = processor._get_mm_fields_config({}, {})
+
+    assert fields["tgt_sizes"].field.keep_on_cpu is True
+    assert fields["video_tgt_sizes"].field.keep_on_cpu is True
+    # Other fields keep their previous setting.
+    assert fields["pixel_values"].field.keep_on_cpu is False
+    assert fields["video_image_sizes"].field.keep_on_cpu is True
+
+
+def test_modality_mm_kwargs_resolution():
+    """Flat keys apply to both modalities; nested scopes apply to one.
+
+    This is what `--mm-processor-kwargs` and per-request overrides are read
+    through, so `images_kwargs` must not leak into video and vice versa.
+    """
+    from vllm.model_executor.models.minicpmv4_6 import (
+        _flat_processor_kwargs,
+        _resolve_modality_mm_kwarg,
+    )
+
+    resolve = _resolve_modality_mm_kwarg
+
+    assert resolve({}, "image", "downsample_mode") is None
+    assert resolve({"downsample_mode": "4x"}, "image", "downsample_mode") == "4x"
+    assert resolve({"downsample_mode": "4x"}, "video", "downsample_mode") == "4x"
+    assert (
+        resolve(
+            {"images_kwargs": {"downsample_mode": "16x"}}, "image", "downsample_mode"
+        )
+        == "16x"
+    )
+    # Scoped to images, so video must not see it.
+    assert (
+        resolve(
+            {"images_kwargs": {"downsample_mode": "16x"}}, "video", "downsample_mode"
+        )
+        is None
+    )
+    assert (
+        resolve({"videos_kwargs": {"max_slice_nums": 1}}, "video", "max_slice_nums")
+        == 1
+    )
+    # A non-mapping scope is ignored rather than raising.
+    assert resolve({"images_kwargs": None}, "image", "downsample_mode") is None
+
+    # `_flat_processor_kwargs` drops the scoped keys and pins the mode.
+    flat = _flat_processor_kwargs(
+        {
+            "downsample_mode": "4x",
+            "images_kwargs": {"a": 1},
+            "videos_kwargs": {"b": 2},
+            "audio_kwargs": {"c": 3},
+        },
+        "16x",
+    )
+    assert flat == {"downsample_mode": "16x"}
+
+
 def test_vit_merger_qkv_is_stacked_before_load():
     mapped = list(
         _stack_vit_merger_qkv(
