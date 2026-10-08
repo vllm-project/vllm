@@ -180,6 +180,33 @@ def test_finish_draft_session_keeps_lora_state():
     assert worker.model_runner.reset_lora_calls == 0
 
 
+class _RecordingScreenedHead:
+    def __init__(self) -> None:
+        self.refresh_calls = 0
+
+    def refresh(self) -> None:
+        self.refresh_calls += 1
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_finish_refreshes_screened_lm_head(is_draft: bool):
+    """Weight transfer bypasses reload_weights, so the screened lm_head
+    re-derives its FP8 copy; a draft update can share the target lm_head."""
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    worker._set_draft_weight_update_target = lambda: None
+    worker.model_runner.screened_head = _RecordingScreenedHead()
+
+    if is_draft:
+        Worker.start_draft_weight_update(worker)
+    else:
+        Worker.start_weight_update(worker)
+    Worker.finish_weight_update(worker)
+
+    assert worker.model_runner.screened_head.refresh_calls == 1
+
+
 def test_double_start_raises():
     worker = _make_worker(_RecordingEngine())
     Worker.start_weight_update(worker)
