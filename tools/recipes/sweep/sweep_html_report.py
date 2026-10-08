@@ -569,8 +569,11 @@ footer { color: #607486; font-size: 12px; text-align: center; }
       <span>TTFT SLA</span></div>
     <div class="card"><strong>{_fmt(tpot_sla_ms)} ms</strong>
       <span>TPOT SLA</span></div>
-    <div class="card"><strong>{_fmt_percent(
-        minimum_compliance * 100 if minimum_compliance is not None else None)}</strong>
+    <div class="card"><strong>{
+        _fmt_percent(
+            minimum_compliance * 100 if minimum_compliance is not None else None
+        )
+    }</strong>
       <span>required combined compliance</span></div>
   </div>
 </header>
