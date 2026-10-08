@@ -328,6 +328,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS: bool = False
 
 
 def get_default_cache_root():
@@ -1168,6 +1169,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         None
         if "VLLM_PLUGINS" not in os.environ
         else os.environ["VLLM_PLUGINS"].split(",")
+    ),
+    # With latest-only retention, privately pin the latest materialized
+    # scheduler-aligned Mamba decode state and publish it on a stopped finish.
+    "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS": lambda: bool(
+        int(os.getenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "0"))
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
