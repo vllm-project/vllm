@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
+from functools import cached_property
 from typing import Any, Literal
 
 import torch
@@ -18,7 +19,10 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.lora.utils import (
+    get_adapter_absolute_path,
+    get_transformers_rename_mapper,
+)
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
@@ -47,6 +51,7 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
+        self.hf_config = vllm_config.model_config.hf_config
         lora_config = vllm_config.lora_config
         if lora_config is None:
             raise ValueError("LoRA config must be set for WorkerLoRAManager.")
@@ -82,6 +87,12 @@ class WorkerLoRAManager:
     @property
     def is_enabled(self) -> bool:
         return True
+
+    @cached_property
+    def _transformers_rename_mapper(self):
+        return get_transformers_rename_mapper(
+            self.hf_config, self._adapter_manager.model
+        )
 
     def create_lora_manager(
         self,
@@ -133,6 +144,11 @@ class WorkerLoRAManager:
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
             if hf_to_vllm_mapper is not None:
                 hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
+            # Adapters trained with Transformers use its renamed module names.
+            if (renames := self._transformers_rename_mapper) is not None:
+                hf_to_vllm_mapper = (
+                    renames | hf_to_vllm_mapper if hf_to_vllm_mapper else renames
+                )
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
