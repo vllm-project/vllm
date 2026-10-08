@@ -141,12 +141,16 @@ def test_bench_serve_insecure(ssl_server):
         "--num-prompts",
         "5",
         "--insecure",
+        "--probe-request-rate",
+        "5",
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     print(result.stdout)
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    # Probes use their own session, which must also honor --insecure.
+    assert "Probe requests completed" in result.stdout
 
 
 @pytest.mark.benchmark
