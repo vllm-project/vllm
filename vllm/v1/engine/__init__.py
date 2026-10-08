@@ -239,7 +239,7 @@ class EngineCoreOutput(
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
     # Sampled-token logprob per new token for requests with
-    # ``sampled_logprobs_only``; replaces ``new_logprobs`` for them. Appended
+    # ``_sampled_logprobs_only``; replaces ``new_logprobs`` for them. Appended
     # last so `array_like` positional serialization stays compatible.
     new_sampled_logprobs: list[float] | None = None
 

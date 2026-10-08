@@ -59,7 +59,7 @@ class LogprobsLists(NamedTuple):
         """The sampled token's logprob at each of a request's new positions.
 
         Column 0 of ``logprobs`` is the sampled token (the sampler stores it
-        first). This is the whole transport for ``sampled_logprobs_only``
+        first). This is the whole transport for ``_sampled_logprobs_only``
         requests: no token ids, no ranks, no per-request ``LogprobsLists``.
         """
         if self.cu_num_generated_tokens is not None:

@@ -272,7 +272,7 @@ class ServingTokens(GenerateBaseServing):
                 # Only the sampled token's logprob is needed: transport one
                 # float per token from the scheduler and skip per-token
                 # Logprob entries and detokenization entirely.
-                sampling_params.sampled_logprobs_only = True
+                sampling_params._sampled_logprobs_only = True
             else:
                 # Top logprobs were also requested: keep the object path and
                 # read the sampled column from the flat representation.
@@ -689,14 +689,8 @@ class ServingTokens(GenerateBaseServing):
             (choice.index, choice.finish_reason) for choice in response.choices
         ]
         if fragments:
-            # As api_router dumps the response (sampled only when requested).
-            exclude = (
-                None
-                if request.return_token_logprobs
-                else {"choices": {"__all__": {"logprobs": {"sampled"}}}}
-            )
             parts = render_json_with_fragments(
-                response.model_dump(exclude=exclude), "logprobs", fragments
+                response.model_dump(), "logprobs", fragments
             )
             # Joined here, so a large body is never copied on the event loop.
             return RenderedGenerateResponse(b"".join(parts)), usage, choice_meta

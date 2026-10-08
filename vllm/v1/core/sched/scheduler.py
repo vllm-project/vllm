@@ -2216,7 +2216,7 @@ class Scheduler(SchedulerInterface):
                 and request.sampling_params.num_logprobs is not None
                 and logprobs
             ):
-                if request.sampling_params.sampled_logprobs_only:
+                if request.sampling_params._sampled_logprobs_only:
                     new_sampled_logprobs = logprobs.sampled_logprobs(
                         req_index, len(new_token_ids)
                     )

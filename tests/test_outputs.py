@@ -110,3 +110,32 @@ def test_request_output_add_preserves_terminal_spec_decode_metrics():
     assert output.finish_reason == "length"
     assert accumulated.finished
     assert output.spec_decode_metrics is spec_decode_metrics
+
+
+def test_request_output_add_merges_sampled_logprobs():
+    """Merged DELTA outputs keep every chunk's sampled-token logprobs."""
+
+    def output(token_ids, sampled, finished):
+        return RequestOutput(
+            request_id="request",
+            prompt=None,
+            prompt_token_ids=[],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=token_ids,
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    sampled_logprobs=sampled,
+                )
+            ],
+            finished=finished,
+        )
+
+    accumulated = output([1, 2], [-0.5, -1.0], False)
+    accumulated.add(output([3], [-0.25], True), aggregate=True)
+
+    assert accumulated.outputs[0].token_ids == [1, 2, 3]
+    assert accumulated.outputs[0].sampled_logprobs == [-0.5, -1.0, -0.25]

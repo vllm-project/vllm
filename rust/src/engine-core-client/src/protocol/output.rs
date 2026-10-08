@@ -139,7 +139,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub prompt_token_id_logprobs: Option<WireNdArray>,
     /// Sampled-token logprob per new token for requests that set
-    /// `SamplingParams.sampled_logprobs_only`; replaces `new_logprobs` for
+    /// `SamplingParams._sampled_logprobs_only`; replaces `new_logprobs` for
     /// them. Opaque here; the Rust frontend does not surface it yet.
     #[serde(default)]
     pub new_sampled_logprobs: Option<OpaqueValue>,

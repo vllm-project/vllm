@@ -27,8 +27,11 @@ from vllm.entrypoints.scale_out.token_in_token_out.logprobs_render import (
     format_float_reprs,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateLogProbs,
     GenerateRequest,
     GenerateResponseBase,
+    GenerateTokensStreamChoice,
+    GenerateTokensStreamResponse,
     RenderedGenerateResponse,
 )
 from vllm.logprobs import Logprob, create_sample_logprobs
@@ -95,12 +98,7 @@ def _body(serving, k, outputs, finish_reason="length", **fields):
     if isinstance(response, RenderedGenerateResponse):
         return response.body, True
     assert isinstance(response, GenerateResponseBase)
-    exclude = (
-        None
-        if request.return_token_logprobs
-        else {"choices": {"__all__": {"logprobs": {"sampled"}}}}
-    )
-    return JSONResponse(content=response.model_dump(exclude=exclude)).body, False
+    return JSONResponse(content=response.model_dump()).body, False
 
 
 def _outcome(serving, k, choices, finish_reason="length"):
@@ -389,3 +387,24 @@ async def test_two_builds_run_at_once(monkeypatch):
     )
     assert first.body == second.body
     assert len(set(names)) == 2
+
+
+def test_sampled_is_omitted_from_stream_chunks():
+    """Streaming tokens-mode chunks with logprobs carry no ``sampled`` key."""
+    chunk = GenerateTokensStreamResponse(
+        request_id="r",
+        choices=[
+            GenerateTokensStreamChoice(index=0, logprobs=GenerateLogProbs(content=[]))
+        ],
+    )
+    assert '"logprobs":{"content":[]}' in chunk.model_dump_json()
+
+
+def test_clients_cannot_select_sampled_logprobs_only():
+    request = GenerateRequest.model_validate(
+        {
+            "token_ids": [1],
+            "sampling_params": {"logprobs": 0, "_sampled_logprobs_only": True},
+        }
+    )
+    assert request.sampling_params._sampled_logprobs_only is False

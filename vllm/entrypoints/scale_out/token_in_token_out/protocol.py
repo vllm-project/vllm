@@ -405,10 +405,10 @@ class GenerateLogProbs(BaseModel):
     """
 
     content: list[GenerateLogProbsContent] | None = None
-    sampled: list[float] | None = None
+    sampled: list[float] | None = Field(default=None, exclude_if=lambda v: v is None)
     """The sampled token's logprob per generated position, set only for
-    ``return_token_logprobs`` requests (and omitted from the response
-    otherwise)."""
+    ``return_token_logprobs`` requests (and omitted from the output
+    otherwise, streaming chunks included)."""
 
 
 class GenerateChoiceBase(BaseModel):
