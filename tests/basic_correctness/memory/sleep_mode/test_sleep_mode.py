@@ -483,7 +483,7 @@ def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
 
     monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
 
-    # Remapped KV memory comes back zeroed even over stale pages.
+    # New requests must overwrite undefined remapped KV bytes before reading them.
     llm.wake_up(tags=["kv_cache"])
     actual = llm.generate(prompt, sampling_params)
 
