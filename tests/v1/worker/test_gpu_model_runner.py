@@ -31,6 +31,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
@@ -298,6 +299,10 @@ def _make_mock_backend_for_kernel_block_size(
 ):
     class _MockBackend:
         @staticmethod
+        def get_name():
+            return "MOCK"
+
+        @staticmethod
         def get_supported_kernel_block_sizes():
             return supported_sizes
 
@@ -423,6 +428,123 @@ def test_select_common_block_size_no_valid_option():
 
     with pytest.raises(ValueError):
         select_common_block_size(48, [backend_a, backend_b])
+
+
+def _mock_backend(supported: list, *, exact: bool = False):
+    """Backend accepting multiples of ``supported``, or only those exact sizes
+    when ``exact`` (as CPU_MLA does)."""
+    from vllm.v1.attention.backend import AttentionBackend
+
+    class _MockBackendCls(AttentionBackend):
+        @staticmethod
+        def get_name() -> str:
+            return "MOCK_EXACT" if exact else "MOCK"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return list(supported)
+
+        if exact:
+
+            @classmethod
+            def supports_block_size(cls, block_size: int | None) -> bool:
+                return block_size is None or block_size in supported
+
+    return _MockBackendCls
+
+
+@pytest.mark.parametrize(
+    "backends,expected",
+    [
+        # A lone backend keeps the default; MultipleOf(8) makes a
+        # minimum-based regression return 8 instead of 16.
+        ([[MultipleOf(8)]], 16),
+        # Sparse-MLA main backend (32 or 64) beside an indexer supporting only
+        # 64: the main backend alone picks 32, which the indexer rejects at
+        # select_common_block_size time.
+        ([[32, 64], [64]], 64),
+        ([[32, 64]], 32),
+        # Neither divides the other, so only the LCM satisfies both.
+        ([[32], [48]], 96),
+    ],
+)
+def test_preferred_block_size_satisfies_every_backend(backends, expected):
+    classes = [_mock_backend(s) for s in backends]
+    assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
+
+
+def test_preferred_block_size_searches_past_an_exact_size_backend():
+    # Extending greedily picks lcm(16, 32) = 32, which the exact backend
+    # rejects; 96 is accepted by both.
+    classes = [_mock_backend([16, 96], exact=True), _mock_backend([MultipleOf(32)])]
+    assert Platform._preferred_block_size_for_backends(classes, 16, None) == 96
+
+
+def test_preferred_block_size_rejects_backends_with_no_common_size():
+    classes = [_mock_backend([16], exact=True), _mock_backend([MultipleOf(64)])]
+    with pytest.raises(ValueError, match="share no supported KV cache block size"):
+        Platform._preferred_block_size_for_backends(classes, 16, None)
+
+
+@pytest.mark.parametrize("cpu", [False, True])
+def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
+    # Alignment that lands on a size an exact-size sibling rejects must fail
+    # here, not later in select_common_block_size().
+    backends = [_mock_backend([MultipleOf(16)]), _mock_backend([16], exact=True)]
+    monkeypatch.setattr(
+        Platform, "_find_non_ssm_backends", classmethod(lambda cls, c: backends)
+    )
+
+    def bump(cls, vllm_config, backend_cls):
+        vllm_config.cache_config.block_size = 32
+
+    monkeypatch.setattr(Platform, "_align_hybrid_block_size", classmethod(bump))
+    cache_config = SimpleNamespace(
+        block_size=16, user_specified_block_size=True, kv_cache_dtype_skip_layers=None
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config, model_config=SimpleNamespace(is_hybrid=True)
+    )
+    from vllm.platforms.cpu import CpuPlatform  # overrides the method; must check too
+
+    platform = CpuPlatform if cpu else Platform
+    with pytest.raises(ValueError, match="MOCK_EXACT"):
+        platform.update_block_size_for_backend(vllm_config)
+
+
+def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
+    # XPU's GDN rounding runs after super()'s check, so it must check again.
+    try:
+        from vllm.platforms.xpu import XPUPlatform
+    except ImportError:
+        pytest.skip("vllm_xpu_kernels not importable outside an XPU stack")
+
+    backends = [_mock_backend([MultipleOf(16)]), _mock_backend([16], exact=True)]
+    monkeypatch.setattr(
+        Platform, "update_block_size_for_backend", classmethod(lambda cls, c: None)
+    )
+    monkeypatch.setattr(
+        Platform, "_find_non_ssm_backends", classmethod(lambda cls, c: backends)
+    )
+    gdn_layer = SimpleNamespace(
+        get_attn_backend=lambda: SimpleNamespace(get_name=lambda: "GDN_ATTN")
+    )
+    monkeypatch.setattr(
+        "vllm.config.vllm.get_layers_from_vllm_config",
+        lambda vllm_config, layer_type: {"gdn": gdn_layer},
+    )
+    cache_config = SimpleNamespace(
+        block_size=16,
+        mamba_cache_mode="none",
+        mamba_page_size_padded=None,
+        user_specified_block_size=True,
+        kv_cache_dtype_skip_layers=None,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config, model_config=SimpleNamespace(is_hybrid=True)
+    )
+    with pytest.raises(ValueError, match="MOCK_EXACT"):
+        XPUPlatform.update_block_size_for_backend(vllm_config)
 
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
@@ -891,6 +1013,36 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 def test_reload_weights_before_load_model(model_runner):
     with pytest.raises(ValueError):
         model_runner.reload_weights()
+
+
+def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
+    # An engine started from an object-storage URI keeps that URI in
+    # model_config.model_weights, which the runai_streamer loader prefers over
+    # model_config.model. A new weights_path must replace it, or the loader
+    # silently re-streams the original checkpoint.
+    loader = Mock()
+    loader.get_all_weights.return_value = iter(())
+    monkeypatch.setattr(gpu_model_runner_module, "get_model_loader", lambda _: loader)
+    monkeypatch.setattr(gpu_model_runner_module, "initialize_layerwise_reload", Mock())
+    monkeypatch.setattr(gpu_model_runner_module, "finalize_layerwise_reload", Mock())
+
+    runner = Mock(lora_config=None)
+    runner.model_config = SimpleNamespace(
+        model="/tmp/pulled-config-files",
+        model_weights="s3://bucket/original",
+        revision="abc123",
+        quantization=None,
+    )
+    runner.get_model.return_value.named_parameters.return_value = []
+    runner.get_model.return_value.load_weights.return_value = None
+
+    GPUModelRunner.reload_weights(runner, weights_path="org/new-model")
+
+    loader.get_all_weights.assert_called_once_with(
+        runner.model_config, runner.get_model.return_value
+    )
+    cfg = runner.model_config
+    assert (cfg.model, cfg.model_weights, cfg.revision) == ("org/new-model", "", None)
 
 
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():

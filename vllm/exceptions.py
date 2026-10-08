@@ -130,6 +130,14 @@ class GenerationError(VLLMServerError):
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+class RetryableRequestError(GenerationError):
+    """A transient request-level failure that is safe for clients to retry."""
+
+    def __init__(self, message: str = "Request failed; please retry"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+
+
 class GracefulHTTPError(VLLMError):
     """Exception that should be translated into an HTTP error response.
 
@@ -172,4 +180,15 @@ class MaxQueuedTokensError(GracefulHTTPError):
             "The engine has reached its prefill token backlog limit. "
             "Please try again later or on a different instance.",
             HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+
+
+class ProfilerAlreadyActiveError(GracefulHTTPError):
+    """Raised when a profiling session is already active."""
+
+    def __init__(self):
+        super().__init__(
+            "A profiling session is already active. Call /stop_profile before "
+            "starting another session.",
+            HTTPStatus.CONFLICT,
         )
