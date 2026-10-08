@@ -602,9 +602,13 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         failed_recving_kv_req_ids=set(),
         finished_recving_kv_req_ids={request.request_id},
         prefix_replay_tokens=0,
+        prefix_replay_group_ids=(),
         use_lookahead_block_hashes=False,
     )
     scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
+    scheduler._load_restores_replay_window = MethodType(
+        Scheduler._load_restores_replay_window, scheduler
+    )
     scheduler._mark_lookahead_hashes_publishable = MethodType(
         Scheduler._mark_lookahead_hashes_publishable, scheduler
     )
