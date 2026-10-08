@@ -369,6 +369,46 @@ class QuickAllReduce:
             ]
         return inp_size <= self.qr_max_size and inp_size >= min_size
 
+    def should_fused_allreduce_rmsnorm(
+        self, inp: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+    ) -> bool:
+        """Whether FlyDSL INT4 QuickReduce can fuse the residual add + RMSNorm."""
+        if self._flydsl_int4 is None or not self.should_quick_allreduce(inp):
+            return False
+        hidden = inp.shape[-1]
+        return (
+            self._flydsl_int4.supports_rmsnorm(hidden, inp.numel() * inp.element_size())
+            and residual.shape == inp.shape
+            and residual.dtype == inp.dtype
+            and residual.is_contiguous()
+            and residual.data_ptr() % 16 == 0
+            and weight.dtype == inp.dtype
+            and weight.shape == (hidden,)
+            and weight.is_contiguous()
+            and weight.data_ptr() % 16 == 0
+        )
+
+    def fused_allreduce_rmsnorm(
+        self,
+        inp: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+        gemma_norm: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """FlyDSL INT4 all-reduce of ``inp`` fused with add + RMSNorm.
+
+        Returns ``(rmsnorm(allreduce(inp) + residual), allreduce(inp) +
+        residual)``; ``gemma_norm`` scales by ``1 + weight``.
+        """
+        assert self._flydsl_int4 is not None
+        out = torch.empty_like(inp)
+        residual_out = torch.empty_like(residual)
+        self._flydsl_int4.allreduce_rmsnorm(
+            inp, residual, weight, epsilon, out, residual_out, gemma_norm=gemma_norm
+        )
+        return out, residual_out
+
     def quick_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place custom quick all reduce."""
         # quick allreduce doesn't require a separate graph mode,
