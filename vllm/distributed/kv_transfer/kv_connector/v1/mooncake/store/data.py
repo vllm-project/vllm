@@ -741,9 +741,9 @@ class RequestTracker:
                 existing.extend(new)
 
 
-# (boundary, {group_id: (proof_end, block_indices)}); see
+# {group_id: (proof_end, block_indices)} for the non-Mamba groups; see
 # ``partial_tail_block_ranges``.
-PartialTail = tuple[int, dict[int, tuple[int, range]]]
+PartialTail = dict[int, tuple[int, range]]
 
 
 @dataclass

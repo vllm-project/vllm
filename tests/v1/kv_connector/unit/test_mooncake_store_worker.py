@@ -1393,18 +1393,75 @@ def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
     db_full, db_mamba = thread.token_databases
     proof_end = 48 if use_eagle else 44
     assert keys == [
-        # Aligned snapshot: boundary 32 from the handed-off block 9.
-        db_mamba.key_for(BlockHash(hs[7])),
         # The tail reads only the LCM gap, even when normal saves lag.
         *[db_full.key_for(BlockHash(hs[i])) for i in range(8, proof_end // 4)],
+        # Aligned snapshot: boundary 32 from the handed-off block 9.
+        db_mamba.key_for(BlockHash(hs[7])),
         # Mamba boundary block from the CoW hand-off (block 7).
         db_mamba.key_for(BlockHash(hs[10])),
     ]
     assert addrs == [
-        [0x2000 + 9 * 256],
         *[[0x1000 + (i + 1) * 256] for i in range(8, proof_end // 4)],
+        [0x2000 + 9 * 256],
         [0x2000 + 7 * 256],
     ]
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
+    """Under DCP2 the attention block spans the LCM (16) and Mamba blocks are
+    half that. The prompt-completing save writes one attention block and one
+    Mamba key: the boundary state from the CoW block, never the interior
+    Mamba blocks."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    coord = SimpleNamespace(
+        enable_partial_hash_hits=True,
+        hash_block_size=4,
+        lcm_block_size=16,
+        mamba_group_ids={1},
+        eagle_proof_margin_by_group={},
+    )
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0), block_size=16, hash_block_size=4
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=8,
+        hash_block_size=4,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([256])
+    thread = _make_store_sending_thread(
+        store, coord=coord, token_databases=[db_full, db_mamba], tp_rank=tp_rank
+    )
+    # Mamba is replicated across two ranks, which split its keys by block.
+    thread.group_put_steps = [1, 2]
+
+    hs = [bytes([i + 1]) * 4 for i in range(11)]
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], list(range(20, 26))),
+        block_hashes=hs,
+        can_save=True,
+        boundary_state_offloads=[(1, 7, 44)],
+        num_prompt_tokens=45,
+        completed_token_len=45,
+        publish_partial_tail=True,
+    )
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
+    assert req.partial_tail == {0: (44, range(2, 3))}
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    # Mamba block cdiv(44, 8) - 1 = 5 belongs to put_step_rank 5 % 2 = 1,
+    # which is tp_rank 0 for group 1.
+    mamba_puts = [db_mamba.key_for(BlockHash(hs[10]))] if tp_rank == 0 else []
+    assert keys == [db_full.key_for(BlockHash(hs[10])), *mamba_puts]
+    assert addrs == [[0x1000 + 3 * 256], *([[0x2000 + 7 * 256]] * len(mamba_puts))]
 
 
 def test_snapshot_offload_skips_null_handoff_block():

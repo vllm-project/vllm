@@ -143,10 +143,7 @@ class MooncakeStoreCoordinator:
         if req_meta.partial_tail is None:
             return []
         block_ids: list[int] = []
-        _, tail_blocks_by_group = req_meta.partial_tail
-        for group_id, (_, block_indices) in tail_blocks_by_group.items():
-            if group_id in self.mamba_group_ids:
-                continue
+        for group_id, (_, block_indices) in req_meta.partial_tail.items():
             group_blocks = req_meta.block_ids[group_id]
             block_ids.extend(
                 group_blocks[idx]
@@ -506,19 +503,20 @@ def partial_tail_block_ranges(
     req_meta: ReqMeta,
     block_sizes: Sequence[int],
 ) -> PartialTail | None:
-    """Locate the blocks a partial-tail save publishes for this request.
+    """Locate the non-Mamba blocks a partial-tail save publishes.
 
     A later request resumes at the prompt's Mamba checkpoint (``boundary``) only
     if both pieces of KV are stored:
 
-    - Mamba groups: the state at ``boundary``, i.e. the last block of the range.
-    - Full-attention groups: the KV from the last LCM-aligned normal save up to
+    - Mamba groups: the state at ``boundary``. The worker writes it straight
+      from the handed-off block, so Mamba groups are not listed here.
+    - Other groups: the KV from the last LCM-aligned normal save up to
       ``boundary`` plus the group's EAGLE proof margin (``proof_end``).
 
-    Returns ``(boundary, {group_id: (proof_end, block_indices)})``, or None when
-    there is no tail to publish. Groups whose proof is not computed yet are
-    omitted. For example, with LCM 16, blocks of 4 tokens, and a checkpoint at
-    44, the full-attention blocks are 8-10, covering [32, 44).
+    Returns ``{group_id: (proof_end, block_indices)}``, or None when there is
+    nothing to publish. Groups whose proof is not computed yet are omitted.
+    For example, with LCM 16, blocks of 4 tokens, and a checkpoint at 44, the
+    full-attention blocks are 8-10, covering [32, 44).
 
     ``block_sizes`` are the per-group block sizes, indexed like
     ``req_meta.block_ids``.
@@ -551,6 +549,8 @@ def partial_tail_block_ranges(
     start = boundary // coord.lcm_block_size * coord.lcm_block_size
     tail_blocks_by_group: dict[int, tuple[int, range]] = {}
     for group_id, block_size in enumerate(block_sizes):
+        if group_id in coord.mamba_group_ids:
+            continue
         proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
         if proof_end > completed or proof_end // hash_block_size > num_hashes:
             continue
@@ -558,4 +558,4 @@ def partial_tail_block_ranges(
             proof_end,
             range(start // block_size, cdiv(proof_end, block_size)),
         )
-    return boundary, tail_blocks_by_group
+    return tail_blocks_by_group or None

@@ -910,7 +910,7 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
     # The save that completes the prompt carries the tail for the worker.
     (req_meta,) = step(44, 1)
     assert req_meta.publish_partial_tail
-    assert req_meta.partial_tail == (44, {0: (44, range(2, 3)), 1: (44, range(2, 3))})
+    assert req_meta.partial_tail == {0: (44, range(2, 3))}
 
     # A later save does not recompute or resend it.
     (req_meta,) = step(45, 3)

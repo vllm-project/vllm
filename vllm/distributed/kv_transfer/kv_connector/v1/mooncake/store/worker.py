@@ -51,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
+    PartialTail,
     PoolKey,
     ReqMeta,
     StoreShardId,
@@ -569,15 +570,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
-    def _boundary_snapshot_puts(
+    def _boundary_state_puts(
         self, req_meta: ReqMeta, mamba_offloads: list[tuple[int, int, int]]
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
-        """Puts for committed mamba "align" boundary-state snapshots.
+        """Puts for handed-off mamba "align" boundary states.
 
-        These are block-aligned boundaries, i.e. exactly what the normal save
-        would key — but ``store_mask`` masks mamba groups out of it entirely, so
-        this is their *only* writer. The exclusion is not an optimization: the
-        normal save resolves a chunk's address as
+        A block-aligned boundary is a committed snapshot; a sub-block one is
+        the prompt's CoW partial tail. Either way the key is the boundary's
+        hash and the value is the handed-off block. ``store_mask`` masks mamba
+        groups out of the normal save entirely, so this is their *only*
+        writer. The exclusion is not an optimization: the normal save resolves
+        a chunk's address as
         ``req_meta.block_ids[g][start // block_size]``, and ``block_ids`` is the
         connector's append-only mirror of the core's per-group table. An
         align-mode table is mutated in place (a superseded state block is freed
@@ -595,6 +598,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
         for group_id, block_id, boundary in mamba_offloads:
             if boundary == 0 or block_id == NULL_BLOCK_ID:
                 continue
+            # A negative index would silently key the state by the last hash.
+            assert boundary % hash_block_size == 0, (
+                f"Mamba boundary {boundary} is not a multiple of the hash block "
+                f"size {hash_block_size}"
+            )
             hash_idx = boundary // hash_block_size - 1
             if hash_idx >= len(req_meta.block_hashes):
                 continue
@@ -602,7 +610,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[group_id]
             put_step_rank = (self.tp_rank + group_id) % put_step
-            if (boundary // db.block_size - 1) % put_step != put_step_rank:
+            if (cdiv(boundary, db.block_size) - 1) % put_step != put_step_rank:
                 continue
             addr, size = db.prepare_value_for_block(block_id)
             puts.append(
@@ -611,27 +619,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return puts
 
     def _sub_block_tail_puts(
-        self,
-        req_meta: ReqMeta,
-        boundary: int,
-        tail_blocks_by_group: dict[int, tuple[int, range]],
-        mamba_offloads: list[tuple[int, int, int]],
+        self, req_meta: ReqMeta, tail_blocks_by_group: PartialTail
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
-        """Puts for the request's sub-block partial tail (its last prompt hash
-        boundary), so a later request can hit the sub-block prefix.
+        """Puts for the non-Mamba blocks of the request's sub-block partial
+        tail, so a later request can hit the sub-block prefix.
 
-        Covers every group's blocks from the normal save's lcm floor to the
-        boundary: the normal save floors to ``lcm_block_size``, so a
+        Covers each group's blocks from the normal save's lcm floor to its
+        ``proof_end``: the normal save floors to ``lcm_block_size``, so a
         smaller-block group's full blocks in that gap are never persisted
         elsewhere, and the consumer's lookup needs every group at every probed
-        boundary. Full blocks are keyed by their block-end hash and the partial
-        boundary block by the boundary sub-hash; a mamba "align" group
-        contributes only its boundary block, from the core-provided CoW block.
+        boundary. Full blocks are keyed by their block-end hash and the last
+        block by the ``proof_end`` sub-hash. Mamba states are written by
+        :meth:`_boundary_state_puts`.
         """
         hash_block_size = self.coord.hash_block_size
-        mamba_block_ids = {
-            group_id: block_id for group_id, block_id, _ in mamba_offloads
-        }
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
         for g_idx, db in enumerate(self.token_databases):
             if not self.group_participates[g_idx] or g_idx not in tail_blocks_by_group:
@@ -646,20 +647,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     continue
                 valid_end = min((block_idx + 1) * db.block_size, group_boundary)
                 key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
-                if g_idx in mamba_block_ids:
-                    if valid_end != boundary:
-                        # Interior align-mode state positions are null or
-                        # stale (the block table is not append-only) and never
-                        # valid gap content; only the boundary block is
-                        # persisted, from the core-provided hand-off.
-                        continue
-                    block_id = mamba_block_ids[g_idx]
-                elif g_idx in self.coord.mamba_group_ids:
+                if block_idx >= len(group_blocks):
                     continue
-                elif block_idx < len(group_blocks):
-                    block_id = group_blocks[block_idx]
-                else:
-                    continue
+                block_id = group_blocks[block_idx]
                 if block_id == NULL_BLOCK_ID:
                     logger.debug(
                         "Skipping unavailable partial-tail source block "
@@ -679,15 +669,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         This is every mamba key the connector writes — ``store_mask`` excludes
         mamba groups from the positional normal save, aligned boundaries
-        included (see :meth:`_boundary_snapshot_puts`).
-
-        The two entry kinds are keyed and sourced differently, so they are
-        prepared separately and put in one batch:
-
-        - block-aligned for its group: a committed boundary-state snapshot,
-          the handed-off block itself;
-        - not block-aligned: the sub-block CoW partial tail, which also has to
-          cover the other groups' blocks in the normal save's lcm gap.
+        included (see :meth:`_boundary_state_puts`). The scheduler-resolved
+        partial tail (``ReqMeta.partial_tail``) adds the other groups' blocks
+        in the normal save's lcm gap; both go in one batch.
 
         Returns:
             True when no put is needed or every put succeeds, False otherwise.
@@ -700,23 +684,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if not mamba_offloads and partial_tail is None:
             return True
 
-        mamba_snapshots: list[tuple[int, int, int]] = []
-        mamba_tails: list[tuple[int, int, int]] = []
-        for group_id, block_id, boundary in mamba_offloads:
-            entry = (group_id, block_id, boundary)
-            if boundary % self.token_databases[group_id].block_size == 0:
-                mamba_snapshots.append(entry)
-            else:
-                mamba_tails.append(entry)
-
-        puts = self._boundary_snapshot_puts(req_meta, mamba_snapshots)
-        if partial_tail is not None:
-            boundary, tail_blocks_by_group = partial_tail
-            puts.extend(
-                self._sub_block_tail_puts(
-                    req_meta, boundary, tail_blocks_by_group, mamba_tails
-                )
-            )
+        puts = (
+            []
+            if partial_tail is None
+            else self._sub_block_tail_puts(req_meta, partial_tail)
+        )
+        puts.extend(self._boundary_state_puts(req_meta, mamba_offloads))
         puts = list({put[0]: put for put in puts}.values())
 
         if not puts:
