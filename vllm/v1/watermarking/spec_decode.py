@@ -8,7 +8,6 @@ from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.watermarker import (
-    DraftBlockState,
     RandomSampler,
     SupportsSpeculativeDecoding,
     Watermarker,
@@ -168,8 +167,9 @@ class DraftWatermarker:
         assert is_drafting
         assert logits_cache_col is not None
         num_steps = self.num_speculative_steps
-        sampled_block = self.watermarker.try_sample_block(
+        sampled_block = self.watermarker._try_sample_block(
             logits,
+            self.contexts,
             num_steps,
             RandomSampler(
                 expanded_idx_mapping=idx_mapping,
@@ -181,18 +181,13 @@ class DraftWatermarker:
                 logits_cache=logits_cache,
                 logits_cache_col=logits_cache_col,
             ),
-            DraftBlockState(
-                contexts=self.contexts,
-                enabled=self.enabled,
-                prior_contexts=self.prior_contexts,
-                all_token_ids=self.all_token_ids,
-                prompt_lens=self.prompt_lens,
-                total_lens=self.total_lens,
-                deduplicate_contexts=self.deduplicate_contexts,
-                deduplicate_contexts_max_history=(
-                    self.deduplicate_contexts_max_history
-                ),
-            ),
+            enabled=self.enabled,
+            prior_contexts=self.prior_contexts,
+            all_token_ids=self.all_token_ids,
+            prompt_lens=self.prompt_lens,
+            total_lens=self.total_lens,
+            deduplicate_contexts=self.deduplicate_contexts,
+            deduplicate_contexts_max_history=self.deduplicate_contexts_max_history,
         )
         if sampled_block is not None:
             return sampled_block

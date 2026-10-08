@@ -8,13 +8,16 @@ import warnings
 
 import torch
 
-from vllm.config.watermarking import WatermarkPRFName, derive_watermark_key
+from vllm.config.watermarking import (
+    WatermarkContextScope,
+    WatermarkPRFName,
+    derive_watermark_key,
+)
 from vllm.v1.watermarking.detector import (
     WatermarkDetector,
 )
 from vllm.v1.watermarking.prfs import PhiloxPRF, WatermarkPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
-    DraftBlockState,
     RandomSampler,
     SupportsSpeculativeDecoding,
     Watermarker,
@@ -102,12 +105,20 @@ class GumbelWatermarker(Watermarker):
         )
         return WatermarkSample(token_ids, logits)
 
-    def try_sample_block(
+    def _try_sample_block(
         self,
         logits: torch.Tensor,
+        contexts: torch.Tensor,
         num_steps: int,
         random_sampler: RandomSampler,
-        state: DraftBlockState,
+        *,
+        enabled: torch.Tensor,
+        prior_contexts: torch.Tensor,
+        all_token_ids: torch.Tensor | None,
+        prompt_lens: torch.Tensor,
+        total_lens: torch.Tensor | None,
+        deduplicate_contexts: WatermarkContextScope,
+        deduplicate_contexts_max_history: int | None,
     ) -> torch.Tensor | None:
         if type(self.prf) is not PhiloxPRF or logits.device.type != "cuda":
             return None
@@ -118,24 +129,24 @@ class GumbelWatermarker(Watermarker):
         assert random_sampler.logits_cache_col is not None
         return draft_philox_gumbel_sample(
             logits,
-            state.contexts,
+            contexts,
             self.prf.key,
             num_steps=num_steps,
             expanded_idx_mapping=random_sampler.expanded_idx_mapping,
             temperatures=random_sampler.temperatures,
             seeds=random_sampler.seeds,
             positions=random_sampler.positions,
-            enabled=state.enabled,
+            enabled=enabled,
             logits_cache=random_sampler.logits_cache,
             logits_cache_col=random_sampler.logits_cache_col,
             use_fp64=random_sampler.use_fp64,
-            prior_contexts=state.prior_contexts,
-            all_token_ids=state.all_token_ids,
-            prompt_lens=state.prompt_lens,
-            total_lens=state.total_lens,
-            deduplicate=state.deduplicate_contexts != "none",
-            max_history=state.deduplicate_contexts_max_history,
-            include_prompt=state.deduplicate_contexts == "all",
+            prior_contexts=prior_contexts,
+            all_token_ids=all_token_ids,
+            prompt_lens=prompt_lens,
+            total_lens=total_lens,
+            deduplicate=deduplicate_contexts != "none",
+            max_history=deduplicate_contexts_max_history,
+            include_prompt=deduplicate_contexts == "all",
         )
 
 
