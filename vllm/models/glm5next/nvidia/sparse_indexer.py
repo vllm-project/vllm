@@ -7,10 +7,12 @@ import torch
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config_or_none
+from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
+from vllm.model_executor.layers.sparse_attn_indexer import _merge_dcp_topk_global
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
     _build_decode_scatter_indices,
@@ -121,6 +123,9 @@ def sparse_attn_indexer_kpool(
     tail_kv_cache: torch.Tensor | None = None,
     tail_prefix: str | None = None,
     topk_backend: str = "auto",
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -170,6 +175,12 @@ def sparse_attn_indexer_kpool(
     has_decode = attn_metadata_narrowed.num_decodes > 0
     has_prefill = attn_metadata_narrowed.num_prefills > 0
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
+    # Pools are the DCP sharding unit of the index K cache.
+    pool_cp_interleave = (
+        cp_kv_cache_interleave_size // max(index_kpool, 1)
+        if dcp_world_size > 1
+        else cp_kv_cache_interleave_size
+    )
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
     # folds the Q scale into `weights` inside fused_indexer_q_rope_quant.
@@ -284,16 +295,18 @@ def sparse_attn_indexer_kpool(
             scales_spec,
         )
         for chunk in prefill_metadata.chunks if not short_prefill else ():
-            k_quant = k_quant_full[: chunk.total_seq_lens]
-            k_scale = k_scale_full[: chunk.total_seq_lens]
+            # Under DCP this rank only gathers the pools it owns.
+            assert chunk.local_cu_seq_lens is not None
+            k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
+            k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
 
-            if not chunk.skip_kv_gather:
+            if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
                 ops.cp_gather_indexer_k_quant_cache(
                     kv_cache,
                     k_quant,
                     k_scale,
                     chunk.block_table,
-                    chunk.cu_seq_lens,
+                    chunk.local_cu_seq_lens,
                 )
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
@@ -314,15 +327,18 @@ def sparse_attn_indexer_kpool(
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
             from vllm.utils.deep_gemm import fp8_fp4_mqa_logits
 
-            logits = fp8_fp4_mqa_logits(
-                (q_slice_cast, q_scale_slice),
-                (k_quant_cast, k_scale_cast),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                clean_logits=False,
-            )
-            num_rows = logits.shape[0]
+            num_rows = q_slice.shape[0]
+            if chunk.local_total_seq_lens == 0:
+                logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
+            else:
+                logits = fp8_fp4_mqa_logits(
+                    (q_slice_cast, q_scale_slice),
+                    (k_quant_cast, k_scale_cast),
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    clean_logits=False,
+                )
 
             # kpool: logits are pool-granular (compress_ratio == index_kpool),
             # so topk selects pools. We pick topk_tokens // kpool pools then
@@ -338,15 +354,28 @@ def sparse_attn_indexer_kpool(
                     chunk.token_start : chunk.token_end, :topk_tokens
                 ]
 
-            torch.ops._C.top_k_per_row_prefill(
+            if logits.shape[1] == 0:
+                topk_dst.fill_(-1)
+            else:
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_dst,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    select_k,
+                )
+            # Local pool ids -> request-relative global pool ids.
+            _merge_dcp_topk_global(
                 logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
                 topk_dst,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
                 select_k,
+                dcp_rank,
+                dcp_world_size,
+                pool_cp_interleave,
+                row_starts=chunk.cu_seqlen_ks,
             )
 
             if index_kpool > 1:
@@ -584,6 +613,14 @@ def sparse_attn_indexer_kpool(
             select_k,
             attn_metadata_narrowed.max_seq_len,
         )
+        _merge_dcp_topk_global(
+            logits,
+            topk_dst,
+            select_k,
+            dcp_rank,
+            dcp_world_size,
+            pool_cp_interleave,
+        )
 
         # Resolve to token-level indices in the output buffer.
         if index_kpool > 1:
@@ -669,14 +706,33 @@ class SparseAttnIndexerKpool(CustomOp):
             else "auto"
         )
         _parallel = _cfg.parallel_config if _cfg is not None else None
-        if (
-            _parallel is not None
-            and _parallel.prefill_context_parallel_size > 1
-            and _parallel.decode_context_parallel_size > 1
-        ):
-            raise NotImplementedError(
-                "SparseAttnIndexerKpool does not support PCP+DCP."
-            )
+        self._parallel_config = _parallel
+        self._cp_kv_cache_interleave_size: int | None = None
+        self.dcp_world_size = 1
+        self.dcp_rank = 0
+        if _parallel is not None and _parallel.decode_context_parallel_size > 1:
+            if _parallel.prefill_context_parallel_size > 1:
+                raise NotImplementedError(
+                    "SparseAttnIndexerKpool does not support PCP+DCP."
+                )
+            self.dcp_world_size = _parallel.decode_context_parallel_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+
+    @property
+    def cp_kv_cache_interleave_size(self) -> int:
+        """Resolved lazily like ``SparseAttnIndexer``: NIXL P/D can adjust it
+        after the model is built, and the indexer metadata builder sees the
+        adjusted value.
+        """
+        if self.dcp_world_size == 1:
+            return 1
+        if self._cp_kv_cache_interleave_size is None:
+            assert self._parallel_config is not None
+            value = self._parallel_config.cp_kv_cache_interleave_size
+            if isinstance(get_forward_context().attn_metadata, dict):
+                self._cp_kv_cache_interleave_size = value
+            return value
+        return self._cp_kv_cache_interleave_size
 
     def forward_native(
         self,
@@ -743,4 +799,7 @@ class SparseAttnIndexerKpool(CustomOp):
             self.tail_cache.kv_cache if self.tail_cache is not None else None,
             self.tail_cache.prefix if self.tail_cache is not None else None,
             self.topk_backend,
+            self.dcp_rank,
+            self.dcp_world_size,
+            self.cp_kv_cache_interleave_size,
         )

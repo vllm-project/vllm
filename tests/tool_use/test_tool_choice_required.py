@@ -5,7 +5,11 @@ from copy import deepcopy
 
 import pytest
 import regex as re
-from openai.types.responses import FunctionTool, ToolChoiceFunction, WebSearchTool
+from openai.types.responses import (
+    FunctionTool,
+    ToolChoiceFunction,
+    WebSearchTool,
+)
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -13,6 +17,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
     find_tool_properties,
@@ -403,6 +409,106 @@ class TestNonFunctionToolsSkipped:
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
 
+    def test_get_json_schema_rejects_only_non_function_tools(self):
+        # An empty anyOf would compile to a grammar no output can satisfy.
+        with pytest.raises(VLLMValidationError, match="no function tool"):
+            get_json_schema_from_tools(tools=[WEB_SEARCH_TOOL], tool_choice="required")
+
+
+class TestMalformedToolSchemaDefs:
+    """Malformed `$defs` in caller-supplied tool parameters is a 400, not a 500."""
+
+    @staticmethod
+    def _tool(params: dict) -> ChatCompletionToolsParam:
+        return TypeAdapter(ChatCompletionToolsParam).validate_python(
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": params,
+                },
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "defs",
+        [
+            pytest.param(None, id="null"),
+            pytest.param([], id="list"),
+            pytest.param("nope", id="string"),
+            pytest.param(1, id="int"),
+        ],
+    )
+    def test_non_object_defs_is_a_client_error(self, defs):
+        tools = [
+            self._tool(
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "$defs": defs,
+                }
+            )
+        ]
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert exc_info.value.parameter == "tools"
+        assert "$defs" in str(exc_info.value)
+        assert "get_weather" in str(exc_info.value)
+
+    def test_duplicate_def_names_is_a_client_error(self):
+        """Also caller-caused, and it used to raise a plain `ValueError`."""
+        tools = [
+            self._tool(
+                {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/D"}},
+                    "$defs": {"D": {"type": "string"}},
+                }
+            ),
+            self._tool(
+                {
+                    "type": "object",
+                    "properties": {"b": {"$ref": "#/$defs/D"}},
+                    "$defs": {"D": {"type": "integer"}},
+                }
+            ),
+        ]
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert exc_info.value.parameter == "tools"
+        assert "multiple schemas" in str(exc_info.value)
+
+    def test_well_formed_defs_still_hoisted(self):
+        """The type check must not reject the shape it is guarding."""
+        tools = [
+            self._tool(
+                {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/D"}},
+                    "$defs": {"D": {"type": "string"}},
+                }
+            )
+        ]
+
+        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert isinstance(schema, dict)
+        assert schema["$defs"] == {"D": {"type": "string"}}
+
+    def test_absent_defs_still_works(self):
+        tools = [
+            self._tool({"type": "object", "properties": {"a": {"type": "string"}}})
+        ]
+
+        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert isinstance(schema, dict)
+
 
 class TestParallelToolCallsConstraint:
     """`parallel_tool_calls=false` must be enforced by the decoding grammar.
@@ -480,3 +586,70 @@ class TestForcedNamedToolChoiceEmptyParams:
         choice = ToolChoiceFunction(type="function", name="ping")
         schema = get_json_schema_from_tools(choice, [tool])
         assert schema == {"type": "object", "properties": {}}
+
+
+class TestForcedFunctionShortNameAlias:
+    """Forced choices must use the selected function's parameter schema."""
+
+    PARAMS = {"type": "object", "properties": {"x": {"type": "integer"}}}
+
+    @pytest.mark.parametrize("plain_first", [True, False])
+    @pytest.mark.parametrize(
+        "namespace,function_name,choice_name",
+        [
+            ("math", "add", "add"),
+            ("math", "add", "math__add"),
+            ("math", "vector__add", "vector__add"),
+            ("math__vector", "vector__add", "vector__add"),
+        ],
+    )
+    def test_namespace_schema_is_not_shadowed(
+        self, plain_first, namespace, function_name, choice_name
+    ):
+        tools = [
+            {
+                "type": "function",
+                "name": "other__add",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"y": {"type": "string"}},
+                },
+            },
+            {
+                "type": "namespace",
+                "name": namespace,
+                "description": "math tools",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": function_name,
+                        "parameters": self.PARAMS,
+                    }
+                ],
+            },
+        ]
+        if not plain_first:
+            tools.reverse()
+        request = ResponsesRequest.model_validate(
+            {
+                "model": "test-model",
+                "input": "Add the numbers.",
+                "tools": tools,
+                "tool_choice": {"type": "function", "name": choice_name},
+            }
+        )
+        assert (
+            get_json_schema_from_tools(request.tool_choice, request.tools)
+            == self.PARAMS
+        )
+
+    def test_plain_function_double_underscore_name_has_no_phantom_alias(self):
+        tool = FunctionTool(type="function", name="math__add", parameters=self.PARAMS)
+        choice = ToolChoiceFunction(type="function", name="add")
+        with pytest.raises(ValueError, match="has not been passed in `tools`"):
+            get_json_schema_from_tools(choice, [tool])
+
+    def test_plain_function_full_name_still_resolves(self):
+        tool = FunctionTool(type="function", name="math__add", parameters=self.PARAMS)
+        choice = ToolChoiceFunction(type="function", name="math__add")
+        assert get_json_schema_from_tools(choice, [tool]) == self.PARAMS
