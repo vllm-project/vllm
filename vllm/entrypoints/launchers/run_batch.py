@@ -256,9 +256,10 @@ class BatchFrontendArgs(BaseFrontendArgs):
     it is uploaded to a URL. When unset, piped input and output are held in
     memory and URL input is downloaded to the system temporary directory."""
     max_inflight: int | None = None
-    """Maximum number of requests queued at the engine at once, which bounds
-    frontend memory. Defaults to twice max_num_seqs across all data-parallel
-    engines, at least 1024."""
+    """Maximum number of requests queued at the engine at once. Responses are
+    written in input order, so up to 16 times this many finished responses may
+    be held behind a slow request. Defaults to twice max_num_seqs across all
+    data-parallel engines, at least 1024."""
     enable_metrics: bool = False
     """Enable Prometheus metrics"""
     host: str | None = None
@@ -321,6 +322,11 @@ def parse_args():
 _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
 
 _STAGING_CHUNK_SIZE = 1 << 20
+
+# Responses are written in input order, so a slow request holds back those
+# behind it. Letting up to this many times --max-inflight requests finish ahead
+# of the oldest unwritten one keeps the engine busy behind long requests.
+_REORDER_WINDOW_FACTOR = 16
 
 
 class BatchProgressTracker:
@@ -466,8 +472,9 @@ async def batch_output_writer(
 ) -> AsyncIterator[IO[str]]:
     """Yield a file that receives responses as they complete.
 
-    A local file holds whatever finished if the run fails. A URL destination is
-    staged and uploaded only once the batch completes.
+    A local file holds the responses for a prefix of the input if the run
+    fails. A URL destination is staged and uploaded only once the batch
+    completes.
     """
     if not is_url(path_or_url):
         logger.info("Writing outputs to local file %s", path_or_url)
@@ -912,49 +919,65 @@ async def dispatch_batch(
     endpoint_registry: dict[str, EndpointConfig],
     tracker: BatchProgressTracker,
     max_inflight: int,
+    window: int | None = None,
 ) -> None:
     """Run every request with at most `max_inflight` alive at once.
 
-    Each request writes its own response. The first request to raise, rather
-    than return an error response, cancels the rest.
+    Responses are written in input order, with at most `window` requests,
+    `max_inflight` by default, dispatched but not yet written. The first
+    request to raise, rather than return an error response, cancels the rest.
     """
-    slots = asyncio.Semaphore(max_inflight)
+    window = max(window or max_inflight, max_inflight)
+    running = asyncio.Semaphore(max_inflight)
+    unwritten = asyncio.Semaphore(window)
     inflight: set[asyncio.Task[None]] = set()
+    finished: dict[int, BatchRequestOutput] = {}
+    next_index = 0
     failure: BaseException | None = None
     stopping = False
 
-    async def run_and_write(request_json: str) -> None:
-        nonlocal failure
+    async def run_and_write(index: int, request_json: str) -> None:
+        nonlocal failure, next_index
         try:
-            response = await run_one_request(request_json, endpoint_registry)
+            try:
+                response = await run_one_request(request_json, endpoint_registry)
+            finally:
+                running.release()
             # Handlers answer a cancellation with an error response; drop it.
             if stopping:
                 return
-            print(response.model_dump_json(), file=output_file)
+            finished[index] = response
+            while next_index in finished:
+                print(finished.pop(next_index).model_dump_json(), file=output_file)
+                next_index += 1
+                tracker.completed()
+                unwritten.release()
             output_file.flush()
-            tracker.completed()
         except BaseException as exc:
             if failure is None:
                 failure = exc
+            # The dispatch loop may be waiting for a slot this request holds.
+            unwritten.release()
             if isinstance(exc, asyncio.CancelledError):
                 raise
-        finally:
-            slots.release()
 
     try:
+        index = 0
         for request_json in input_file:
             if not request_json.strip():
                 continue
-            await slots.acquire()
+            await unwritten.acquire()
+            await running.acquire()
             if failure is not None:
                 break
-            task = asyncio.create_task(run_and_write(request_json))
+            task = asyncio.create_task(run_and_write(index, request_json))
+            index += 1
             inflight.add(task)
             task.add_done_callback(inflight.discard)
         else:
-            # Reacquiring every slot waits for the last request to finish.
-            for _ in range(max_inflight):
-                await slots.acquire()
+            # Reacquiring every slot waits for the last response to be written.
+            for _ in range(window):
+                await unwritten.acquire()
                 if failure is not None:
                     break
 
@@ -991,6 +1014,7 @@ async def run_batch(
     )
     # The final drain reacquires every slot, so hold no more than the batch needs.
     max_inflight = min(max_inflight, max(num_requests, 1))
+    window = min(max_inflight * _REORDER_WINDOW_FACTOR, max(num_requests, 1))
     tracker = BatchProgressTracker()
 
     async with batch_output_writer(
@@ -998,7 +1022,12 @@ async def run_batch(
     ) as output_file:
         with tracker.pbar(total=num_requests):
             await dispatch_batch(
-                input_file, output_file, endpoint_registry, tracker, max_inflight
+                input_file,
+                output_file,
+                endpoint_registry,
+                tracker,
+                max_inflight,
+                window,
             )
 
 

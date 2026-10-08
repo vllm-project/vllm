@@ -70,11 +70,11 @@ vllm run-batch \
 
 You should now have your results at `results.jsonl`. You can check your results by running `cat results.jsonl`
 
-Responses are written as each request finishes, so their order does not follow
-the input file. Match a response to its request with `custom_id` rather than by
-line number. The output file is truncated when the run starts; if the run fails
-partway, it holds the responses that finished, so check the exit code before
-treating it as complete. An output URL is uploaded only when the run succeeds.
+Responses are written in input order as the batch runs. The output file is
+truncated when the run starts; if the run fails partway, it holds the responses
+for the first lines of the input, so check the exit code before treating it as
+complete. To resume, rerun the input lines past the last one written. An output
+URL is uploaded only when the run succeeds.
 
 ```bash
 cat results.jsonl

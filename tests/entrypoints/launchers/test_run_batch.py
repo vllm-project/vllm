@@ -1410,6 +1410,78 @@ async def test_batch_output_writer_uploads_url_output_once(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_batch_writes_responses_in_input_order(tmp_path, monkeypatch):
+    """Responses follow the input order even when later requests finish first."""
+    requests = _chat_requests(20)
+    input_path = _write_batch(tmp_path, [json.dumps(r) for r in requests])
+    output_path = tmp_path / "output.jsonl"
+
+    async def fake_run_one_request(request_json, endpoint_registry):
+        index = int(json.loads(request_json)["custom_id"].split("-")[1])
+        await asyncio.sleep((len(requests) - index) * 0.001)
+        return _response(request_json)
+
+    monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
+
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+    ):
+        await dispatch_batch(
+            input_file, output_file, {}, BatchProgressTracker(), max_inflight=8
+        )
+
+    written = [
+        BatchRequestOutput.model_validate_json(line).custom_id
+        for line in output_path.read_text().strip().split("\n")
+    ]
+    assert written == [r["custom_id"] for r in requests]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_holds_the_window_behind_a_stalled_request(
+    tmp_path, monkeypatch
+):
+    """A slow first request blocks writes and caps dispatch at the window."""
+    input_path = _write_batch(tmp_path, [json.dumps(r) for r in _chat_requests(20)])
+    output_path = tmp_path / "output.jsonl"
+    release_head = asyncio.Event()
+    dispatched: list[str] = []
+
+    async def fake_run_one_request(request_json, endpoint_registry):
+        dispatched.append(json.loads(request_json)["custom_id"])
+        if len(dispatched) == 1:
+            await release_head.wait()
+        return _response(request_json)
+
+    monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
+
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+    ):
+        run = asyncio.create_task(
+            dispatch_batch(
+                input_file,
+                output_file,
+                {},
+                BatchProgressTracker(),
+                max_inflight=2,
+                window=6,
+            )
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert len(dispatched) == 6
+        assert output_path.read_text() == ""
+
+        release_head.set()
+        await run
+
+    assert len(output_path.read_text().strip().split("\n")) == 20
+
+
+@pytest.mark.asyncio
 async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch):
     """An aborted batch leaves nothing running and writes nothing it cancelled."""
     input_path = _write_batch(tmp_path, [json.dumps(r) for r in _chat_requests(8)])
