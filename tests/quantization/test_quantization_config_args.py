@@ -26,6 +26,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kInt8StaticChannelSym,
     kMxfp8Dynamic,
+    kNvfp4DynamicToken,
+    kNvfp4Static,
 )
 
 # ---- QuantSpec ------------------------------------------------------------
@@ -68,13 +70,17 @@ def test_args_linear_string_resolves_via_quant_key_names():
     assert args.moe is None
 
 
-def test_args_moe_string_resolves_via_online_shorthand():
+@pytest.mark.parametrize(
+    "shorthand,weight",
+    [("fp8_per_block", kFp8Static128BlockSym), ("nvfp4_per_token", kNvfp4Static)],
+)
+def test_args_moe_string_resolves_via_online_shorthand(shorthand, weight):
     # An online-shorthand name pulls the matching slot from _ONLINE_SHORTHANDS
     # (so `linear: "fp8_per_block"` and `moe: "fp8_per_block"` produce the
     # same per-layer-kind spec the `--quantization fp8_per_block` shorthand
     # would).
-    args = quant_config_args(moe="fp8_per_block")
-    assert args.moe == QuantSpec(weight=kFp8Static128BlockSym)
+    args = quant_config_args(moe=shorthand)
+    assert args.moe == QuantSpec(weight=weight)
 
 
 def test_args_string_shorthand_missing_slot_raises():
@@ -84,9 +90,14 @@ def test_args_string_shorthand_missing_slot_raises():
         quant_config_args(linear="int8_per_channel_weight_only")
 
 
-def test_args_accepts_dict_form():
-    args = quant_config_args(moe={"activation": "mxfp8"})
-    assert args.moe == QuantSpec(weight=None, activation=kMxfp8Dynamic)
+@pytest.mark.parametrize(
+    "activation,expected",
+    [("mxfp8", kMxfp8Dynamic), ("nvfp4_per_token", kNvfp4DynamicToken)],
+)
+def test_args_accepts_dict_form(activation, expected):
+    args = quant_config_args(moe={"activation": activation})
+    assert args.moe == QuantSpec(weight=None, activation=expected)
+    assert args.linear is None
 
 
 def test_targets_reject_non_string_keys():
@@ -110,22 +121,34 @@ def test_resolve_colliding_shorthand_is_deferred(quantization: str):
     assert resolve_quantization_config(quantization, None) is None
 
 
-def test_resolve_int8_shorthand_leaves_linear_unset():
-    # int8_per_channel_weight_only is MoE-only; linear stays None so that
-    # OnlineQuantizationConfig leaves Linear layers in full precision.
-    args = resolve_quantization_config("int8_per_channel_weight_only", None)
+@pytest.mark.parametrize(
+    "shorthand,weight",
+    [
+        ("int8_per_channel_weight_only", kInt8StaticChannelSym),
+        ("nvfp4_per_token", kNvfp4Static),
+    ],
+)
+def test_resolve_moe_only_shorthand_leaves_linear_unset(shorthand, weight):
+    args = resolve_quantization_config(shorthand, None)
     assert args is not None
     assert args.linear is None
-    assert args.moe == QuantSpec(weight=kInt8StaticChannelSym)
+    assert args.moe == QuantSpec(weight=weight)
 
 
-def test_resolve_quantization_config_only():
+@pytest.mark.parametrize("quantization", [None, "modelopt_fp4"])
+@pytest.mark.parametrize(
+    "activation,expected",
+    [("mxfp8", kMxfp8Dynamic), ("nvfp4_per_token", kNvfp4DynamicToken)],
+)
+def test_resolve_activation_override(quantization, activation, expected):
     # When only `quantization_config` is given (e.g. for an already-quantized
     # checkpoint that needs an activation override), it's returned as-is.
-    args = resolve_quantization_config(None, {"moe": {"activation": "mxfp8"}})
+    args = resolve_quantization_config(
+        quantization, {"moe": {"activation": activation}}
+    )
     assert args is not None
     assert args.linear is None
-    assert args.moe == QuantSpec(weight=None, activation=kMxfp8Dynamic)
+    assert args.moe == QuantSpec(weight=None, activation=expected)
 
 
 def test_resolve_merges_explicit_over_shorthand():
