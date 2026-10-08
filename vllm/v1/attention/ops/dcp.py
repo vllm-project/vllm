@@ -1228,7 +1228,6 @@ class RocmDirectDCPA2AWorkspace:
         return output
 
 
-@functools.cache
 def _rocm_direct_a2a_enabled(group: GroupCoordinator, dtype: torch.dtype) -> bool:
     from vllm.platforms.rocm import on_gfx950
 
@@ -1243,6 +1242,7 @@ def _rocm_direct_a2a_enabled(group: GroupCoordinator, dtype: torch.dtype) -> boo
     )
 
 
+@functools.cache
 def get_direct_dcp_a2a_workspace(
     group: GroupCoordinator,
     device: torch.device,
@@ -1280,7 +1280,6 @@ def get_direct_dcp_a2a_workspace(
 
 
 # Q gather
-
 
 # Symmetric-memory implementation
 
