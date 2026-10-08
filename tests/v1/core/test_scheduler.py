@@ -1244,6 +1244,7 @@ def test_long_prefill_threshold_ignored_when_alone():
     assert output.has_uncapped_lone_prefill
 
 
+@pytest.mark.skip_global_cleanup
 def test_long_prefill_threshold_short_step_keeps_schedule_ahead():
     """A lone request whose chunk stays within the threshold does not block
     scheduling the next batch behind it."""
