@@ -630,7 +630,7 @@ class TPSPLlamaDecoderLayer(LlamaDecoderLayer):
                 raise RuntimeError("TP/SP residual shard has an unexpected shape")
             local_residual = residual
 
-        if select_sp_config(profile, x.size(0)):
+        if projection.bias is None and select_sp_config(profile, x.size(0)):
             if backend is None or profile.config is None:
                 raise RuntimeError("TP/SP Llama profile has no enabled configuration")
             if x.dtype != torch.bfloat16 or projection.weight.dtype != torch.bfloat16:
@@ -737,6 +737,10 @@ class TPSPLlamaModel(LlamaModel):
             else self.embed_input_ids(input_ids)
         )
         residual = hidden_states
+        aux_hidden_states: list[torch.Tensor] = []
+        self._maybe_add_hidden_state(
+            aux_hidden_states, self.start_layer, hidden_states, None
+        )
         hidden_states = self.layers[0].input_layernorm(hidden_states)
         for idx, layer in enumerate(self.layers):
             next_norm = (
@@ -754,11 +758,30 @@ class TPSPLlamaModel(LlamaModel):
                 self.tpsp_profile.backend,
                 idx != 0,
             )
+            if idx + 1 in self.aux_hidden_state_layers:
+                group = get_tp_group()
+                padded = torch.empty(
+                    (group.world_size * residual.size(0), self.config.hidden_size),
+                    device=residual.device,
+                    dtype=residual.dtype,
+                )
+                dist.all_gather_into_tensor(
+                    padded, residual.contiguous(), group=group.device_group
+                )
+                self._maybe_add_hidden_state(
+                    aux_hidden_states, idx + 1, padded[: hidden_states.size(0)], None
+                )
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
 class TPSPLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config, prefix="", layer_type=TPSPLlamaDecoderLayer):
+        if vllm_config.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "--enable-tpsp is incompatible with --pipeline-parallel-size > 1"
+            )
         if vllm_config.quant_config is not None:
             raise RuntimeError("TP/SP Llama does not support quantized weights")
         if vllm_config.lora_config is not None:

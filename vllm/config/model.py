@@ -1565,6 +1565,10 @@ class ModelConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
+        if self.enable_tpsp and parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "--enable-tpsp is incompatible with --pipeline-parallel-size > 1"
+            )
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
