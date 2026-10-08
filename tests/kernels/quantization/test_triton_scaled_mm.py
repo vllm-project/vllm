@@ -222,3 +222,66 @@ def test_rdna4_triton_fp8_backend_preserves_linear_shape(out_dtype, use_bias):
     torch.testing.assert_close(
         compiled(layer, qa, bias), expected, rtol=1e-2, atol=1e-2
     )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm RDNA4")
+@pytest.mark.parametrize("n", [256, 8192])
+def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(monkeypatch, n):
+    """Prefill compilation must preserve decode tiles and GPU graph replay."""
+    from vllm.platforms.rocm import on_rdna4
+
+    if not on_rdna4():
+        pytest.skip("Requires RDNA4")
+    importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
+    set_random_seed(0)
+    launches = []
+    real_kernel = triton_scaled_mm_module.scaled_mm_kernel
+
+    class RecordingKernel:
+        def __getitem__(self, grid):
+            launch = real_kernel[grid]
+
+            def record(*args, **kwargs):
+                launches.append(
+                    tuple(kwargs[f"BLOCK_SIZE_{dim}"] for dim in ("M", "N", "K"))
+                )
+                return launch(*args, **kwargs)
+
+            return record
+
+    monkeypatch.setattr(triton_scaled_mm_module, "scaled_mm_kernel", RecordingKernel())
+    k = 128
+    b = (0.2 * torch.randn(n, k, device=device)).to(current_platform.fp8_dtype()).t()
+    sb = torch.rand(n, 1, device=device) + 0.5
+
+    def run(a, sa):
+        return torch.ops.vllm.triton_per_token_fp8_scaled_mm(
+            a, b, sa, sb, torch.bfloat16, None
+        )
+
+    compiled = torch.compile(run, fullgraph=True, dynamic=True)
+    for m in (256, 1, 8, 32, 33, 64, 65, 128, 129):
+        a = (0.2 * torch.randn(m, k, device=device)).to(current_platform.fp8_dtype())
+        sa = torch.rand(m, 1, device=device) + 0.5
+        expected_tile = (
+            (64, 64 if n < 8192 else 128, 256)
+            if m <= 32
+            else (64, 64, 256)
+            if m <= 64
+            else (64, 128, 128)
+            if m <= 128
+            else (128, 128, 128)
+        )
+        expected = torch_scaled_mm(a, b, sa, sb, torch.bfloat16)
+        actual = compiled(a, sa)
+        assert launches[-1] == expected_tile
+        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = compiled(a, sa)
+        assert launches[-1] == expected_tile
+        count = len(launches)
+        graph.replay()
+        torch.testing.assert_close(captured, expected, rtol=1e-2, atol=1e-2)
+        assert len(launches) == count
