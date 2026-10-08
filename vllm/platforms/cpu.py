@@ -607,10 +607,6 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_lookahead_block_hashes(cls) -> bool:
-        return True
-
-    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.get_num_threads()
 

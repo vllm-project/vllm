@@ -4,8 +4,6 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.platforms import current_platform
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -19,8 +17,6 @@ def is_lookahead_block_hashing_enabled(
 ) -> bool:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None or not speculative_config.use_eagle_block_drop():
-        return False
-    if not current_platform.supports_lookahead_block_hashes():
         return False
     if vllm_config.kv_transfer_config is not None:
         return bool(

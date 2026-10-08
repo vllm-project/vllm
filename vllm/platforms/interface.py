@@ -1268,13 +1268,6 @@ class Platform:
         return False
 
     @classmethod
-    def supports_lookahead_block_hashes(cls) -> bool:
-        """Whether the platform's model runner writes draft KV for every
-        scheduled token in the step it is scheduled, which lookahead block
-        hashes rely on to publish blocks at the committed frontier."""
-        return False
-
-    @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
         """Check whether the platform's ModelRunner can handle multiple attention
         layers that share the same layer index (e.g. cross attention and self

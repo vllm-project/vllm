@@ -485,10 +485,6 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
-    def supports_lookahead_block_hashes(cls) -> bool:
-        return True
-
-    @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
 
