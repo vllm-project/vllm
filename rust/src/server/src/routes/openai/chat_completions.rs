@@ -38,7 +38,7 @@ use crate::routes::openai::chat_completions::types::{
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
-use crate::routes::openai::utils::metrics::PerRequestMetrics;
+use crate::routes::openai::utils::metrics::per_request_metrics;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, FunctionCallDelta, FunctionCallResponse, StreamResponseEnvelope, ToolCall,
     ToolCallDelta, Usage,
@@ -47,13 +47,6 @@ use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
-
-fn chat_per_request_metrics(
-    enabled: bool,
-    usage: &vllm_chat::ChatTokenUsage,
-) -> Option<PerRequestMetrics> {
-    enabled.then(|| PerRequestMetrics::from_timestamps(usage.timestamps, usage.output_token_count))
-}
 
 pub(crate) fn lower_chat_request(
     request: ChatCompletionRequest,
@@ -167,6 +160,7 @@ async fn collect_chat_completion(
         logprobs,
         token_ids,
         usage,
+        timestamps,
         finish_reason,
         kv_transfer_params,
         ec_transfer_params,
@@ -211,7 +205,11 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let metrics = chat_per_request_metrics(enable_per_request_metrics, &usage);
+    let metrics = per_request_metrics(
+        enable_per_request_metrics,
+        timestamps,
+        usage.output_token_count,
+    );
     let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -440,6 +438,7 @@ async fn chat_completion_chunk_stream(
             }
             Ok(ChatEvent::Done {
                 usage: final_usage,
+                timestamps,
                 finish_reason,
                 ..
             }) => {
@@ -488,12 +487,11 @@ async fn chat_completion_chunk_stream(
                         &envelope,
                         Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
                     );
-                    if enable_per_request_metrics {
-                        chunk.metrics = Some(PerRequestMetrics::from_timestamps(
-                            final_usage.timestamps,
-                            final_usage.output_token_count,
-                        ));
-                    }
+                    chunk.metrics = per_request_metrics(
+                        enable_per_request_metrics,
+                        timestamps,
+                        final_usage.output_token_count,
+                    );
                     y.yield_ok(chunk).await;
                 }
 
@@ -848,7 +846,7 @@ mod tests {
 
     use super::{
         ApiServerOptions, ChatCompletionStreamResponse, ResponseOptions, StreamResponseEnvelope,
-        block_delta_chunk, chat_completion_chunk_stream, chat_per_request_metrics, final_chunk,
+        block_delta_chunk, chat_completion_chunk_stream, final_chunk,
     };
 
     /// Terminal usage with the given engine-level counts and zero reasoning tokens.
@@ -872,25 +870,6 @@ mod tests {
             1,
             "model".to_string(),
         ))
-    }
-
-    #[test]
-    fn non_streaming_chat_metrics_follow_enable_flag() {
-        let usage = ChatTokenUsage {
-            timestamps: vllm_llm::RequestTimestamps {
-                queued_ts: 10.0,
-                scheduled_ts: 10.2,
-                first_token_ts: 10.5,
-                last_token_ts: 11.0,
-            },
-            ..done_usage(1, 2, 0)
-        };
-
-        assert!(chat_per_request_metrics(false, &usage).is_none());
-
-        let metrics = chat_per_request_metrics(true, &usage).expect("per-request metrics");
-        assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
-        assert!((metrics.tokens_per_second.unwrap() - 2.5).abs() < 1e-9);
     }
 
     #[test]
@@ -998,14 +977,12 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                usage: ChatTokenUsage {
-                    timestamps: vllm_llm::RequestTimestamps {
-                        queued_ts: 10.0,
-                        scheduled_ts: 10.2,
-                        first_token_ts: 10.5,
-                        last_token_ts: 11.0,
-                    },
-                    ..done_usage(1, 1, 1)
+                usage: done_usage(1, 1, 1),
+                timestamps: vllm_llm::RequestTimestamps {
+                    queued_ts: 10.0,
+                    scheduled_ts: 10.2,
+                    first_token_ts: 10.5,
+                    last_token_ts: 11.0,
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1091,6 +1068,7 @@ mod tests {
             Ok(ChatEvent::Done {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1145,6 +1123,7 @@ mod tests {
             Ok(ChatEvent::Done {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1225,6 +1204,7 @@ mod tests {
             Ok(ChatEvent::Done {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1357,6 +1337,7 @@ mod tests {
             Ok(ChatEvent::Done {
                 message: Default::default(),
                 usage: done_usage(1, 4, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1435,6 +1416,7 @@ mod tests {
             Ok(ChatEvent::Done {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1517,8 +1499,8 @@ mod tests {
                         cached_token_count: 0,
                     },
                     reasoning_tokens: 2,
-                    timestamps: Default::default(),
                 },
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1589,8 +1571,8 @@ mod tests {
                         cached_token_count: 0,
                     },
                     reasoning_tokens: 2,
-                    timestamps: Default::default(),
                 },
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1645,6 +1627,7 @@ mod tests {
             Ok(ChatEvent::Done {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,

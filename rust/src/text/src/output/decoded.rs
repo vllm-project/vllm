@@ -318,7 +318,9 @@ pub async fn decoded_text_event_stream(
                     kv_transfer_params,
                     ec_transfer_params,
                     sampling_mask,
-                    timestamps: output.timestamps,
+                    timestamps: output
+                        .timestamps
+                        .expect("terminal output must carry request timestamps"),
                 })),
             })
             .await;
@@ -546,12 +548,12 @@ mod tests {
                 outputs: vec![
                     GenerateOutput::for_test(Some(Arc::clone(&prompt)), vec![0xe4], None),
                     GenerateOutput {
-                        timestamps: RequestTimestamps {
+                        timestamps: Some(RequestTimestamps {
                             queued_ts: 8.0,
                             scheduled_ts: 9.0,
                             first_token_ts: 10.0,
                             last_token_ts: 11.5,
-                        },
+                        }),
                         ..GenerateOutput::for_test(
                             None,
                             vec![0xbd, 0xa0],

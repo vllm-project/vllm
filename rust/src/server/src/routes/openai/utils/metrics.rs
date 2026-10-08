@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use serde::Serialize;
+use serde::ser::SerializeMap;
+use serde::{Serialize, Serializer};
 use vllm_llm::RequestTimestamps;
 
 /// Per-request response timing fields matching Python's `PerRequestMetrics`.
@@ -36,8 +37,58 @@ impl PerRequestMetrics {
     }
 }
 
+pub fn per_request_metrics(
+    enabled: bool,
+    times: RequestTimestamps,
+    num_generation_tokens: usize,
+) -> Option<PerRequestMetrics> {
+    enabled.then(|| PerRequestMetrics::from_timestamps(times, num_generation_tokens))
+}
+
+/// Serialize stream metrics like Pydantic's recursive `exclude_none=True`.
+pub fn serialize_stream_metrics<S>(
+    metrics: &Option<PerRequestMetrics>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let Some(metrics) = metrics else {
+        return serializer.serialize_none();
+    };
+    let field_count = [
+        metrics.time_to_first_token_ms,
+        metrics.generation_time_ms,
+        metrics.queue_time_ms,
+        metrics.mean_itl_ms,
+        metrics.tokens_per_second,
+    ]
+    .into_iter()
+    .flatten()
+    .count();
+    let mut map = serializer.serialize_map(Some(field_count))?;
+    if let Some(value) = metrics.time_to_first_token_ms {
+        map.serialize_entry("time_to_first_token_ms", &value)?;
+    }
+    if let Some(value) = metrics.generation_time_ms {
+        map.serialize_entry("generation_time_ms", &value)?;
+    }
+    if let Some(value) = metrics.queue_time_ms {
+        map.serialize_entry("queue_time_ms", &value)?;
+    }
+    if let Some(value) = metrics.mean_itl_ms {
+        map.serialize_entry("mean_itl_ms", &value)?;
+    }
+    if let Some(value) = metrics.tokens_per_second {
+        map.serialize_entry("tokens_per_second", &value)?;
+    }
+    map.end()
+}
+
 #[cfg(test)]
 mod tests {
+    use serde::Serialize;
+
     use super::*;
 
     #[test]
@@ -64,5 +115,35 @@ mod tests {
         assert_eq!(missing.queue_time_ms, None);
         assert_eq!(missing.mean_itl_ms, None);
         assert_eq!(missing.tokens_per_second, None);
+    }
+
+    #[test]
+    fn stream_serialization_omits_unset_fields() {
+        #[derive(Serialize)]
+        struct Chunk {
+            #[serde(serialize_with = "serialize_stream_metrics")]
+            metrics: Option<PerRequestMetrics>,
+        }
+
+        let metrics = PerRequestMetrics::from_timestamps(
+            RequestTimestamps {
+                queued_ts: 10.0,
+                scheduled_ts: 10.2,
+                first_token_ts: 10.5,
+                last_token_ts: 10.5,
+            },
+            1,
+        );
+        let value = serde_json::to_value(Chunk {
+            metrics: Some(metrics),
+        })
+        .unwrap();
+        let metrics = value["metrics"].as_object().unwrap();
+        assert_eq!(metrics.len(), 4);
+        assert!(metrics.contains_key("time_to_first_token_ms"));
+        assert!(metrics.contains_key("generation_time_ms"));
+        assert!(metrics.contains_key("queue_time_ms"));
+        assert!(metrics.contains_key("tokens_per_second"));
+        assert!(!metrics.contains_key("mean_itl_ms"));
     }
 }

@@ -128,15 +128,13 @@ impl [AssistantContentBlock] {
 /// Extends the engine-level [`TokenUsage`] with reasoning attribution measured
 /// by the chat output pipeline. [`TokenUsage`] itself stays engine-level and
 /// is not touched by parsing.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChatTokenUsage {
     /// Engine-level token usage.
     pub engine: TokenUsage,
     /// Number of generated tokens attributed to reasoning; 0 when the
     /// configured parser has no reasoning channel.
     pub reasoning_tokens: usize,
-    /// Engine lifecycle times used by frontend response metrics.
-    pub timestamps: RequestTimestamps,
 }
 
 impl From<TokenUsage> for ChatTokenUsage {
@@ -144,7 +142,6 @@ impl From<TokenUsage> for ChatTokenUsage {
         Self {
             engine,
             reasoning_tokens: 0,
-            timestamps: RequestTimestamps::default(),
         }
     }
 }
@@ -238,6 +235,8 @@ pub enum ChatEvent {
     Done {
         message: AssistantMessage,
         usage: ChatTokenUsage,
+        /// Engine lifecycle times used by frontend response metrics.
+        timestamps: RequestTimestamps,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         /// Boxed, like `ec_transfer_params`, to keep the per-token variants of
