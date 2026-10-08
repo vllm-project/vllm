@@ -1894,9 +1894,7 @@ class EngineArgs:
             dest="gdn_prefill_backend",
             choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl"],
             default=None,
-            help="Select GDN prefill backend. On ROCm gfx942/gfx950 with AITER "
-            "enabled, the default is 'aiter_flydsl' for BF16 models with "
-            "128-dim linear heads; 'triton' opts out.",
+            help="Select GDN prefill backend.",
         )
         parser.add_argument(
             "--kda-prefill-backend",
