@@ -471,9 +471,9 @@ def _rdna_rocm_attn_can_use_custom_paged_attention(
         and not cfg.has_sliding_window
     ):
         return False
-    model_config = getattr(vllm_config, "model_config", None)
-    if model_config is None:
+    if vllm_config is None or vllm_config.model_config is None:
         return True
+    model_config = vllm_config.model_config
     # Hybrid models raise the attention block size above 16.
     if model_config.is_hybrid:
         return False
