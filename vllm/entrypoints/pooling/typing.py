@@ -11,6 +11,7 @@ from pydantic import ConfigDict
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.pooling_params import LateChunkingParams
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.renderers.inputs import DictPrompt
@@ -124,6 +125,9 @@ class OfflineInputsContext:
     tokenization_kwargs: dict[str, Any] | None
     lora_request: Sequence[LoRARequest | None] | None
     priorities: int | Sequence[int] | None
+    late_chunking: list[LateChunkingParams | None] = field(
+        default_factory=list, kw_only=True
+    )
 
 
 @dataclass
@@ -158,6 +162,7 @@ class OfflineOutputsContext:
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None
+    late_chunking: list[LateChunkingParams | None] = field(default_factory=list)
 
 
 class RenderParams(TypedDict):
