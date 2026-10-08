@@ -128,7 +128,7 @@ class TritonMLASparseBackend(AttentionBackend):
         return "TRITON_MLA_SPARSE"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # The DSA indexer backend requires block size 64 on CUDA and shares
         # the KV cache group with this backend; the base-class MultipleOf(1)
         # default lets auto-selection settle on 16, which then fails
