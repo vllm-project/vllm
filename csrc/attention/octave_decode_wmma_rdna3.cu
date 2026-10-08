@@ -47,7 +47,6 @@ using octave::Format;
 using octave::LUT_ONE;
 using octave::R;
 constexpr int QG = 4;        // query tokens per block
-constexpr int kWindow = 64;  // exact recent positions (sparse window mode)
 constexpr int kSinks = 4;    // exact leading positions (sparse window mode)
 constexpr int QROW = D + 8;  // padded LDS row (bank spread)
 constexpr float PSCALE = 256.0f;
@@ -127,7 +126,7 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     int64_t smo, int64_t smh, int64_t sms, const int* __restrict__ idx,
     int64_t sidx, int topk, const int* __restrict__ qpos,
     const int* __restrict__ wtags, int wmask, const int* __restrict__ stags,
-    int smask) {
+    int smask, int window) {
   #ifndef OCTAVE_WMMA_STUB
   using F = Format<VB, KC>;
   constexpr int NG = KC ? 1 : 4;  // QK tiles (one per K scale)
@@ -299,13 +298,13 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
         return (pb >= 0 && pb < num_phys_blocks) ? pb : -1;
       };
       // Exact-window tokens (attended by octave_window_attn instead): the
-      // last kWindow positions before the query, and the first kSinks.
+      // last `window` positions before the query, and the first kSinks.
       const int rpos = SP && wtags ? qpos[grp * QG + seg0] : 0;
       auto in_window = [&](int pos, int pb, int off) {
         const int t = irow[min(pos, topk - 1)];
         const int d = rpos - t;
         const int slot = pb * block_size + off;
-        return (d >= 0 && d < kWindow && wtags[slot & wmask] == slot) ||
+        return (d >= 0 && d < window && wtags[slot & wmask] == slot) ||
                (t >= 0 && t < kSinks && stags[slot & smask] == slot);
       };
       auto sel_ptr = [&](int pos) {
@@ -596,7 +595,7 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        int64_t num_kv_splits, int64_t fmt,
                        const std::optional<torch::Tensor>& indices,
                        const int* qpos, const int* wtags, int wmask,
-                       const int* stags, int smask) {
+                       const int* stags, int smask, int window) {
   using namespace octave_wmma;
   static const bool arch_ok = [] {
     const auto* prop = at::cuda::getCurrentDeviceProperties();
@@ -622,17 +621,19 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
   const int nrt = std::min(num_q, QG) * hpk > 16 ? 2 : 1;
   const int spb = 2 * kSqWmmaNsb / nrt;
   dim3 grid((num_q + QG - 1) / QG, num_kv_heads, (ns + spb - 1) / spb);
-  #define SQW_SP(B, KC, T, SP)                                                 \
-    decode_wmma<B, KC, kSqWmmaNsb, T, SP><<<grid, 64 * kSqWmmaNsb, 0, stream>>>(\
-        (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),          \
-        block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),                 \
-        q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),                    \
-        k_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,          \
-        num_kv_heads, cache.size(2), block_table.size(1), block_table.size(0), \
-        cache.size(0), ns, kSqWmmaMinTps, nrt, query.stride(0),                \
-        query.stride(1), cache.stride(0), cache.stride(1), cache.stride(2),    \
-        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2), idx, sidx, topk,    \
-        qpos, wtags, wmask, stags, smask)
+  #define SQW_SP(B, KC, T, SP)                                              \
+    decode_wmma<B, KC, kSqWmmaNsb, T, SP>                                   \
+        <<<grid, 64 * kSqWmmaNsb, 0, stream>>>(                             \
+            (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),   \
+            block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),          \
+            q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),             \
+            k_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,   \
+            num_kv_heads, cache.size(2), block_table.size(1),               \
+            block_table.size(0), cache.size(0), ns, kSqWmmaMinTps, nrt,     \
+            query.stride(0), query.stride(1), cache.stride(0),              \
+            cache.stride(1), cache.stride(2), mid_o.stride(0),              \
+            mid_o.stride(1), mid_o.stride(2), idx, sidx, topk, qpos, wtags, \
+            wmask, stags, smask, window)
   #define SQW(B, KC, T)          \
     do {                         \
       if (sp)                    \
