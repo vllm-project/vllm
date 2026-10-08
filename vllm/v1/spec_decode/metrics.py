@@ -106,9 +106,6 @@ class SpecDecodingLogging:
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_verified_draft_tokens = np.sum(self.num_verified_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
-        if num_drafts == 0:
-            self.reset()
-            return
         draft_throughput = 0
         accepted_throughput = 0
 
