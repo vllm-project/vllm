@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import types
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -11,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -128,11 +128,27 @@ def _attach_reduced_draft_vocab(speculator: "DraftModelSpeculator") -> None:
         ``LocalArgmaxMixin.get_top_tokens`` with something of its own
         (e.g. Gemma4's centroid-projection head) -- that model has its own
         restriction mechanism already and this generic one is not a fit;
+      - the model carries a ``draft_id_to_target_id`` remap (EAGLE-3 and
+        DFlash-style drafters with their own, smaller draft vocabulary,
+        e.g. ``llama_eagle3``/``qwen3_eagle3``) -- their
+        ``LocalArgmaxMixin.get_top_tokens`` argmax index is already in
+        draft-vocab space and needs the ``+ d2t[k]`` remap to become a
+        target vocab id; this patch's reduced head assumes its argmax
+        index already IS a target vocab id, so attaching it here would
+        skip that remap and propose ids the target never meant;
       - the model has no plain top-level ``lm_head`` with a 2-D weight
         (the nested-head MTP classes, e.g. GLM-4 MoE's
         ``shared_head.head``, are not yet covered by this generic patch);
       - ``lm_head.tp_size != 1`` (the reduced head built here is a plain
         matmul, not a vocab-parallel one).
+
+    Attaching ``get_top_tokens()`` is necessary but not sufficient: the
+    speculator only ever calls it (via ``get_draft_top_tokens`` from
+    ``sample_draft``) when ``speculator.use_local_argmax_reduction`` is
+    also enabled. With that flag at its default (False), ``sample_draft``
+    takes the full-``compute_draft_logits()`` path instead and this
+    attached method is never invoked -- so this function warns at attach
+    time when the flag isn't on, rather than let the no-op pass silently.
 
     Safety: the reduced weight is built with ``index_select``, which always
     allocates a new tensor -- this never mutates ``lm_head.weight`` in
@@ -140,11 +156,11 @@ def _attach_reduced_draft_vocab(speculator: "DraftModelSpeculator") -> None:
     shares that exact weight object with the target
     (``load_eagle_model`` in ``eagle/utils.py``). The target's own
     verification path (``compute_logits`` / the rejection sampler) never
-    calls ``get_top_tokens`` -- only ``_greedy_sample_draft`` and
-    ``sample_draft`` on this speculator do -- so it cannot be reached by
-    this change either way.
+    calls ``get_top_tokens`` -- only ``get_draft_top_tokens`` (via
+    ``sample_draft``, and only when ``use_local_argmax_reduction`` is set)
+    does -- so it cannot be reached by this change either way.
     """
-    path = os.environ.get("VLLM_SPEC_DRAFT_VOCAB", "").strip()
+    path = envs.VLLM_SPEC_DRAFT_VOCAB.strip()
     if not path:
         return
     model = speculator.model
@@ -154,6 +170,16 @@ def _attach_reduced_draft_vocab(speculator: "DraftModelSpeculator") -> None:
             "VLLM_SPEC_DRAFT_VOCAB is set but %s already defines its own "
             "get_top_tokens() (not the generic LocalArgmaxMixin default); "
             "not overriding it.",
+            model.__class__.__name__,
+        )
+        return
+    if getattr(model, "draft_id_to_target_id", None) is not None:
+        logger.info(
+            "VLLM_SPEC_DRAFT_VOCAB is set but %s has its own "
+            "draft_id_to_target_id remap (a smaller draft vocabulary, not "
+            "a reduced view of the target's); this generic patch assumes "
+            "the two vocabularies are the same and would skip that remap, "
+            "so it is not a fit here -- not overriding it.",
             model.__class__.__name__,
         )
         return
@@ -210,6 +236,15 @@ def _attach_reduced_draft_vocab(speculator: "DraftModelSpeculator") -> None:
         full_mib,
         cut_mib,
     )
+    if not speculator.use_local_argmax_reduction:
+        logger.warning(
+            "VLLM_SPEC_DRAFT_VOCAB: get_top_tokens() attached to %s but "
+            "inactive -- use_local_argmax_reduction is False, so "
+            "sample_draft() never calls it and decode is unaffected. Set "
+            "speculative_config.use_local_argmax_reduction=True to use "
+            "the reduced vocabulary.",
+            model.__class__.__name__,
+        )
 
 
 class DraftModelSpeculator(BaseSpeculator):
