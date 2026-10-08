@@ -3,13 +3,12 @@
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import overload
 
 from vllm.config import (
     AttentionConfig,
@@ -28,18 +27,16 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.config.quantization import QuantizationConfigArgs
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightTransferUpdateRequest,
-)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
+from vllm.entrypoints.common.offline import _O, _R, OfflineInferenceMixin
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
+from vllm.entrypoints.rl.offline import RLOfflineMixin
 from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
@@ -56,7 +53,6 @@ from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from ..renderers import ChatParams
-from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -64,7 +60,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
+class LLM(
+    BeamSearchOfflineMixin, PoolingOfflineMixin, RLOfflineMixin, OfflineInferenceMixin
+):
     """An LLM for generating texts from given prompts and sampling parameters.
 
     This class includes a tokenizer, a language model (possibly distributed
@@ -883,60 +881,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         """
         return self.llm_engine.get_metrics()
-
-    def init_weight_transfer_engine(
-        self, request: WeightTransferInitRequest | dict
-    ) -> None:
-        """Initialize weight transfer for RL training.
-
-        Args:
-            request: Weight transfer initialization request with backend-specific info
-
-        """
-        init_info_dict = (
-            request["init_info"] if isinstance(request, dict) else request.init_info
-        )
-
-        self.llm_engine.collective_rpc(
-            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
-        )
-
-    def start_weight_update(self) -> None:
-        """Start a new weight update."""
-        self.llm_engine.collective_rpc("start_weight_update")
-
-    def start_draft_weight_update(self) -> None:
-        """Start a new weight update targeting the speculative draft model."""
-        self.llm_engine.collective_rpc("start_draft_weight_update")
-
-    def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
-        """Update the weights of the model.
-
-        Args:
-            request: Weight update request with backend-specific update info
-
-        """
-        update_info_dict = (
-            request["update_info"] if isinstance(request, dict) else request.update_info
-        )
-
-        self.llm_engine.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
-        )
-
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
-        """Finish the weight update and set its version if provided."""
-        self.llm_engine.collective_rpc("finish_weight_update")
-        if weight_version is not None:
-            self.llm_engine.set_weight_version(weight_version)
-
-    def update_weight_version(self, new_version: str) -> None:
-        """Set the weight version without updating weights."""
-        self.llm_engine.set_weight_version(new_version)
-
-    def get_weight_version(self) -> str:
-        """Return the latest committed weight version."""
-        return self.llm_engine.get_weight_version()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
