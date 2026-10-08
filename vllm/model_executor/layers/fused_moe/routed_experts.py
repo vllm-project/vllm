@@ -381,6 +381,7 @@ class RoutedExperts(PluggableLayer):
             loaded_weight: checkpoint weight to load into the param
             tp_rank: tensor parallel rank
             is_scale: whether padding should use unit scales instead of zero weights.
+            is_block_scale: whether scales cover quantization blocks.
 
         """
         padded_tp = self.moe_config.tp_shard_with_padding
