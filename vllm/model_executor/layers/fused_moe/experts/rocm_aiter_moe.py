@@ -235,6 +235,30 @@ def rocm_aiter_grouped_topk(
     return topk_weights, topk_ids
 
 
+def aiter_moe_pads(
+    hidden_pad: int,
+    intermediate_pad: int,
+    activation: MoEActivation,
+    use_mxfp4_w4a4: bool,
+    tp_size: int,
+) -> tuple[int, int]:
+    """Round the padding deltas to what AITER's MoE dispatch expects.
+
+    SITU's A16W4 FlyDSL kernel pads per gate/up half, so its pads pass through
+    unrounded. Otherwise the pads are rounded to AITER's CK/FlyDSL tile
+    granularity, and at tp_size == 1 the intermediate pad is doubled for the
+    fused gate/up weight. The W4A4 SiLU path doubles it inside AITER, so it is
+    passed undoubled.
+    """
+    if activation == MoEActivation.SITU:
+        return hidden_pad, intermediate_pad
+    double = tp_size == 1 and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
+    return (
+        hidden_pad // 128 * 128,
+        intermediate_pad // 64 * 64 * (2 if double else 1),
+    )
+
+
 def rocm_aiter_fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -362,18 +386,13 @@ def rocm_aiter_fused_experts(
             else moe_config.intermediate_pad
         )
 
-        # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
-        # dispatch (currently pinned to v0.1.13.post1):
-        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
-        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
-        # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
-        # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
-        # SITU's A16W4 FlyDSL kernel pads per gate/up half; pass through unrounded.
-        if activation != MoEActivation.SITU:
-            hidden_pad = hidden_pad // 128 * 128
-            intermediate_pad = (
-                intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
-            )
+        hidden_pad, intermediate_pad = aiter_moe_pads(
+            hidden_pad,
+            intermediate_pad,
+            activation,
+            quant_config.use_mxfp4_w4a4,
+            moe_config.tp_size,
+        )
 
         # AITER's stage1 GEMM needs gate_mode to match how weights were
         # shuffled at load time (oracle/mxfp4.py). gpt-oss uses INTERLEAVE;
