@@ -311,6 +311,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "GraniteMoeSWAForCausalLM": _HfExamplesInfo("ibm-granite/granite-swash-3b-a600m"),
     "GraniteSWAForCausalLM": _HfExamplesInfo("ibm-granite/granite-swash-2b"),
+    "GraniteSwitchForCausalLM": _HfExamplesInfo(
+        "ibm-granite/granite-switch-4.1-3b-preview",
+        # A Granite Switch checkpoint is a base model plus a set of composed-in
+        # adapters, so it only exists once it has been composed. The first
+        # public one is still being published; flip this to True then.
+        is_available_online=False,
+    ),
     "HrmTextForCausalLM": _HfExamplesInfo(
         "sapientinc/HRM-Text-1B",
     ),
