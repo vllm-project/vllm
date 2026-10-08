@@ -390,7 +390,7 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_norm_bias,
             indexer_k_norm_eps,
             indexer_k_rope_cos_sin_cache,
-            self.topk_indices_buffer,
+            self.impl.topk_indices_buffer,  # type: ignore[attr-defined]
             slot_mapping=mla_slot,
             indexer_slot_mapping=indexer_slot,
             indexer_k_cache=indexer_k_cache,
@@ -497,7 +497,7 @@ class DeepseekV32Attention(MLAAttention):
                 self.indexer.head_dim,
                 self.indexer.max_model_len,
                 self.indexer.max_total_seq_len,
-                self.topk_indices_buffer,
+                self.impl.topk_indices_buffer,  # type: ignore[attr-defined]
                 skip_k_cache_insert=not self.use_pcp,
                 use_pcp=self.use_pcp,
                 pcp_shard_decode_requests=self.pcp_shard_decode_requests,
