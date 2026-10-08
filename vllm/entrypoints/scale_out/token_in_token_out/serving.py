@@ -7,8 +7,6 @@ import concurrent.futures
 import contextvars
 import functools
 import math
-import queue
-import threading
 import time
 from collections.abc import AsyncGenerator, Callable
 from collections.abc import Sequence as GenericSequence
@@ -87,84 +85,22 @@ T = TypeVar("T")
 # Logprob entries (positions x slots) from which a response is built in a
 # worker thread rather than on the event loop (about 0.2 us per entry).
 OFFLOAD_MIN_LOGPROB_ENTRIES = 1 << 15
-# Builds of at least this many entries share two threads (a third waits:
-# more threads only add memory); smaller ones have their own thread, so they
-# never queue behind a multi-second large build.
-LARGE_LOGPROB_ENTRIES = 1 << 20
-
-
-class _BuildThreads:
-    """``workers`` daemon threads, started on first use, running builds in
-    submission order. A failing build fails its own future only."""
-
-    def __init__(self, name: str, workers: int) -> None:
-        self.name = name
-        self.workers = workers
-        self._queue: queue.SimpleQueue = queue.SimpleQueue()
-        self._lock = threading.Lock()
-        self._threads: list[threading.Thread] = []
-
-    def submit(self, fn: Callable[[], T]) -> "concurrent.futures.Future[T]":
-        future: concurrent.futures.Future[T] = concurrent.futures.Future()
-        self._queue.put((future, fn))
-        with self._lock:
-            while len(self._threads) < self.workers:
-                thread = threading.Thread(
-                    target=self._run,
-                    name=f"{self.name}-{len(self._threads)}",
-                    daemon=True,
-                )
-                thread.start()
-                self._threads.append(thread)
-        return future
-
-    def _run(self) -> None:
-        while True:
-            self._run_one(*self._queue.get())
-
-    @staticmethod
-    def _run_one(future: concurrent.futures.Future, fn: Callable[[], object]) -> None:
-        # A separate frame, so nothing of a finished build stays referenced
-        # while the thread waits for the next one.
-        if not future.set_running_or_notify_cancel():
-            return  # cancelled while queued: its client went away
-        try:
-            future.set_result(fn())
-        except BaseException as e:
-            future.set_exception(e)
-
-
-_LARGE_RESPONSE_BUILDER = _BuildThreads("generate-response", workers=2)
-_RESPONSE_BUILDER = _BuildThreads("generate-response-mid", workers=1)
-
-
-def _log_discarded_build(future: concurrent.futures.Future) -> None:
-    if not future.cancelled() and future.exception() is not None:
-        logger.warning(
-            "Building the response of a disconnected request failed: %r",
-            future.exception(),
-        )
+# Two threads: a build is mostly GIL-bound and a second thread overlaps its
+# GIL-free part; more threads only add memory.
+_RESPONSE_BUILDER = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="generate-response"
+)
 
 
 async def build_response_off_loop(entries: int, build: Callable[[], T]) -> T:
     """Run ``build`` (CPU only, no shared-state side effects) inline for
     fewer than ``OFFLOAD_MIN_LOGPROB_ENTRIES`` logprob entries, else in a
-    worker thread, so the event loop keeps serving other requests. If the
-    caller is cancelled, a queued build never runs and a running one
-    finishes, its failure logged."""
+    worker thread, so the event loop keeps serving other requests."""
     if entries < OFFLOAD_MIN_LOGPROB_ENTRIES:
         return build()
-    builder = (
-        _LARGE_RESPONSE_BUILDER
-        if entries >= LARGE_LOGPROB_ENTRIES
-        else _RESPONSE_BUILDER
+    return await asyncio.get_running_loop().run_in_executor(
+        _RESPONSE_BUILDER, functools.partial(contextvars.copy_context().run, build)
     )
-    future = builder.submit(functools.partial(contextvars.copy_context().run, build))
-    try:
-        return await asyncio.wrap_future(future)
-    except asyncio.CancelledError:
-        future.add_done_callback(_log_discarded_build)
-        raise
 
 
 def _array_logprob_entries(final_res: RequestOutput) -> int:
