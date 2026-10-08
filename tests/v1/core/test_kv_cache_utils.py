@@ -966,6 +966,24 @@ def test_free_kv_cache_block_queue_popleft_n():
         assert block.next_free_block is None
 
 
+@pytest.mark.parametrize("num_blocks", [1, 2, 16])
+def test_free_kv_cache_block_queue_popleft_n_drain_and_refill(num_blocks):
+    """Draining a batch must leave the sentinels ready for reuse."""
+    blocks = [KVCacheBlock(block_id=i) for i in range(num_blocks)]
+    queue = FreeKVCacheBlockQueue(blocks)
+
+    assert queue.popleft_n(num_blocks) == blocks
+    assert queue.num_free_blocks == 0
+    assert queue.fake_free_list_head.next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is queue.fake_free_list_head
+    assert all(b.prev_free_block is None and b.next_free_block is None for b in blocks)
+    assert queue.popleft_n(0) == []
+
+    queue.append_n(blocks)
+    assert queue.popleft_n(num_blocks) == blocks
+    assert queue.num_free_blocks == 0
+
+
 def test_free_kv_cache_block_queue_get_all_free_blocks():
     # Create a list of KVCacheBlock objects
     blocks = [KVCacheBlock(block_id=i) for i in range(5)]
