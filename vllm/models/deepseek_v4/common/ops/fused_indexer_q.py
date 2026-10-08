@@ -87,7 +87,7 @@ class FusedIndexerQRopeQuantTritonKernel(
         index_q_head_dim: int
         fp8_max: float
         use_fnuz: bool
-        is_rocm: bool
+        use_explicit_fma: bool
 
     @staticmethod
     @triton.jit
@@ -114,7 +114,7 @@ class FusedIndexerQRopeQuantTritonKernel(
         index_weights_out_stride,
         FP8_MAX: tl.constexpr = 448.0,
         USE_FNUZ: tl.constexpr = False,
-        IS_ROCM: tl.constexpr = False,
+        USE_EXPLICIT_FMA: tl.constexpr = False,
     ):
         # Layout matches the unfused reference (DeepseekV4ScalingRotaryEmbedding
         # + per_token_group_quant_fp8): GPT-J interleaved RoPE applied to the
@@ -142,12 +142,13 @@ class FusedIndexerQRopeQuantTritonKernel(
         rot_base = base_ptr + INDEX_Q_NOPE_DIM
         x_even = tl.load(rot_base + half_offset * 2).to(tl.float32)
         x_odd = tl.load(rot_base + half_offset * 2 + 1).to(tl.float32)
-        # Match CUDA/HIP rotary_embedding contraction before bf16 rounding.
-        r_even = tl.fma(x_even, cos, -(x_odd * sin))
-        if IS_ROCM:
+        if USE_EXPLICIT_FMA:
+            # Match HIP rotary_embedding contraction before bf16 materialization.
+            r_even = tl.fma(x_even, cos, -(x_odd * sin))
             r_odd = tl.fma(x_odd, cos, x_even * sin)
         else:
-            r_odd = tl.fma(x_even, sin, x_odd * cos)
+            r_even = x_even * cos - x_odd * sin
+            r_odd = x_odd * cos + x_even * sin
 
         # Match reference numerics: fp32 → bf16 → fp32 before the ue8m0 absmax.
         # Same pattern as the K-side compressor kernel (fused_compress_quant_cache.py).
@@ -221,7 +222,7 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_q_head_dim=head_dim,
             fp8_max=224.0 if use_fnuz else 448.0,
             use_fnuz=use_fnuz,
-            is_rocm=current_platform.is_rocm(),
+            use_explicit_fma=current_platform.is_rocm(),
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -303,7 +304,8 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_weights_out_stride=index_weights_out.stride(0),
             FP8_MAX=fp8_max,
             USE_FNUZ=use_fnuz,
-            IS_ROCM=current_platform.is_rocm(),
+            USE_EXPLICIT_FMA=current_platform.is_rocm(),
+            enable_fp_fusion=True,  # Match the reference's RoPE rounding.
             num_warps=1,
         )
 
@@ -412,8 +414,8 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             ).to(tl.float32)
             x_even = tl.load(rot_q_base + pair_off * 2).to(tl.float32)
             x_odd = tl.load(rot_q_base + pair_off * 2 + 1).to(tl.float32)
-            r_even = tl.fma(x_even, cos_b, -(x_odd * sin_b))
-            r_odd = tl.fma(x_even, sin_b, x_odd * cos_b)
+            r_even = x_even * cos_b - x_odd * sin_b
+            r_odd = x_odd * cos_b + x_even * sin_b
             # bf16 roundtrip for parity with the FP8 kernel / reference numerics.
             r_even = r_even.to(tl.bfloat16).to(tl.float32)
             r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
@@ -539,6 +541,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             MXFP4_BLOCK=MXFP4_BLOCK_SIZE,
             index_weights_stride=index_weights.stride(0),
             index_weights_out_stride=index_weights_out.stride(0),
+            enable_fp_fusion=True,  # Match the reference's RoPE rounding.
             num_warps=1,
         )
 

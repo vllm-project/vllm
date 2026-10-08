@@ -26,7 +26,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
 from vllm.utils.import_utils import has_cutedsl
 
 HEAD_DIM = 128
@@ -150,16 +149,12 @@ def _reference(
 )
 @pytest.mark.parametrize("use_cutedsl", [False, True])
 @pytest.mark.parametrize("n_head", [32, 64])
-@pytest.mark.parametrize("enable_fp_fusion", [False, True])
 @torch.inference_mode()
 def test_fused_indexer_q_rope_quant_matches_unfused(
-    num_tokens, cache_dtype, use_fp4, use_cutedsl, n_head, enable_fp_fusion, monkeypatch
+    num_tokens, cache_dtype, use_fp4, use_cutedsl, n_head
 ):
     if use_cutedsl and not has_cutedsl():
         pytest.skip("cutedsl (cutlass) not installed")
-
-    # RoPE must match the CUDA reference with either Triton fusion default.
-    monkeypatch.setattr(triton.knobs.language, "default_fp_fusion", enable_fp_fusion)
 
     device = "cuda"
     torch.manual_seed(0)
