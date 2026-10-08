@@ -138,12 +138,14 @@ def test_completion_derender_matches_coupled_completion(
         tokenizer=tokenizer,
     )
     request = CompletionRequest(model=MODEL_NAME, prompt="hi", logprobs=k)
+    generated = _generate(token_ids, dicts)
     derendered = _convert_chat_logprobs_to_completion_logprobs(
         _resolve_logprobs(
-            _generate(token_ids, dicts),
+            generated,
             tokenizer,
             top_limit=_completion_top_logprobs_limit(request),
-        )
+        ),
+        generated,
     )
     assert derendered.model_dump() == coupled.model_dump()
     if k > 0:
@@ -164,3 +166,32 @@ def test_without_the_request_derender_keeps_every_candidate(tokenizer, vocab_ids
         top_limit=_chat_top_logprobs_limit(None),
     )
     assert [len(e.top_logprobs) for e in derendered.content] == [len(d) for d in dicts]
+
+
+@pytest.mark.parametrize("k", [-1, 0, 2])
+def test_completion_position_without_logprobs_stays_none(
+    tokenizer, vocab_ids, serving_completion, k
+):
+    """A position the engine returned no logprobs for is `None` in
+    `/v1/completions`, while a position whose candidates were all cut
+    (`logprobs=-1`) is `{}`; derender keeps the two apart."""
+    token_ids, dicts = _positions(tokenizer, vocab_ids, k, RANKS)
+    dicts[3] = None
+    coupled = serving_completion._create_completion_logprobs(
+        token_ids=token_ids,
+        top_logprobs=dicts,
+        num_output_top_logprobs=k,
+        tokenizer=tokenizer,
+    )
+    request = CompletionRequest(model=MODEL_NAME, prompt="hi", logprobs=k)
+    generated = _generate(token_ids, dicts)
+    derendered = _convert_chat_logprobs_to_completion_logprobs(
+        _resolve_logprobs(
+            generated,
+            tokenizer,
+            top_limit=_completion_top_logprobs_limit(request),
+        ),
+        generated,
+    )
+    assert derendered.top_logprobs == coupled.top_logprobs
+    assert derendered.top_logprobs[3] is None

@@ -140,6 +140,11 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
     `logprobs + 1` entries when the sampled token is outside the top
     `logprobs`. Clients that assume `len(top_logprobs) == logprobs` should
     take the first `logprobs` entries after sorting by `rank`.
+    Derender applies each endpoint's cut from the original request, so send
+    `chat_request` / `completion_request` to derender whenever logprobs are
+    requested: without it derender returns every candidate, which on chat is
+    `top_logprobs + 1` entries where `/v1/chat/completions` returns
+    `top_logprobs`.
 
 ## Multimodal Render Features
 
