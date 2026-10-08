@@ -36,7 +36,6 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
-from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -508,34 +507,13 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         index_group = self.index_group
         if isinstance(index_group, HiSparseMLAIndexGroup):
             num_decode_tokens = attn_metadata.num_decode_tokens
-            output: torch.Tensor | None = None
-            decode_lse: torch.Tensor | None = None
-            if num_decode_tokens > 0:
-                physical_topk, valid_counts = (
-                    index_group.convert_logical_to_physical_topk(
-                        self.index_group_index,
-                        topk_indices[:num_decode_tokens],
-                        attn_metadata,
-                        block_stride_rows=None,
-                        return_valid_counts=True,
-                    )
-                )
-                if num_decode_tokens < num_actual_toks:
-                    output = self._new_mqa_output(q)
-                decode_out, decode_lse = self._run_mqa_kernel(
-                    q[:num_decode_tokens],
-                    index_group.physical_kv_cache(self.index_group_index).view(
-                        kv_c_and_k_pe_cache.dtype
-                    ),
-                    physical_topk,
-                    valid_counts,
-                    out=None if output is None else output[:num_decode_tokens],
-                )
-                if num_decode_tokens == num_actual_toks:
-                    return decode_out, decode_lse
-
-            cache = index_group.cache(self.index_group_index)
-            if num_decode_tokens == 0 and cache.all_context_pages_resident:
+            physical_kv_cache = index_group.physical_kv_cache(
+                self.index_group_index
+            ).view(kv_c_and_k_pe_cache.dtype)
+            if num_decode_tokens == num_actual_toks or (
+                num_decode_tokens == 0
+                and index_group.cache(self.index_group_index).all_context_pages_resident
+            ):
                 physical_topk, valid_counts = (
                     index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
@@ -546,34 +524,38 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                     )
                 )
                 return self._run_mqa_kernel(
-                    q,
-                    index_group.physical_kv_cache(self.index_group_index).view(
-                        kv_c_and_k_pe_cache.dtype
-                    ),
-                    physical_topk,
-                    valid_counts,
+                    q, physical_kv_cache, physical_topk, valid_counts
                 )
 
-            if output is None:
-                output = self._new_mqa_output(q)
-            lses = [] if decode_lse is None else [decode_lse]
-            assert attn_metadata.prefill is not None
-            assert attn_metadata.prefill.host_staging_plans is not None
-            (staging,) = current_workspace_manager().get_simultaneous(
-                index_group.prefill_staging_spec(self.index_group_index)
-            )
-            for plan in attn_metadata.prefill.host_staging_plans:
-                prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
-                    self.index_group_index,
-                    kv_c_and_k_pe_cache,
-                    attn_metadata,
-                    plan,
-                    staging,
+            output = self._new_mqa_output(q)
+            lses: list[torch.Tensor] = []
+            if num_decode_tokens:
+                physical_topk, valid_counts = (
+                    index_group.convert_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices[:num_decode_tokens],
+                        attn_metadata,
+                        block_stride_rows=None,
+                        return_valid_counts=True,
+                    )
                 )
-                tokens = slice(
-                    num_decode_tokens + plan.tokens.start,
-                    num_decode_tokens + plan.tokens.stop,
+                _, decode_lse = self._run_mqa_kernel(
+                    q[:num_decode_tokens],
+                    physical_kv_cache,
+                    physical_topk,
+                    valid_counts,
+                    out=output[:num_decode_tokens],
                 )
+                if decode_lse is not None:
+                    lses.append(decode_lse)
+            for (
+                tokens,
+                prefill_cache,
+                block_table,
+                req_ids,
+            ) in index_group.staged_prefills(
+                self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
+            ):
                 prefill_indices, prefill_lens = (
                     triton_convert_req_index_to_global_index(
                         req_ids,

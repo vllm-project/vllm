@@ -349,16 +349,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         common_attn_metadata: "CommonAttentionMetadata",
         block_table: torch.Tensor,
         num_decodes: int,
-        num_prefills: int,
+        prefill_seq_lens_cpu: torch.Tensor,
     ) -> list[HiSparsePrefillStagingPlan]:
         """Split prefill requests into groups whose staged history fits the
         reserved staging buffer, one plan per group."""
         block_size = self.kv_cache_spec.block_size
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        assert seq_lens_cpu is not None
-        prefill_blocks = (
-            seq_lens_cpu[num_decodes : num_decodes + num_prefills] + block_size - 1
-        ) // block_size
+        num_prefills = prefill_seq_lens_cpu.shape[0]
+        prefill_blocks = (prefill_seq_lens_cpu + block_size - 1) // block_size
         capacity = self.hisparse_staging_block_capacity
         bounds = (
             split_prefill_chunks(prefill_blocks, capacity)
@@ -374,7 +371,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 seq_lens[start:end],
                 block_size,
                 int(prefill_blocks[start:end].sum()),
-                requests=slice(start, end),
+                request_start=start,
                 tokens=slice(
                     int(query_start_loc_cpu[start]), int(query_start_loc_cpu[end])
                 ),
@@ -431,7 +428,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             staging_plans = None
             if self.vllm_config.attention_config.hisparse_config is not None:
                 staging_plans = self._build_hisparse_staging_plans(
-                    common_attn_metadata, block_table, num_decodes, num_prefills
+                    common_attn_metadata,
+                    block_table,
+                    num_decodes,
+                    seq_lens_cpu[num_decodes : num_decodes + num_prefills],
                 )
             prefill = SparseMLAPrefillMetadata(
                 block_table=block_table,

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,6 +23,7 @@ from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     create_hisparse_cache_handle,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
 
 
 def _create_side_stream(device: torch.device) -> torch.Stream:
@@ -278,7 +280,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         cache, its block table, and plan-relative request ids for the plan's
         query tokens."""
         cache = self.cache(layer_index)
-        first_request = attn_metadata.num_decodes + plan.requests.start
+        first_request = attn_metadata.num_decodes + plan.request_start
         last_request = first_request + plan.block_table.shape[0]
         resident_cache = None
         if cache.view is not None and cache.block_table is not None:
@@ -300,6 +302,33 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         if first_request > 0:
             req_ids = req_ids - first_request
         return staged_cache, plan.block_table, req_ids
+
+    def staged_prefills(
+        self,
+        layer_index: int,
+        kv_cache: torch.Tensor,
+        attn_metadata: Any,
+        staging: torch.Tensor | None = None,
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Stage each prefill group in turn, yielding its batch query-token slice,
+        staged cache, block table, and plan-relative request ids. ``staging``
+        defaults to the shared workspace."""
+        if staging is None:
+            (staging,) = current_workspace_manager().get_simultaneous(
+                self.prefill_staging_spec(layer_index)
+            )
+        prefill = attn_metadata.prefill
+        assert prefill is not None and prefill.host_staging_plans is not None
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        for plan in prefill.host_staging_plans:
+            staged_cache, block_table, req_ids = self.stage_prefill_rows(
+                layer_index, kv_cache, attn_metadata, plan, staging
+            )
+            tokens = slice(
+                num_decode_tokens + plan.tokens.start,
+                num_decode_tokens + plan.tokens.stop,
+            )
+            yield tokens, staged_cache, block_table, req_ids
 
     def _prefill_gather_plan(
         self, layer_index: int, attn_metadata: Any

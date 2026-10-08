@@ -862,27 +862,22 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             if decode_out is not None:
                 output[:num_decode_tokens].copy_(decode_out)
                 del decode_out
-            assert attn_metadata.prefill is not None
-            assert attn_metadata.prefill.host_staging_plans is not None
             # q is a view of this impl's workspace, so take staging alongside it.
             *_, staging = current_workspace_manager().get_simultaneous(
                 *self.workspace_specs,
                 index_group.prefill_staging_spec(self.index_group_index),
             )
-            for plan in attn_metadata.prefill.host_staging_plans:
-                staged_cache, plan_block_table, plan_req_ids = (
-                    index_group.stage_prefill_rows(
-                        self.index_group_index,
-                        kv_c_and_k_pe_cache,
-                        attn_metadata,
-                        plan,
-                        staging,
-                    )
-                )
-                tokens = slice(
-                    num_decode_tokens + plan.tokens.start,
-                    num_decode_tokens + plan.tokens.stop,
-                )
+            for (
+                tokens,
+                staged_cache,
+                plan_block_table,
+                plan_req_ids,
+            ) in index_group.staged_prefills(
+                self.index_group_index,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                staging,
+            ):
                 staged_rows, staged_stride = flat_kv_row_view(
                     staged_cache, attn_metadata.block_size
                 )

@@ -486,6 +486,9 @@ def hisparse_prefill_staging_remap(
     return new_bt, row_ids
 
 
+_ALL_PREFILL_TOKENS = slice(0, None)
+
+
 @dataclass
 class HiSparsePrefillStagingPlan:
     block_table: torch.Tensor
@@ -493,10 +496,10 @@ class HiSparsePrefillStagingPlan:
     dst_rows: torch.Tensor
     miss_mask: torch.Tensor
     block_size: int
-    # Prefill requests and query tokens this plan stages, relative to the
-    # batch's first prefill.
-    requests: slice = slice(0, None)
-    tokens: slice = slice(0, None)
+    # First prefill request and the query tokens this plan stages, relative to
+    # the batch's first prefill.
+    request_start: int = 0
+    tokens: slice = _ALL_PREFILL_TOKENS
     # Host rows with a GPU-resident copy (adopted shadow pages): the flat
     # resident-cache row to read instead of DMAing from host, -1 for misses.
     gpu_row_ids: torch.Tensor | None = None
@@ -568,8 +571,8 @@ def build_hisparse_prefill_staging_plan(
     seq_lens: torch.Tensor,
     block_size: int,
     staging_block_capacity: int,
-    requests: slice | None = None,
-    tokens: slice | None = None,
+    request_start: int = 0,
+    tokens: slice = _ALL_PREFILL_TOKENS,
 ) -> HiSparsePrefillStagingPlan:
     """Build an asynchronous layer-independent host-cache staging remap."""
     device = block_table.device
@@ -603,8 +606,8 @@ def build_hisparse_prefill_staging_plan(
         dst_rows=dst_rows,
         miss_mask=valid_rows.to(torch.int32),
         block_size=block_size,
-        requests=slice(0, None) if requests is None else requests,
-        tokens=slice(0, None) if tokens is None else tokens,
+        request_start=request_start,
+        tokens=tokens,
     )
 
 
