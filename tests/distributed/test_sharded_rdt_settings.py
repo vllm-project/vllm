@@ -201,13 +201,17 @@ def test_trainer_checks_selected_ray_floor_before_remote(monkeypatch):
     assert events == ["host", "remote"]
 
 
-def test_host_staging_execution_path_is_enabled():
-    ShardedRDTWeightTransferEngine._refuse_unbuilt_settings(
-        ShardedRDTWeightTransferInitInfo(staging_device="host")
+def test_parallel_stage_scheduler_reaches_pool_setup(monkeypatch):
+    monkeypatch.setattr(engine_mod, "check_ray_rdt_version", lambda _mode: None)
+    engine = ShardedRDTWeightTransferEngine.__new__(ShardedRDTWeightTransferEngine)
+    engine.parallel_config = SimpleNamespace(enable_eplb=False)
+    engine._configure_ring = Mock(side_effect=RuntimeError("stop at pool setup"))
+    info = ShardedRDTWeightTransferInitInfo(
+        staging_device="host",
+        stages_in_flight=2,
     )
 
+    with pytest.raises(RuntimeError, match="stop at pool setup"):
+        engine.init_transfer_engine(info)
 
-def test_parallel_stage_scheduler_remains_refused_until_implemented():
-    info = ShardedRDTWeightTransferInitInfo(stages_in_flight=2)
-    with pytest.raises(NotImplementedError, match="stages_in_flight"):
-        ShardedRDTWeightTransferEngine._refuse_unbuilt_settings(info)
+    engine._configure_ring.assert_called_once_with(info)
