@@ -242,27 +242,32 @@ def copy_kv_blocks(
 
 
 def _physical_blocks(
-    cache: torch.Tensor, indices: torch.Tensor, layout: KVCacheLayout
-) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    cache: torch.Tensor,
+    indices: torch.Tensor,
+    layout: KVCacheLayout,
+    require_nhd: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Select ``indices`` of ``cache`` as the bytes NIXL wrote into them.
 
     ``cache`` is a registered per-layer cache: a logical ``[B, H, N, C]`` view
-    whose strides follow ``layout``. Permuting it into physical order makes
-    each block one contiguous run, so ``index_select`` copies the block's
-    bytes in memory order and ``index_copy_`` writes them back in place.
+    whose strides follow ``layout``. Blocks stay on dim 0; the block dims are
+    permuted into their physical order so that, for a layout whose block is
+    one contiguous run, ``index_select`` copies the block's bytes in memory
+    order and ``index_copy_`` writes them back in place.
 
-    Returns the physical view, the selected blocks in physical order, and
-    whether heads are the outer block dimension (HND) in that order.
+    ``require_nhd`` asserts the block is one run in NHD order, which is what
+    the HND -> NHD transposes reinterpret.
     """
     assert cache.ndim == 4, f"expected a logical [B, H, N, C] cache, got {cache.shape}"
-    order = layout.layer_view_order
-    physical = cache.permute(*order)
-    assert physical[0].is_contiguous(), (
-        f"{layout.name} blocks are not contiguous in physical order "
-        f"(strides {cache.stride()}); the receive post-process cannot reorder them"
-    )
-    heads_outer = order.index(1) < order.index(2)
-    return physical, physical.index_select(0, indices), heads_outer
+    # Physical order of the block dims (H=1, N=2, C=3), ignoring where B sits.
+    block_order = tuple(d for d in layout.layer_view_order if d != 0)
+    physical = cache.permute(0, *block_order)
+    if require_nhd:
+        assert block_order == (2, 1, 3) and physical[0].is_contiguous(), (
+            f"layout post-process targets a contiguous NHD block, got "
+            f"{layout.name} with strides {cache.stride()}"
+        )
+    return physical, physical.index_select(0, indices)
 
 
 def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio, layout):
@@ -282,13 +287,20 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio, layout):
     2. permute => (H, nblocks, remoteN, D)
     3. flatten => (H, localN, D)
 
-    With tokens outer (NHD) the concatenated sub-blocks already are the local
-    block, so nothing moves.
+    This regroup is needed only when a block is one contiguous HND run
+    (``layout.is_block_contiguous``: LBHNC, BLHNC). With tokens outer (NHD)
+    the concatenated sub-blocks already are the local block, and layouts that
+    store each head's tokens as a separate run (LHBNC) receive every
+    sub-block inside that run, so nothing moves.
 
     """
-    physical, blocks_to_update, heads_outer = _physical_blocks(cache, indices, layout)
-    if not heads_outer:
+    if not layout.is_block_contiguous:
+        # Tokens-outer blocks (NHD), or layouts whose block is one run per
+        # head (e.g. LHBNC): the sub-blocks were written into each run in
+        # token order, so the block already is the local block.
         return
+    physical, blocks_to_update = _physical_blocks(cache, indices, layout)
+    assert physical[0].is_contiguous(), f"{layout.name} block is not one run"
     n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
@@ -316,8 +328,9 @@ def kv_postprocess_layout_on_receive(cache, indices, layout):
     - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
 
     """
-    physical, blocks_to_update, heads_outer = _physical_blocks(cache, indices, layout)
-    assert not heads_outer, f"layout post-process targets NHD, got {layout.name}"
+    physical, blocks_to_update = _physical_blocks(
+        cache, indices, layout, require_nhd=True
+    )
     inv_order = (0, 2, 1, 3)
     target_shape = list(blocks_to_update.shape)
     target_shape[0] = -1
@@ -335,8 +348,9 @@ def kv_postprocess_blksize_and_layout_on_receive(
     prefill is LBHNC, smaller block_size
     decode(local) is LBNHC, larger block_size
     """
-    physical, blocks_to_update, heads_outer = _physical_blocks(cache, indices, layout)
-    assert not heads_outer, f"layout post-process targets NHD, got {layout.name}"
+    physical, blocks_to_update = _physical_blocks(
+        cache, indices, layout, require_nhd=True
+    )
     block_size, n_kv_heads, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
