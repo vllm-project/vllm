@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -240,9 +241,36 @@ def copy_kv_blocks(
         copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
 
 
-def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
+def _physical_blocks(
+    cache: torch.Tensor, indices: torch.Tensor, layout: KVCacheLayout
+) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    """Select ``indices`` of ``cache`` as the bytes NIXL wrote into them.
+
+    ``cache`` is a registered per-layer cache: a logical ``[B, H, N, C]`` view
+    whose strides follow ``layout``. Permuting it into physical order makes
+    each block one contiguous run, so ``index_select`` copies the block's
+    bytes in memory order and ``index_copy_`` writes them back in place.
+
+    Returns the physical view, the selected blocks in physical order, and
+    whether heads are the outer block dimension (HND) in that order.
+    """
+    assert cache.ndim == 4, f"expected a logical [B, H, N, C] cache, got {cache.shape}"
+    order = layout.layer_view_order
+    physical = cache.permute(*order)
+    assert physical[0].is_contiguous(), (
+        f"{layout.name} blocks are not contiguous in physical order "
+        f"(strides {cache.stride()}); the receive post-process cannot reorder them"
+    )
+    heads_outer = order.index(1) < order.index(2)
+    return physical, physical.index_select(0, indices), heads_outer
+
+
+def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio, layout):
     """Transforms the layout of received KV cache blocks to the local block_size.
     (Only works for local blocksize > remote blocksize)
+
+    Both sides share the layout; the ``block_size_ratio`` remote sub-blocks
+    land back to back in the local block's bytes.
 
     Example:
     local blocksize = 16 tokens, remote blocksize = 4 tokens
@@ -254,10 +282,13 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
     2. permute => (H, nblocks, remoteN, D)
     3. flatten => (H, localN, D)
 
+    With tokens outer (NHD) the concatenated sub-blocks already are the local
+    block, so nothing moves.
+
     """
-    blocks_to_update = cache.index_select(0, indices)
-    # use physical order
-    blocks_to_update = blocks_to_update.permute(0, 2, 1, 3)
+    physical, blocks_to_update, heads_outer = _physical_blocks(cache, indices, layout)
+    if not heads_outer:
+        return
     n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
@@ -267,22 +298,17 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
         .permute(0, 2, 1, 3, 4)
         .flatten(2, 3)
     )
-    permuted_blocks = permuted_blocks.permute(0, 2, 1, 3)
-    cache.index_copy_(0, indices, permuted_blocks)
+    physical.index_copy_(0, indices, permuted_blocks)
 
 
-def kv_postprocess_layout_on_receive(cache, indices):
+def kv_postprocess_layout_on_receive(cache, indices, layout):
     """Transforms the layout of received KV cache blocks to the local format.
 
     This method corrects layout mismatches from direct memory copies by
     permuting the tensor dimensions.
 
-    4D cache:
-    - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
-    - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
-    5D cache:
-    - **Source Layout:** `[num_blocks, kv_dim, n_kv_head, block_size, head_dim]`
-    - **Target Layout:** `[num_blocks, kv_dim, block_size, n_kv_head, head_dim]`
+    - **Received bytes:** `[n_kv_head, block_size, head_dim]` (HND)
+    - **Local block:** `[block_size, n_kv_head, head_dim]` (NHD)
 
     Implementation:
     - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
@@ -290,25 +316,27 @@ def kv_postprocess_layout_on_receive(cache, indices):
     - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
 
     """
-    blocks_to_update = cache.index_select(0, indices)
+    physical, blocks_to_update, heads_outer = _physical_blocks(cache, indices, layout)
+    assert not heads_outer, f"layout post-process targets NHD, got {layout.name}"
+    inv_order = (0, 2, 1, 3)
     target_shape = list(blocks_to_update.shape)
     target_shape[0] = -1
-    inv_order = [0, 1, 3, 2, 4] if blocks_to_update.ndim == 5 else [0, 2, 1, 3]
     src_shape = tuple(target_shape[i] for i in inv_order)
-    blocks_to_update = cache.index_select(0, indices)
     permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
-    cache.index_copy_(0, indices, permuted_blocks)
+    physical.index_copy_(0, indices, permuted_blocks)
 
 
-def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
+def kv_postprocess_blksize_and_layout_on_receive(
+    cache, indices, block_size_ratio, layout
+):
     """Transforms the layout of received KV cache to the local block_size and LBHNC.
     (Only works for local blocksize > remote blocksize)
 
     prefill is LBHNC, smaller block_size
     decode(local) is LBNHC, larger block_size
     """
-    blocks_to_update = cache.index_select(0, indices)
-
+    physical, blocks_to_update, heads_outer = _physical_blocks(cache, indices, layout)
+    assert not heads_outer, f"layout post-process targets NHD, got {layout.name}"
     block_size, n_kv_heads, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
@@ -318,7 +346,7 @@ def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_rati
         .permute(0, 1, 3, 2, 4)
         .flatten(1, 2)
     )
-    cache.index_copy_(0, indices, permuted_blocks)
+    physical.index_copy_(0, indices, permuted_blocks)
 
 
 def yield_req_data(

@@ -2846,25 +2846,28 @@ class NixlBaseConnectorWorker:
                 indices = async_tensor_h2d(block_ids, device, torch.long)
 
             if convert:
+                # The caches are logical [B, H, N, C] views; the helpers
+                # reorder each block's physical bytes according to the layout.
+                layout = KVCacheLayout[self.kv_cache_layout]
                 for cache in attn_caches:
                     if self.enable_permute_local_kv and block_size_ratio > 1:
                         kv_postprocess_blksize_and_layout_on_receive(
-                            cache, indices, block_size_ratio
+                            cache, indices, block_size_ratio, layout
                         )
                     elif self.enable_permute_local_kv:
-                        kv_postprocess_layout_on_receive(cache, indices)
+                        kv_postprocess_layout_on_receive(cache, indices, layout)
                     else:
                         kv_postprocess_blksize_on_receive(
-                            cache, indices, block_size_ratio
+                            cache, indices, block_size_ratio, layout
                         )
 
             if sub_blocks_in_last:
                 last_block_id = block_ids[covered_blocks]
                 for cache in attn_caches:
-                    # Both post-processed layouts leave tokens on dim 1.
-                    sub_block_tokens = cache.shape[1] // block_size_ratio
+                    # Tokens are dim 2 of the logical [B, H, N, C] view.
+                    sub_block_tokens = cache.shape[2] // block_size_ratio
                     zero_from = sub_blocks_in_last * sub_block_tokens
-                    cache[last_block_id, zero_from:].zero_()
+                    cache[last_block_id, :, zero_from:].zero_()
             if has_stale:
                 assert indices is not None
                 stale_ids = indices[first_stale:]

@@ -1421,7 +1421,9 @@ def test_post_process_zeroes_untransferred_tail():
     worker.transfer_topo = MagicMock()
     worker.device_type = "cpu"
     worker.enable_permute_local_kv = False
-    attn_cache = torch.ones(6, block_tokens, 2, 4)
+    worker.kv_cache_layout = "LBHNC"
+    # Registered caches are logical [B, H, N, C] views.
+    attn_cache = torch.ones(6, 2, block_tokens, 4)
     mamba_cache = torch.ones(6, 16)
     worker.device_kv_caches = {"attn.0": attn_cache, "mamba.0": mamba_cache}
     fa_group = MagicMock(layer_names=["attn.0"])
@@ -1436,10 +1438,11 @@ def test_post_process_zeroes_untransferred_tail():
     # Request occupies blocks [2, 3]; only 6 of 8 sub-blocks were received.
     worker.post_process_device_kv_on_receive(ratio, [([2, 3], 6)])
 
-    # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
+    # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens),
+    # zeroed along the token dim for every head.
     assert torch.all(attn_cache[2] == 1)
-    assert torch.all(attn_cache[3, :4] == 1)
-    assert torch.all(attn_cache[3, 4:] == 0)
+    assert torch.all(attn_cache[3, :, :4] == 1)
+    assert torch.all(attn_cache[3, :, 4:] == 0)
     # Untouched blocks and the mamba cache keep their content.
     assert torch.all(attn_cache[4] == 1)
     assert torch.all(mamba_cache == 1)
