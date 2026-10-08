@@ -77,7 +77,7 @@ def test_choice_answer_shape():
         ("q", "nope", {"x": None, "y": None}, "unknown question type"),
         ("q", "choice", ["x", "y"], "must map option names"),
         ("q", "noul", ["yes", "no"], "must be an object"),
-        ("q", "noul", {"ture": "same day"}, "must be an object"),
+        ("q", "noul", {"maybe": "same day"}, "must be an object"),
         ("q", "score", {"0": "calm", "1": "furious"}, "ordered list of levels"),
         ("q", "score", ["calm"], "ordered list of levels"),
     ],
