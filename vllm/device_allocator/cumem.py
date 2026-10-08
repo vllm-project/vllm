@@ -363,7 +363,8 @@ class CuMemAllocator:
                     # drivers scrub on release, so this can go once they're the floor.
                     libcudart.cudaMemset(ptr, 0, handle[1])
         if current_platform.is_rocm():
-            torch.accelerator.synchronize()  # hipMemset is async to other streams
+            # hipMemset is async to other streams; finish it before they run.
+            torch.accelerator.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
