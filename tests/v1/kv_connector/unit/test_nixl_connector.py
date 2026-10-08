@@ -553,6 +553,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
         self.src_blocks_data = np.empty((0, 3), dtype=np.uint64)
         rep_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        if isinstance(rep_spec, UniformTypeKVCacheSpecs):
+            rep_spec = rep_spec.first_spec
         test_shape = compute_layer_kv_cache_shape_bytes(rep_spec, 1)
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
