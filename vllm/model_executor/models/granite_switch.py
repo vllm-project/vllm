@@ -2341,12 +2341,13 @@ class DecoderInterface(abc.ABC):
 
     @abc.abstractmethod
     def load_weights(self, model, weights: Iterable[tuple[str, torch.Tensor]]) -> set:
-        """Apply checkpoint weights into ``model`` and finalize fused state.
+        """Apply checkpoint weights into ``model``.
 
         Owns the whole per-adaptation weight-application decision, not just a
         one-to-one name rename: LoRA fans stacked-MoE tensors into per-expert
         FusedMoE loads; SR additionally marks the intentionally-absent shared-KV
-        LoRA slices loaded. Both end by calling ``finalize_modules``.
+        LoRA slices loaded. ``finalize_modules`` runs afterwards, driven by
+        ``GraniteSwitchForCausalLM.process_weights_after_loading``.
 
         Args:
             model: The ``GraniteSwitchForCausalLM`` (so ``named_parameters`` and
@@ -2448,9 +2449,6 @@ class LoRADecoderInterface(DecoderInterface):
             _load_direct(name, loaded_weight)
 
         _audit_loaded(params_dict, loaded_params, model, label="LoRA weight load")
-
-        # Build w_ext from the loaded lora_A plus the base weights.
-        self.finalize_modules(model, model.config)
         return loaded_params
 
     def finalize_modules(self, model, config) -> None:
@@ -2589,8 +2587,6 @@ class SRDecoderInterface(DecoderInterface):
                 loaded.add(pname)
 
         _audit_loaded(params, loaded, model, label="SR weight load")
-
-        self.finalize_modules(model, model.config)
         return loaded
 
     def finalize_modules(self, model, config) -> None:
@@ -3077,8 +3073,18 @@ class GraniteSwitchForCausalLM(nn.Module, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load the checkpoint, delegating to the adaptation's loader.
 
-        Both loaders end by finalizing the fused kernel state and registering
-        the per-module remap tables. See ``LoRADecoderInterface.load_weights``
-        and ``SRDecoderInterface.load_weights``.
+        See ``LoRADecoderInterface.load_weights`` and
+        ``SRDecoderInterface.load_weights``.
         """
         return self.model.decoder_interface.load_weights(self, weights)
+
+    def process_weights_after_loading(self) -> None:
+        """Build w_ext and register the per-module remap tables.
+
+        vLLM's model-level post-load hook rather than the tail of
+        ``load_weights``, so the fusion also runs under ``load_format="dummy"``,
+        whose loader substitutes its own ``load_weights``. Otherwise a
+        dummy-weight run would leave every projection unfinalized and trip the
+        ``_finalized`` assert on the first forward.
+        """
+        self.model.decoder_interface.finalize_modules(self, self.config)
