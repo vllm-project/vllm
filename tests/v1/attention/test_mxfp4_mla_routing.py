@@ -9,6 +9,8 @@ the only kernel that reads an MXFP4 cache. CPU-only, except where marked.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import torch
 
@@ -52,20 +54,19 @@ def test_rope_bearing_geometry_is_refused():
     not torch.cuda.is_available(),
     reason="_forward_mla imports vllm.platforms.rocm, which queries the GPU",
 )
-def test_mxfp4_decode_skips_the_bf16_split_k_kernel(monkeypatch):
-    """The split-K decode reads bf16 rows, so a packed cache stays on the
-    ragged kernel even when split-K would be chosen."""
+def test_mxfp4_decode_takes_the_split_k_kernel(monkeypatch):
+    """Long decodes split, and the split-K kernel must be told the cache is packed."""
     from types import SimpleNamespace
 
     from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 
-    def no_split_k(**kwargs):
-        raise AssertionError("mxfp4_mla reached the bf16 split-K decode")
+    def no_single_pass(**kwargs):
+        raise AssertionError("expected the split-K decode")
 
-    captured = {}
+    captured: dict[str, Any] = {}
     monkeypatch.setattr(sparse_mod, "rocm_sparse_decode_bf16_num_splits", lambda *a: 4)
-    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_decode_bf16", no_split_k)
-    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_prefill", captured.update)
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_decode_bf16", captured.update)
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_prefill", no_single_pass)
 
     impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
     impl.num_heads = 16
@@ -91,3 +92,4 @@ def test_mxfp4_decode_skips_the_bf16_split_k_kernel(monkeypatch):
 
     assert captured["kv_cache_dtype"] == "mxfp4_mla"
     assert captured["kv"].shape == (4, 1, 272)
+    assert captured["num_splits"] == 4

@@ -946,7 +946,7 @@ class ROCMAiterMLASparseImpl(
                     q.shape[1],
                     min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
                 )
-                if attn_metadata.num_decode_tokens == num_tokens and not is_mxfp4
+                if attn_metadata.num_decode_tokens == num_tokens
                 else 1
             )
             if decode_num_splits > 1:
@@ -962,6 +962,7 @@ class ROCMAiterMLASparseImpl(
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
                     num_splits=decode_num_splits,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
             else:
                 rocm_sparse_attn_prefill(

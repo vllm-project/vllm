@@ -59,6 +59,29 @@ def _attend(q, kv, indices, indptr):
     return out
 
 
+def _attend_split(q, kv, indices, indptr, num_splits: int):
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_sparse_attn_decode_bf16,
+    )
+
+    out = torch.empty(SQ, H, LATENT, dtype=torch.bfloat16, device="cuda")
+    rocm_sparse_attn_decode_bf16(
+        q=q,
+        kv=kv.unsqueeze(1),
+        scale=LATENT**-0.5,
+        head_dim=LATENT,
+        nope_head_dim=LATENT,
+        rope_head_dim=0,
+        attn_sink=None,
+        output=out,
+        ragged_indices=indices,
+        ragged_indptr=indptr,
+        num_splits=num_splits,
+        kv_cache_dtype="mxfp4_mla" if kv.dtype == torch.uint8 else "auto",
+    )
+    return out
+
+
 def _fixture(seed: int = 0):
     g = torch.Generator().manual_seed(seed)
     q = torch.randn(SQ, H, LATENT, generator=g, dtype=torch.bfloat16).cuda()
@@ -83,15 +106,18 @@ def _packed_cache(latent: torch.Tensor) -> torch.Tensor:
     return cache
 
 
-def _assert_packed_matches_dequantized(seed: int):
+def _assert_packed_matches_dequantized(seed: int, num_splits: int = 1):
+    """``num_splits > 1`` runs the split-K decode kernel instead."""
     q, latent, indices, indptr = _fixture(seed)
 
-    packed = _packed_cache(latent)
-    got = _attend(q, packed, indices, indptr).cpu()
+    def attend(kv):
+        if num_splits == 1:
+            return _attend(q, kv, indices, indptr).cpu()
+        return _attend_split(q, kv, indices, indptr, num_splits).cpu()
 
+    got = attend(_packed_cache(latent))
     # The same values, materialized as a plain bf16 cache.
-    dequantized = mx.quantize_dequantize(latent.to(torch.bfloat16), GROUP).cuda()
-    want = _attend(q, dequantized, indices, indptr).cpu()
+    want = attend(mx.quantize_dequantize(latent.to(torch.bfloat16), GROUP).cuda())
 
     assert torch.equal(got, want), (
         "attention over the packed cache disagrees with attention over the "
@@ -99,13 +125,14 @@ def _assert_packed_matches_dequantized(seed: int):
     )
 
 
+@pytest.mark.parametrize("num_splits", [1, 2, 4])
 @pytest.mark.parametrize("seed", [0, 1])
-def test_packed_cache_matches_dequantized_bf16_cache(seed: int):
-    _assert_packed_matches_dequantized(seed)
+def test_packed_cache_matches_dequantized_bf16_cache(seed: int, num_splits: int):
+    _assert_packed_matches_dequantized(seed, num_splits)
 
 
 def test_software_unpack_matches_dequantized_bf16_cache():
-    """Force the software unpack used off gfx950 through the full kernel.
+    """Force the software unpack used off gfx950 through both attention kernels.
 
     Triton reads _HW_UNPACK at compile time and refuses to relaunch a kernel
     after it changes, so it is set in a fresh process before the first launch.
@@ -116,6 +143,7 @@ def test_software_unpack_matches_dequantized_bf16_cache():
         "mxfp4_mla_read._HW_UNPACK = tl.constexpr(False)\n"
         "import test_mxfp4_mla_e2e\n"
         "test_mxfp4_mla_e2e._assert_packed_matches_dequantized(seed=0)\n"
+        "test_mxfp4_mla_e2e._assert_packed_matches_dequantized(0, num_splits=4)\n"
     )
     path = os.pathsep.join(
         [os.path.dirname(__file__), os.environ.get("PYTHONPATH", "")]
