@@ -23,6 +23,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
 )
+from vllm.model_executor.layers.fused_moe.expert_substitution import (
+    SubstitutedRoutedExperts,
+    make_expert_substitution,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
@@ -251,6 +255,12 @@ def FusedMoEFactory(
             fuse_shared_experts,
         )
     )
+    expert_substitution = make_expert_substitution(
+        vllm_config.model_config, layer_name, num_experts, hidden_size, params_dtype
+    )
+    if expert_substitution is not None:
+        # Route over all logical experts but allocate only the retained ones.
+        global_num_experts -= len(expert_substitution.substituted_expert_ids)
 
     # Initialize EPLB manager (or None?)
     eplb_state: EplbLayerState | None = None
@@ -364,6 +374,7 @@ def FusedMoEFactory(
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
         has_hash_routing=hash_indices_table is not None,
+        require_decomposed_backend=expert_substitution is not None,
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
@@ -377,7 +388,20 @@ def FusedMoEFactory(
 
     # Create RoutedExperts instance BEFORE create_weights()
     # This will hold all expert weight parameters
-    if routed_experts_cls is None:
+    if expert_substitution is not None:
+        if routed_experts_cls not in (None, RoutedExperts) or (
+            routed_input_transform is not None or routed_output_transform is not None
+        ):
+            raise NotImplementedError(
+                "expert substitution requires the default RoutedExperts and no "
+                "routed input or output transforms"
+            )
+        routed_experts_cls = SubstitutedRoutedExperts
+        routed_experts_args = {
+            **(routed_experts_args or {}),
+            "expert_substitution": expert_substitution,
+        }
+    elif routed_experts_cls is None:
         routed_experts_cls = RoutedExperts
 
     assert params_dtype is not None
