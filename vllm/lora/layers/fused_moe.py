@@ -356,6 +356,31 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert tgt == 1, f"expert-dim mismatch: source {src.shape[0]} vs buffer {tgt}"
         return src[:1]
 
+    def _get_lora_shard_buffers(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+        if self.fully_sharded:
+            raise NotImplementedError("Local fully-sharded MoE LoRA is unsupported")
+        buffers = [
+            (self.w13_lora_a_stacked[0][index], self.w13_lora_b_stacked[0][index]),
+            (self.w2_lora_a_stacked[0][index], self.w2_lora_b_stacked[0][index]),
+        ]
+        if self._w13_slices == 2:
+            buffers.append(
+                (self.w13_lora_a_stacked[1][index], self.w13_lora_b_stacked[1][index])
+            )
+        return tuple(buffers)
+
+    def set_lora_shard(
+        self,
+        index: int,
+        rank: int,
+        lora_a: list[torch.Tensor],
+        lora_b: list[torch.Tensor],
+    ) -> None:
+        super().set_lora_shard(index, rank, lora_a, lora_b)
+        self.adapter_enabled[index] = 1
+
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
         for pos in range(self._w13_slices):
