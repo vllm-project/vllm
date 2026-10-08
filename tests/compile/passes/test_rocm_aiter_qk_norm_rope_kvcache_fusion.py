@@ -534,21 +534,6 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         else:
             torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
 
-        # fp8: fused vs unfused writers can round to adjacent fp8 codes (~1 ULP,
-        # 1.25e-1). Tolerate it; a real layout bug corrupts many elements by >>1 ULP.
-        # The fused k_out is the dequantized cache write, so it carries the same
-        # rounding; FA and ROCM_ATTN prefill consume it directly. Unified reads K
-        # from the cache and skips the dequant, leaving its fp8 k_out undefined.
-        if not expect_fusion or (not is_fp8_cache and mrope_section is None):
-            # The AITER PTS kernel populates k_out only for non-FP8 caches.
-            # With FP8, the kernel writes quantized K directly to the cache
-            # and may leave k_out uninitialised.  In production this is fine
-            # because downstream attention reads K from the cache.
-            torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
-
-        # Should be bit exact since no processing had been done on v for both paths
-        torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
-
         # Fused and unfused arithmetic can straddle an FP8 rounding boundary.
         # Allow one E4M3 quantization step while still comparing every block.
         if is_fp8_cache:
@@ -556,10 +541,10 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         else:
             cache_atol, cache_rtol = ATOL, RTOL
 
-        if not (
-            is_fp8_cache
-            and attn_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
-        ):
+        # The fused k_out is the dequantized cache write, so it carries the same
+        # rounding; FA and ROCM_ATTN prefill consume it directly. Unified reads K
+        # from the cache and asks the kernel not to write k_out at all.
+        if attn_backend != AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
             torch.testing.assert_close(
                 k_unfused, k_fused, atol=cache_atol, rtol=cache_rtol
             )

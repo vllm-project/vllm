@@ -1687,6 +1687,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
+            return_kv=True,
         )
 
     def do_rope_and_kv_cache_update(
