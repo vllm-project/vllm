@@ -810,10 +810,7 @@ def one_and_two_stage_allreduce(
 def test_one_and_two_stage_allreduce_bitwise_identical(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Both kernels accumulate ranks in the same order, so which one the size
-    heuristic selects cannot change the result's bits.
-
-    Needs 4 ranks: at 2, the 2-stage owner rotation only turns a+b into b+a,
+    """Needs 4 ranks: at 2, the 2-stage owner rotation only turns a+b into b+a,
     which is commutative, so no 2-rank run can tell the orders apart.
     """
     tp_size = 4

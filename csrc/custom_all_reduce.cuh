@@ -44,10 +44,8 @@ __global__ void __launch_bounds__(512, 1)
 #pragma unroll
   for (int i = 0; i < ngpus; i++) {
     int target = (rank + i) % ngpus;
-    // Accumulate in absolute rank order, as 1-stage does, so both kernels
-    // produce identical bits and the size-based selection cannot change them.
-    // tmps must stay rotated: tmps[0] is this rank's own scratch buffer, and
-    // the stage-2 gather below indexes tmps with the same (rank + i) rotation.
+    // Absolute rank order (same as 1-stage); tmps keeps the (rank + i) rotation
+    // for stage 2.
     ptrs[i] = (const P*)_dp->ptrs[i];
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
