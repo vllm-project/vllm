@@ -229,12 +229,7 @@ class WorkspaceManager:
                 # Walk up the stack skipping WorkspaceManager frames
                 curr_frame = curr_frame.f_back
                 while curr_frame is not None:
-                    # TODO: This only catches instance methods (self), missing
-                    # classmethods and staticmethods. Once Python 3.11+ is the
-                    # minimum supported version, use co_qualname instead:
-                    #   qualname = curr_frame.f_code.co_qualname
-                    #   if qualname.startswith("WorkspaceManager."):
-                    if isinstance(curr_frame.f_locals.get("self"), WorkspaceManager):
+                    if curr_frame.f_code.co_qualname.startswith("WorkspaceManager."):
                         curr_frame = curr_frame.f_back
                         continue
                     filename = os.path.basename(curr_frame.f_code.co_filename)
