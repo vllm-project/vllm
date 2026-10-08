@@ -30,17 +30,6 @@ from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 
-class _RequestFinalized:
-    """Sentinel returned by safe_prepare_write when the requesting request has
-    already been finalized. Distinct from None (allocation failure) so callers
-    can handle the two cases differently without recording a failure metric."""
-
-    __slots__ = ()
-
-
-REQUEST_FINALIZED = _RequestFinalized()
-
-
 @dataclass(slots=True)
 class _RequestCacheAccess:
     """Cache keys observed by one request, grouped in prefix order."""

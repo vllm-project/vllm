@@ -47,9 +47,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import (
-    REQUEST_FINALIZED,
     CPUOffloadingManager,
-    _RequestFinalized,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
@@ -64,6 +62,17 @@ from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 logger = init_logger(__name__)
+
+
+class _RequestFinalized:
+    """Sentinel returned by safe_prepare_write when the requesting request has
+    already been finalized. Distinct from None (allocation failure) so callers
+    can handle the two cases differently without recording a failure metric."""
+
+    __slots__ = ()
+
+
+REQUEST_FINALIZED = _RequestFinalized()
 
 
 @dataclass
