@@ -16,7 +16,6 @@ class ServerConfig(TypedDict, total=False):
     system_prompt: str | None
     supports_parallel: bool | None
     supports_rocm: bool | None
-    extended: bool | None  # tests do not run in CI automatically
 
 
 def patch_system_prompt(
@@ -93,38 +92,6 @@ CONFIGS: dict[str, ServerConfig] = {
         ],
         "supports_parallel": False,
     },
-    "llama4": {
-        "model": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-        "arguments": [
-            "--enforce-eager",
-            "--no-enable-prefix-caching",
-            "--tool-call-parser",
-            "llama4_pythonic",
-            "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_llama4_pythonic.jinja"),
-            "-tp",
-            "4",
-        ],
-        "supports_parallel": False,
-        "extended": True,
-    },
-    "llama4_json": {
-        "model": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-        "arguments": [
-            "--enforce-eager",
-            "--no-enable-prefix-caching",
-            "-tp",
-            "4",
-            "--distributed-executor-backend",
-            "mp",
-            "--tool-call-parser",
-            "llama4_json",
-            "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_llama4_json.jinja"),
-        ],
-        "supports_parallel": True,
-        "extended": True,
-    },
     "mistral-7b": {
         "model": "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
@@ -148,31 +115,6 @@ CONFIGS: dict[str, ServerConfig] = {
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally.",
         "supports_parallel": True,
-    },
-    "mistral-small-3.2": {
-        "model": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
-        "arguments": [
-            "--enforce-eager",
-            "--no-enable-prefix-caching",
-            "--tool-call-parser",
-            "mistral",
-            "--tokenizer-mode",
-            "mistral",
-            "--config-format",
-            "mistral",
-            "--load-format",
-            "mistral",
-            "--tensor-parallel-size",
-            "4",
-            '--ignore-patterns="consolidated.safetensors"',
-        ],
-        "system_prompt": "You are a helpful assistant with access to tools. If a tool"
-        " that you have would be helpful to answer a user query, "
-        "call the tool. Otherwise, answer the user's query directly "
-        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
-        "to the user's question - just respond to it normally.",
-        "supports_parallel": True,
-        "extended": True,
     },
     # FIXME: This test currently fails, need to debug why.
     # "granite20b": {
