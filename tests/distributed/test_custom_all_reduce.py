@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from unittest.mock import Mock
 
 import pytest
 import ray
 import torch
 import torch.distributed as dist
 
+from vllm.device_allocator import alloc_conf
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators import custom_all_reduce as car
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
@@ -203,6 +205,68 @@ def test_custom_allreduce_filters_dtype(
     communicator.max_size = 1024
 
     assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
+
+
+@pytest.fixture
+def custom_allreduce_for_capture(monkeypatch):
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator._ptr = 0
+    communicator._IS_CAPTURING = False
+    communicator._capture_registered = True
+    communicator.world_size = 2
+    communicator.rank = 0
+    communicator.max_size = 1024
+    communicator.buffer_ptrs = [1234]
+    monkeypatch.setattr(communicator, "register_graph_buffers", Mock())
+    monkeypatch.setattr(car.ops, "all_reduce", Mock())
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    return communicator
+
+
+@pytest.mark.parametrize(
+    ("register", "conf", "expected_buffer"),
+    [
+        (True, "", 0),
+        (True, "expandable_segments:True", 1234),
+        (False, "", 1234),
+    ],
+)
+def test_custom_allreduce_capture_stages_expandable_segments(
+    monkeypatch, custom_allreduce_for_capture, register, conf, expected_buffer
+):
+    communicator = custom_allreduce_for_capture
+    communicator._capture_registered = register
+    monkeypatch.setattr(alloc_conf, "current_alloc_conf", lambda: conf)
+    inp = torch.empty(16)
+
+    with communicator.capture():
+        communicator.custom_all_reduce(inp)
+        communicator.all_reduce(inp, registered=True)
+
+    assert [call.args[3] for call in car.ops.all_reduce.call_args_list] == [
+        expected_buffer,
+        expected_buffer,
+    ]
+    communicator.register_graph_buffers.assert_called_once()
+
+
+def test_custom_allreduce_capture_tracks_allocator_changes(
+    monkeypatch, custom_allreduce_for_capture
+):
+    communicator = custom_allreduce_for_capture
+    inp = torch.empty(16)
+    for enabled, expected_buffer in [(False, 0), (True, 1234), (False, 1234)]:
+        car.ops.all_reduce.reset_mock()
+        monkeypatch.setattr(
+            alloc_conf,
+            "current_alloc_conf",
+            lambda enabled=enabled: f"expandable_segments:{enabled}",
+        )
+        with communicator.capture():
+            communicator.custom_all_reduce(inp)
+        car.ops.all_reduce.assert_called_once()
+        assert car.ops.all_reduce.call_args.args[3] == expected_buffer
 
 
 @pytest.mark.parametrize("batch_invariant", [False, True])
@@ -710,6 +774,68 @@ def test_custom_allreduce_chunked(monkeypatch: pytest.MonkeyPatch, tp_size):
     if tp_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, 1, chunked_allreduce)
+
+
+@ray.remote(num_gpus=1, max_calls=1, max_retries=0)
+def expandable_graph_allreduce(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port
+):
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(
+        tp_size, pp_size, rank, distributed_init_port, local_rank=rank
+    )
+    fa = get_tp_group().device_communicator.ca_comm
+    assert fa is not None and not fa.disabled
+    original_conf = alloc_conf.current_alloc_conf()
+    try:
+        # Enable after communicator creation to cover runtime allocator changes.
+        alloc_conf.set_alloc_conf(
+            alloc_conf.with_conf_flag(
+                original_conf, alloc_conf.EXPANDABLE_SEGMENTS, True
+            )
+        )
+        # A fresh stream avoids reusing non-expandable initialization blocks.
+        stream = torch.cuda.Stream(device=device)
+        dtype = torch.bfloat16
+        numel = fa.max_size // (2 * dtype.itemsize)
+        with torch.cuda.stream(stream):
+            inp = torch.full((numel,), rank + 1, dtype=dtype, device=device)
+        stream.synchronize()
+        assert any(
+            segment["is_expandable"]
+            and segment["address"]
+            <= inp.data_ptr()
+            < segment["address"] + segment["total_size"]
+            for segment in torch.cuda.memory_snapshot()
+        )
+        expected = tp_size * (tp_size + 1) / 2
+        torch.testing.assert_close(
+            fa.custom_all_reduce(inp), torch.full_like(inp, expected)
+        )
+        torch.accelerator.synchronize()
+
+        with fa.capture():
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                out1 = fa.custom_all_reduce(inp)
+                out2 = fa.custom_all_reduce(inp * 2)
+        for value in (1, 2, 3):
+            inp.fill_((rank + 1) * value)
+            graph.replay()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(out1, torch.full_like(inp, expected * value))
+            torch.testing.assert_close(out2, torch.full_like(inp, expected * value * 2))
+    finally:
+        alloc_conf.set_alloc_conf(original_conf)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA IPC")
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_custom_allreduce_graph_with_expandable_segments(monkeypatch, tp_size):
+    if tp_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    multi_process_parallel(monkeypatch, tp_size, 1, expandable_graph_allreduce)
 
 
 @pytest.mark.parametrize("tp_size", [2])
