@@ -17,6 +17,42 @@ from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
 
 
+def test_nvidia_dspark_binding_uses_multi_head_latent_attention():
+    from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+
+    assert dspark_mla.MultiHeadLatentAttention is MultiHeadLatentAttention
+
+
+def test_default_mla_hooks_return_their_inputs():
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
+    kv = torch.zeros(2, 4)
+    k_pe = torch.zeros(2, 1, 2)
+    slots = torch.zeros(2, dtype=torch.int64)
+    q = torch.zeros(2, 2, 4)
+    ql = torch.zeros(2, 2, 4)
+    q_pe = torch.zeros(2, 2, 2)
+    layer = SimpleNamespace(
+        kv_cache_dtype="auto",
+        impl=SimpleNamespace(supports_quant_query_input=False),
+    )
+
+    out_kv, out_k_pe, out_slots = MLAAttention._prepare_kv_cache_update(
+        layer, kv, k_pe, slots, None
+    )
+    assert out_kv is kv
+    assert out_k_pe is k_pe
+    assert out_slots is slots
+
+    out_q, out_mha_k_pe = MLAAttention._prepare_mha_inputs(layer, q, k_pe)
+    assert out_q is q
+    assert out_mha_k_pe is k_pe
+
+    formed = MLAAttention._form_decode_q(layer, ql, q_pe, kv, k_pe, kv, None, 2)
+    assert formed[0] is ql
+    assert formed[1] is q_pe
+
+
 def test_kv_cache_layer_defaults_to_the_attention_module():
     attn = SimpleNamespace(layer_name="model.layers.0.self_attn", mla_attn=object())
     assert K3DSparkModel.kv_cache_layer(SimpleNamespace(), attn) is attn

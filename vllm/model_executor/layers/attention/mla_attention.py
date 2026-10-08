@@ -885,6 +885,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         # Assigned on every call, including None, so a previous forward cannot
         # leave a stale tensor for the compiled KV-update op to read.
+        # CUDA-graph replay sees new values only while this object stays the
+        # persistent buffer the runner updates in place (InputBuffers.positions,
+        # captured as input_buffers.positions[:num_tokens]). Replacing the
+        # tensor freezes the captured pointer.
         self._rope_positions = positions
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
@@ -899,6 +903,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
+            # Same replay rule as _rope_positions: forward_context.slot_mapping
+            # is the persistent buffer the runner updates in place. Replacing
+            # that tensor freezes the captured pointer.
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
