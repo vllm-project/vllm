@@ -18,8 +18,8 @@ class StructuredDecisionError(ValueError):
     """An invalid request. Returned as a 400."""
 
 
-#: Options are labeled A to Z in order. A single capital letter is one token
-#: at the start of a reply for the tokenizers tested; every read checks it.
+#: A choice labels its options A to Z in order. A single capital letter is one
+#: token at the start of a reply for the tokenizers tested. Every read checks it.
 LABELS = tuple(string.ascii_uppercase)
 
 
@@ -40,6 +40,8 @@ class Question:
 
 class QuestionType(ABC):
     name: ClassVar[str]
+    #: The labels of a question's options, in option order.
+    label_set: ClassVar[tuple[str, ...]] = LABELS
     reply_instruction: ClassVar[str] = "Answer with the letter of one option only."
 
     @abstractmethod
@@ -53,12 +55,8 @@ class QuestionType(ABC):
         ``question.labels[i]`` among the labels, and the list sums to 1.
         ``label_mass`` is the labels' total probability over the vocabulary."""
 
-    def labels(self, options: list[Option]) -> tuple[str, ...]:
-        """The label for each option. A single capital letter is one token at
-        the start of a reply for the tokenizers tested; every read checks it."""
-        return LABELS[: len(options)]
-
-    def reply_line(self, label: str, option: Option) -> str:
+    def reply_line(self, label: str, option: Option) -> str | None:
+        """The option's line in the prompt, or None to leave it out."""
         return (
             f"{label}: {option.name} - {option.description}"
             if option.description
@@ -69,7 +67,9 @@ class QuestionType(ABC):
         """The question as the model reads it, after the state."""
         lines = [f"Question: {question.instructions}"] if question.instructions else []
         for label, o in zip(question.labels, question.options):
-            lines.append(self.reply_line(label, o))
+            line = self.reply_line(label, o)
+            if line is not None:
+                lines.append(line)
         lines.append(self.reply_instruction)
         return "\n".join(lines)
 
@@ -109,7 +109,7 @@ def build_question(
     names = [o.name for o in options]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate option names")
-    limit = min(max_options, len(LABELS))
+    limit = min(max_options, len(qtype.label_set))
     if len(options) > limit:
         raise StructuredDecisionError(
             f"question {qid!r}: at most {limit} options for this model"
@@ -121,7 +121,7 @@ def build_question(
         type=qtype,
         instructions=instructions,
         options=tuple(options),
-        labels=qtype.labels(options),
+        labels=qtype.label_set[: len(options)],
     )
 
 
@@ -174,10 +174,13 @@ class NoulQuestion(QuestionType):
     """Yes or no. ``criteria`` may describe what true and false mean."""
 
     name = "noul"
+    label_set = ("yes", "no")
     reply_instruction = "Answer with yes or no only."
 
     def parse_options(self, qid: str, criteria: Any) -> list[Option]:
-        if criteria is not None and not isinstance(criteria, dict):
+        if criteria is not None and (
+            not isinstance(criteria, dict) or not criteria.keys() <= {"true", "false"}
+        ):
             raise StructuredDecisionError(
                 f"question {qid!r}: noul criteria must be an object with true and false"
             )
@@ -189,11 +192,8 @@ class NoulQuestion(QuestionType):
             Option("no", None if false is None else str(false)),
         ]
 
-    def labels(self, options: list[Option]) -> tuple[str, ...]:
-        return ("yes", "no")
-
-    def reply_line(self, label: str, option: Option) -> str:
-        return f"{label}: {option.description}" if option.description else label
+    def reply_line(self, label: str, option: Option) -> str | None:
+        return f"{label}: {option.description}" if option.description else None
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float
@@ -214,7 +214,9 @@ class ScoreQuestion(QuestionType):
     level names, from the first to the last level of the scale."""
 
     name = "score"
-    reply_instruction = "Answer with the number of one option only."
+    # 0-indexed like the answer, so a level's label is its score.
+    label_set = tuple(string.digits)
+    reply_instruction = "Answer with the number of one level only."
 
     def parse_options(self, qid: str, criteria: Any) -> list[Option]:
         if not isinstance(criteria, list) or len(criteria) < 2:
@@ -222,11 +224,6 @@ class ScoreQuestion(QuestionType):
                 f"question {qid!r}: score criteria must be an ordered list of levels"
             )
         return [Option(str(level)) for level in criteria]
-
-    def labels(self, options: list[Option]) -> tuple[str, ...]:
-        if len(options) <= 9:
-            return tuple(str(i + 1) for i in range(len(options)))
-        return LABELS[: len(options)]
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float

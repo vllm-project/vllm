@@ -77,6 +77,7 @@ def test_choice_answer_shape():
         ("q", "nope", {"x": None, "y": None}, "unknown question type"),
         ("q", "choice", ["x", "y"], "must map option names"),
         ("q", "noul", ["yes", "no"], "must be an object"),
+        ("q", "noul", {"ture": "same day"}, "must be an object"),
         ("q", "score", {"0": "calm", "1": "furious"}, "ordered list of levels"),
         ("q", "score", ["calm"], "ordered list of levels"),
     ],
@@ -104,7 +105,7 @@ def test_noul_labels_and_prompt():
     assert q.labels == ("yes", "no")
     assert [a.name for a in q.options] == ["yes", "no"]
     assert q.type.prompt(q) == (
-        "Question: Reply within the hour?\nyes\nno\nAnswer with yes or no only."
+        "Question: Reply within the hour?\nAnswer with yes or no only."
     )
     described = noul(criteria={"true": "same day", "false": "later"})
     assert described.type.prompt(described) == (
@@ -126,20 +127,20 @@ def test_noul_answer_shape():
     }
 
 
-def test_score_labels_use_digits_then_letters():
-    assert score().labels == ("1", "2", "3")
-    wide = score(criteria=[str(i) for i in range(10)])
-    assert wide.labels == ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
+def test_score_labels_are_levels():
+    assert score().labels == ("0", "1", "2")
+    with pytest.raises(StructuredDecisionError, match="at most 10"):
+        score(criteria=[str(i) for i in range(11)])
 
 
 def test_score_prompt():
     q = score()
     assert q.type.prompt(q) == (
         "Question: How angry?\n"
-        "1: calm\n"
-        "2: annoyed\n"
-        "3: furious\n"
-        "Answer with the number of one option only."
+        "0: calm\n"
+        "1: annoyed\n"
+        "2: furious\n"
+        "Answer with the number of one level only."
     )
 
 

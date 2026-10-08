@@ -70,7 +70,7 @@ def test_labels_start_the_reply(qwen):
     assert [tokenizer.decode([i]) for i in ids] == list(LABELS)
     # A noul's and a score's labels are one token here too.
     assert (
-        len(set(label_token_ids(tokenizer, tail, tail_text, ("yes", "no", "1", "9"))))
+        len(set(label_token_ids(tokenizer, tail, tail_text, ("yes", "no", "0", "9"))))
         == 4
     )
     # After a colon, Qwen writes ":A" as one token, so "A" is not one token.

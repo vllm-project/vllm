@@ -31,7 +31,7 @@ question prefills only its own text, then reads one token.
 | type | criteria | answer |
 | --- | --- | --- |
 | `choice` | map of option name to a description or `null` | `choice`, `probabilities` by option name, `confidence` |
-| `noul` | optional object with `true` and `false` descriptions | `noul` (probability of yes), `probabilities`, `confidence` |
+| `noul` | `null`, or an object with optional `true` and `false` descriptions | `noul` (probability of yes), `probabilities`, `confidence` |
 | `score` | ordered list of level names | `score` (expected 0-indexed level), `legend`, `probabilities` by level index, `confidence` |
 
 A choice has at least one option, a score at least two levels. A question id
@@ -117,14 +117,15 @@ whole vocabulary: its share of the labels times `label_mass`.
 
 Labels follow the type: a `choice` labels its options `A` to `Z` in the order
 the request lists them, a `noul` labels its options `yes` and `no`, and a
-`score` labels its levels `1` to `9`, or `A` to `Z` past nine levels.
+`score` labels its levels `0` to `9`, so a level's label is its score.
 
 ## Limits
 
 | limit | value |
 | --- | --- |
 | questions per request | 64 |
-| options per `choice` or `score` | 26 |
+| options per `choice` | 26 |
+| levels per `score` | 10 |
 
 ## Request fields
 
