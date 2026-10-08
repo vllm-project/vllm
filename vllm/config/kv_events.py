@@ -48,22 +48,22 @@ class KVEventsConfig:
     """
 
     snapshot_endpoint: str | None = None
-    """The zmq ROUTER endpoint serving compacted snapshots of the live KV
-    cache state. Enables publisher identities and idle heartbeats on the live
-    stream. A snapshot includes its publisher identity and the sequence number
-    of the last recorded batch it covers. Consumers load it into a private
-    index, then resume with contiguous live batches from the same publisher.
+    """The zmq ROUTER endpoint that serves snapshots of the current KV cache
+    state, so a consumer that starts late can catch up and then follow the live
+    stream. Setting it also adds a publisher identity to every live batch and
+    sends an empty batch every second while idle. See the KV event snapshots
+    docs for the protocol.
     """
 
     snapshot_max_blocks: int = 1_000_000
-    """The most block records the snapshot recorder retains, and separately the
-    most live block references across all tiers. Exceeding either makes
-    snapshots unavailable until the publisher restarts.
+    """The most block records the snapshot recorder keeps, and separately the
+    most live block references across all tiers. Going over either stops
+    snapshots until the engine restarts.
     """
 
     snapshot_max_response_bytes: int = 256 * 1024 * 1024
-    """The most encoded bytes in one snapshot reply. A larger snapshot makes
-    snapshots unavailable until the publisher restarts.
+    """The most encoded bytes in one snapshot reply. A larger snapshot stops
+    snapshots until the engine restarts.
     """
 
     def __post_init__(self):

@@ -149,7 +149,8 @@ class IdentifiedKVEventBatch(KVEventBatch):
     """A live or replayed batch from a publisher that serves snapshots.
 
     `publisher_id` changes only when the publisher restarts. It is the last
-    array element, so `KVEventBatch` decoders read these batches unchanged.
+    array element, so decoders that skip trailing elements, such as
+    `KVEventBatch`, read these batches unchanged.
     """
 
     publisher_id: bytes | None = None
