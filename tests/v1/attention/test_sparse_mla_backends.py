@@ -3296,7 +3296,8 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
 
     cache = SimpleNamespace(
         runtime=SimpleNamespace(
-            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
+            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device)),
+            max_swap_rows=num_tokens,
         ),
         source_block_table=torch.empty(
             num_decodes, 1, dtype=torch.int32, device=device
@@ -3604,15 +3605,22 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
 
 
 def test_hisparse_resident_prefill_uses_attention_block_stride():
+    """A batch beyond the swap-row capacity must bypass swap_in.
+
+    The index-group workspace has one more row than the HiSparse swap rows, so
+    routing on its size sent a 2-token batch with max_num_seqs=1 (a piecewise
+    CUDA-graph capture) into swap_in, which overflowed its capacity of 1.
+    """
     expected = torch.tensor([[19]], dtype=torch.int32)
     cache_handle = SimpleNamespace(
         all_context_pages_resident=True,
         view=SimpleNamespace(block_size=64, attention_block_stride=832),
         block_table=torch.tensor([[3]], dtype=torch.int32),
+        runtime=SimpleNamespace(max_swap_rows=1),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache_handle]
-    index_group.physical_topk_indices = torch.empty((1, 1), dtype=torch.int32)
+    index_group.physical_topk_indices = torch.empty((2, 1), dtype=torch.int32)
     index_group._convert_once = MagicMock(return_value=expected)
     topk = torch.zeros((2, 1), dtype=torch.int32)
     metadata = SimpleNamespace(
