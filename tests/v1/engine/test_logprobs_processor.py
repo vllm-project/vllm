@@ -95,7 +95,7 @@ def test_sampled_logprobs_only_keeps_a_float_list_and_no_entries():
     from vllm.sampling_params import SamplingParams
     from vllm.v1.engine import EngineCoreRequest
 
-    params = SamplingParams(logprobs=0, sampled_logprobs_only=True)
+    params = SamplingParams(logprobs=0, _sampled_logprobs_only=True)
     request = EngineCoreRequest(
         request_id="r",
         prompt_token_ids=[1, 2, 3],
@@ -133,6 +133,55 @@ def test_sampled_logprobs_only_requires_logprobs_zero():
     from vllm.sampling_params import SamplingParams
 
     with pytest.raises(ValueError, match="sampled_logprobs_only"):
-        SamplingParams(logprobs=2, sampled_logprobs_only=True)
+        SamplingParams(logprobs=2, _sampled_logprobs_only=True)
     with pytest.raises(ValueError, match="sampled_logprobs_only"):
-        SamplingParams(sampled_logprobs_only=True)
+        SamplingParams(_sampled_logprobs_only=True)
+
+
+def test_sampled_logprobs_only_is_not_client_settable():
+    """Internal flag: a client cannot turn it on through the request schema
+    (that left logprobs None and tripped an assert, a 500), but it still
+    reaches the engine when the server sets it."""
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        GenerateRequest,
+    )
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    for key in ("sampled_logprobs_only", "_sampled_logprobs_only"):
+        request = GenerateRequest.model_validate(
+            {"token_ids": [1, 2], "sampling_params": {"logprobs": 0, key: True}}
+        )
+        assert request.sampling_params.sampled_logprobs_only is False
+
+    params = SamplingParams(logprobs=0, _sampled_logprobs_only=True)
+    decoded = MsgpackDecoder(SamplingParams).decode(MsgpackEncoder().encode(params))
+    assert decoded.sampled_logprobs_only is True
+
+
+def test_aggregated_delta_outputs_merge_sampled_logprobs():
+    from vllm.outputs import CompletionOutput, RequestOutput
+
+    def delta(token_ids, sampled):
+        return RequestOutput(
+            request_id="r",
+            prompt=None,
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=token_ids,
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    sampled_logprobs=sampled,
+                )
+            ],
+            finished=False,
+        )
+
+    merged = delta([7, 8], [-0.5, -1.25])
+    merged.add(delta([9], [-0.25]), aggregate=True)
+    assert merged.outputs[0].token_ids == [7, 8, 9]
+    assert merged.outputs[0].sampled_logprobs == [-0.5, -1.25, -0.25]
