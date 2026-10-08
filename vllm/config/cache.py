@@ -200,6 +200,12 @@ class CacheConfig:
     prompt tail. Off by default; only takes effect with `mamba_cache_mode`
     "align", EAGLE on the Mamba group, and a prefix match unit smaller than the
     Mamba block size."""
+    enable_mamba_decode_checkpoint: bool = False
+    """Also publish the latest scheduler-aligned Mamba decode state to the local
+    prefix cache when a request stops, so a follow-up turn that replays the
+    generated message can resume from it. Off by default; requires
+    `prefix_cache_retention_interval` 0 and `mamba_cache_mode` "align", and is
+    not supported with EAGLE/MTP speculative decoding."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
@@ -297,6 +303,7 @@ class CacheConfig:
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "enable_mamba_shared_prefix_checkpoint",
+            "enable_mamba_decode_checkpoint",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",

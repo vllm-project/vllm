@@ -343,6 +343,9 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+            enable_mamba_decode_checkpoint=(
+                self.cache_config.enable_mamba_decode_checkpoint
+            ),
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:

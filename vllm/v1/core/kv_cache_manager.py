@@ -146,6 +146,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
+        enable_mamba_decode_checkpoint: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -178,6 +179,8 @@ class KVCacheManager:
             metrics_collector=self.metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
         )
+        if enable_mamba_decode_checkpoint:
+            self.coordinator.enable_decode_checkpoints()
         # One predicate, read by both sides of the feature, so the scheduler
         # cannot end a chunk at a junction the manager would refuse -- a refused
         # junction costs a forward pass and displaces the block-boundary stop.
