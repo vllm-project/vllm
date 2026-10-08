@@ -38,7 +38,7 @@ Output (gzipped JSON):
           "device": true,
           "symbols": ["_Z21fusedQKNormRopeKernelI...", ...],
           "deps": ["csrc/libtorch_stable/fused_qknorm_rope_kernel.cu",
-                   "csrc/cuda_compat.h", ...]
+                   "csrc/core/cuda_compat.h", ...]
           # "error": "..."          # present when cuobjdump failed on it
         },
         ...

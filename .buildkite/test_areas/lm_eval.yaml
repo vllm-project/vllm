@@ -919,7 +919,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/kernels/linear/
   - vllm/distributed/
-  - csrc/moe/
+  - csrc/libtorch_stable/moe/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-deepep.txt
 

@@ -528,7 +528,7 @@ steps:
   num_gpus: 1
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/quantization/
+  - csrc/libtorch_stable/quantization/
   - vllm/compilation/
   - vllm/model_executor/layers/layernorm.py
   - vllm/model_executor/layers/activation.py
@@ -550,7 +550,7 @@ steps:
   num_gpus: 1
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/quantization/
+  - csrc/libtorch_stable/quantization/
   - vllm/model_executor/
   - vllm/v1/attention/
   - vllm/compilation/
@@ -1483,7 +1483,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/
+  - csrc/libtorch_stable/quantization/
   - csrc/rocm/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
@@ -1510,8 +1510,8 @@ steps:
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
-  - csrc/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
+  - csrc/libtorch_stable/moe/
   - csrc/rocm/
   - tests/kernels/moe
   - tests/kernels/utils.py
@@ -1555,7 +1555,7 @@ steps:
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/attention/
+  - csrc/libtorch_stable/attention/
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
@@ -1669,7 +1669,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/mamba/
+  - csrc/libtorch_stable/mamba/
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
@@ -1687,8 +1687,8 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/moe/
-  - csrc/quantization/w8a8/cutlass/moe/
+  - csrc/libtorch_stable/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fused_moe/
   - tests/kernels/moe/test_deepep_moe.py
   - vllm/_aiter_ops.py
@@ -3128,7 +3128,7 @@ steps:
   - tests/compile/fusions_e2e/
   - tests/utils.py
   - tests/conftest.py
-  - csrc/quantization/
+  - csrc/libtorch_stable/quantization/
   commands:
   # Existing MI300 jobs own BF16; TP2 Quick owns the excluded Llama cell.
   - amd-smi
@@ -3152,7 +3152,7 @@ steps:
   - tests/compile/fusions_e2e/
   - tests/utils.py
   - tests/conftest.py
-  - csrc/quantization/
+  - csrc/libtorch_stable/quantization/
   commands:
   # Dummy-weight rewrite coverage; trained FP8 AR/RMS equivalence is unresolved.
   # TODO: FP4 output-quant and trained MXFP4 AR/RMS fusion remain unsupported.
@@ -3192,7 +3192,7 @@ steps:
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - .buildkite/test_areas/compile.yaml
-  - csrc/quantization/
+  - csrc/libtorch_stable/quantization/
   - vllm/compilation/
   - vllm/model_executor/
   - vllm/v1/attention/
@@ -3307,7 +3307,7 @@ steps:
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/moe/
+  - csrc/libtorch_stable/moe/
   - csrc/rocm/
   - tests/kernels/moe/
   - vllm/model_executor/layers/fused_moe/
@@ -3528,7 +3528,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/quantization/
+  - csrc/libtorch_stable/quantization/
   - vllm/compilation/
   - vllm/distributed/
   - vllm/model_executor/
@@ -4569,9 +4569,9 @@ steps:
   agent_pool: mi355_dpx
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/quantization/fp4/
-  - csrc/attention/mla/
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/libtorch_stable/quantization/fp4/
+  - csrc/libtorch_stable/attention/mla/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py
@@ -4638,7 +4638,7 @@ steps:
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/attention/
+  - csrc/libtorch_stable/attention/
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
@@ -4658,8 +4658,8 @@ steps:
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
-  - csrc/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
+  - csrc/libtorch_stable/moe/
   - csrc/rocm/
   - tests/kernels/moe
   - tests/kernels/utils.py
@@ -4694,7 +4694,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/moe/
+  - csrc/libtorch_stable/moe/
   - csrc/rocm/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
@@ -4708,7 +4708,7 @@ steps:
   - vllm/utils/torch_utils.py
   - vllm/platforms/
   - vllm/_aiter_ops.py
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - vllm/distributed/device_communicators/
   - vllm/config
   commands:
@@ -4752,7 +4752,7 @@ steps:
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/
+  - csrc/libtorch_stable/quantization/
   - csrc/rocm/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
@@ -4801,7 +4801,7 @@ steps:
   agent_pool: mi355_dpx
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/moe/
+  - csrc/libtorch_stable/moe/
   - vllm/model_executor/layers/fused_moe/
   - tests/kernels/moe/test_deepep_moe.py
   - vllm/_aiter_ops.py
@@ -4829,8 +4829,8 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/moe/
-  - csrc/quantization/w8a8/cutlass/moe/
+  - csrc/libtorch_stable/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fused_moe/
   - tests/kernels/moe/test_deepep_moe.py
   - vllm/_aiter_ops.py
