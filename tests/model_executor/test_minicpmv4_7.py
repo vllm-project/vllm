@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
+from torch import nn
 
+from vllm.model_executor.models.interfaces import EagleModelMixin, supports_eagle3
 from vllm.model_executor.models.minicpmv4_6 import (
     MiniCPMV4_6ForConditionalGeneration,
     _stack_vit_merger_qkv,
@@ -28,6 +30,42 @@ def test_4_7_is_separate_from_4_6():
     )
     assert issubclass(MiniCPMV4_7ProcessingInfo, object)
     assert issubclass(MiniCPMV4_7MultiModalProcessor, object)
+
+
+@pytest.mark.parametrize(
+    "model_cls",
+    [MiniCPMV4_6ForConditionalGeneration, MiniCPMV4_7ForConditionalGeneration],
+)
+def test_exposes_eagle3_aux_hidden_states(model_cls):
+    """dspark/EAGLE-3 drafting needs the target to hand out aux hidden states.
+
+    The GPU model runner enables auxiliary hidden state outputs for `dspark`
+    and then calls ``set_eagle3_aux_hidden_state_layers``, which raises unless
+    the target declares ``SupportsEagle3``. MiniCPM-V has no layers of its own
+    to hook: it delegates to the Qwen3.5 text backbone, which already
+    implements the interface.
+    """
+
+    class DummyBackbone(nn.Module, EagleModelMixin):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Identity(), nn.Identity()])
+
+    class DummyLanguageModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = DummyBackbone()
+
+        def embed_input_ids(self, input_ids):
+            return input_ids
+
+    model = model_cls.__new__(model_cls)
+    nn.Module.__init__(model)
+    model.language_model = DummyLanguageModel()
+
+    assert supports_eagle3(model)
+    model.set_aux_hidden_state_layers((1, 2))
+    assert model.language_model.model.aux_hidden_state_layers == (1, 2)
 
 
 def test_vit_merger_qkv_is_stacked_before_load():
