@@ -196,13 +196,12 @@ class DeepseekV32Model(torch.nn.Module):
             else:
                 assert input_ids is not None
                 hidden_states = self.embed_input_ids(input_ids)
-            residual = None
         else:
             assert intermediate_tensors is not None
-            # The previous stage sends the full residual stream; the first
-            # layer here treats it like an embedding (plain RMSNorm, no AR).
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = None
+        # A later PP stage receives the full residual stream, so its first layer
+        # treats it like an embedding (plain RMSNorm, no AR).
+        residual = None
 
         aux_hidden_states = []
         for idx, layer in enumerate(
