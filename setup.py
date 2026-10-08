@@ -896,22 +896,47 @@ class precompiled_wheel_utils:
         print(f"Using ROCm precompiled wheel: {wheel_url}")
         return wheel_url, download_filename
 
+    # Publication lags main by roughly 5-10 commits; anything much older is
+    # unlikely to still match the checkout's compiled sources.
+    WHEEL_SEARCH_DEPTH = 20
+    # Changes here make an older wheel's extensions unusable.
+    WHEEL_BLOCKING_PATHS = (
+        "csrc",
+        "cmake",
+        "CMakeLists.txt",
+        "pyproject.toml",
+        "vllm/_custom_ops.py",
+    )
+    # Changes here are usually harmless for an older wheel.
+    WHEEL_WARNING_PATHS = ("rust", "setup.py")
+
     @staticmethod
-    def find_compatible_wheel(
+    def find_published_wheel_commit(
         base_commit: str, variant: str | None, arch: str
-    ) -> tuple[list[dict], str]:
-        """Find a published wheel whose compiled sources match the working tree."""
+    ) -> str:
+        """Find the nearest ancestor of base_commit that has a published wheel.
+
+        Raises:
+            ValueError: If no wheel is published within WHEEL_SEARCH_DEPTH
+                commits, or compiled sources changed since the nearest one.
+
+        """
         from urllib.error import HTTPError
 
+        utils = precompiled_wheel_utils
         candidates = subprocess.check_output(
-            ["git", "rev-list", "--first-parent", "--max-count=50", base_commit],
+            [
+                "git",
+                "rev-list",
+                "--first-parent",
+                f"--max-count={utils.WHEEL_SEARCH_DEPTH}",
+                base_commit,
+            ],
             text=True,
         ).splitlines()
-        for commit in candidates:
+        for distance, commit in enumerate(candidates):
             try:
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, variant
-                )
+                wheels, _ = utils.fetch_metadata_for_variant(commit, variant)
             except HTTPError as err:
                 if err.code != 404:
                     raise
@@ -922,38 +947,40 @@ class precompiled_wheel_utils:
                 for wheel in wheels
             ):
                 continue
+            if distance == 0:
+                return commit
 
-            # Compare against the working tree, including staged/unstaged changes.
-            changed = subprocess.check_output(
-                [
-                    "git",
-                    "diff",
-                    "--name-only",
-                    commit,
-                    "--",
-                    "csrc",
-                    "cmake",
-                    "CMakeLists.txt",
-                    "setup.py",
-                    "pyproject.toml",
-                    "vllm/_custom_ops.py",
-                    "rust",
-                ],
-                text=True,
-            ).strip()
-            if changed:
+            diff = ["git", "diff", "--name-only", commit, base_commit, "--"]
+            blocking, warning = (
+                subprocess.check_output([*diff, *paths], text=True).strip()
+                for paths in (utils.WHEEL_BLOCKING_PATHS, utils.WHEEL_WARNING_PATHS)
+            )
+            if blocking:
                 raise ValueError(
-                    f"Precompiled wheel {commit} does not match the compiled "
-                    f"sources in this checkout. Changed files:\n{changed}\n"
-                    "Build vLLM from source (unset VLLM_USE_PRECOMPILED), or "
-                    "rebase onto a commit with a compatible published wheel."
+                    f"No precompiled wheel is published yet for {base_commit}, and "
+                    f"the nearest one ({commit}, {distance} commits older) was "
+                    f"built from different compiled sources:\n{blocking}\n"
+                    "Wait for wheel publication, rebase onto a commit with a "
+                    "published wheel, build from source (unset "
+                    "VLLM_USE_PRECOMPILED), or set VLLM_PRECOMPILED_WHEEL_COMMIT "
+                    "to a full commit SHA to skip this check."
                 )
-            print(f"Using compatible precompiled wheel commit {commit}")
-            return wheels, repo_url
+            if warning:
+                logger.warning(
+                    "Precompiled wheel %s predates changes to:\n%s\n"
+                    "The Rust frontend and packaged files may be stale.",
+                    commit,
+                    warning,
+                )
+            print(
+                f"No precompiled wheel is published yet for {base_commit}; using "
+                f"{commit} ({distance} commits older)"
+            )
+            return commit
         raise ValueError(
             f"No published precompiled wheel for variant {variant} and "
-            f"architecture {arch} within 50 commits of {base_commit}. "
-            "Wait for wheel publication or build vLLM from source."
+            f"architecture {arch} within {utils.WHEEL_SEARCH_DEPTH} commits of "
+            f"{base_commit}. Wait for wheel publication or build vLLM from source."
         )
 
     @staticmethod
@@ -993,25 +1020,14 @@ class precompiled_wheel_utils:
                     ", trying to fetch base commit in main branch"
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-                if envs.VLLM_USE_PRECOMPILED and not envs.VLLM_DOCKER_BUILD_CONTEXT:
-                    if commit == "nightly":
-                        raise ValueError(
-                            "Cannot determine a compatible precompiled wheel without "
-                            "the upstream merge-base. Check your Git history and "
-                            "network connection, or build vLLM from source."
-                        )
-                    wheels, repo_url = precompiled_wheel_utils.find_compatible_wheel(
+                if (
+                    envs.VLLM_USE_PRECOMPILED
+                    and not envs.VLLM_DOCKER_BUILD_CONTEXT
+                    and commit != "nightly"
+                ):
+                    commit = precompiled_wheel_utils.find_published_wheel_commit(
                         commit, variant, arch
                     )
-                    from urllib.parse import urljoin
-
-                    wheel = next(
-                        wheel
-                        for wheel in wheels
-                        if wheel.get("package_name") == "vllm"
-                        and arch in wheel.get("platform_tag", "")
-                    )
-                    return urljoin(repo_url, wheel["path"]), wheel.get("filename")
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
             download_filename = None
             try:

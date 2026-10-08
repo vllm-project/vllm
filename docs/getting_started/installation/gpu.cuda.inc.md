@@ -117,21 +117,21 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
-For a local Git checkout, automatic wheel selection starts at the merge-base with
-upstream `main` and searches up to 50 commits along its first-parent history for a
-published wheel matching your CUDA variant and architecture. This handles delays
-in wheel publication. Before using the wheel, the installer checks for changes to
-compiled sources and build files (including Rust and tracked local edits). If
-these differ, installation stops with instructions to build from source or rebase.
-This is a conservative source check, not a guarantee of binary compatibility.
+Wheels are published an hour or two after a commit lands on `main`. If the wheel for
+your merge-base with upstream `main` is not available yet, the installer uses the
+nearest older commit that has one, searching up to 20 commits back. It stops with an
+error if compiled sources or build configuration (`csrc/`, `cmake/`, `CMakeLists.txt`,
+`pyproject.toml`, `vllm/_custom_ops.py`) changed between that commit and your
+merge-base, and warns if `rust/` or `setup.py` did. This is a source-level check, not
+a guarantee of binary compatibility.
 
-Explicit wheel locations or full commit SHA overrides bypass this automatic
-compatibility check. Docker build contexts retain their existing wheel selection behavior.
+Setting `VLLM_PRECOMPILED_WHEEL_LOCATION` or a full SHA in
+`VLLM_PRECOMPILED_WHEEL_COMMIT` skips this search and check.
 
 There are more environment variables to control the behavior of Python-only build:
 
 - `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
-- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit hash to download the pre-compiled wheel. It can be `nightly` to use the last **already built** commit on the main branch.
+- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit to download the pre-compiled wheel from. Must be a full 40-character SHA.
 - `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cu130`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
