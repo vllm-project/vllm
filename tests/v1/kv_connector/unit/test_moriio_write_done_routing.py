@@ -85,7 +85,7 @@ def _write_task(
         request_id=request_id,
         transfer_id=transfer_id,
         dst_engine_id="remote-engine",
-        local_block_ids=[1, 3],
+        local_block_ids=[[1, 3]],
         remote_block_ids_hint=None,
         layer_name="layer0",
         event=None,
@@ -226,6 +226,7 @@ def test_finalize_single_pod_port_uses_global_rank():
 
 def test_write_blocks_for_req_forwards_routing_to_schedule_write():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = False
     captured: dict[str, Any] = {}
 
     def _capture_schedule_write_blocks(**kwargs: Any) -> None:
@@ -243,13 +244,14 @@ def test_write_blocks_for_req_forwards_routing_to_schedule_write():
     assert captured["multi_pod_hosts"] == ["10.0.0.1", "10.0.0.2"]
     assert captured["remote_dp_size_local"] == 8
     assert captured["remote_ip"] == "10.0.0.1"
-    assert captured["local_block_ids"] == [1]
-    assert captured["remote_block_ids"] == [2]
+    assert captured["local_block_ids"] == [[1]]
+    assert captured["remote_block_ids"] == [[2]]
     assert not hasattr(worker, "multi_pod_hosts")
 
 
 def test_write_blocks_for_req_falls_back_when_multi_pod_hosts_empty():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = False
     captured: dict[str, Any] = {}
 
     def _capture_schedule_write_blocks(**kwargs: Any) -> None:
@@ -267,5 +269,19 @@ def test_write_blocks_for_req_falls_back_when_multi_pod_hosts_empty():
 
     assert captured["multi_pod_hosts"] == ["10.0.0.9"]
     assert captured["remote_dp_size_local"] == 4
-    assert captured["local_block_ids"] == [1]
-    assert captured["remote_block_ids"] == [2]
+    assert captured["local_block_ids"] == [[1]]
+    assert captured["remote_block_ids"] == [[2]]
+
+
+def test_hybrid_write_rejects_unequal_tp_before_scheduling_any_layer():
+    from unittest.mock import Mock
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = True
+    worker.world_size = 2
+    worker.schedule_write_blocks = Mock()
+
+    with pytest.raises(NotImplementedError, match="heterogeneous-TP"):
+        worker._write_blocks_for_req("req", _req_meta(), "attention", kv_layer=None)
+
+    worker.schedule_write_blocks.assert_not_called()

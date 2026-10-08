@@ -158,6 +158,10 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = True
     scheduler.block_size = block_size
+    scheduler._has_mamba = False
+    scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]
+    )
     scheduler.blocks_per_sw = [0]
     scheduler._group_block_sizes = [block_size]
     scheduler.transfer_id_to_request_id = {}
@@ -933,6 +937,7 @@ def test_clamp_to_prompt_blocks_clamps_each_group_by_its_own_block_size():
     # their own prompt-block count; a sliding-window group is left untouched.
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.blocks_per_sw = [0, 0, 3]
+    scheduler._has_mamba = False
     scheduler._group_block_sizes = [16, 32, 16]
 
     req = SimpleNamespace(num_prompt_tokens=40)
