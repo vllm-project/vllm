@@ -148,7 +148,7 @@ class DraftWatermarker:
         contexts.copy_(torch.cat((contexts[:, 1:], sampled.unsqueeze(-1)), dim=-1))
         return sampled
 
-    def sample_parallel(
+    def sample_block(
         self,
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
