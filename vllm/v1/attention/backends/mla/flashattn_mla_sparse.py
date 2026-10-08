@@ -219,6 +219,11 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         index_group = self.index_group
         if isinstance(index_group, HiSparseMLAIndexGroup):
             num_decode_tokens = attn_metadata.num_decode_tokens
+            output: torch.Tensor | None = None
+            if 0 < num_decode_tokens < num_actual_toks:
+                output = q_nope.new_empty(
+                    (num_actual_toks, q_nope.shape[1], self.kv_lora_rank)
+                )
             outputs = []
             if num_decode_tokens:
                 physical_topk, valid_counts = (
@@ -240,6 +245,7 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
                         physical_topk,
                         valid_counts,
                         attn_metadata.block_size,
+                        out=None if output is None else output[:num_decode_tokens],
                     )
                 )
             if num_decode_tokens < num_actual_toks:
@@ -283,9 +289,10 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
                         physical_topk,
                         valid_counts,
                         attn_metadata.block_size,
+                        out=None if output is None else output[num_decode_tokens:],
                     )
                 )
-            return torch.cat(outputs) if len(outputs) > 1 else outputs[0], None
+            return outputs[0] if output is None else output, None
 
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
@@ -334,6 +341,7 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         block_size: int,
         *,
         cache_is_flat: bool = False,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         kv_rows = (
             kv_cache if cache_is_flat else flat_kv_row_view(kv_cache, block_size)[0]
@@ -351,7 +359,7 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         else:
             k_cache = kv_rows[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
 
-        out = flash_attn_varlen_func(
+        return flash_attn_varlen_func(
             q=q_rope,
             k=k_cache,
             v=v_cache,
@@ -364,5 +372,5 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
             softmax_scale=self.scale,
             causal=True,
             fa_version=3,
+            out=out,
         )
-        return out
