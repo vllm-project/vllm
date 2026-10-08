@@ -191,6 +191,9 @@ class HummingConfig(QuantizationConfig):
         return "humming" if user_quant == "humming" else None
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        # Compose so that the checkpoint renaming applied first is kept
+        if (mapper := getattr(self, "hf_to_vllm_mapper", None)) is not None:
+            hf_to_vllm_mapper = mapper | hf_to_vllm_mapper
         self.hf_to_vllm_mapper = hf_to_vllm_mapper
 
     def is_layer_skipped(self, config: dict[str, Any], prefix: str):

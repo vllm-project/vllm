@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
@@ -197,6 +198,42 @@ class WeightsMapper:
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
         )
+
+
+def get_checkpoint_renaming_mapper(hf_config: "PreTrainedConfig") -> WeightsMapper:
+    """Get the renamings Transformers applies to this checkpoint when loading it.
+
+    These map the checkpoint's names to the current Transformers module names. The
+    Transformers model is created on the meta device so that each sub-model's
+    renamings are scoped exactly as they are in Transformers."""
+    import transformers
+    from transformers.conversion_mapping import (
+        WeightRenaming,
+        get_checkpoint_conversion_mapping,
+        get_model_conversion_mapping,
+    )
+
+    auto_map = getattr(hf_config, "auto_map", None) or {}
+    custom = {r.rsplit(".", 1)[-1] for r in auto_map.values() if isinstance(r, str)}
+    archs = [a for a in hf_config.architectures or [] if a not in custom]
+    model_cls = next((c for a in archs if (c := getattr(transformers, a, None))), None)
+    # Like Transformers, only apply the legacy renamings to custom models
+    transforms = get_checkpoint_conversion_mapping("legacy")
+    if model_cls is not None:
+        try:
+            with torch.device("meta"):
+                model = model_cls._from_config(copy.deepcopy(hf_config))
+            transforms = get_model_conversion_mapping(model)
+        except Exception as e:
+            logger.warning(
+                "Failed to get checkpoint renamings for %s, only the legacy "
+                "renamings will be applied: %s",
+                model_cls.__name__,
+                e,
+            )
+    # vLLM fuses weights itself, so only the renamings are needed
+    renamings = [t for t in transforms if isinstance(t, WeightRenaming)]
+    return WeightsMapper(orig_to_new_renaming=renamings)
 
 
 def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
