@@ -219,17 +219,16 @@ LOGPROBS_MODES = frozenset({"raw_logprobs", "processed_logprobs"})
 
 
 def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy]:
-    """Raises ValueError when the model cannot serve structured decisions. The
-    server opted in with --enable-structured-decisions, so startup fails."""
+    """Raise ValueError when the model cannot serve structured decisions."""
     if model_config.architecture not in NEXT_TOKEN_ARCHITECTURES:
         raise ValueError(
-            "--enable-structured-decisions does not support "
+            "The structured decisions API does not support "
             f"{model_config.architecture}. Supported architectures: "
             f"{sorted(NEXT_TOKEN_ARCHITECTURES)}"
         )
     if model_config.logprobs_mode not in LOGPROBS_MODES:
         raise ValueError(
-            "--enable-structured-decisions needs --logprobs-mode raw_logprobs or "
+            "Structured decisions need --logprobs-mode raw_logprobs or "
             f"processed_logprobs, not {model_config.logprobs_mode}"
         )
     return NextTokenStrategy
