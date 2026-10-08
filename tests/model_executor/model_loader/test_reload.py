@@ -46,16 +46,17 @@ from vllm.platforms import current_platform
 def _fp8_reload_unsupported() -> bool:
     """Whether the FP8 reload/online-quantize tests should be skipped.
 
-    ``supports_fp8()`` returns True on MI250 (gfx90a) because the general
-    quantization paths upcast FP8 weights, but gfx90a has no native FP8 and
-    cannot run these reload models, so treat it as unsupported here.
+    ``supports_fp8()`` returns True on MI250 (gfx90a) and RDNA3 (gfx11)
+    because the general quantization paths upcast FP8 weights, but neither has
+    native FP8 and cannot run these reload models, so treat them as
+    unsupported here.
     """
     if not current_platform.supports_fp8():
         return True
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx90a
+        from vllm.platforms.rocm import on_gfx11, on_gfx90a
 
-        return on_gfx90a()
+        return on_gfx90a() or on_gfx11()
     return False
 
 

@@ -559,6 +559,11 @@ class TritonAttentionImpl(AttentionImpl):
         self.use_alibi_sqrt = use_alibi_sqrt
         self.chunk_lookback = chunk_lookback
         self.supports_quant_query_input = current_platform.is_cuda()
+        if current_platform.is_rocm():
+            # Enable GPUs with fp8 MMA support
+            from vllm.platforms.rocm import on_gfx11, on_gfx90a
+
+            self.supports_quant_query_input = not (on_gfx90a() or on_gfx11())
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
