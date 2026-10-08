@@ -239,17 +239,16 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         ):
             # Prefill-sized batches do not fit the decode residency workspace.
             # Non-resident prefills are staged before reaching this path.
-            # _convert_once's side-stream cache is only ordered for decode batches.
             assert cache.all_context_pages_resident
             leader = self.cache(0)
             assert leader.view is not None and leader.block_table is not None
-            return triton_convert_req_index_to_global_index(
+            return self._convert_once(
+                layer_index,
+                logical_topk_indices,
                 req_id_per_token,
                 leader.block_table,
-                logical_topk_indices,
-                BLOCK_SIZE=leader.view.block_size,
-                BLOCK_STRIDE_ROWS=leader.view.attention_block_stride,
-                NUM_TOPK_TOKENS=logical_topk_indices.shape[1],
+                leader.view.block_size,
+                block_stride_rows=leader.view.attention_block_stride,
                 return_valid_counts=return_valid_counts,
             )
         source_block_table = cache.source_block_table
