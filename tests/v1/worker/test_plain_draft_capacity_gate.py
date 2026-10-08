@@ -13,8 +13,8 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
-from vllm.v1.worker.gpu.spec_decode.draft_model.speculator import (
-    PlainDraftModelSpeculator,
+from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
+    StandaloneARSpeculator,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -51,10 +51,10 @@ def _make_spec(
         decode_calls=0,
     )
     spec._input_fits_in_drafter = MethodType(
-        PlainDraftModelSpeculator._input_fits_in_drafter, spec
+        StandaloneARSpeculator._input_fits_in_drafter, spec
     )
     spec._input_fits_in_drafter_across_dp = MethodType(
-        PlainDraftModelSpeculator._input_fits_in_drafter_across_dp, spec
+        StandaloneARSpeculator._input_fits_in_drafter_across_dp, spec
     )
 
     def _copy_request_inputs(*args, **kwargs):
@@ -74,7 +74,7 @@ def _make_spec(
 
 def _propose(spec: SimpleNamespace, batch: SimpleNamespace, **kwargs) -> torch.Tensor:
     num_reqs = batch.num_reqs
-    return PlainDraftModelSpeculator.propose(
+    return StandaloneARSpeculator.propose(
         spec,
         batch,
         attn_metadata={},
@@ -92,14 +92,14 @@ def _propose(spec: SimpleNamespace, batch: SimpleNamespace, **kwargs) -> torch.T
 
 
 def test_input_fits_in_drafter_boundary():
-    # Plain drafters reserve num_spec query tokens, not the DFlash bonus.
+    # Standalone AR drafters reserve num_spec query tokens, not the DFlash bonus.
     # 97 + 3 == 100 fits; 98 + 3 == 101 does not. The check is batch-wide.
     spec = SimpleNamespace(
         num_speculative_steps=_NUM_SPEC,
         effective_drafter_max_model_len=_DRAFT_LIMIT,
         max_model_len=_TARGET_MAX_MODEL_LEN,
     )
-    fits = PlainDraftModelSpeculator._input_fits_in_drafter
+    fits = StandaloneARSpeculator._input_fits_in_drafter
     assert fits(spec, _batch([97]))
     assert fits(spec, _batch([10, 97]))
     assert not fits(spec, _batch([98]))
