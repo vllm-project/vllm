@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -21,6 +22,7 @@ from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
@@ -62,6 +64,10 @@ class EngineClient(ABC):
     @abstractmethod
     def dead_error(self) -> BaseException: ...
 
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        """KV-event publisher config of each engine, keyed by DP rank."""
+        return {}
+
     def check_admission(  # noqa: B027
         self, n: int = 1, request_id: str | None = None
     ) -> None:
@@ -97,6 +103,7 @@ class EngineClient(ABC):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -155,8 +162,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine."""
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides."""
         ...
 
     @abstractmethod
@@ -192,8 +205,8 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self, tags: list[str] | None = None) -> None:
-        """Wake up the engine."""
+    async def wake_up(self, tags: list[str] | None = None) -> bool:
+        """Wake the tagged resources; return whether every engine is fully awake."""
         ...
 
     @abstractmethod
@@ -259,6 +272,10 @@ class EngineClient(ABC):
         kwargs: dict | None = None,
     ):
         """Perform a collective RPC call to the given path."""
+        raise NotImplementedError
+
+    async def compute_weight_checksums(self) -> list[dict[str, str]]:
+        """Return rank-qualified weight digests from every worker of every engine."""
         raise NotImplementedError
 
     async def handle_fault(
