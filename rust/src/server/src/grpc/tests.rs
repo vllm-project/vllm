@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::io;
+use std::os::fd::IntoRawFd;
+use std::os::unix::net::UnixListener;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -690,6 +692,7 @@ async fn unary_generate_returns_collected_text() {
         pb::finish_info::FinishReason::Stop as i32
     );
     assert_eq!(finish.num_output_tokens, 3);
+    assert_eq!(finish.num_cached_tokens, Some(0));
 
     let prompt = response.prompt_info.expect("prompt_info present");
     assert_eq!(prompt.num_prompt_tokens, 5); // "hello" = 5 bytes
@@ -1438,6 +1441,7 @@ async fn streaming_generate_yields_incremental_responses() {
         .find_map(|r| r.outputs.as_ref())
         .expect("at least one output");
     let finish = last_output.finish_info.as_ref().expect("finish_info on last output");
+    assert_eq!(finish.num_cached_tokens, Some(0));
     assert_eq!(
         finish.finish_reason,
         pb::finish_info::FinishReason::Stop as i32
@@ -2228,10 +2232,14 @@ async fn control_aggregates_multi_engine_capacity() {
         ready_1.world_size = 12;
         ready_1.data_parallel_rank = start_rank + 1;
 
+        let listener_fd = |address: &str| {
+            let path = address.strip_prefix("ipc://").expect("IPC test endpoint");
+            UnixListener::bind(path).expect("bind inherited test listener").into_raw_fd()
+        };
         let client_config = EngineCoreClientConfig {
             transport_mode: TransportMode::Bootstrapped {
-                input_address: input_address.clone(),
-                output_address: output_address.clone(),
+                input_listener_fd: listener_fd(&input_address),
+                output_listener_fd: listener_fd(&output_address),
                 engine_start_index: start_rank,
                 engine_count: 2,
                 data_parallel_size: global_size,
