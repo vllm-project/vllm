@@ -1160,6 +1160,10 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 # Catch GPU<->CPU syncs in execute_model/sample_tokens
 ENV VLLM_GPU_SYNC_CHECK=error
 
+# Use the legacy ProcessGroupNCCL instead of nccl2, which eagerly allocates
+# a communicator per new_group (pytorch/pytorch#199957)
+ENV TORCH_DIST_USE_NCCL2=0
+
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
