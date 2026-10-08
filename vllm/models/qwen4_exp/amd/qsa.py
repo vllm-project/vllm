@@ -11,7 +11,7 @@ from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.cache import CacheDType
+from vllm.config.cache import CacheConfig, CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -118,6 +119,13 @@ _QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
     "float16",
     *_OCTAVE_CACHE_DTYPES,
 )
+
+
+def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType:
+    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
+    if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
+        return "auto"
+    return cache_config.cache_dtype
 
 
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
@@ -456,7 +464,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
         self.layer_name = f"{prefix}.attn"
         self.attn_type = AttentionType.DECODER
-        self.kv_cache_dtype = cache_config.cache_dtype
+        self.kv_cache_dtype = qsa_kv_cache_dtype(cache_config, prefix)
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
