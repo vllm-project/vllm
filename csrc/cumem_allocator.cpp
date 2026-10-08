@@ -22,6 +22,11 @@ static const char* PYARGS_PARSE = "KKKK";
 static const unsigned long long DEFAULT_MEMCREATE_CHUNK_SIZE =
     (256ULL * 1024ULL * 1024ULL);
 
+// When set, each allocation is backed by a single physical allocation instead
+// of chunks. RDMA registration through dmabuf covers one allocation only, so
+// memory that a NIC must register as a single region needs this.
+static bool g_single_allocation = false;
+
 static unsigned long long get_memcreate_chunk_size() {
   const char* env = getenv("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE");
   if (!env) return DEFAULT_MEMCREATE_CHUNK_SIZE;
@@ -147,6 +152,10 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
       fab_flag) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
   }
+#else
+  // Exportable as a dmabuf through the allocation handle, which unlike an
+  // address-range export does not keep the memory alive once it is released.
+  prop.requestedHandleType = hipMemHandleTypePosixFileDescriptor;
 #endif
 
 #ifndef USE_ROCM
@@ -381,7 +390,9 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   // DEFAULT_MEMCREATE_CHUNK_SIZE is used.
   size_t base_chunk = (size_t)get_memcreate_chunk_size();
   size_t aligned_chunk_size =
-      ((base_chunk + granularity - 1) / granularity) * granularity;
+      g_single_allocation
+          ? alignedSize
+          : ((base_chunk + granularity - 1) / granularity) * granularity;
   size_t num_chunks =
       (alignedSize + aligned_chunk_size - 1) / aligned_chunk_size;
   CUmemGenericAllocationHandle** p_memHandle =
@@ -799,9 +810,28 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   Py_RETURN_NONE;
 }
 
+static PyObject* python_set_single_allocation(PyObject* self, PyObject* args) {
+  int enabled = 0;
+  if (!PyArg_ParseTuple(args, "p", &enabled)) {
+    return nullptr;
+  }
+#ifdef USE_ROCM
+  bool previous = g_single_allocation;
+  g_single_allocation = enabled != 0;
+  return PyBool_FromLong(previous);
+#else
+  // CUDA never splits an allocation into chunks.
+  Py_RETURN_FALSE;
+#endif
+}
+
 static PyMethodDef module_methods[] = {
     {"init_module", (PyCFunction)py_init_module, METH_VARARGS,
      "Initialize module with python_malloc and python_free callables."},
+    {"python_set_single_allocation", (PyCFunction)python_set_single_allocation,
+     METH_VARARGS,
+     "Back each new allocation by one physical allocation (ROCm); returns the "
+     "previous setting."},
     {"python_create_and_map", (PyCFunction)python_create_and_map, METH_VARARGS,
      "Create and map memory on the device."},
     {"python_unmap_and_release", (PyCFunction)python_unmap_and_release,

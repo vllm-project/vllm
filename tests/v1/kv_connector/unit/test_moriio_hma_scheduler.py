@@ -766,6 +766,7 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
         dst_num_blocks={},
         block_lens={},
         layer_name_to_local_kv_cache_metadata={},
+        _region_tensors={},
         kv_caches_base_addr={},
         kv_layer_mr_offset={},
         local_kv_cache_size=[],
