@@ -31,28 +31,17 @@ ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 
-FROM ${BASE_IMAGE} AS base
+# Runtime base shared by the final image and the build stages.
+FROM ${BASE_IMAGE} AS runtime_base
 
 ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
-# Install build dependencies and utilities
 RUN apt-get update -q -y && apt-get install -q -y \
-    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl \
-    libnuma-dev ccache mold
+    && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --upgrade pip
-# Note: mold is installed but not set as the system default linker because
-# some packages use JIT compilation at runtime with flags mold does not support.
-# Build stages opt in via LDFLAGS="-fuse-ld=mold".
-# Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
-ARG USE_SCCACHE
-RUN if [ "$USE_SCCACHE" != "1" ]; then \
-        apt-get purge -y sccache || true; \
-        python3 -m pip uninstall -y sccache || true; \
-        rm -f "$(which sccache)" || true; \
-    fi
 
 # Install UV — download first, then run, so a curl failure is not masked by the pipe
 RUN curl -LsSf --retry 3 --retry-delay 5 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh \
@@ -66,6 +55,27 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
+
+ARG COMMON_WORKDIR
+WORKDIR ${COMMON_WORKDIR}
+
+FROM runtime_base AS base
+
+# Install build dependencies and utilities
+RUN apt-get update -q -y && apt-get install -q -y \
+    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
+    libnuma-dev ccache mold
+# Note: mold is installed but not set as the system default linker because
+# some packages use JIT compilation at runtime with flags mold does not support.
+# Build stages opt in via LDFLAGS="-fuse-ld=mold".
+# Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
+ARG USE_SCCACHE
+RUN if [ "$USE_SCCACHE" != "1" ]; then \
+        apt-get purge -y sccache || true; \
+        python3 -m pip uninstall -y sccache || true; \
+        rm -f "$(which sccache)" || true; \
+    fi
+
 # ccache directory - persisted across layer rebuilds via cache mounts.
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CCACHE_COMPILERCHECK=content
@@ -105,9 +115,6 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
-
-ARG COMMON_WORKDIR
-WORKDIR ${COMMON_WORKDIR}
 
 
 # -----------------------
@@ -595,53 +602,8 @@ FROM base AS mori_base
 ARG NIC_BACKEND
 ARG AINIC_VERSION
 ARG UBUNTU_CODENAME
-RUN /bin/bash -lc 'set -euo pipefail; \
- \
- install_ainic() { \
-   apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg apt-transport-https; \
-   rm -rf /var/lib/apt/lists/*; \
-   mkdir -p /etc/apt/keyrings; \
-   curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/amdainic.gpg; \
-   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdainic.gpg] https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_VERSION} ${UBUNTU_CODENAME} main" \
-     > /etc/apt/sources.list.d/amdainic.list; \
-   apt-get update && apt-get install -y --no-install-recommends \
-     libionic-dev \
-     ionic-common \
-   ; \
-   rm -rf /var/lib/apt/lists/*; \
- }; \
- \
- # NOTE: requires FW 235.2.86.0 and kernel drivers on the host: \
- #   bnxt-en-dkms=1.10.3.235.2.86.0 bnxt-re-dkms=235.2.86.0 (from packages.broadcom.com PPA) \
- install_bnxt() { \
-   install -m 0755 -d /etc/apt/keyrings; \
-   curl -fsSL https://packages.broadcom.com/artifactory/api/security/keypair/PackagesKey/public \
-     -o /etc/apt/keyrings/broadcom-nic.asc; \
-   chmod a+r /etc/apt/keyrings/broadcom-nic.asc; \
-   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/broadcom-nic.asc] https://packages.broadcom.com/artifactory/ethernet-nic-debian-public jammy main" \
-     > /etc/apt/sources.list.d/broadcom-nic.list; \
-   apt-get update && apt-get install -y --no-install-recommends \
-     bnxt-rocelib=235.2.86.0 \
-   ; \
-   cp -a /usr/local/lib/x86_64-linux-gnu/libbnxt_re* /usr/local/lib/; \
-   ldconfig; \
-   rm -rf /var/lib/apt/lists/*; \
- }; \
- \
- echo "[MORI] Install MoRI proxy deps"; \
- pip install --quiet --ignore-installed blinker && \
- pip install --quiet quart msgpack aiohttp pyzmq; \
- echo "[MORI] NIC_BACKEND=${NIC_BACKEND}"; \
- \
- # NIC backend deps — mori auto-detects NIC at runtime (MORI_DEVICE_NIC env var override). \
- # Only vendor packages are installed here for dlopen; no compile-time flags needed. \
- case "${NIC_BACKEND}" in \
-   none)  ;; \
-   all)   install_ainic; install_bnxt ;; \
-   ainic) install_ainic ;; \
-   bnxt)  install_bnxt ;; \
-   *)     echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic, bnxt, all"; exit 2 ;; \
- esac'
+RUN --mount=type=bind,source=tools/install_mori_nic_deps_rocm.sh,target=/tmp/install_mori_nic_deps.sh \
+    bash /tmp/install_mori_nic_deps.sh
 
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)
@@ -918,8 +880,14 @@ FROM scratch AS export_test_smoke
 COPY --from=test_smoke /vllm-smoke-ok /
 
 # -----------------------
-# Final vLLM image
-FROM mori_base AS final_common
+# Final vLLM image. Built on runtime_base so build-only packages stay out.
+FROM runtime_base AS final_common
+ARG NIC_BACKEND
+ARG AINIC_VERSION
+ARG UBUNTU_CODENAME
+RUN --mount=type=bind,source=tools/install_mori_nic_deps_rocm.sh,target=/tmp/install_mori_nic_deps.sh \
+    bash /tmp/install_mori_nic_deps.sh
+
 ENV UV_COMPILE_BYTECODE=1
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
