@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import multiprocessing
+import os
 import socket
 import threading
 import time
@@ -138,11 +139,32 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
             assert not proc.is_alive()
 
 
-def test_api_server_child_adopts_inherited_zmq_listeners():
-    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
-    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+def _assert_endpoint_reserved(address: str) -> None:
+    """A competing bind must fail while the endpoint has a listener owner."""
+    if address.startswith("ipc://"):
+        competitor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bind_address: str | tuple[str, int] = address.removeprefix("ipc://")
+    else:
+        competitor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        bind_address = ("127.0.0.1", int(address.rsplit(":", 1)[1]))
+    with competitor, pytest.raises(OSError, match="Address already in use"):
+        competitor.bind(bind_address)
+
+
+@pytest.mark.parametrize("scheme", ["tcp", "ipc"])
+def test_api_server_child_adopts_inherited_zmq_listeners(tmp_path, scheme):
+    if scheme == "tcp":
+        input_path = output_path = "tcp://127.0.0.1:0"
+    else:
+        input_path = f"ipc://{tmp_path}/input.sock"
+        output_path = f"ipc://{tmp_path}/output.sock"
+    input_listener = make_zmq_listener(input_path, zmq.ROUTER)
+    output_listener = make_zmq_listener(output_path, zmq.PULL)
     input_address = input_listener.address
     output_address = output_listener.address
+    # The supervisor reserves each endpoint as soon as it allocates it.
+    _assert_endpoint_reserved(input_address)
+    _assert_endpoint_reserved(output_address)
     http_socket = socket.socket()
     manager = APIServerProcessManager(
         target_server_fn=_adopt_zmq_listener_worker,
@@ -163,6 +185,11 @@ def test_api_server_child_adopts_inherited_zmq_listeners():
     try:
         assert input_listener.socket.fileno() == -1
         assert output_listener.socket.fileno() == -1
+        # After the parent closes its copies, the child's inherited descriptors
+        # keep both endpoints reserved; closing must not unlink IPC paths.
+        assert manager.processes[0].is_alive()
+        _assert_endpoint_reserved(input_address)
+        _assert_endpoint_reserved(output_address)
         dealer.send(b"input")
         push.send(b"output")
         assert dealer.recv() == b"ok"
@@ -546,3 +573,35 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
     finally:
         sock.close()
         grpc_sock.close()
+
+
+def test_rust_frontend_spawn_failure_cleans_up_listeners(tmp_path):
+    """No child owns the listeners when Popen fails, so the parent removes them."""
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model"]
+    )
+    input_listener = make_zmq_listener(f"ipc://{tmp_path}/input.sock", zmq.ROUTER)
+    output_listener = make_zmq_listener(f"ipc://{tmp_path}/output.sock", zmq.PULL)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(FileNotFoundError):
+            RustFrontendProcessManager(
+                binary_path=str(tmp_path / "missing-vllm-rs"),
+                sock=sock,
+                args=args,
+                input_listener=input_listener,
+                output_listener=output_listener,
+                engine_start_index=0,
+                engine_count=1,
+                data_parallel_size=1,
+            )
+    finally:
+        sock.close()
+
+    for listener in (input_listener, output_listener):
+        assert listener.socket.fileno() == -1
+        assert not os.path.exists(listener.address.removeprefix("ipc://"))
