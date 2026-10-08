@@ -259,10 +259,10 @@ class QuickAllReduce:
                 self.qr_quantization_min_size // KB,
             )
         self.create_shared_buffer()
-        self._flydsl_int4 = self._init_flydsl_int4(vllm_config)
+        self._flydsl_int4 = self._init_flydsl_int4()
         self.disabled = False
 
-    def _init_flydsl_int4(self, vllm_config) -> Any:
+    def _init_flydsl_int4(self) -> Any:
         if (
             self.qr_quant_level != QuickReduceRegime.INT4
             or not rocm_aiter_ops.is_flydsl_quick_reduce_available()
@@ -283,15 +283,6 @@ class QuickAllReduce:
             "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads; other "
             "payloads use the HIP QuickReduce kernels."
         )
-        if (
-            vllm_config is not None
-            and vllm_config.compilation_config.pass_config.fuse_allreduce_rms
-        ):
-            logger.warning_once(
-                "fuse_allreduce_rms is on, but FlyDSL QuickReduce has no fused "
-                "kernels yet: the payloads it takes run all-reduce plus a "
-                "separate RMSNorm, so the fusion does nothing for them."
-            )
         return flydsl_int4
 
     @staticmethod
@@ -368,6 +359,46 @@ class QuickAllReduce:
                 self.qr_quant_level.value
             ]
         return inp_size <= self.qr_max_size and inp_size >= min_size
+
+    def should_fused_allreduce_rmsnorm(
+        self, inp: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+    ) -> bool:
+        """Whether FlyDSL INT4 QuickReduce can fuse the residual add + RMSNorm."""
+        if not self.uses_flydsl_int4(inp):
+            return False
+        hidden = inp.shape[-1]
+        return (
+            self._flydsl_int4.supports_rmsnorm(hidden, inp.numel() * inp.element_size())
+            and residual.shape == inp.shape
+            and residual.dtype == inp.dtype
+            and residual.is_contiguous()
+            and residual.data_ptr() % 16 == 0
+            and weight.dtype == inp.dtype
+            and weight.shape == (hidden,)
+            and weight.is_contiguous()
+            and weight.data_ptr() % 16 == 0
+        )
+
+    def fused_allreduce_rmsnorm(
+        self,
+        inp: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+        gemma_norm: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """FlyDSL INT4 all-reduce of ``inp`` fused with add + RMSNorm.
+
+        Returns ``(rmsnorm(allreduce(inp) + residual), allreduce(inp) +
+        residual)``; ``gemma_norm`` scales by ``1 + weight``.
+        """
+        assert self._flydsl_int4 is not None
+        out = torch.empty_like(inp)
+        residual_out = torch.empty_like(residual)
+        self._flydsl_int4.allreduce_rmsnorm(
+            inp, residual, weight, epsilon, out, residual_out, gemma_norm=gemma_norm
+        )
+        return out, residual_out
 
     def quick_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place custom quick all reduce."""

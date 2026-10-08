@@ -33,6 +33,9 @@ def test_rocm_aiter_gemma_rmsnorm_falls_back_after_allreduce(
     class FakeQuickReduce:
         disabled = False
 
+        def should_fused_allreduce_rmsnorm(self, inp, residual, weight):
+            return False
+
         def uses_flydsl_int4(self, inp):
             return False
 
@@ -101,8 +104,9 @@ def test_rocm_aiter_gemma_rmsnorm_falls_back_after_allreduce(
 def test_rocm_aiter_fused_rmsnorm_skips_fused_kernels_for_flydsl_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """FlyDSL QuickReduce has no fused RMSNorm. A payload it owns takes the
-    unfused all-reduce + RMSNorm, not the fused HIP QR or custom-AR kernels."""
+    """A payload FlyDSL QuickReduce owns but its fused RMSNorm kernel declines
+    takes the unfused all-reduce + RMSNorm, not the fused HIP QR or custom-AR
+    kernels."""
 
     class FakeAiterCA:
         def custom_fused_ar_rms(self, *args, **kwargs):
@@ -116,6 +120,9 @@ def test_rocm_aiter_fused_rmsnorm_skips_fused_kernels_for_flydsl_payloads(
 
     class FakeQuickReduce:
         disabled = False
+
+        def should_fused_allreduce_rmsnorm(self, inp, residual, weight):
+            return False
 
         def uses_flydsl_int4(self, inp):
             return True
