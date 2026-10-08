@@ -172,9 +172,15 @@ class MooncakeStoreScheduler:
             for group_id, group in enumerate(store_groups)
             if isinstance(group.kv_cache_spec, MambaSpec)
         }
-        assert all(
-            spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
-        ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+        # Capacity-only consumers neither load nor save Mamba checkpoints.
+        if (
+            self.kv_role != "kv_consumer"
+            or self.enable_lookup
+            or self.save_decode_cache
+        ):
+            assert all(
+                spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
+            ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
 
         self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(

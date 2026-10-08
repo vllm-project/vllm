@@ -141,8 +141,27 @@ def test_validation_rejects_mamba_mode_directly():
         )
 
 
-def test_scheduler_requires_align_mode_for_mamba():
-    vllm_config = _make_vllm_config()
+@pytest.mark.parametrize(
+    "kv_role,enable_lookup,save_decode_cache,capacity_only",
+    [
+        ("kv_consumer", False, False, True),
+        ("kv_consumer", True, False, False),
+        ("kv_consumer", False, True, False),
+        ("kv_producer", False, False, False),
+        ("kv_both", False, False, False),
+    ],
+)
+def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
+    kv_role, enable_lookup, save_decode_cache, capacity_only
+):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role=kv_role,
+        kv_connector_extra_config={
+            "enable_lookup": enable_lookup,
+            "save_decode_cache": save_decode_cache,
+        },
+    )
     mamba_spec = MambaSpec(
         block_size=16,
         shapes=((1, 1),),
@@ -155,14 +174,20 @@ def test_scheduler_requires_align_mode_for_mamba():
         kv_cache_groups=[KVCacheGroupSpec(["mamba"], mamba_spec)],
     )
 
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "scheduler.LookupKeyClient"
-        ),
-        pytest.raises(AssertionError, match="requires mamba_cache_mode='align'"),
-    ):
-        scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "scheduler.LookupKeyClient"
+    ) as mock_client:
+        if not capacity_only:
+            with pytest.raises(
+                AssertionError, match="requires mamba_cache_mode='align'"
+            ):
+                scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+            return
+
+        store_scheduler = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+        assert store_scheduler.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
+        mock_client.return_value.lookup.assert_not_called()
 
 
 def _make_block_stored(
