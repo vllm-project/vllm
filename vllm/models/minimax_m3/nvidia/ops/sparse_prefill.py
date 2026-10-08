@@ -23,15 +23,6 @@ _PREFILL_TILE_Q = 16
 # since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
 # might lose pointer alignment, which trigger Triton recompiles. we don't actually
 # need pointer alignment for those tensors anyway because we do scalar load.
-@triton.heuristics(
-    {
-        "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
-        "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
-        "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
-        * triton.next_power_of_2(args["gqa_group_size"]),
-        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
-    }
-)
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _gqa_sparse_fwd_tiled_kernel(
     q_ptr,
@@ -68,13 +59,14 @@ def _gqa_sparse_fwd_tiled_kernel(
     stride_bt_b: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    BLOCK_SIZE_D: tl.constexpr,
-    BLOCK_SIZE_H: tl.constexpr,
-    BLOCK_SIZE_QH: tl.constexpr,
-    BLOCK_SIZE_T: tl.constexpr,
     USE_FP8: tl.constexpr,
     KV_SCALE_MODE: tl.constexpr,
 ):
+    BLOCK_SIZE_D: tl.constexpr = triton.next_power_of_2(head_dim)
+    BLOCK_SIZE_H: tl.constexpr = triton.next_power_of_2(gqa_group_size)
+    BLOCK_SIZE_QH: tl.constexpr = BLOCK_SIZE_Q * BLOCK_SIZE_H
+    BLOCK_SIZE_T: tl.constexpr = triton.next_power_of_2(max_topk)
+
     pid_q = tl.program_id(0) * BLOCK_SIZE_Q
     pid_kh = tl.program_id(1)
     pid_b = tl.program_id(2)

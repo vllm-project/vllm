@@ -1599,6 +1599,7 @@ def test_prefill_sparse_attention_correctness(
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
 ):
+    """Exercise sparse prefill on CUDA, including partial query tiles."""
     assert len(q_lens) == len(kv_lens)
     assert all(kv_len >= q_len for q_len, kv_len in zip(q_lens, kv_lens))
 
