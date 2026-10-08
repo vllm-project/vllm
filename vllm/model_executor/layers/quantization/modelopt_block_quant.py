@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ModelOpt safetensors block codecs with BF16 activations."""
 
-import weakref
-
 import torch
 
 from vllm.config import get_current_vllm_config
@@ -30,7 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.parameter import ModelWeightParameter
-from vllm.utils.b12x import B12X_BLOCK_CODECS, get_b12x_blockscaled
+from vllm.utils.b12x import B12X_BLOCK_CODECS, B12xWarmupUnit, get_b12x_blockscaled
 
 
 @torch.library.custom_op(
@@ -314,7 +312,6 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer):
-        from b12x.preparation import PreparationSession, PreparedCall
         from b12x.sequence import embedding
 
         from vllm.model_executor.utils import replace_parameter
@@ -330,7 +327,6 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
             *capture_sizes,
         )
         weight = layer.weight.data
-        requests = []
         if self.is_embedding:
             bases = weight[..., :2].contiguous().view(torch.float16)
             if not torch.isfinite(bases).all().item():
@@ -339,20 +335,6 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
             width = weight.shape[1] * self.block_size
             if config.model_config is not None:
                 capacity = max(capacity, config.model_config.max_model_len)
-
-            def prepare_embedding(state):
-                ids = torch.zeros(
-                    capacity,
-                    dtype=getattr(torch, state.query.id_dtype),
-                    device=weight.device,
-                )
-                out = torch.empty(
-                    (capacity, width), dtype=torch.bfloat16, device=weight.device
-                )
-                return PreparedCall(
-                    run=lambda: state.run(weight, ids, out=out),
-                    owners=(weight, ids, out),
-                )
 
             for dtype in (torch.int32, torch.int64):
                 plan = embedding.plan(
@@ -367,11 +349,6 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
                     device=weight.device,
                 )
                 layer.b12x_embedding_plans[dtype] = plan
-                requests.append(
-                    plan.request(
-                        name=f"q8_0_embedding_{dtype}", prepare_call=prepare_embedding
-                    )
-                )
         else:
             packed = api.pack_weight(weight, recipe=self.codec)
             query = api.BlockscaledQuery(
@@ -386,47 +363,51 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
                 query,
                 exact_m=tuple(sorted({m for m in capture_sizes if 0 < m < capacity})),
             )
-            source = torch.zeros(
-                (capacity, packed.in_features),
-                dtype=torch.bfloat16,
-                device=weight.device,
-            )
-
-            def prepare_dense(state):
-                return PreparedCall(
-                    run=lambda: state.run(
-                        source[: state.query.num_tokens],
-                        packed.values,
-                        packed.metadata,
-                        None,
-                    )
-                )
-
-            requests.append(
-                plan.request(
-                    name=self.codec,
-                    prepare_calls={m: prepare_dense for m in plan.token_counts},
-                )
-            )
             layer.b12x_block_weight = packed
             layer.b12x_block_plan = plan
-        session = PreparationSession(
-            device=weight.device, autotune=False, compile_workers=0
-        )
-        try:
-            session.prepare(tuple(requests))
-        except BaseException:
-            session.close()
-            raise
-        previous = getattr(layer, "b12x_block_finalizer", None)
-        if previous is not None:
-            previous()
-        layer.b12x_block_finalizer = weakref.finalize(layer, session.close)
-        layer.b12x_block_finalizer.atexit = False
         if not self.is_embedding:
             replace_parameter(
                 layer, "weight", torch.empty(0, dtype=torch.uint8, device=weight.device)
             )
+
+        layer.b12x_warmup_provider = self
+
+    def get_b12x_warmup_unit(
+        self,
+        layer: torch.nn.Module,
+        token_counts: tuple[int, ...],
+        output_dtype: torch.dtype,
+    ) -> B12xWarmupUnit:
+        if self.is_embedding:
+            plans = tuple(layer.b12x_embedding_plans.values())
+        else:
+            plans = (layer.b12x_block_plan,)
+
+        def compile() -> None:
+            if self.is_embedding:
+                for dtype, plan in layer.b12x_embedding_plans.items():
+                    ids = torch.zeros(
+                        plan.query.max_rows, dtype=dtype, device=layer.weight.device
+                    )
+                    self.embedding(layer, ids)
+            else:
+                packed = layer.b12x_block_weight
+                for tokens in sorted(set(token_counts) | set(plans[0].token_counts)):
+                    source = torch.zeros(
+                        (tokens, packed.in_features),
+                        dtype=output_dtype,
+                        device=packed.values.device,
+                    )
+                    self.apply(layer, source)
+
+        return B12xWarmupUnit(
+            name=(
+                self.codec.upper() + (" embedding" if self.is_embedding else " linear")
+            ),
+            # Every layer owns a plan that must be prepared before capture.
+            key=(type(self), *(plan.handle for plan in plans)),
+            compile=compile,
+        )
 
     def apply(self, layer, x, bias=None):
         if x.dtype != torch.bfloat16:
