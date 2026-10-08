@@ -11,7 +11,7 @@ from ..utils import check_spec_decode_matches_reference, get_test_prompts
 
 
 @pytest.mark.parametrize(
-    ["model_path", "verifier_model", "expected_accuracy_threshold"],
+    ["model_path", "expected_target_model", "expected_accuracy_threshold"],
     [
         # Measured reference: 75%-80%.
         (
@@ -29,7 +29,7 @@ def test_speculators_model_integration(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_path: str,
-    verifier_model: str,
+    expected_target_model: str,
     expected_accuracy_threshold: float,
     vllm_runner,
 ):
@@ -63,12 +63,11 @@ def test_speculators_model_integration(
         vllm_runner,
         sampling_config,
         test_prompts,
-        ref_model=verifier_model,
-        ref_kwargs=engine_kwargs,
+        target_model=None,
+        target_engine_kwargs=engine_kwargs,
         spec_model=model_path,
-        spec_kwargs=engine_kwargs,
-        required_matches=int(0.66 * len(test_prompts)),
-        context=f"speculator={model_path}, verifier={verifier_model}",
-        spec_accuracy_threshold=expected_accuracy_threshold,
-        expected_verifier=verifier_model,
+        spec_engine_kwargs=engine_kwargs,
+        prompts_required_matches=int(0.66 * len(test_prompts)),
+        gsm8k_spec_accuracy_threshold=expected_accuracy_threshold,
+        expected_target_model=expected_target_model,
     )

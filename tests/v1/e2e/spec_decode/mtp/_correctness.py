@@ -72,14 +72,14 @@ def check_mtp_correctness(
             vllm_runner,
             sampling_config,
             test_prompts,
-            ref_model=model_name,
-            ref_kwargs=engine_kwargs,
+            target_model=model_name,
+            target_engine_kwargs=engine_kwargs,
             spec_model=model_name,
-            spec_kwargs={**engine_kwargs, "speculative_config": speculative_config},
-            required_matches=int(0.8 * len(test_prompts)) + 1,
-            context=f"{method} target={model_name}, draft={draft_model}",
-            spec_accuracy_threshold=expected_accuracy_threshold,
-            ref_accuracy_threshold=expected_accuracy_threshold,
-            # MTP supports async scheduling by default.
-            expect_async_scheduling=True,
+            spec_engine_kwargs={
+                **engine_kwargs,
+                "speculative_config": speculative_config,
+            },
+            prompts_required_matches=int(0.8 * len(test_prompts)) + 1,
+            gsm8k_spec_accuracy_threshold=expected_accuracy_threshold,
+            gsm8k_target_accuracy_threshold=expected_accuracy_threshold,
         )

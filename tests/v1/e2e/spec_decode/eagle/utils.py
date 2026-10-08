@@ -73,16 +73,12 @@ def _run_eagle_correctness(
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
-        context = (
-            f"{method} target={model_name}, draft={spec_model_name}, "
-            f"backend={attn_backend}"
-        )
         check_spec_decode_matches_reference(
             vllm_runner,
             sampling_config,
             test_prompts,
-            ref_model=model_name,
-            ref_kwargs=dict(
+            target_model=model_name,
+            target_engine_kwargs=dict(
                 block_size=None,
                 trust_remote_code=False,
                 max_model_len=max_model_len,
@@ -93,7 +89,7 @@ def _run_eagle_correctness(
                 **extra_kwargs,
             ),
             spec_model=model_name,
-            spec_kwargs=dict(
+            spec_engine_kwargs=dict(
                 block_size=None,
                 trust_remote_code=True,
                 tensor_parallel_size=tp_size,
@@ -111,10 +107,7 @@ def _run_eagle_correctness(
                 compilation_config=CompilationConfig(),
                 **extra_kwargs,
             ),
-            required_matches=int(0.6 * len(test_prompts)) + 1,
-            context=context,
-            spec_accuracy_threshold=expected_accuracy_threshold,
-            ref_accuracy_threshold=expected_accuracy_threshold,
-            # EAGLE/EAGLE3 supports async scheduling by default.
-            expect_async_scheduling=True,
+            prompts_required_matches=int(0.6 * len(test_prompts)) + 1,
+            gsm8k_spec_accuracy_threshold=expected_accuracy_threshold,
+            gsm8k_target_accuracy_threshold=expected_accuracy_threshold,
         )
