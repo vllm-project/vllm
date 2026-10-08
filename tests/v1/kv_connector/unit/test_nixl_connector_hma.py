@@ -281,7 +281,6 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
     worker._replicated_pcp_done_sending = set()
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
-    worker._send_pending_recv_notifs = MagicMock()
     worker._sync_device_after_direct_recv = MagicMock()
     worker.use_host_buffer = False
     worker._reqs_to_send = {}
