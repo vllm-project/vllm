@@ -303,6 +303,37 @@ fn decodes_big_endian_payloads() {
 }
 
 #[test]
+fn decodes_per_entry_ranks() {
+    // logprob_token_ids rows are in request order, so the engine sends a rank
+    // per entry instead of only the sampled one.
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        Some(Value::Array(vec![
+            ndarray_value(
+                "<i4",
+                &[1, 3],
+                Value::Ext(3, [1_i32, 2, 1].map(i32::to_le_bytes).concat()),
+            ),
+            ndarray_value(
+                "<f4",
+                &[1, 3],
+                Value::Ext(3, [-0.5_f32, -4.0, -0.5].map(f32::to_le_bytes).concat()),
+            ),
+            ndarray_value(
+                "<i8",
+                &[1, 3],
+                Value::Ext(3, [1_i64, 9, 1].map(i64::to_le_bytes).concat()),
+            ),
+            Value::Nil,
+        ])),
+        None,
+    )))];
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
+    let ranks: Vec<u32> = logprobs.positions[0].entries.iter().map(|entry| entry.rank).collect();
+    assert_eq!(ranks, vec![1, 9, 1]);
+}
+
+#[test]
 fn rejects_supported_array_dtypes_in_incompatible_logprobs_fields() {
     for (ids_dtype, probs_dtype, field) in [
         ("<u4", "<f4", "logprob_token_ids"),

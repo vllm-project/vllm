@@ -310,6 +310,22 @@ def test_stashes_of_different_widths_join():
     assert torch.equal(out.logprobs[3:], wide.logprobs)
 
 
+def test_stashes_with_per_entry_ranks_join():
+    # The label-id read ranks every column. The topk generation ranks only its
+    # sampled token, so its other columns get topk positions.
+    wide, narrow = _stash(2, 11, 100), _stash(3, 3, 0)
+    wide = wide._replace(selected_token_ranks=torch.arange(22).reshape(2, 11) + 50)
+
+    out = _concat_logprob_stashes([narrow, wide], [0, 3])
+
+    assert out.selected_token_ranks.shape == (5, 11)
+    assert not out.selected_token_ranks[:3, 0].any()
+    assert torch.equal(
+        out.selected_token_ranks[:3, 1:], torch.arange(1, 11).expand(3, -1)
+    )
+    assert torch.equal(out.selected_token_ranks[3:], wide.selected_token_ranks)
+
+
 @pytest.mark.parametrize("width", [4, CL])
 @pytest.mark.parametrize("steps", [1, 2])
 def test_read_emits_at_convergence_while_generation_waits_for_commit(width, steps):

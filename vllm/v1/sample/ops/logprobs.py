@@ -15,11 +15,14 @@ def batched_count_greater_than(x: torch.Tensor, values: torch.Tensor) -> torch.T
     tensors and cause memory issues.
 
     Args:
-        x (torch.Tensor): A 2D tensor of shape (batch_size, n_elements).
-        values (torch.Tensor): A 2D tensor of shape (batch_size, 1).
+        x (torch.Tensor): A 2D tensor of shape (batch_size, n_elements), or
+            a 3D tensor of shape (batch_size, 1, n_elements).
+        values (torch.Tensor): A 2D tensor of shape (batch_size, 1), or a 3D
+            tensor of shape (batch_size, n_values, 1).
 
     Returns:
-        torch.Tensor: A 1D tensor of shape (batch_size,) with the counts.
+        torch.Tensor: A tensor of shape (batch_size,) with the counts, or
+            (batch_size, n_values) for 3D inputs.
 
     """
     torch._check(x.shape[0] >= 1)
