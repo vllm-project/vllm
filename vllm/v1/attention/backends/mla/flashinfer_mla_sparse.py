@@ -575,11 +575,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 )
                 prefill_outs.append(plan_out)
                 prefill_lses.append(plan_lse)
-            prefill_out = torch.cat(prefill_outs)
             prefill_lse = None if prefill_lses[0] is None else torch.cat(prefill_lses)
             if decode_out is None:
-                return prefill_out, prefill_lse
-            output = torch.cat((decode_out, prefill_out))
+                if len(prefill_outs) == 1:
+                    return prefill_outs[0], prefill_lse
+                return torch.cat(prefill_outs), prefill_lse
+            output = torch.cat((decode_out, *prefill_outs))
             if decode_lse is None:
                 return output, None
             assert prefill_lse is not None
