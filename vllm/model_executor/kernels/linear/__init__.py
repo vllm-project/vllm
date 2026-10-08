@@ -219,6 +219,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
+    TritonPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFp8BlockScaledMMKernel,
@@ -310,6 +311,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "triton": {
         TritonInt8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
+        TritonPerTokenFp8ScaledMMLinearKernel,
         TritonW4A16LinearKernel,
     },
     "deep_gemm": {
@@ -441,6 +443,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
+        TritonPerTokenFp8ScaledMMLinearKernel,
     ],
     PlatformEnum.CPU: [
         CPUFP8W8A8ScaledMMLinearKernel,

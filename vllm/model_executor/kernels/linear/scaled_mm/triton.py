@@ -9,6 +9,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm
     triton_scaled_mm,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8DynamicTokenSym,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
@@ -20,8 +24,53 @@ from .BlockScaledMMLinearKernel import (
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
+    FP8ScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearLayerConfig,
 )
+
+
+class TritonPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    """Native Triton FP8 GEMM for RDNA4 per-token/per-channel quantization."""
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "requires ROCm RDNA4."
+        from vllm.platforms.rocm import on_rdna4
+
+        if not on_rdna4():
+            return False, "requires ROCm RDNA4."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        if not (
+            c.activation_quant_key == kFp8DynamicTokenSym
+            and c.weight_quant_key.scale.group_shape.is_per_channel()
+        ):
+            return False, "requires per-token activations and per-channel weights."
+        if c.out_dtype not in (torch.bfloat16, torch.float16):
+            return False, "requires BF16 or FP16 output."
+        return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        return kFp8DynamicTokenSym
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        return triton_scaled_mm(A, B, As, Bs, out_dtype, bias).view(*output_shape)
 
 
 class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):

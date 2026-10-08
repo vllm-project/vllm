@@ -160,3 +160,65 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     out_plain = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=False)
     out_td = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=True)
     torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm RDNA4")
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("use_bias", [False, True])
+def test_rdna4_triton_fp8_backend_preserves_linear_shape(out_dtype, use_bias):
+    """Select the backend and validate quantization, weight layout and 3D output."""
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+    from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+        TritonPerTokenFp8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+        kFp8StaticChannelSym,
+    )
+    from vllm.platforms.rocm import on_rdna4
+
+    if not on_rdna4():
+        pytest.skip("Requires RDNA4")
+    set_random_seed(0)
+    n, k = 256, 128
+    with set_current_vllm_config(
+        VllmConfig(kernel_config=KernelConfig(linear_backend="triton"))
+    ):
+        kernel = init_fp8_linear_kernel(
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticChannelSym,
+            input_dtype=out_dtype,
+            out_dtype=out_dtype,
+            weight_shape=(n, k),
+        )
+    assert isinstance(kernel, TritonPerTokenFp8ScaledMMLinearKernel)
+    layer = torch.nn.Module()
+    layer.weight = (
+        (0.2 * torch.randn(n, k, device=device)).to(current_platform.fp8_dtype()).t()
+    )
+    layer.weight_scale = torch.rand(n, 1, device=device) + 0.5
+    x = torch.randn(3, 11, k, device=device, dtype=out_dtype)
+    bias = torch.randn(n, device=device, dtype=out_dtype) if use_bias else None
+    x_q, x_s = kernel.quant_fp8(x.reshape(-1, k))
+    expected = torch_scaled_mm(
+        x_q, layer.weight, x_s, layer.weight_scale, out_dtype, bias
+    ).view(3, 11, n)
+    actual = kernel.apply_weights(layer, x, bias)
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+    compiled = torch.compile(kernel.apply_weights, fullgraph=True)
+    # Eager and compiled native quantization can round FP8 differently.
+    compiled_q, compiled_s = torch.compile(kernel.quant_fp8, fullgraph=True)(
+        x.reshape(-1, k)
+    )
+    compiled_expected = torch_scaled_mm(
+        compiled_q, layer.weight, compiled_s, layer.weight_scale, out_dtype, bias
+    ).view(3, 11, n)
+    torch.testing.assert_close(
+        compiled(layer, x, bias), compiled_expected, rtol=1e-2, atol=1e-2
+    )
+    qa = QuantizedActivation(x_q, x_s, x.dtype, x.shape, kFp8DynamicTokenSym)
+    torch.testing.assert_close(
+        compiled(layer, qa, bias), expected, rtol=1e-2, atol=1e-2
+    )
