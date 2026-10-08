@@ -43,7 +43,6 @@ try:
         AmdSmiException,
         AmdSmiMemoryType,
         amdsmi_get_gpu_asic_info,
-        amdsmi_get_gpu_device_bdf,
         amdsmi_get_gpu_device_uuid,
         amdsmi_get_gpu_memory_total,
         amdsmi_get_processor_handles,
@@ -200,23 +199,23 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
     return amdsmi_get_gpu_memory_total(handle, AmdSmiMemoryType.VRAM)
 
 
-@with_amdsmi_context
-def _query_pci_bdf_from_amdsmi(physical_device_id: int) -> str:
-    handles = amdsmi_get_processor_handles()
-    return amdsmi_get_gpu_device_bdf(handles[physical_device_id])
-
-
 _PCI_DEVICES_PATH = Path("/sys/bus/pci/devices")
 
 
 @cache
-def _query_apu_pool_sizes(physical_device_id: int) -> tuple[int, int] | None:
+def _query_apu_pool_sizes(device_id: int) -> tuple[int, int] | None:
     """(VRAM carve-out, GTT) sizes in bytes from amdgpu sysfs, or None.
 
     Reads sysfs because amdsmi reports KFD's pool size when VRAM total is 0.
+    The PCI address comes from HIP itself, so the device always matches even
+    when HIP and amdsmi enumerate GPUs differently.
     """
     try:
-        bdf = _query_pci_bdf_from_amdsmi(physical_device_id)
+        props = torch.cuda.get_device_properties(device_id)
+        bdf = (
+            f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:"
+            f"{props.pci_device_id:02x}.0"
+        )
         device_path = _PCI_DEVICES_PATH / bdf
         vram_total = int((device_path / "mem_info_vram_total").read_text())
         gtt_total = int((device_path / "mem_info_gtt_total").read_text())
@@ -226,7 +225,7 @@ def _query_apu_pool_sizes(physical_device_id: int) -> tuple[int, int] | None:
     return vram_total, gtt_total
 
 
-def _apu_allocates_from_gtt(physical_device_id: int, device_total: int) -> bool:
+def _apu_allocates_from_gtt(device_id: int, device_total: int) -> bool:
     """Whether an APU serves device allocations from GTT rather than VRAM.
 
     Which pool amdgpu uses depends on the kernel version (always VRAM before
@@ -234,7 +233,7 @@ def _apu_allocates_from_gtt(physical_device_id: int, device_total: int) -> bool:
     the pool size HIP reports against both instead of predicting it. Native
     MI300A has no carve-out. Assumes GTT if the sizes cannot be read.
     """
-    pool_sizes = _query_apu_pool_sizes(physical_device_id)
+    pool_sizes = _query_apu_pool_sizes(device_id)
     if pool_sizes is None:
         return True
     vram_total, gtt_total = pool_sizes
@@ -1116,8 +1115,7 @@ class RocmPlatform(Platform):
         # OS actually has.
         if device_id is None:
             device_id = torch.cuda.current_device()
-        physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
-        if not _apu_allocates_from_gtt(physical_device_id, total_memory):
+        if not _apu_allocates_from_gtt(device_id, total_memory):
             return free_memory, total_memory
 
         host_memory = psutil.virtual_memory()
