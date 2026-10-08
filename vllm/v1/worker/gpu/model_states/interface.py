@@ -127,6 +127,12 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
+    ) -> None:
+        """Hook run after the KV cache tensors are allocated and bound."""
+        return None
+
     def capture_inner_cudagraphs(
         self,
         input_buffers: InputBuffers,

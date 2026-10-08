@@ -594,8 +594,12 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         failed_recving_kv_req_ids=set(),
         finished_recving_kv_req_ids={request.request_id},
         prefix_replay_tokens=0,
+        prefix_replay_group_ids=(),
     )
     scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
+    scheduler._load_restores_replay_window = MethodType(
+        Scheduler._load_restores_replay_window, scheduler
+    )
     Scheduler._update_waiting_for_remote_kv(scheduler, request)
     assert request.num_tokens - request.num_computed_tokens == 1
     assert _allocate_scheduled(manager, request, num_new_tokens=1) is not None
