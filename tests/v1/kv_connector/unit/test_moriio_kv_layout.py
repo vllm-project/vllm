@@ -291,6 +291,200 @@ def test_kernel_block_layout_without_spec_dimensions_rejects_ambiguous_axes():
         )
 
 
+def test_kernel_split_4d_view_addresses_manager_blocks():
+    # kpool-style indexer: 16-token blocks of 4 states, viewed in 2-state pages.
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=3,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+    )
+    manager_view = torch.empty((8, 1, 4, 3), dtype=torch.bfloat16)
+    kernel_view = manager_view.view(16, 1, 2, 3)
+    layer_to_spec = {"layer": spec}
+
+    manager = moriio_layout.get_layer_transfer_geometry(
+        "layer", manager_view, layer_to_spec
+    )
+    kernel = moriio_layout.get_layer_transfer_geometry(
+        "layer", kernel_view, layer_to_spec
+    )
+
+    assert kernel == manager
+    assert kernel.num_blocks == 8
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", kernel_view, layer_to_spec, [1, 3], [4, 5], 16
+    ) == ([24, 72], [96, 120], [24, 24])
+
+
+def test_kernel_split_4d_view_rejects_padded_kernel_blocks():
+    spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=3, dtype=torch.bfloat16
+    )
+    padded = torch.empty((16, 1, 5, 3), dtype=torch.bfloat16)[:, :, :4]
+
+    with pytest.raises(ValueError, match="not 4 dense kernel blocks per block"):
+        moriio_layout.get_layer_transfer_geometry("layer", padded, {"layer": spec})
+
+
+def _kernel_split_views(num_heads, num_states, content, manager_blocks, ratio):
+    # tokens_per_state=1 makes spec.num_states == block_size, so a manager block
+    # holds `num_states` states and a kernel block holds `num_states // ratio`.
+    spec = MLAAttentionSpec(
+        block_size=num_states,
+        num_kv_heads=num_heads,
+        head_size=content,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        tokens_per_state=1,
+    )
+    manager = torch.empty(
+        (manager_blocks, num_heads, num_states, content), dtype=torch.bfloat16
+    )
+    kernel = manager.view(
+        manager_blocks * ratio, num_heads, num_states // ratio, content
+    )
+    return spec, manager, kernel
+
+
+@pytest.mark.parametrize("ratio", [1, 2, 4, 8, 16])
+def test_kernel_split_ratios_match_manager_geometry(ratio):
+    manager_blocks = 4
+    spec, manager_view, kernel_view = _kernel_split_views(
+        num_heads=1,
+        num_states=16,
+        content=3,
+        manager_blocks=manager_blocks,
+        ratio=ratio,
+    )
+    layer_to_spec = {"layer": spec}
+
+    manager = moriio_layout.get_layer_transfer_geometry(
+        "layer", manager_view, layer_to_spec
+    )
+    kernel = moriio_layout.get_layer_transfer_geometry(
+        "layer", kernel_view, layer_to_spec
+    )
+
+    # The split view addresses manager blocks, not its own B * ratio kernel blocks.
+    assert kernel == manager
+    assert kernel.num_blocks == manager_blocks
+    # Exercise the last valid id and a non-contiguous pair, against the unsplit ref.
+    ids = ([manager_blocks - 1, 0], [0, manager_blocks - 1])
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", kernel_view, layer_to_spec, *ids, manager_blocks
+    ) == moriio_layout.compute_block_transfer_offsets(
+        "layer", manager_view, layer_to_spec, *ids, manager_blocks
+    )
+
+
+@pytest.mark.parametrize("num_heads", [2, 4])
+def test_kernel_split_multi_head_matches_manager_geometry(num_heads):
+    manager_blocks = 4
+    spec, manager_view, kernel_view = _kernel_split_views(
+        num_heads=num_heads,
+        num_states=16,
+        content=3,
+        manager_blocks=manager_blocks,
+        ratio=4,
+    )
+    layer_to_spec = {"layer": spec}
+
+    manager = moriio_layout.get_layer_transfer_geometry(
+        "layer", manager_view, layer_to_spec
+    )
+    kernel = moriio_layout.get_layer_transfer_geometry(
+        "layer", kernel_view, layer_to_spec
+    )
+
+    # block_len and slot size scale with H; the split still maps to manager blocks.
+    assert kernel == manager
+    assert kernel.num_blocks == manager_blocks
+    assert kernel.slot_size_bytes == num_heads * 3 * manager_view.element_size()
+    ids = ([manager_blocks - 1, 0], [0, manager_blocks - 1])
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", kernel_view, layer_to_spec, *ids, manager_blocks
+    ) == moriio_layout.compute_block_transfer_offsets(
+        "layer", manager_view, layer_to_spec, *ids, manager_blocks
+    )
+
+
+def test_kernel_split_matches_real_allocator_indexer():
+    # The GLM-5.3-Flash kpool indexer as the real allocator produces it:
+    # block_size 640 viewed in 128-token storage pages (ratio 5) at EP8/TP1 scale.
+    from vllm.v1.kv_cache_interface import (
+        KVCacheLayout,
+        KVCacheTensor,
+        create_kv_cache_views,
+    )
+
+    num_blocks = 3
+    spec = MLAAttentionSpec(
+        block_size=640,
+        num_kv_heads=1,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.uint8,
+        state_content_bytes=132,
+        tokens_per_state=4,
+    )
+    page = spec.page_size_bytes
+    tensor = KVCacheTensor(
+        size=num_blocks * page,
+        layers=["indexer"],
+        layer_stride=num_blocks * page,
+        block_stride=page,
+    )
+    raw = torch.zeros(num_blocks * page, dtype=torch.int8)
+    (view,) = create_kv_cache_views(
+        raw, spec, num_blocks, KVCacheLayout.LBHNC, tensor, kernel_block_size=128
+    )
+    layer_to_spec = {"indexer": spec}
+
+    # ratio 5 => 15 kernel blocks, but geometry is in 3 manager blocks of 160 states.
+    assert tuple(view.shape) == (15, 1, 32, 132)
+    geometry = moriio_layout.get_layer_transfer_geometry("indexer", view, layer_to_spec)
+    assert geometry.num_blocks == num_blocks
+    assert geometry.block_len == geometry.block_stride == 160 * 132 == 21120
+    assert geometry.transfers_per_block == 1
+    # Non-contiguous ids transfer one 21120-byte manager page each at id * page.
+    assert moriio_layout.compute_block_transfer_offsets(
+        "indexer", view, layer_to_spec, [2, 0], [0, 2], num_blocks
+    ) == ([0, 42240], [42240, 0], [21120, 21120])
+    # Contiguous ids coalesce into a single transfer of all three manager pages.
+    assert moriio_layout.compute_block_transfer_offsets(
+        "indexer", view, layer_to_spec, [0, 1, 2], [0, 1, 2], num_blocks
+    ) == ([0], [0], [63360])
+
+
+def test_kernel_split_rejects_out_of_range_block_id():
+    manager_blocks = 4
+    spec, _, kernel_view = _kernel_split_views(
+        num_heads=1, num_states=16, content=3, manager_blocks=manager_blocks, ratio=2
+    )
+
+    with pytest.raises(ValueError, match="outside"):
+        moriio_layout.compute_block_transfer_offsets(
+            "layer", kernel_view, {"layer": spec}, [manager_blocks], [0], manager_blocks
+        )
+
+
+def test_non_divisible_state_count_is_unsupported():
+    # num_states (16) not divisible by the view's state axis (3): not a kernel split.
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=3,
+        dtype=torch.bfloat16,
+        tokens_per_state=1,
+    )
+    view = torch.empty((8, 1, 3, 3), dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="Unsupported MoRIIO MLA cache shape"):
+        moriio_layout.get_layer_transfer_geometry("layer", view, {"layer": spec})
+
+
 def test_mixed_layers_compute_distinct_offsets_per_layer():
     kv_caches = {
         "separated": torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16),
