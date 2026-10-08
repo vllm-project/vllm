@@ -14,10 +14,10 @@ Each server must pass finite generation and its own GSM64 gate before full GSM13
 
 | Model | C | vLLM auto | FlashInfer auto | FlashInfer cuDNN |
 | --- | ---: | ---: | ---: | ---: |
-| Kimi-K3 (KDA) | 1 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 8 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 32 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 128 | Pending | Pending | Pending |
+| Kimi-K3 (KDA) | 1 | 289.221 | 333.196 | 274.394 |
+| Kimi-K3 (KDA) | 8 | 1279.490 | 1443.067 | 1210.756 |
+| Kimi-K3 (KDA) | 32 | 4742.299 | 5351.686 | 4419.455 |
+| Kimi-K3 (KDA) | 128 | 18412.276 | 20009.054 | 20906.159 |
 | GLM-5.3 (KDA) | 1 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
 | GLM-5.3 (KDA) | 8 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
 | GLM-5.3 (KDA) | 32 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
@@ -35,10 +35,10 @@ Each server must pass finite generation and its own GSM64 gate before full GSM13
 
 | Model | C | vLLM auto | FlashInfer auto | FlashInfer cuDNN |
 | --- | ---: | ---: | ---: | ---: |
-| Kimi-K3 (KDA) | 1 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 8 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 32 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 128 | Pending | Pending | Pending |
+| Kimi-K3 (KDA) | 1 | 313.641 | 335.635 | 348.196 |
+| Kimi-K3 (KDA) | 8 | 1769.013 | 1917.690 | 1890.517 |
+| Kimi-K3 (KDA) | 32 | 5769.200 | 5934.229 | 6353.972 |
+| Kimi-K3 (KDA) | 128 | 22531.251 | 20600.418 | 22893.252 |
 | GLM-5.3 (KDA) | 1 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
 | GLM-5.3 (KDA) | 8 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
 | GLM-5.3 (KDA) | 32 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
@@ -56,10 +56,10 @@ Each server must pass finite generation and its own GSM64 gate before full GSM13
 
 | Model | C | vLLM auto | FlashInfer auto | FlashInfer cuDNN |
 | --- | ---: | ---: | ---: | ---: |
-| Kimi-K3 (KDA) | 1 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 8 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 32 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 128 | Pending | Pending | Pending |
+| Kimi-K3 (KDA) | 1 | 8.096 | 8.037 | 8.073 |
+| Kimi-K3 (KDA) | 8 | 13.010 | 11.688 | 13.131 |
+| Kimi-K3 (KDA) | 32 | 21.887 | 21.054 | 22.405 |
+| Kimi-K3 (KDA) | 128 | 58.247 | 55.325 | 58.737 |
 | GLM-5.3 (KDA) | 1 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
 | GLM-5.3 (KDA) | 8 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
 | GLM-5.3 (KDA) | 32 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
@@ -77,10 +77,10 @@ Each server must pass finite generation and its own GSM64 gate before full GSM13
 
 | Model | C | vLLM auto | FlashInfer auto | FlashInfer cuDNN |
 | --- | ---: | ---: | ---: | ---: |
-| Kimi-K3 (KDA) | 1 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 8 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 32 | Pending | Pending | Pending |
-| Kimi-K3 (KDA) | 128 | Pending | Pending | Pending |
+| Kimi-K3 (KDA) | 1 | 119.116 | 119.649 | 118.966 |
+| Kimi-K3 (KDA) | 8 | 542.008 | 588.946 | 533.271 |
+| Kimi-K3 (KDA) | 32 | 1155.787 | 1183.941 | 1111.507 |
+| Kimi-K3 (KDA) | 128 | 1443.019 | 1536.263 | 1437.274 |
 | GLM-5.3 (KDA) | 1 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
 | GLM-5.3 (KDA) | 8 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
 | GLM-5.3 (KDA) | 32 | Unavailable (failed run) | Unavailable (failed run) | Unavailable (failed run) |
@@ -99,20 +99,24 @@ Each server must pass finite generation and its own GSM64 gate before full GSM13
 | Model | Launch | GSM64 correct / 64 | Full GSM correct / 1319 | Full invalid |
 | --- | --- | ---: | ---: | ---: |
 | GLM-5.3 (KDA) | 00-candidate-vllm_auto | 57 | 1208 | 0 |
-
-GLM-5.3 (KDA) runtime failures: `[{"arm": "01-candidate-flashinfer_auto", "error": "RuntimeError('Incomplete or nonfinite results: /lustre/fsw/coreai_libraries_cudnn/agopal/vllm-gdn-kda-20261001/kda-cpu-parity-20261005/serving-v27-latest-full/results/glm-GB200-3270870/01-candidate-flashinfer_auto/bench/8k1k-c128-r1.json')", "excluded_from_comparison": true}]`
-
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 64 | 1259 | 1 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 64 | 1254 | 1 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 64 | 1251 | 1 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 64 | 1247 | 1 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 64 | 1246 | 2 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 64 | 1248 | 1 |
 | Qwen3.5 (GDN) | 00-candidate-vllm_auto | 59 | 1149 | 0 |
 | Qwen3.5 (GDN) | 01-candidate-flashinfer_auto | 59 | 1132 | 0 |
-
-Qwen3.5 (GDN) failures: `[{"arm": "02-candidate-flashinfer_cudnn", "reason": "GSM64 fails the declared minimum or protocol; timing stopped", "details": {"accuracy": 0.859375, "invalid_rate": 0.0, "latency": 15.682142404955812, "questions_per_second": 4.081075043660805, "total_output_tokens": 9243, "tokens_per_second": 589.3965098212003, "num_questions": 64, "num_shots": 5, "max_tokens": 256, "timestamp": 1791447369.895552}, "excluded_from_performance": true}]`
-
 | Qwen3-Next (GDN) | 00-candidate-vllm_auto | 55 | 1142 | 1 |
 | Qwen3-Next (GDN) | 01-candidate-flashinfer_auto | 56 | 1149 | 0 |
 | Qwen3-Next (GDN) | 02-candidate-flashinfer_cudnn | 55 | 1136 | 0 |
 | Qwen3-Next (GDN) | 03-candidate-flashinfer_cudnn | 55 | 1141 | 0 |
 | Qwen3-Next (GDN) | 04-candidate-flashinfer_auto | 55 | 1149 | 1 |
 | Qwen3-Next (GDN) | 05-candidate-vllm_auto | 55 | 1142 | 0 |
+
+GLM-5.3 (KDA) runtime failures: `[{"arm": "01-candidate-flashinfer_auto", "error": "RuntimeError('Incomplete or nonfinite results: /lustre/fsw/coreai_libraries_cudnn/agopal/vllm-gdn-kda-20261001/kda-cpu-parity-20261005/serving-v27-latest-full/results/glm-GB200-3270870/01-candidate-flashinfer_auto/bench/8k1k-c128-r1.json')", "excluded_from_comparison": true}]`
+
+Qwen3.5 (GDN) failures: `[{"arm": "02-candidate-flashinfer_cudnn", "reason": "GSM64 fails the declared minimum or protocol; timing stopped", "details": {"accuracy": 0.859375, "invalid_rate": 0.0, "latency": 15.682142404955812, "questions_per_second": 4.081075043660805, "total_output_tokens": 9243, "tokens_per_second": 589.3965098212003, "num_questions": 64, "num_shots": 5, "max_tokens": 256, "timestamp": 1791447369.895552}, "excluded_from_performance": true}]`
 
 ## Every repeat
 
@@ -130,6 +134,78 @@ Qwen3.5 (GDN) failures: `[{"arm": "02-candidate-flashinfer_cudnn", "reason": "GS
 | GLM-5.3 (KDA) | 00-candidate-vllm_auto | 128 | 1 | 9474.298 | 10935.101 | 26.350 | 3389.545 |
 | GLM-5.3 (KDA) | 00-candidate-vllm_auto | 128 | 2 | 9474.862 | 10806.593 | 26.308 | 3406.096 |
 | GLM-5.3 (KDA) | 00-candidate-vllm_auto | 128 | 3 | 9483.177 | 10805.806 | 26.294 | 3406.627 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 1 | 1 | 290.506 | 311.993 | 8.114 | 118.893 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 1 | 2 | 289.585 | 310.836 | 8.072 | 119.506 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 1 | 3 | 288.536 | 310.398 | 8.072 | 119.513 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 8 | 1 | 1276.877 | 1564.744 | 12.817 | 556.713 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 8 | 2 | 1278.116 | 1748.953 | 12.991 | 543.331 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 8 | 3 | 1283.121 | 1884.940 | 13.173 | 531.942 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 32 | 1 | 4668.324 | 6091.466 | 22.245 | 1127.757 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 32 | 2 | 4658.207 | 5781.604 | 21.935 | 1152.691 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 32 | 3 | 4714.690 | 6330.195 | 22.282 | 1117.110 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 128 | 1 | 18135.231 | 23030.108 | 58.807 | 1426.145 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 128 | 2 | 18161.593 | 23235.774 | 59.064 | 1418.765 |
+| Kimi-K3 (KDA) | 00-candidate-vllm_auto | 128 | 3 | 18164.665 | 22109.773 | 58.009 | 1452.652 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 1 | 1 | 334.116 | 332.517 | 8.026 | 119.862 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 1 | 2 | 334.239 | 337.250 | 8.053 | 119.396 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 1 | 3 | 335.415 | 350.791 | 8.054 | 119.207 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 8 | 1 | 1457.997 | 1982.283 | 11.812 | 580.886 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 8 | 2 | 1481.681 | 1889.677 | 11.664 | 591.132 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 8 | 3 | 1512.211 | 1842.122 | 11.608 | 595.622 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 32 | 1 | 5468.069 | 5933.960 | 21.266 | 1174.510 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 32 | 2 | 5486.649 | 5875.036 | 20.857 | 1195.124 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 32 | 3 | 5398.187 | 5717.822 | 20.814 | 1203.923 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 128 | 1 | 20750.781 | 23397.189 | 58.338 | 1435.969 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 128 | 2 | 20001.968 | 21005.157 | 55.720 | 1520.779 |
+| Kimi-K3 (KDA) | 01-candidate-flashinfer_auto | 128 | 3 | 19443.992 | 19945.522 | 54.602 | 1559.533 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 1 | 1 | 275.649 | 348.851 | 8.077 | 118.899 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 1 | 2 | 273.866 | 349.338 | 8.060 | 119.137 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 1 | 3 | 273.160 | 344.336 | 8.046 | 119.408 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 8 | 1 | 1212.555 | 1885.813 | 13.061 | 535.928 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 8 | 2 | 1209.650 | 1817.413 | 13.037 | 539.209 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 8 | 3 | 1209.994 | 1920.487 | 13.179 | 530.526 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 32 | 1 | 4409.508 | 6498.363 | 22.390 | 1106.569 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 32 | 2 | 4409.817 | 6382.111 | 22.348 | 1112.591 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 32 | 3 | 4471.935 | 6161.560 | 22.343 | 1121.214 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 128 | 1 | 17178.413 | 23528.595 | 59.031 | 1421.205 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 128 | 2 | 21948.984 | 23840.441 | 60.398 | 1395.785 |
+| Kimi-K3 (KDA) | 02-candidate-flashinfer_cudnn | 128 | 3 | 21495.367 | 22462.023 | 58.152 | 1452.905 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 1 | 1 | 275.832 | 361.369 | 8.051 | 119.092 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 1 | 2 | 274.041 | 348.143 | 8.094 | 118.671 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 1 | 3 | 273.818 | 337.137 | 8.111 | 118.589 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 8 | 1 | 1210.697 | 1840.629 | 13.106 | 535.885 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 8 | 2 | 1210.627 | 1933.426 | 13.159 | 530.798 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 8 | 3 | 1211.011 | 1945.336 | 13.247 | 527.280 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 32 | 1 | 4406.183 | 6400.222 | 22.568 | 1103.413 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 32 | 2 | 4410.863 | 6158.716 | 22.256 | 1124.706 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 32 | 3 | 4408.425 | 6522.862 | 22.524 | 1100.547 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 128 | 1 | 21163.074 | 22822.880 | 58.341 | 1443.734 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 128 | 2 | 21615.389 | 21092.885 | 56.362 | 1506.721 |
+| Kimi-K3 (KDA) | 03-candidate-flashinfer_cudnn | 128 | 3 | 22035.728 | 23612.688 | 60.139 | 1403.295 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 1 | 1 | 332.638 | 333.334 | 8.044 | 119.586 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 1 | 2 | 331.066 | 331.553 | 8.024 | 119.903 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 1 | 3 | 331.701 | 328.365 | 8.024 | 119.939 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 8 | 1 | 1390.283 | 2009.778 | 11.721 | 583.635 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 8 | 2 | 1395.407 | 1892.000 | 11.642 | 591.991 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 8 | 3 | 1420.822 | 1890.279 | 11.680 | 590.411 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 32 | 1 | 5309.820 | 6203.264 | 21.372 | 1158.439 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 32 | 2 | 5336.491 | 6025.304 | 21.160 | 1175.366 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 32 | 3 | 5110.903 | 5849.988 | 20.855 | 1196.285 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 128 | 1 | 20280.879 | 19905.052 | 54.393 | 1564.288 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 128 | 2 | 19928.256 | 19689.919 | 54.419 | 1568.048 |
+| Kimi-K3 (KDA) | 04-candidate-flashinfer_auto | 128 | 3 | 19648.446 | 19659.665 | 54.478 | 1568.959 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 1 | 1 | 289.640 | 314.895 | 8.098 | 119.075 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 1 | 2 | 288.851 | 312.629 | 8.121 | 118.782 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 1 | 3 | 288.209 | 321.097 | 8.103 | 118.924 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 8 | 1 | 1276.377 | 1830.072 | 13.026 | 539.161 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 8 | 2 | 1286.188 | 1768.667 | 13.007 | 542.042 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 8 | 3 | 1276.260 | 1816.701 | 13.045 | 538.858 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 32 | 1 | 4648.942 | 5616.716 | 21.919 | 1159.992 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 32 | 2 | 4652.942 | 5454.274 | 21.550 | 1182.684 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 32 | 3 | 5110.690 | 5340.943 | 21.392 | 1194.490 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 128 | 1 | 18622.272 | 23414.682 | 58.889 | 1417.606 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 128 | 2 | 18696.964 | 21107.019 | 56.804 | 1490.175 |
+| Kimi-K3 (KDA) | 05-candidate-vllm_auto | 128 | 3 | 18692.931 | 22290.146 | 57.909 | 1452.770 |
 | Qwen3.5 (GDN) | 00-candidate-vllm_auto | 1 | 1 | 103.529 | 118.121 | 3.303 | 292.777 |
 | Qwen3.5 (GDN) | 00-candidate-vllm_auto | 1 | 2 | 102.866 | 119.858 | 3.302 | 292.703 |
 | Qwen3.5 (GDN) | 00-candidate-vllm_auto | 1 | 3 | 102.324 | 121.985 | 3.303 | 292.447 |
