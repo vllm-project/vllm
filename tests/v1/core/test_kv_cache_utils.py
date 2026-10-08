@@ -435,6 +435,7 @@ def make_request(
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
+    use_lookahead_block_hashes: bool = False,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -459,7 +460,9 @@ def make_request(
         pooling_params=None,
         lora_request=None,
         cache_salt=cache_salt,
-        block_hasher=get_request_block_hasher(block_size, hash_fn),
+        block_hasher=get_request_block_hasher(
+            block_size, hash_fn, use_lookahead_block_hashes
+        ),
         prompt_embeds=prompt_embeds,
     )
 
@@ -1273,145 +1276,86 @@ def test_request_block_hasher(hash_fn):
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
-def test_request_block_hasher_incremental_append_with_multiple_mm_features(hash_fn):
+@pytest.mark.parametrize("lookahead", [False, True])
+def test_request_block_hasher_incremental_append_with_multiple_mm_features(
+    hash_fn, lookahead
+):
     mm_positions = [
         PlaceholderRange(offset=4, length=2),
         PlaceholderRange(offset=6, length=1),
     ]
+    num_tokens = 7 + lookahead
     incremental = make_request(
         request_id="incremental",
-        prompt_token_ids=list(range(7)),
+        prompt_token_ids=list(range(num_tokens)),
         block_size=4,
         hash_fn=hash_fn,
         mm_positions=mm_positions,
         mm_hashes=["A", "B"],
+        use_lookahead_block_hashes=lookahead,
     )
-    incremental.append_output_token_ids(7)
+    incremental.append_output_token_ids(num_tokens)
     fresh = make_request(
         request_id="fresh",
-        prompt_token_ids=list(range(8)),
+        prompt_token_ids=list(range(num_tokens + 1)),
         block_size=4,
         hash_fn=hash_fn,
         mm_positions=mm_positions,
         mm_hashes=["A", "B"],
+        use_lookahead_block_hashes=lookahead,
     )
 
+    mm_keys = (("mm", "A", 0), ("mm", "B", 2))
+    extra_keys = (mm_keys, 8, None) if lookahead else mm_keys
     expected_second_hash = hash_fn(
-        (incremental.block_hashes[0], (4, 5, 6, 7), (("mm", "A", 0), ("mm", "B", 2)))
+        (incremental.block_hashes[0], (4, 5, 6, 7), extra_keys)
     )
     assert incremental.block_hashes[1] == expected_second_hash
     assert incremental.block_hashes == fresh.block_hashes
 
 
-@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp", "dflash", "dspark"])
-def test_lookahead_block_hashes_supports_all_eagle_methods(method: str):
-    speculative_config = object.__new__(SpeculativeConfig)
-    object.__setattr__(speculative_config, "method", method)
-    vllm_config = cast(
-        VllmConfig,
-        SimpleNamespace(
-            cache_config=SimpleNamespace(enable_prefix_caching=True),
-            speculative_config=speculative_config,
-            num_prefill_lookahead_tokens=1,
-            kv_transfer_config=None,
-            kv_events_config=None,
-        ),
-    )
-
-    assert is_lookahead_block_hashing_enabled(vllm_config)
-
-
 @pytest.mark.parametrize(
-    "config_override",
+    ("overrides", "expected"),
     [
-        {"enable_prefix_caching": False},
-        {"method": "ngram"},
-        {"num_prefill_lookahead_tokens": 2},
+        *(
+            pytest.param({"method": method}, True, id=method)
+            for method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        ),
+        pytest.param({"method": "ngram"}, False, id="not-eagle"),
+        pytest.param({"enable_prefix_caching": False}, False, id="no-prefix-caching"),
+        pytest.param({"num_prefill_lookahead_tokens": 2}, False, id="multi-module-mtp"),
+        pytest.param(
+            {"enable_prefix_caching": False, "connector_support": True},
+            True,
+            id="supporting-connector",
+        ),
+        pytest.param({"connector_support": False}, False, id="unsupported-connector"),
     ],
 )
-def test_lookahead_block_hashes_preserves_unsupported_fallbacks(
-    config_override: dict[str, Any],
-):
+def test_lookahead_block_hashing_enabled(overrides: dict[str, Any], expected: bool):
     speculative_config = object.__new__(SpeculativeConfig)
-    object.__setattr__(
-        speculative_config,
-        "method",
-        config_override.get("method", "mtp"),
-    )
+    object.__setattr__(speculative_config, "method", overrides.get("method", "mtp"))
+    connector_support = overrides.get("connector_support")
     vllm_config = cast(
         VllmConfig,
         SimpleNamespace(
             cache_config=SimpleNamespace(
-                enable_prefix_caching=config_override.get("enable_prefix_caching", True)
+                enable_prefix_caching=overrides.get("enable_prefix_caching", True)
             ),
             speculative_config=speculative_config,
-            num_prefill_lookahead_tokens=config_override.get(
+            num_prefill_lookahead_tokens=overrides.get(
                 "num_prefill_lookahead_tokens", 1
             ),
-            kv_transfer_config=config_override.get("kv_transfer_config"),
-            kv_events_config=SimpleNamespace(
-                enable_kv_cache_events=config_override.get(
-                    "enable_kv_cache_events", False
-                )
-            ),
+            kv_transfer_config=None if connector_support is None else object(),
         ),
     )
-
-    assert not is_lookahead_block_hashing_enabled(vllm_config)
-
-
-@pytest.mark.parametrize(
-    "config_override",
-    [
-        {"enable_prefix_caching": False, "kv_transfer_config": object()},
-        {"enable_kv_cache_events": True},
-    ],
-)
-def test_lookahead_block_hashes_supports_cache_integrations(
-    config_override: dict[str, Any],
-):
-    speculative_config = object.__new__(SpeculativeConfig)
-    object.__setattr__(speculative_config, "method", "mtp")
-    vllm_config = cast(
-        VllmConfig,
-        SimpleNamespace(
-            cache_config=SimpleNamespace(
-                enable_prefix_caching=config_override.get("enable_prefix_caching", True)
-            ),
-            speculative_config=speculative_config,
-            num_prefill_lookahead_tokens=1,
-            kv_transfer_config=config_override.get("kv_transfer_config"),
-            kv_events_config=SimpleNamespace(
-                enable_kv_cache_events=config_override.get(
-                    "enable_kv_cache_events", False
-                )
-            ),
-        ),
-    )
-
     connector = (
-        SimpleNamespace(supports_lookahead_block_hashes=True)
-        if vllm_config.kv_transfer_config is not None
-        else None
+        None
+        if connector_support is None
+        else SimpleNamespace(supports_lookahead_block_hashes=connector_support)
     )
-    assert is_lookahead_block_hashing_enabled(vllm_config, connector)
 
-
-def test_lookahead_block_hashes_requires_connector_support():
-    speculative_config = object.__new__(SpeculativeConfig)
-    object.__setattr__(speculative_config, "method", "mtp")
-    vllm_config = cast(
-        VllmConfig,
-        SimpleNamespace(
-            cache_config=SimpleNamespace(enable_prefix_caching=True),
-            speculative_config=speculative_config,
-            num_prefill_lookahead_tokens=1,
-            kv_transfer_config=object(),
-        ),
-    )
-    connector = SimpleNamespace(supports_lookahead_block_hashes=False)
-
-    assert not is_lookahead_block_hashing_enabled(vllm_config, connector)
+    assert is_lookahead_block_hashing_enabled(vllm_config, connector) == expected
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

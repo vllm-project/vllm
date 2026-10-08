@@ -43,7 +43,6 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
-    get_request_lookahead_block_hasher,
     init_none_hash,
 )
 from vllm.v1.core.sched.diffusion_scheduler import (
@@ -351,7 +350,7 @@ def test_scheduler_publishes_lookahead_blocks_at_allocation():
             prompt_token_ids=prompt_token_ids,
             sampling_params=SamplingParams(max_tokens=3, ignore_eos=True),
             pooling_params=None,
-            block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+            block_hasher=get_request_block_hasher(block_size, sha256, True),
         )
 
     def num_cached_tokens(prompt_token_ids: list[int]) -> int:
@@ -394,7 +393,7 @@ def test_finished_request_publishes_block_ending_at_last_sampled_token():
         prompt_token_ids=[0, 1, 2],
         sampling_params=SamplingParams(max_tokens=2, ignore_eos=True),
         pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+        block_hasher=get_request_block_hasher(block_size, sha256, True),
     )
     scheduler.add_request(request)
 
@@ -417,7 +416,7 @@ def test_finished_request_publishes_block_ending_at_last_sampled_token():
         prompt_token_ids=[0, 1, 2, 3, 4, 5],
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+        block_hasher=get_request_block_hasher(block_size, sha256, True),
     )
     _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
     assert num_tokens == 4
@@ -440,7 +439,7 @@ def test_connector_finish_includes_partial_eagle_block(
         prompt_token_ids=list(range(33)),
         sampling_params=SamplingParams(max_tokens=2),
         pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+        block_hasher=get_request_block_hasher(block_size, sha256, True),
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()

@@ -55,7 +55,6 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
     get_request_block_hasher,
-    get_request_lookahead_block_hasher,
     init_none_hash,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
@@ -227,24 +226,17 @@ class EngineCore:
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
-        use_lookahead_block_hashes = is_lookahead_block_hashing_enabled(
-            vllm_config,
-            kv_connector,
-        )
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
             )
             init_none_hash(caching_hash_fn)
 
-            if use_lookahead_block_hashes:
-                self.request_block_hasher = get_request_lookahead_block_hasher(
-                    hash_block_size, caching_hash_fn
-                )
-            else:
-                self.request_block_hasher = get_request_block_hasher(
-                    hash_block_size, caching_hash_fn
-                )
+            self.request_block_hasher = get_request_block_hasher(
+                hash_block_size,
+                caching_hash_fn,
+                is_lookahead_block_hashing_enabled(vllm_config, kv_connector),
+            )
 
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue

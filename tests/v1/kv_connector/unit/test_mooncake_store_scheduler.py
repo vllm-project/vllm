@@ -821,7 +821,7 @@ def test_from_request_tracker_no_load_saves_normally():
     assert tracker.num_saved_tokens == 48
 
 
-def test_from_request_tracker_waits_for_materialized_eagle_kv():
+def test_from_request_tracker_caps_save_at_max_save_tokens():
     tracker = RequestTracker(
         req_id="req-0",
         token_len=48,

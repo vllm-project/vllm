@@ -8,10 +8,7 @@ import pytest
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import (
-    get_request_lookahead_block_hasher,
-    init_none_hash,
-)
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -707,7 +704,7 @@ def test_stale_output_does_not_republish_preempted_lookahead_blocks():
         prompt_token_ids=list(range(9)),
         sampling_params=SamplingParams(max_tokens=4, ignore_eos=True),
         pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+        block_hasher=get_request_block_hasher(block_size, sha256, True),
     )
     scheduler.add_request(request)
 
@@ -735,7 +732,7 @@ def test_stale_output_does_not_republish_preempted_lookahead_blocks():
         prompt_token_ids=list(range(9)),
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+        block_hasher=get_request_block_hasher(block_size, sha256, True),
     )
     assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 0
 

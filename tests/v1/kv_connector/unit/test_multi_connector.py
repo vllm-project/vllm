@@ -1082,27 +1082,6 @@ Options:
 """)
 
 
-@pytest.mark.parametrize("supported", [False, True])
-def test_factory_configures_eagle_prefix_hashing(supported: bool):
-    connector_config = _prefix_hashing_connector_config(supported)
-    vllm_config = create_vllm_config(
-        kv_connector=connector_config["kv_connector"],
-        kv_connector_module_path=connector_config["kv_connector_module_path"],
-        kv_connector_extra_config=connector_config["kv_connector_extra_config"],
-        kv_role="kv_both",
-        disable_hybrid_kv_cache_manager=True,
-    )
-    _enable_eagle(vllm_config)
-
-    connector = KVConnectorFactory.create_connector(
-        vllm_config,
-        KVConnectorRole.SCHEDULER,
-        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
-    )
-
-    assert connector.use_lookahead_block_hashes is supported
-
-
 @pytest.mark.parametrize(
     ("child_support", "expected"),
     [([True, True], True), ([True, False], False)],
@@ -1134,17 +1113,6 @@ def test_factory_configures_multi_connector_eagle_prefix_hashing(
     assert all(
         child.use_lookahead_block_hashes is expected for child in connector._connectors
     )
-
-
-def test_multi_connector_propagates_eagle_prefix_hashing(mc: MultiConnector):
-    for connector in mc._connectors:
-        connector.reset_mock()
-
-    mc.set_lookahead_block_hashes(True)
-
-    assert mc.use_lookahead_block_hashes
-    for connector in mc._connectors:
-        connector.set_lookahead_block_hashes.assert_called_once_with(True)
 
 
 def test_multi_connector_worker_metadata(mc):

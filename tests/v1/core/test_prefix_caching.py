@@ -47,7 +47,6 @@ from vllm.v1.core.kv_cache_utils import (
     get_block_hash,
     get_group_id,
     get_request_block_hasher,
-    get_request_lookahead_block_hasher,
     hash_block_tokens,
     init_none_hash,
     make_block_hash_with_group_id,
@@ -121,7 +120,7 @@ def make_request(
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=(
-            get_request_lookahead_block_hasher(block_size, hash_fn)
+            get_request_block_hasher(block_size, hash_fn, True)
             if use_lookahead_hashes
             else get_request_block_hasher(block_size, hash_fn)
         ),
@@ -4454,65 +4453,6 @@ def test_masked_block_does_not_emit_empty_stored_event():
     )
 
     assert pool.take_events() == []
-
-
-def test_lookahead_hash_is_created_when_successor_arrives():
-    block_size = 2
-    request = make_request(
-        "request",
-        [0, 1],
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
-    )
-    assert request.block_hashes == []
-
-    request.append_output_token_ids(2)
-    assert request.block_hashes == [
-        kv_cache_utils.hash_block_tokens(
-            sha256,
-            None,
-            [0, 1],
-            (None, 2, None),
-        )
-    ]
-
-    expected = make_request(
-        "expected",
-        [0, 1, 2],
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
-    )
-    assert request.block_hashes == expected.block_hashes
-
-
-def test_lookahead_block_hashes_support_resumable_requests():
-    request = make_request(
-        "resumable",
-        [0, 1, 2],
-        2,
-        sha256,
-        use_lookahead_hashes=True,
-        resumable=True,
-    )
-
-    original_hash = request.block_hashes.copy()
-    assert len(original_hash) == 1
-
-    request.truncate_block_hashes(2, hash_block_size=2, lookahead_tokens=1)
-    del request._all_token_ids[2:]
-    request.append_output_token_ids(3)
-
-    expected = make_request(
-        "expected",
-        [0, 1, 3],
-        2,
-        sha256,
-        use_lookahead_hashes=True,
-    )
-    assert request.block_hashes == expected.block_hashes
-    assert request.block_hashes != original_hash
 
 
 def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():

@@ -287,18 +287,6 @@ class Request:
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
 
-    def truncate_block_hashes(
-        self,
-        num_tokens: int,
-        hash_block_size: int,
-        lookahead_tokens: int = 0,
-    ) -> None:
-        """Discard hashes whose token dependencies extend past ``num_tokens``."""
-        if self._block_hasher is None:
-            return
-        num_hashes = max(num_tokens - lookahead_tokens, 0) // hash_block_size
-        del self.block_hashes[num_hashes:]
-
     @property
     def use_structured_output(self) -> bool:
         return self.structured_output_request is not None

@@ -327,6 +327,9 @@ class Scheduler(SchedulerInterface):
         self.use_lookahead_block_hashes = is_lookahead_block_hashing_enabled(
             vllm_config, self.connector
         )
+        if self.use_lookahead_block_hashes:
+            # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
+            self.use_eagle_block_drop = False
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -465,20 +468,18 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         block_size = self.cache_config.block_size
-        # The last block-aligned position whose state can be cached. Without
-        # lookahead hashing, EAGLE prunes the last FullAttn match, so
-        # back off one block to avoid a Mamba cache miss.
+        # The last block-aligned position whose state can be cached. With
+        # Eagle, FullAttn prunes the last matching block, so back off one
+        # block to avoid a Mamba cache miss.
         last_cache_position = request.num_tokens - request.num_tokens % block_size
-        if self.use_eagle_block_drop and not self.use_lookahead_block_hashes:
+        if self.use_eagle_block_drop:
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
         checkpoint_position = get_mamba_prefill_checkpoint_position(
             prefill_end,
             self.hash_block_size,
-            drop_eagle_block=(
-                self.use_eagle_block_drop and not self.use_lookahead_block_hashes
-            ),
+            drop_eagle_block=self.use_eagle_block_drop,
         )
         use_internal_checkpoint = (
             self.mamba_has_prefill_checkpoint_blocks
@@ -518,11 +519,7 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
         )
-        if (
-            tail_boundary
-            and self.use_eagle_block_drop
-            and not self.use_lookahead_block_hashes
-        ):
+        if tail_boundary and self.use_eagle_block_drop:
             # Eagle matches one hash unit past the candidate and drops it, so
             # nothing proves the prompt's own last hash boundary. Materialize
             # the state one unit lower, where the hit can actually land. Keyed on
@@ -1677,13 +1674,10 @@ class Scheduler(SchedulerInterface):
             session.num_prompt_tokens : num_computed_tokens
         ]
         del session._all_token_ids[num_computed_tokens:]
-        del session.block_hashes[num_computed_tokens // self.hash_block_size :]
+        # A lookahead hash also covers the token after its block.
+        num_hashed_tokens = num_computed_tokens - int(self.use_lookahead_block_hashes)
+        del session.block_hashes[max(num_hashed_tokens, 0) // self.hash_block_size :]
         session._output_token_ids.clear()
-        session.truncate_block_hashes(
-            num_computed_tokens,
-            self.hash_block_size,
-            lookahead_tokens=int(self.use_lookahead_block_hashes),
-        )
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
         session.prompt_token_ids.extend(kept_output_tokens)
@@ -3063,7 +3057,7 @@ class Scheduler(SchedulerInterface):
         )
 
         # Direct-transfer connectors need the partial physical tail. Store-style
-        # connectors enforce the lookahead publication fence themselves.
+        # connectors save only blocks covered by ``request.block_hashes``.
         block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
             request_id=request.request_id,
             num_computed_tokens=request.num_computed_tokens,

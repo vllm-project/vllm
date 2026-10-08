@@ -200,9 +200,12 @@ class KVConnectorBase_V1(ABC):
 
     @property
     def supports_lookahead_block_hashes(self) -> bool:
-        """Whether this engine can use lookahead block hashes.
+        """Whether the connector stays correct with lookahead block hashes.
 
-        Engines sharing a content-addressed cache must make the same choice.
+        True when it either transfers a request's own blocks (P/D) or keys
+        stored KV by ``request.block_hashes``, so a hit carries the same
+        lookahead-token proof as a local prefix-cache hit. Engines sharing a
+        content-addressed cache must make the same choice.
         """
         return False
 

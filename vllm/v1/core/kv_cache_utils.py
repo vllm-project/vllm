@@ -873,6 +873,7 @@ def resolve_kv_cache_block_sizes(
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
+    use_lookahead_block_hashes: bool = False,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -881,11 +882,15 @@ def get_request_block_hasher(
     full prefix, so each hash uniquely fingerprints the prefix ending at its
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see ``BlockHashListWithBlockSize``).
+
+    With ``use_lookahead_block_hashes``, each hash also covers the token right
+    after its block, which the EAGLE draft KV at the block's last position
+    depends on, so it is emitted only once that token exists.
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
-        num_tokens = request.num_tokens
+        num_tokens = request.num_tokens - int(use_lookahead_block_hashes)
 
         if start_token_idx + hash_block_size > num_tokens:
             # Early stop when there no new full blocks created.
@@ -913,8 +918,12 @@ def get_request_block_hasher(
                 break
 
             # MM and LoRA requests need extra keys for block-hash computation.
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start_token_idx, end_token_idx, curr_mm_idx
+            extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
+                request,
+                start_token_idx,
+                end_token_idx,
+                curr_mm_idx,
+                use_lookahead_block_hashes,
             )
 
             # Compute the hash of the current block
@@ -930,50 +939,6 @@ def get_request_block_hasher(
         return new_block_hashes
 
     return request_block_hasher
-
-
-def get_request_lookahead_block_hasher(
-    hash_block_size: int,
-    caching_hash_fn: Callable[[Any], bytes],
-) -> Callable[[Request], list[BlockHash]]:
-    """Return a hasher for EAGLE-safe prefix-cache blocks.
-
-    A target block ending at position ``end - 1`` and the corresponding
-    EAGLE draft block together depend on the token at ``end``. Each hash
-    therefore covers one full block and records its lookahead token and input
-    identity in the hash extra keys. This preserves the normal block shape for
-    KV events while proving the EAGLE dependency at every block boundary.
-    """
-
-    def request_lookahead_block_hasher(request: Request) -> list[BlockHash]:
-        start_token_idx = len(request.block_hashes) * hash_block_size
-        num_tokens = request.num_tokens
-        new_block_hashes: list[BlockHash] = []
-        curr_mm_idx = -1 if start_token_idx > 0 else 0
-        prev_block_hash_value = (
-            request.block_hashes[-1] if request.block_hashes else None
-        )
-
-        while (end_token_idx := start_token_idx + hash_block_size) < num_tokens:
-            extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
-                request,
-                start_token_idx,
-                end_token_idx,
-                curr_mm_idx,
-            )
-            block_hash = hash_block_tokens(
-                caching_hash_fn,
-                prev_block_hash_value,
-                request.all_token_ids[start_token_idx:end_token_idx],
-                extra_keys,
-            )
-            new_block_hashes.append(block_hash)
-            prev_block_hash_value = block_hash
-            start_token_idx = end_token_idx
-
-        return new_block_hashes
-
-    return request_lookahead_block_hasher
 
 
 def generate_lookahead_block_hash_extra_keys(
