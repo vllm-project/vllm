@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import NamedTuple, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    PartialTail,
     ReqMeta,
     chunk_hashes_for_block_size,
 )
@@ -123,20 +124,26 @@ class MooncakeStoreCoordinator:
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
 
+    def resolve_partial_tail(self, req_meta: ReqMeta) -> None:
+        """Compute the blocks this job's partial-tail save publishes.
+
+        Runs once per store job on the scheduler; the worker puts the result.
+        """
+        req_meta.partial_tail = partial_tail_block_ranges(
+            self,
+            req_meta,
+            [group.kv_cache_spec.block_size for group in self.kv_cache_groups],
+        )
+
     def tail_attention_block_ids(self, req_meta: ReqMeta) -> list[int]:
         """Return full-attention block IDs needed to complete a Mamba tail hit.
 
         Mamba state IDs are handled separately.
         """
-        partial_tail = partial_tail_block_ranges(
-            self,
-            req_meta,
-            [group.kv_cache_spec.block_size for group in self.kv_cache_groups],
-        )
-        if partial_tail is None:
+        if req_meta.partial_tail is None:
             return []
         block_ids: list[int] = []
-        _, tail_blocks_by_group = partial_tail
+        _, tail_blocks_by_group = req_meta.partial_tail
         for group_id, (_, block_indices) in tail_blocks_by_group.items():
             if group_id in self.mamba_group_ids:
                 continue
@@ -498,7 +505,7 @@ def partial_tail_block_ranges(
     coord: MooncakeStoreCoordinator,
     req_meta: ReqMeta,
     block_sizes: Sequence[int],
-) -> tuple[int, dict[int, tuple[int, range]]] | None:
+) -> PartialTail | None:
     """Locate the blocks a partial-tail save publishes for this request.
 
     A later request resumes at the prompt's Mamba checkpoint (``boundary``) only
@@ -521,11 +528,12 @@ def partial_tail_block_ranges(
         for group_id, _, position in req_meta.boundary_state_offloads or []
         if position % block_sizes[group_id]
     ]
+    # The tail is due on the save that first covers the prompt, or when Mamba
+    # hands off its checkpoint state.
+    if not mamba_tails and not req_meta.publish_partial_tail:
+        return None
     prompt_tokens = req_meta.num_prompt_tokens or 0
     completed = req_meta.completed_token_len
-    # The tail is due once the prompt is computed, or when Mamba hands it off.
-    if not mamba_tails and (completed is None or not 0 < prompt_tokens <= completed):
-        return None
     if not coord.enable_partial_hash_hits or not req_meta.block_hashes:
         return None
     hash_block_size = coord.hash_block_size

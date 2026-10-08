@@ -741,6 +741,11 @@ class RequestTracker:
                 existing.extend(new)
 
 
+# (boundary, {group_id: (proof_end, block_indices)}); see
+# ``partial_tail_block_ranges``.
+PartialTail = tuple[int, dict[int, tuple[int, range]]]
+
+
 @dataclass
 class ReqMeta:
     """Per-request metadata for store put/get operations."""
@@ -771,6 +776,12 @@ class ReqMeta:
     boundary_state_offloads: list[tuple[int, int, int]] | None = None
     # Total computed prefix length at the end of this step.
     completed_token_len: int | None = None
+    # Set on the save that first covers the whole prompt, so the scheduler
+    # publishes the prompt's partial tail once rather than on every save.
+    publish_partial_tail: bool = False
+    # Scheduler-computed ``partial_tail_block_ranges`` result: the scheduler
+    # pins exactly these blocks and the worker puts exactly these blocks.
+    partial_tail: PartialTail | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -848,6 +859,7 @@ class ReqMeta:
             num_prompt_tokens=num_prompt_tokens,
             prefill_end_tokens=tracker.prefill_end_tokens,
             completed_token_len=input_token_len,
+            publish_partial_tail=publish_tail and not skip_save,
         )
 
 

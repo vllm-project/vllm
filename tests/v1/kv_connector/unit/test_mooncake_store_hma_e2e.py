@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     MooncakeStoreCoordinator,
+    partial_tail_block_ranges,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
@@ -379,6 +380,14 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     assert out[1][2].hex() == fine_hashes[6].hex()
 
 
+def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
+    """Resolve the tail on ``req`` as the scheduler does before the worker."""
+    req.partial_tail = partial_tail_block_ranges(
+        thread.coord, req, [db.block_size for db in thread.token_databases]
+    )
+    return req
+
+
 def test_sub_block_partial_tail_offload_reads_cow_block():
     """Sub-block prompt (the 900/128/1536 shape, scaled to 12/4/16): the
     partial tail is offloaded for both groups under the boundary sub-hash. The
@@ -448,7 +457,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         boundary_state_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_boundary_states(req)
+    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -521,7 +530,7 @@ def test_offload_syncs_event_before_put():
     )
     req.current_event = event
 
-    send.add_request(req)
+    send.add_request(_resolve_partial_tail(send, req))
     send._handle_request(send.request_queue.get())
     assert send.request_queue.qsize() == 0
     assert store._data
@@ -597,7 +606,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         boundary_state_offloads=[(1, mamba_cow_block, 8)],
     )
 
-    send._maybe_offload_boundary_states(req)
+    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
 
     # FA (block 4): full blocks ending at 4 and 8, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under
@@ -686,7 +695,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         num_prompt_tokens=12,
         boundary_state_offloads=[(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(req)
+    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 
@@ -792,7 +801,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         num_prompt_tokens=12,
         boundary_state_offloads=[(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(req)
+    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 

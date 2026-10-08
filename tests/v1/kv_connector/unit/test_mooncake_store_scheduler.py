@@ -875,6 +875,50 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
     )
 
 
+def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4, enable_partial_hash_hits=True, save_decode_cache=True
+    )
+    scheduler._store_group_ids = (0, 1)
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(48)),
+        block_hashes=[bytes([i]) for i in range(12)],
+        prefill_end_tokens=45,
+    )
+    block_ids = ([0, 1, 2], [50])
+    scheduler._request_trackers["req-0"].allocated_block_ids = block_ids
+
+    def step(num_computed_tokens: int, num_scheduled_tokens: int):
+        return scheduler.build_connector_meta(
+            SimpleNamespace(
+                finished_req_ids=set(),
+                preempted_req_ids=set(),
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=SimpleNamespace(
+                    req_ids=["req-0"],
+                    new_block_ids=[()],
+                    num_computed_tokens=[num_computed_tokens],
+                    resumed_req_ids=set(),
+                ),
+                num_scheduled_tokens={"req-0": num_scheduled_tokens},
+                scheduled_spec_decode_tokens={},
+                kv_connector_block_state=_make_connector_block_state(block_ids),
+            )
+        ).requests
+
+    # The save that completes the prompt carries the tail for the worker.
+    (req_meta,) = step(44, 1)
+    assert req_meta.publish_partial_tail
+    assert req_meta.partial_tail == (44, {0: (44, range(2, 3)), 1: (44, range(2, 3))})
+
+    # A later save does not recompute or resend it.
+    (req_meta,) = step(45, 3)
+    assert req_meta.token_len_chunk == 48
+    assert not req_meta.publish_partial_tail
+    assert req_meta.partial_tail is None
+
+
 class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens

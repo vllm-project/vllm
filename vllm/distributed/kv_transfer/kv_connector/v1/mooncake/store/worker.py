@@ -41,7 +41,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
-    partial_tail_block_ranges,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
@@ -697,9 +696,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         mamba_offloads = req_meta.boundary_state_offloads or []
         if not req_meta.block_hashes:
             return True
-        partial_tail = partial_tail_block_ranges(
-            self.coord, req_meta, [db.block_size for db in self.token_databases]
-        )
+        partial_tail = req_meta.partial_tail
         if not mamba_offloads and partial_tail is None:
             return True
 

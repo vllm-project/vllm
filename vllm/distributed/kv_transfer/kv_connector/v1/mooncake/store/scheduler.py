@@ -495,6 +495,7 @@ class MooncakeStoreScheduler:
             if req_meta.store_job_id is not None:
                 assert req_meta.store_job_id in self._pinned_saves
                 continue
+            self._store_coord.resolve_partial_tail(req_meta)
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
             block_ids: list[int] = []
@@ -574,6 +575,7 @@ class MooncakeStoreScheduler:
             boundary_state_offloads=remapped_offloads,
             completed_token_len=request.num_computed_tokens,
         )
+        self._store_coord.resolve_partial_tail(req_meta)
         pinned_block_ids.extend(self._store_coord.tail_attention_block_ids(req_meta))
         pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
 

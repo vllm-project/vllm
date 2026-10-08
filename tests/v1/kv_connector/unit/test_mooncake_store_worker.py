@@ -28,6 +28,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+    partial_tail_block_ranges,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlobBlockHashes,
     ChunkedTokenDatabase,
@@ -942,6 +945,14 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
 
 
+def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
+    """Resolve the tail on ``req`` as the scheduler does before the worker."""
+    req.partial_tail = partial_tail_block_ranges(
+        thread.coord, req, [db.block_size for db in thread.token_databases]
+    )
+    return req
+
+
 def _make_partial_tail_send_thread(
     store,
     *,
@@ -1003,7 +1014,7 @@ def test_partial_tail_offload_rejects_wrong_prompt_boundary(use_eagle):
     req.boundary_state_offloads = [(1, 7, 8)]
 
     with pytest.raises(AssertionError, match="Mamba tail.*prompt checkpoint"):
-        thread._maybe_offload_boundary_states(req)
+        thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
     store.batch_is_exist.assert_not_called()
     store.batch_put_from_multi_buffers.assert_not_called()
 
@@ -1025,7 +1036,9 @@ def test_eagle_attention_proof_published_after_checkpoint_handoff():
     metadata.completed_token_len = 8
     metadata.boundary_state_offloads = [(1, 7, 8)]
 
-    assert thread._maybe_offload_boundary_states(metadata)
+    assert thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, metadata)
+    )
     mamba_key = thread.token_databases[1].key_for(b"a1")
     attention_key = thread.token_databases[0].key_for(b"a2")
     assert mamba_key in stored
@@ -1033,7 +1046,10 @@ def test_eagle_attention_proof_published_after_checkpoint_handoff():
 
     metadata.completed_token_len = 13
     metadata.boundary_state_offloads = None
-    assert thread._maybe_offload_boundary_states(metadata)
+    metadata.publish_partial_tail = True
+    assert thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, metadata)
+    )
     assert attention_key in stored
     keys, addrs, *_ = store.batch_put_from_multi_buffers.call_args.args
     assert addrs[keys.index(attention_key)] == [0x1000 + 3 * 256]
@@ -1046,7 +1062,9 @@ def test_partial_tail_offload_skips_null_source_blocks():
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_partial_tail_send_thread(store)
 
-    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([0, 2, 3]))
+    assert thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, _make_partial_tail_req([0, 2, 3]))
+    )
 
     keys, addrs, _sizes, _replicate_config = (
         store.batch_put_from_multi_buffers.call_args.args
@@ -1183,7 +1201,7 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
         boundary_state_offloads=[(1, 7, 12)],
         num_prompt_tokens=13,
     )
-    assert thread._maybe_offload_boundary_states(req)
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
     keys, addrs, _sizes, _replicate_config = (
         store.batch_put_from_multi_buffers.call_args.args
@@ -1206,7 +1224,9 @@ def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
         supports_group_ids=True,
     )
 
-    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([1, 2, 3]))
+    assert thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, _make_partial_tail_req([1, 2, 3]))
+    )
 
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
@@ -1240,13 +1260,17 @@ def test_partial_tail_put_failure_activates_pressure_gate():
     store.batch_put_from_multi_buffers.return_value = [256, -200, 256]
     thread = _make_partial_tail_send_thread(store)
 
-    _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
+    _run_store_req(
+        thread, _resolve_partial_tail(thread, _make_partial_tail_req([1, 2, 3]))
+    )
 
     assert thread._store_pressure_active is True
     assert thread._skip_store_requests == {"req-a"}
     assert thread._saved_offset.get("req-a", 0) == 0
 
-    _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
+    _run_store_req(
+        thread, _resolve_partial_tail(thread, _make_partial_tail_req([1, 2, 3]))
+    )
     assert store.batch_put_from_multi_buffers.call_count == 1
 
 
@@ -1329,7 +1353,7 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
         can_save=True,
         boundary_state_offloads=[(1, 7, 32)],
     )
-    assert thread._maybe_offload_boundary_states(req)
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     # boundary 32 is block-aligned for the mamba group (block 16): one key,
@@ -1363,7 +1387,7 @@ def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
         num_prompt_tokens=49 if use_eagle else 45,
         completed_token_len=49 if use_eagle else 45,
     )
-    assert thread._maybe_offload_boundary_states(req)
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     db_full, db_mamba = thread.token_databases
@@ -1391,13 +1415,16 @@ def test_snapshot_offload_skips_null_handoff_block():
 
     hs = [bytes([i + 1]) * 4 for i in range(8)]
     assert thread._maybe_offload_boundary_states(
-        ReqMeta(
-            req_id="req-a",
-            token_len_chunk=0,
-            block_ids=([1, 2, 3], [5]),
-            block_hashes=hs,
-            can_save=True,
-            boundary_state_offloads=[(1, NULL_BLOCK_ID, 32)],
+        _resolve_partial_tail(
+            thread,
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=0,
+                block_ids=([1, 2, 3], [5]),
+                block_hashes=hs,
+                can_save=True,
+                boundary_state_offloads=[(1, NULL_BLOCK_ID, 32)],
+            ),
         )
     )
     store.batch_is_exist.assert_not_called()
