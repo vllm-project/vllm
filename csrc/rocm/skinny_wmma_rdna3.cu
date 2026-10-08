@@ -13,7 +13,7 @@
 //
 // Block: 8 waves = RT row tiles (16 features each) x WK waves splitting K.
 // Grid: (row tiles / RT, split). With split > 1 every block writes fp32
-// partials that skinny_wmma_reduce sums; otherwise it writes the output.
+// partials and the last block of each row tile to finish sums them.
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -73,8 +73,8 @@ __global__ void __launch_bounds__(kWaves * 32)
     skinny_wmma_kernel(const _Float16* __restrict__ x,
                        const _Float16* __restrict__ w,
                        _Float16* __restrict__ out, float* __restrict__ part,
-                       const int N, const int M, const int K,
-                       const int k_per_block) {
+                       int* __restrict__ count, const int N, const int M,
+                       const int K, const int k_per_block) {
 #ifdef SKINNY_WMMA_BODY
   constexpr int WK = kWaves / RT;
   const int lane = threadIdx.x & 31;
@@ -139,48 +139,83 @@ __global__ void __launch_bounds__(kWaves * 32)
 
   // acc[t][i] of lane l is feature f0 + 2i + (l >> 4), token 16t + (l & 15).
   __shared__ float red[kWaves][NT][8][32];
+  __shared__ bool last;
   #pragma unroll
   for (int t = 0; t < NT; ++t)
   #pragma unroll
     for (int i = 0; i < 8; ++i) red[wave][t][i][lane] = acc[t][i];
   __syncthreads();
-  if (kw != 0) return;
+  const int split = gridDim.y;
+  if (kw == 0) {
+  #pragma unroll
+    for (int t = 0; t < NT; ++t) {
+  #pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        float v = 0.f;
+  #pragma unroll
+        for (int j = 0; j < WK; ++j) v += red[j * RT + rt][t][i][lane];
+        const int f = f0 + 2 * i + (lane >> 4);
+        const int tok = t * 16 + r;
+        if (f >= M || tok >= N) continue;
+        if (split > 1)
+          part[((int64_t)blockIdx.y * N + tok) * M + f] = v;
+        else
+          out[(int64_t)tok * M + f] = (_Float16)v;
+      }
+    }
+  }
+  if (split == 1) return;
+  // The last block of a row tile to finish sums the partials of all splits
+  // in split order and leaves the tile's counter at zero for the next launch.
+  __threadfence();
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    last = atomicAdd(&count[blockIdx.x], 1) == split - 1;
+    if (last) count[blockIdx.x] = 0;
+  }
+  __syncthreads();
+  if (!last || kw != 0) return;
+  __threadfence();
   #pragma unroll
   for (int t = 0; t < NT; ++t) {
   #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      float v = 0.f;
-  #pragma unroll
-      for (int j = 0; j < WK; ++j) v += red[j * RT + rt][t][i][lane];
       const int f = f0 + 2 * i + (lane >> 4);
       const int tok = t * 16 + r;
       if (f >= M || tok >= N) continue;
-      if (part != nullptr)
-        part[((int64_t)blockIdx.y * N + tok) * M + f] = v;
-      else
-        out[(int64_t)tok * M + f] = (_Float16)v;
+      float v = 0.f;
+      for (int s = 0; s < split; ++s)
+        v += __hip_atomic_load(&part[((int64_t)s * N + tok) * M + f],
+                               __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+      out[(int64_t)tok * M + f] = (_Float16)v;
     }
   }
 #endif
 }
 
-__global__ void skinny_wmma_reduce(const float* __restrict__ part,
-                                   _Float16* __restrict__ out, const int NM,
-                                   const int split) {
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= NM) return;
-  float v = 0.f;
-  for (int s = 0; s < split; ++s) v += part[(int64_t)s * NM + i];
-  out[i] = (_Float16)v;
-}
-
 template <int NT, int RT>
 void launch(const _Float16* x, const _Float16* w, _Float16* out, float* part,
-            int N, int M, int K, int split, int k_per_block,
+            int* count, int N, int M, int K, int split, int k_per_block,
             hipStream_t stream) {
   const dim3 grid((M + 16 * RT - 1) / (16 * RT), split);
-  skinny_wmma_kernel<NT, RT>
-      <<<grid, kWaves * 32, 0, stream>>>(x, w, out, part, N, M, K, k_per_block);
+  skinny_wmma_kernel<NT, RT><<<grid, kWaves * 32, 0, stream>>>(
+      x, w, out, part, count, N, M, K, k_per_block);
+}
+
+// Per-tile arrival counters for the split-K epilogue, zeroed once and left at
+// zero by every launch. Consecutive calls take different slots, so kernels
+// that overlap on other streams never share a counter.
+int* tile_counters(const c10::Device& dev, int tiles) {
+  constexpr int kSlots = 64, kSlotTiles = 1024;
+  TORCH_CHECK(tiles <= kSlotTiles, "skinny_wmma_f16: too many row tiles");
+  static torch::Tensor buf[64];
+  static int next[64];
+  const int d = dev.index();
+  if (!buf[d].defined())
+    buf[d] = torch::zeros({kSlots * kSlotTiles},
+                          torch::dtype(torch::kInt32).device(dev));
+  const int slot = next[d]++ % kSlots;
+  return buf[d].data_ptr<int>() + slot * kSlotTiles;
 }
 
 }  // namespace skinny_wmma
@@ -205,8 +240,6 @@ torch::Tensor skinny_wmma_f16(const torch::Tensor& x, const torch::Tensor& w,
   auto out = torch::empty({N, M}, x.options());
   // K per block, a multiple of the 64-K load group; split <= 0 aims at ~2
   // blocks per CU with at least one group per wave.
-  // Split only when the row tiles alone leave CUs idle: every split costs
-  // a reduce launch.
   const bool tall = M >= 16 * 2 * 384;
   const int row_blocks = (M + 16 * (tall ? 2 : 1) - 1) / (16 * (tall ? 2 : 1));
   if (split <= 0)
@@ -224,21 +257,18 @@ torch::Tensor skinny_wmma_f16(const torch::Tensor& x, const torch::Tensor& w,
   const auto* wp = reinterpret_cast<const _Float16*>(w.data_ptr());
   auto* op = reinterpret_cast<_Float16*>(out.data_ptr());
   float* pp = s > 1 ? part.data_ptr<float>() : nullptr;
+  int* cp = s > 1 ? tile_counters(x.device(), (M + 15) / 16) : nullptr;
   // One row tile per block, 8 waves along K; two for very tall weights.
   if (N <= 16) {
     if (tall)
-      launch<1, 2>(xp, wp, op, pp, N, M, K, s, kpb, stream);
+      launch<1, 2>(xp, wp, op, pp, cp, N, M, K, s, kpb, stream);
     else
-      launch<1, 1>(xp, wp, op, pp, N, M, K, s, kpb, stream);
+      launch<1, 1>(xp, wp, op, pp, cp, N, M, K, s, kpb, stream);
   } else {
     if (tall)
-      launch<2, 2>(xp, wp, op, pp, N, M, K, s, kpb, stream);
+      launch<2, 2>(xp, wp, op, pp, cp, N, M, K, s, kpb, stream);
     else
-      launch<2, 1>(xp, wp, op, pp, N, M, K, s, kpb, stream);
-  }
-  if (s > 1) {
-    const int NM = N * M;
-    skinny_wmma_reduce<<<(NM + 255) / 256, 256, 0, stream>>>(pp, op, NM, s);
+      launch<2, 1>(xp, wp, op, pp, cp, N, M, K, s, kpb, stream);
   }
   return out;
 }
