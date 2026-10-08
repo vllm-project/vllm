@@ -52,7 +52,9 @@ async def init_app_state(
         served_model_names = [args.model]
 
     if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
+        request_logger = RequestLogger(
+            max_log_len=args.max_log_len, log_requests_path=args.log_requests_path
+        )
     else:
         request_logger = None
 

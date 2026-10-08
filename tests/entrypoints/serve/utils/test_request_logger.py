@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
@@ -278,7 +280,9 @@ def test_streaming_complete_logs_full_text_content():
 def test_request_logger_log_request_body_truncation(max_log_len):
     """The JSON body is logged in full unless max_log_len truncates it."""
     request = CompletionRequest(model="test-model", prompt="Hello, world!")
-    full_body = request.model_dump_json(exclude_unset=True)
+    full_body = request.model_dump(mode="json", exclude_unset=True)
+    full_body["request_type"] = type(request).__name__
+    full_body_json_str = json.dumps(full_body)
     mock_logger = MagicMock()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
@@ -286,4 +290,25 @@ def test_request_logger_log_request_body_truncation(max_log_len):
 
     mock_logger.debug.assert_called_once()
     logged_body = mock_logger.debug.call_args.args[2]
-    assert logged_body == full_body[:max_log_len]
+    assert logged_body == full_body_json_str[:max_log_len]
+
+
+def test_request_logger_appends_full_jsonl_bodies(tmp_path):
+    """Test that the request logger appends full JSON bodies to the file."""
+    path = tmp_path / "requests.jsonl"
+    requests = [
+        CompletionRequest(model="test-model", prompt="Hello\n世界!"),
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Hello\n世界!"}],
+            temperature=0.7,
+        ),
+    ]
+
+    request_logger = RequestLogger(max_log_len=None, log_requests_path=str(path))
+    for request in requests:
+        request_logger.log_request_body(request)
+        full_body = request.model_dump(mode="json", exclude_unset=True)
+        full_body["request_type"] = type(request).__name__
+        full_body = json.dumps(full_body)
+        assert path.read_text(encoding="utf-8").splitlines()[-1] == full_body
