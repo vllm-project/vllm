@@ -154,9 +154,9 @@ class ScreenedLMHead:
     """lm_head logits for batches that only read the top k, exact on every row
     that can be among them and -inf elsewhere."""
 
-    # Tiles and the token cap were measured on GB10 (lm_head 248320 x 2560):
-    # the screen beats the BF16 head by 41% at 64 tokens and loses beyond 96,
-    # where the GEMM is no longer bandwidth bound.
+    # Tiles and caps were measured on GB10 (lm_head 248320 x 2560): greedy, the
+    # screen beats the BF16 head by 39% at 64 tokens and loses beyond 96, where
+    # the GEMM is no longer bandwidth bound; top-32 still wins by 23% at 64.
     MAX_TOKENS = 64
     MAX_TOP_K = 32
     BLOCK_V = 64
