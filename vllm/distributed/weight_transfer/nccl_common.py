@@ -8,6 +8,7 @@ The dense (`NCCLWeightTransferEngine`) and sparse
 sparse engine does not have to subclass the dense one.
 """
 
+import socket
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -17,6 +18,7 @@ import torch
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.utils import StatelessProcessGroup
 
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCL_UNIQUE_ID_BYTES,
@@ -136,6 +138,39 @@ class NCCLRendezvous(Protocol):
     world_size: int
 
 
+def stateless_init_metadata_group(
+    master_address: str,
+    master_port: int,
+    rank: int,
+    world_size: int,
+    *,
+    listen_socket: socket.socket | None = None,
+) -> "StatelessProcessGroup":
+    """Create only the TCPStore group used for metadata agreement."""
+    from vllm.distributed.utils import StatelessProcessGroup
+
+    return StatelessProcessGroup.create(
+        host=master_address,
+        port=master_port,
+        rank=rank,
+        world_size=world_size,
+        listen_socket=listen_socket,
+    )
+
+
+def pynccl_from_metadata_group(
+    group: "StatelessProcessGroup",
+    device,
+    *,
+    library_path: str | None = None,
+) -> "PyNcclCommunicator":
+    """Construct the data-plane communicator from an existing metadata group."""
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
+    with unpinned_nccl_env():
+        return PyNcclCommunicator(group, device=device, library_path=library_path)
+
+
 def stateless_init_process_group(
     master_address: str,
     master_port: int,
@@ -164,6 +199,8 @@ def uid_init_process_group(
     rank: int,
     world_size: int,
     device,
+    *,
+    library_path: str | None = None,
 ) -> "PyNcclCommunicator":
     """Join the NCCL group from pre-shared ``ncclUniqueId`` bytes.
 
@@ -178,7 +215,31 @@ def uid_init_process_group(
             rank=rank,
             world_size=world_size,
             device=device,
+            library_path=library_path,
         )
+
+
+def _worker_group_rank(rank_offset: int, parallel_config: "ParallelConfig") -> int:
+    """Return this worker's rank in a trainer-to-worker process group."""
+    dp_rank = parallel_config.data_parallel_index
+    world_size_per_dp = parallel_config.world_size  # TP * PP
+    rank_within_dp = parallel_config.rank
+    return rank_offset + dp_rank * world_size_per_dp + rank_within_dp
+
+
+def worker_init_metadata_group(
+    init_info: NCCLWeightTransferInitInfo,
+    parallel_config: "ParallelConfig",
+) -> "StatelessProcessGroup":
+    """Join the trainer-to-worker TCP metadata group without constructing NCCL."""
+    assert init_info.master_address is not None
+    assert init_info.master_port is not None
+    return stateless_init_metadata_group(
+        init_info.master_address,
+        init_info.master_port,
+        _worker_group_rank(init_info.rank_offset, parallel_config),
+        init_info.world_size,
+    )
 
 
 def worker_init_process_group(
@@ -190,15 +251,7 @@ def worker_init_process_group(
     Computes a unique rank for this worker across all data-parallel groups and
     joins the trainer via whichever rendezvous mode `init_info` carries.
     """
-    # Calculate the global rank in the trainer-worker process group.
-    # Must account for data parallel to get unique ranks across all workers.
-    dp_rank = parallel_config.data_parallel_index
-    world_size_per_dp = parallel_config.world_size  # TP * PP
-    rank_within_dp = parallel_config.rank
-
-    # Unique rank across all DP groups
-    worker_rank = dp_rank * world_size_per_dp + rank_within_dp
-    rank = worker_rank + init_info.rank_offset
+    rank = _worker_group_rank(init_info.rank_offset, parallel_config)
 
     device = torch.accelerator.current_device_index()
     unique_id_bytes = init_info.nccl_unique_id_bytes
