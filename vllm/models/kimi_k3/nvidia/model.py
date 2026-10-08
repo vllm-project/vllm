@@ -95,10 +95,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v4.nvidia.model import (
-    DeepseekV4MegaMoEExperts,
-    DeepseekV4MLP,
-)
+from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
@@ -351,10 +348,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.activation = activation
         self.activation_beta = activation_beta
         self.activation_linear_beta = activation_linear_beta
-        self.register_buffer("_mega_l1_packed", None, persistent=False)
-        self.register_buffer("_mega_l1_scale", None, persistent=False)
-        self.register_buffer("_mega_l2_packed", None, persistent=False)
-        self.register_buffer("_mega_l2_scale", None, persistent=False)
 
     def synchronize_first_launch(self) -> None:
         ep_group = get_ep_group()
@@ -366,51 +359,11 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         torch.distributed.barrier(group=ep_group.cpu_group)
         self._synchronized_ep_groups.add(key)
 
-    def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
-        if self._transformed_l1_weights is not None:
-            return
-
-        # Weight cache IPC engine: the daemon exported the transformed
-        # buffers; reuse them zero-copy and drop the raw packed params.
-        if self._mega_l1_packed is not None:
-            self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
-            self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
-            self._drop_raw_mega_weights()
-            return
-
-        self._check_runtime_supported()
-        backend = self._ensure_backend()
-        self._transformed_l1_weights, self._transformed_l2_weights = (
-            backend.transform_weights(
-                w13_weight=self.w13_weight.data,
-                w13_weight_scale=self.w13_weight_scale.data,
-                w2_weight=self.w2_weight.data,
-                w2_weight_scale=self.w2_weight_scale.data,
-                num_local_experts=self.num_local_experts,
-                hidden_size=self.hidden_size,
-                intermediate_size=self.intermediate_size,
-                activation=self.activation,
-            )
-        )
-        l1_packed, l1_scale = self._transformed_l1_weights
-        l2_packed, l2_scale = self._transformed_l2_weights
-        self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
-        self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
-        self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
-        self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
-        self._drop_raw_mega_weights()
-
-    def _drop_raw_mega_weights(self) -> None:
-        self.w13_weight = None
-        self.w13_weight_scale = None
-        self.w2_weight = None
-        self.w2_weight_scale = None
-
     def get_symm_buffer(self):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
-        backend = self._ensure_backend()
+        backend = self.backend
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
         key = (
@@ -485,7 +438,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 else None,
             )
 
-        backend = self._ensure_backend()
+        backend = self.backend
         symm_buffer = self.get_symm_buffer()
         prepare_megamoe_inputs(
             hidden_states,
@@ -498,9 +451,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             is_padding=is_padding,
             hidden_quant=backend.hidden_quant,
         )
-        self.finalize_weights()
-        assert self._transformed_l1_weights is not None
-        assert self._transformed_l2_weights is not None
         backend.run_mega_moe(
             y=y,
             l1_weights=self._transformed_l1_weights,
@@ -1572,11 +1522,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             loaded_params.add(name)
         return loaded_params
 
-    def finalize_mega_moe_weights(self) -> None:
-        for module in self.modules():
-            if isinstance(module, KimiMoE) and module.use_mega_moe:
-                module.experts.finalize_weights()
-
 
 class KimiLinearForCausalLM(
     nn.Module,
@@ -1698,14 +1643,6 @@ class KimiLinearForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-    def process_weights_after_loading(self) -> None:
-        # A parent AutoWeightsLoader may invoke load_weights repeatedly for
-        # non-contiguous streamed prefixes. Finalize only after the full stream.
-        self.model.finalize_mega_moe_weights()
-        # The fused MultiHeadLatentAttention's process_weights_after_loading
-        # (W_UK_T / W_UV absorption) is driven by the loader's generic post-load
-        # hook for any AttentionLayerBase, so no manual trigger is needed here.
 
 
 def get_spec_layer_idx_from_weight_name(
@@ -2153,6 +2090,3 @@ class KimiK3ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-    def process_weights_after_loading(self) -> None:
-        self.language_model.process_weights_after_loading()

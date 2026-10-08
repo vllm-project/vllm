@@ -12,10 +12,6 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    deepgemm_post_process_weight_scale_block,
-)
-from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4ForCausalLM,
     DeepseekV4MegaMoEExperts,
@@ -23,7 +19,6 @@ from vllm.models.deepseek_v4.nvidia.model import (
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
 )
-from vllm.models.deepseek_v4.nvidia.mtp import DeepSeekV4MTP
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.deepseek_v41.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm.models.deepseek_v41.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
@@ -36,6 +31,15 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="DeepSeek V4 MegaMoE requires CUDA",
 )
+
+
+@pytest.fixture(autouse=True)
+def sm100_mega_moe_backend(monkeypatch):
+    """Build the SM100 kernel layout on any GPU; kernels are gated per test."""
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.model.get_deep_gemm_mega_moe_backend",
+        lambda *args: DeepGemmSm100MegaMoEBackend(),
+    )
 
 
 @pytest.fixture
@@ -298,18 +302,6 @@ def test_deepseek_v4_mega_moe_expert_mapping():
     ]
 
 
-def test_deepseek_v4_mega_moe_ue8m0_uint8_to_float():
-    raw = torch.tensor([0, 126, 127, 128], dtype=torch.uint8)
-
-    decoded = DeepseekV4MegaMoEExperts._ue8m0_uint8_to_float(raw)
-
-    assert torch.equal(decoded.view(torch.int32), raw.to(torch.int32) << 23)
-    assert decoded[0].item() == 0.0
-    assert decoded[1].item() == 0.5
-    assert decoded[2].item() == 1.0
-    assert decoded[3].item() == 2.0
-
-
 @pytest.mark.parametrize("use_kimi", [False, True])
 def test_deep_gemm_mega_moe_capture_precedes_eplb(monkeypatch, use_kimi):
     experts_cls = DeepseekV4MegaMoEExperts
@@ -422,16 +414,141 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
         return_success=True,
     )
 
-    assert torch.equal(experts.w13_weight[0, :128], w1)
-    assert torch.equal(experts.w13_weight[0, 128:], w3)
-    assert torch.equal(experts.w2_weight[0], w2)
+    interleaved = experts.w13_weight[0].view(torch.uint8).view(16, 2, 8, 64)
+    assert torch.equal(interleaved[:, 0], w1.view(16, 8, 64))
+    assert torch.equal(interleaved[:, 1], w3.view(16, 8, 64))
+    assert torch.equal(experts.w2_weight[0].view(torch.uint8), w2)
     assert torch.count_nonzero(experts.w13_weight[1]) == 0
 
 
+def _reference_mega_moe_layout(w13, s13, w2, s2):
+    """CPU copy of DeepGEMM's transform_weights_for_mega_moe on packed scales."""
+
+    def interleave(t):
+        g, n, k = t.shape
+        halves = t.view(g, 2, n // 16, 8, k)
+        return torch.stack([halves[:, 0], halves[:, 1]], dim=2).reshape(g, n, k)
+
+    def utccp(sf):
+        g, mn, k = sf.shape
+        return sf.reshape(g, -1, 4, 32, k).transpose(2, 3).reshape(g, mn, k)
+
+    return (
+        interleave(w13),
+        utccp(interleave(s13.view(torch.int32))),
+        w2,
+        utccp(s2.view(torch.int32)),
+    )
+
+
+def _make_mega_moe_experts(num_local_experts, num_logical_experts):
+    return DeepseekV4MegaMoEExperts(
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+            compilation_config=SimpleNamespace(static_forward_context={}),
+        ),
+        num_experts=num_local_experts,
+        num_local_experts=num_local_experts,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=256,
+        intermediate_size=384,
+        num_logical_experts=num_logical_experts,
+    )
+
+
+def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
+    hidden, inter = experts.hidden_size, experts.intermediate_size
+    shapes = {
+        "w13_weight": (num_logical_experts, 2 * inter, hidden // 2),
+        "w13_weight_scale": (num_logical_experts, 2 * inter, hidden // 32),
+        "w2_weight": (num_logical_experts, hidden, inter // 2),
+        "w2_weight_scale": (num_logical_experts, hidden, inter // 32),
+    }
+    generator = torch.Generator().manual_seed(seed)
+    ckpt = {
+        name: torch.randint(0, 256, shape, dtype=torch.uint8, generator=generator)
+        for name, shape in shapes.items()
+    }
+    shards = []
+    for expert_id in range(num_logical_experts):
+        for name, tensor in ckpt.items():
+            if name.startswith("w2_"):
+                shards.append((name, tensor[expert_id], "w2", expert_id))
+            else:
+                shards.append((name, tensor[expert_id, :inter], "w1", expert_id))
+                shards.append((name, tensor[expert_id, inter:], "w3", expert_id))
+    for i in torch.randperm(len(shards), generator=generator).tolist():
+        name, loaded_weight, shard_id, expert_id = shards[i]
+        if name.endswith("scale"):
+            loaded_weight = loaded_weight.view(torch.float8_e8m0fnu)
+        assert experts.weight_loader(
+            getattr(experts, name),
+            loaded_weight,
+            f"experts.{name}",
+            shard_id=shard_id,
+            expert_id=expert_id,
+            return_success=True,
+        )
+    return ckpt
+
+
+def _expected_mega_moe_layout(ckpt, num_local_experts, num_logical_experts):
+    physical = torch.arange(num_local_experts) % num_logical_experts
+    ckpt = {name: tensor[physical] for name, tensor in ckpt.items()}
+    expected = _reference_mega_moe_layout(*ckpt.values())
+    if is_deep_gemm_supported():
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        w13, s13, w2, s2 = (t.cuda() for t in ckpt.values())
+        hidden, inter = w2.shape[1], w2.shape[2] * 2
+        scales = [
+            deep_gemm.transform_sf_into_required_layout(
+                (sf.to(torch.int32) << 23).view(torch.float32),
+                mn,
+                k,
+                (1, 32),
+                num_local_experts,
+            )
+            for sf, mn, k in ((s13, 2 * inter, hidden), (s2, hidden, inter))
+        ]
+        (l1, l1_sf), (l2, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+            (w13.view(torch.int8), scales[0]), (w2.view(torch.int8), scales[1])
+        )
+        for actual, reference in zip((l1, l1_sf, l2, l2_sf), expected):
+            assert torch.equal(actual.cpu().view(reference.dtype), reference)
+    return expected
+
+
+def _assert_mega_moe_layout(experts, expected):
+    actual = (*experts._transformed_l1_weights, *experts._transformed_l2_weights)
+    for tensor, reference in zip(actual, expected):
+        assert torch.equal(tensor.view(reference.dtype), reference)
+
+
+def test_deepseek_v4_mega_moe_loads_shards_into_kernel_layout():
+    """Shards in any order, including EPLB replicas, land in DeepGEMM's layout."""
+    experts = _make_mega_moe_experts(num_local_experts=4, num_logical_experts=3)
+    ckpt = _load_mega_moe_checkpoint_shuffled(experts, 3, seed=0)
+    _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 4, 3))
+    # DeepGEMM's MN-major scale strides.
+    assert experts.w13_weight_scale.stride() == (768 * 2, 1, 768)
+    assert experts.w2_weight_scale.stride() == (256 * 3, 1, 256)
+
+
+def test_deepseek_v4_mega_moe_reload_overwrites_kernel_layout_in_place():
+    """A second load must update the live kernel tensors without reallocating."""
+    experts = _make_mega_moe_experts(num_local_experts=2, num_logical_experts=2)
+    _load_mega_moe_checkpoint_shuffled(experts, 2, seed=0)
+    data_ptrs = [param.data_ptr() for param in experts.parameters()]
+    ckpt = _load_mega_moe_checkpoint_shuffled(experts, 2, seed=1)
+    assert [param.data_ptr() for param in experts.parameters()] == data_ptrs
+    _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 2, 2))
+
+
 @pytest.mark.parametrize("intermediate_size", [512, 2304])
-def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
-    monkeypatch, intermediate_size
-):
+def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(intermediate_size):
     """Keep native widths so V4.1 routed and shared experts can fuse."""
     experts = DeepseekV4MegaMoEExperts(
         SimpleNamespace(
@@ -445,216 +562,149 @@ def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
         hidden_size=128,
         intermediate_size=intermediate_size,
     )
-    originals = []
-    for param in (
-        experts.w13_weight,
-        experts.w13_weight_scale,
-        experts.w2_weight,
-        experts.w2_weight_scale,
-    ):
-        param.data.random_(1, 128)
-        originals.append(param.data.clone())
-    monkeypatch.setattr(
-        experts, "_ensure_backend", lambda: DeepGemmSm100MegaMoEBackend()
-    )
-    monkeypatch.setattr(
-        "vllm.utils.deep_gemm._import_deep_gemm",
-        lambda: SimpleNamespace(
-            transform_sf_into_required_layout=lambda sf, *args: sf,
-            transform_weights_for_mega_moe=lambda l1, l2: (l1, l2),
-        ),
-    )
 
-    experts.finalize_weights()
     assert experts.intermediate_size == intermediate_size
+    assert experts.w13_weight.shape == (2, 2 * intermediate_size, 64)
+    assert experts.w13_weight_scale.shape == (2, 2 * intermediate_size, 1)
+    assert experts.w2_weight.shape == (2, 128, intermediate_size // 2)
+    assert experts.w2_weight_scale.shape == (2, 128, intermediate_size // 128)
     transformed = (*experts._transformed_l1_weights, *experts._transformed_l2_weights)
-    for actual, original in zip(transformed, originals):
-        expected = (
-            original
-            if actual.dtype == torch.int8
-            else experts._ue8m0_uint8_to_float(original)
-        )
-        assert torch.equal(actual.view(expected.dtype), expected)
+    for actual, param in zip(transformed, experts.parameters()):
+        assert actual.data_ptr() == param.data_ptr()
 
-    transformed_l1 = experts._transformed_l1_weights
-    experts.finalize_weights()
-    assert experts._transformed_l1_weights is transformed_l1
+
+def test_deepseek_v4_mega_moe_loads_shared_experts_into_kernel_layout(monkeypatch):
+    """Shared expert shards land directly in the MegaMoE kernel layout."""
+    monkeypatch.setattr(
+        DeepGemmSm100MegaMoEBackend, "supports_shared_experts", lambda *args: True
+    )
+    experts = DeepseekV4MegaMoEExperts(
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+            compilation_config=SimpleNamespace(static_forward_context={}),
+        ),
+        num_experts=2,
+        num_local_experts=2,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=256,
+        intermediate_size=384,
+        num_shared_experts=1,
+    )
+    assert experts.has_fused_shared_experts
+    hidden, inter = 256, 384
+    generator = torch.Generator().manual_seed(42)
+
+    def rand(*shape):
+        return torch.randint(0, 256, shape, dtype=torch.uint8, generator=generator)
+
+    w1, w3, w2 = rand(inter, hidden), rand(inter, hidden), rand(hidden, inter)
+    s1, s3, s2 = (
+        rand(inter, hidden // 32),
+        rand(inter, hidden // 32),
+        rand(hidden, inter // 32),
+    )
+    fp8, e8m0 = torch.float8_e4m3fn, torch.float8_e8m0fnu
+    # The down shard arrives as `.w2.` (MTP, DSpark) or `.down_proj.` (mapped).
+    for name, data in [
+        ("shared_experts.w1.weight", w1.view(fp8)),
+        ("shared_experts.w3.weight", w3.view(fp8)),
+        ("shared_experts.down_proj.weight", w2.view(fp8)),
+        ("shared_experts.w1.weight_scale", s1.view(e8m0)),
+        ("shared_experts.w3.weight_scale", s3.view(e8m0)),
+        ("shared_experts.w2.weight_scale", s2.view(e8m0)),
+    ]:
+        loaded = experts.load_shared_expert_weight(f"ffn.{name}", data)
+        # Weight tracking checks this name against the registered parameters.
+        assert loaded in {f"ffn.experts.{n}" for n, _ in experts.named_parameters()}
+
+    def l1_halves():
+        return experts.shared_l1_weight.view(torch.uint8).view(-1, 2, 8, hidden)
+
+    # Every tensor matches DeepGEMM's batched transform of the checkpoint.
+    expected = _reference_mega_moe_layout(
+        *(t.unsqueeze(0) for t in (torch.cat([w1, w3]), torch.cat([s1, s3]), w2, s2))
+    )
+    actual = (
+        experts.shared_l1_weight,
+        experts.shared_l1_weight_scale,
+        experts.shared_l2_weight,
+        experts.shared_l2_weight_scale,
+    )
+    for tensor, reference in zip(actual, expected):
+        assert torch.equal(tensor.view(reference.dtype), reference[0])
+    # A reload of one shard overwrites in place and leaves the other half alone.
+    ptr = experts.shared_l1_weight.data_ptr()
+    w1b = rand(inter, hidden)
+    experts.load_shared_expert_weight("shared_experts.w1.weight", w1b.view(fp8))
+    assert experts.shared_l1_weight.data_ptr() == ptr
+    assert torch.equal(l1_halves()[:, 0], w1b.view(-1, 8, hidden))
+    assert torch.equal(l1_halves()[:, 1], w3.view(-1, 8, hidden))
+    with pytest.raises(ValueError):
+        experts.load_shared_expert_weight("shared_experts.gate_up_proj.weight", w1)
+
+
+def _fake_deep_gemm(with_shared: bool):
+    def old_buffer(group): ...
+
+    def old_kernel(y): ...
+
+    def new_buffer(group, num_shared_experts=0): ...
+
+    def new_kernel(y, shared_l1_weights=None, shared_l2_weights=None): ...
+
+    return SimpleNamespace(
+        get_symm_buffer_for_mega_moe=new_buffer if with_shared else old_buffer,
+        fp8_fp4_mega_moe=new_kernel if with_shared else old_kernel,
+        get_block_m_for_mega_moe=lambda *args: 0,
+    )
 
 
 @pytest.mark.parametrize(
-    "hidden_size,intermediate_size,block_size,mxfp8,packed",
+    "weight_dtype,scale_dtype,scale_shape,with_shared,fused",
     [
-        pytest.param(128, 512, 128, False, False, id="aligned-block128"),
-        pytest.param(128, 512, 128, False, True, id="aligned-block128-packed"),
-        pytest.param(128, 512, 128, True, False, id="aligned-block128-mxfp8"),
-        pytest.param(5120, 2304, 32, False, False, id="deepseek-v41-flash"),
-        pytest.param(128, 2304, 128, False, False, id="native-block128"),
-        pytest.param(128, 2304, 128, False, True, id="native-block128-packed"),
-        pytest.param(5120, 2304, 32, True, False, id="deepseek-v41-flash-mxfp8"),
+        (torch.float8_e4m3fn, torch.float8_e8m0fnu, (2, 2), True, True),
+        (torch.float8_e4m3fn, torch.uint8, (256, 8), True, True),
+        (torch.float8_e4m3fn, torch.float8_e8m0fnu, (2, 2), False, False),
+        (torch.bfloat16, None, None, True, False),
+        (torch.float8_e4m3fn, torch.float32, (2, 2), True, False),
+        (torch.float8_e4m3fn, torch.uint8, (256, 16), True, False),
     ],
 )
-def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
-    monkeypatch, hidden_size, intermediate_size, block_size, mxfp8, packed
+def test_deepseek_v4_mega_moe_decides_shared_fusion_at_construction(
+    monkeypatch, weight_dtype, scale_dtype, scale_shape, with_shared, fused
 ):
-    """Shared fusion preserves checkpoint weights and scales at native widths."""
-    if packed and not is_deep_gemm_supported():
-        pytest.skip("Packing the shared scales requires DeepGEMM")
-
-    class FakeDeepGemm:
-        transformed_dims: list[tuple[int, int]] = []
-        scale_inputs: list[tuple[int, ...]] = []
-        scale_values: list[torch.Tensor] = []
-
-        @staticmethod
-        def get_symm_buffer_for_mega_moe(*args, num_shared_experts=0, **kwargs):
-            return None
-
-        @staticmethod
-        def get_block_m_for_mega_moe(*args, **kwargs):
-            return 128
-
-        @staticmethod
-        def fp8_fp4_mega_moe(
-            y,
-            l1_weights,
-            l2_weights,
-            sym_buffer,
-            shared_l1_weights=None,
-            shared_l2_weights=None,
-            **kwargs,
-        ):
-            return None
-
-        @classmethod
-        def transform_sf_into_required_layout(cls, sf, mn, k, *args, **kwargs):
-            cls.scale_inputs.append(tuple(sf.shape))
-            cls.scale_values.append(sf)
-            return torch.empty((sf.shape[0], mn, k // 128), dtype=torch.int32)
-
-        @classmethod
-        def transform_weights_for_mega_moe(cls, l1_weights, l2_weights):
-            cls.transformed_dims.append((l1_weights[0].dim(), l2_weights[0].dim()))
-            if l1_weights[0].dim() == 2:
-                return (l1_weights[0].clone(), l1_weights[1]), l2_weights
-            return l1_weights, l2_weights
-
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
+    """Fuse only shared experts the installed kernel and the 1x32 layout fit."""
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm._import_deep_gemm", lambda: _fake_deep_gemm(with_shared)
     )
+
+    def linear():
+        scale = (
+            None if scale_dtype is None else torch.empty(scale_shape).to(scale_dtype)
+        )
+        return SimpleNamespace(
+            weight=torch.empty(256, 256, dtype=weight_dtype), weight_scale_inv=scale
+        )
+
+    shared = SimpleNamespace(gate_up_proj=linear(), down_proj=linear())
     experts = DeepseekV4MegaMoEExperts(
-        vllm_config,
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+            compilation_config=SimpleNamespace(static_forward_context={}),
+        ),
         num_experts=2,
-        num_local_experts=1,
+        num_local_experts=2,
         experts_start_idx=0,
         top_k=1,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
+        hidden_size=256,
+        intermediate_size=128,
         num_shared_experts=1,
-    )
-    monkeypatch.setattr(
-        experts, "_ensure_backend", lambda: DeepGemmSm100MegaMoEBackend()
+        shared_experts=shared,
     )
 
-    def fp8_parameter(*shape):
-        return torch.nn.Parameter(
-            torch.empty(*shape, dtype=torch.uint8)
-            .random_(1, 119)
-            .view(torch.float8_e4m3fn),
-            requires_grad=False,
-        )
-
-    def scale_parameter(*shape, dtype=torch.int32):
-        return torch.nn.Parameter(torch.ones(*shape, dtype=dtype), requires_grad=False)
-
-    shared_experts = SimpleNamespace(
-        gate_up_proj=SimpleNamespace(
-            weight=fp8_parameter(2 * intermediate_size, hidden_size),
-            weight_block_size=(block_size, block_size),
-            weight_scale_inv=scale_parameter(
-                2 * intermediate_size // block_size,
-                hidden_size // block_size,
-                dtype=torch.float8_e8m0fnu,
-            ),
-        ),
-        down_proj=SimpleNamespace(
-            weight=fp8_parameter(hidden_size, intermediate_size),
-            weight_block_size=(block_size, block_size),
-            weight_scale_inv=scale_parameter(
-                hidden_size // block_size,
-                intermediate_size // block_size,
-                dtype=torch.float8_e8m0fnu,
-            ),
-        ),
-    )
-    if mxfp8:
-        for linear in (shared_experts.gate_up_proj, shared_experts.down_proj):
-            linear.weight_block_size = (1, 32)
-            linear.weight_scale = torch.nn.Parameter(
-                linear.weight_scale_inv.view(torch.uint8)
-                .repeat_interleave(block_size, dim=0)
-                .repeat_interleave(block_size // 32, dim=1),
-                requires_grad=False,
-            )
-            del linear.weight_scale_inv
-    originals = []
-    for linear in (shared_experts.gate_up_proj, shared_experts.down_proj):
-        scale = linear.weight_scale if mxfp8 else linear.weight_scale_inv
-        scale.data.view(torch.uint8).random_(124, 130)
-        block_m, block_k = linear.weight_block_size
-        scale_1x32 = (
-            experts._ue8m0_uint8_to_float(scale.view(torch.uint8))
-            .repeat_interleave(block_m, dim=0)
-            .repeat_interleave(block_k // 32, dim=1)
-        )
-        originals.append((linear.weight.view(torch.uint8).clone(), scale_1x32))
-        if packed:
-            linear.weight_scale_inv = torch.nn.Parameter(
-                deepgemm_post_process_weight_scale_block(
-                    scale.data.cuda().unsqueeze(0),
-                    *linear.weight.shape,
-                    quant_block_shape=linear.weight_block_size,
-                    num_groups=1,
-                )
-                .squeeze(0)
-                .cpu(),
-                requires_grad=False,
-            )
-    monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: FakeDeepGemm)
-
-    original_gate_up_ptr = shared_experts.gate_up_proj.weight.data_ptr()
-    experts.finalize_weights(shared_experts)
-
-    assert experts.has_fused_shared_experts
-    assert experts.intermediate_size == intermediate_size
-    assert FakeDeepGemm.transformed_dims == [(3, 3), (2, 2)]
-    assert FakeDeepGemm.scale_inputs[-2:] == [
-        (1, 2 * intermediate_size, hidden_size // 32),
-        (1, hidden_size, intermediate_size // 32),
-    ]
-    for transformed, actual_scale, (weight, scale) in zip(
-        (
-            experts._transformed_shared_l1_weights,
-            experts._transformed_shared_l2_weights,
-        ),
-        FakeDeepGemm.scale_values[-2:],
-        originals,
-    ):
-        assert torch.equal(transformed[0].view(torch.uint8), weight)
-        assert torch.equal(actual_scale[0], scale)
-    assert shared_experts.gate_up_proj.weight.data_ptr() != original_gate_up_ptr
-    assert (
-        experts._transformed_shared_l1_weights[0].data_ptr()
-        == shared_experts.gate_up_proj.weight.data_ptr()
-    )
-    assert (
-        experts._transformed_shared_l2_weights[0].data_ptr()
-        == shared_experts.down_proj.weight.data_ptr()
-    )
-
-    transformed_l1 = experts._transformed_shared_l1_weights
-    experts.finalize_weights(shared_experts)
-    assert experts._transformed_shared_l1_weights is transformed_l1
+    assert experts.has_fused_shared_experts == fused
+    assert hasattr(experts, "shared_l1_weight") == fused
 
 
 @pytest.mark.parametrize("fused", [False, True])
@@ -671,10 +721,7 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
 
     class FakeExperts(torch.nn.Module):
         has_fused_shared_experts = fused
-        _backend = DeepGemmSm100MegaMoEBackend()
-
-        def _ensure_backend(self):
-            return self._backend
+        backend = DeepGemmSm100MegaMoEBackend()
 
         def forward(self, hidden_states, *args, **kwargs):
             return torch.ones_like(hidden_states)
@@ -691,7 +738,7 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
     moe.use_native_mega_moe = True
     moe.gate = FakeGate()
     moe.experts = FakeExperts()
-    moe.shared_experts = FakeSharedExperts()
+    moe.shared_experts = None if fused else FakeSharedExperts()
     moe.scoring_func = "sqrtsoftplus"
     moe.n_activated_experts = 1
     moe.renormalize = True
@@ -710,7 +757,8 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
 
     expected = 1 if fused else 3
     assert torch.all(output == expected)
-    assert moe.shared_experts.calls == (0 if fused else 1)
+    if not fused:
+        assert moe.shared_experts.calls == 1
 
 
 @pytest.mark.skipif(
@@ -882,35 +930,20 @@ def test_deepseek_v4_mega_moe_stages_shared_scale_tma_layout(shared_block_m):
     assert torch.all(fused_shared_x_sf[~populated] == -1)
 
 
-def test_deepseek_v4_pwal_hook_finalizes_mega_moe_and_mhc_broadcast():
+def test_deepseek_v4_pwal_hook_finalizes_mhc_broadcast():
     """The loader invokes the model-level PWAL hook for every load format,
-    so it must finalize megamoe + mhc broadcast weights to cover dummy
-    load, which skips load_weights()."""
+    so it must finalize mhc broadcast weights to cover dummy load, which
+    skips load_weights()."""
     calls = []
     stub = SimpleNamespace(
         model=SimpleNamespace(
-            finalize_mega_moe_weights=lambda: calls.append("mega_moe"),
             finalize_mhc_broadcast_weights=lambda: calls.append("mhc"),
         )
     )
 
     DeepseekV4ForCausalLM.process_weights_after_loading(stub)
 
-    assert calls == ["mega_moe", "mhc"]
-
-
-def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
-    """MTP/DSpark drafters load as their own top-level models, so each needs
-    its own PWAL hook now that the megamoe forward no longer finalizes
-    weights lazily on first use."""
-    calls = []
-    mtp = SimpleNamespace(finalize_mega_moe_weights=lambda: calls.append("mtp"))
-    DeepSeekV4MTP.process_weights_after_loading(mtp)
-
-    dspark = SimpleNamespace(_finalize_moe=lambda: calls.append("dspark"))
-    DSparkDeepseekV4ForCausalLM.process_weights_after_loading(dspark)
-
-    assert calls == ["mtp", "dspark"]
+    assert calls == ["mhc"]
 
 
 @pytest.mark.skipif(
