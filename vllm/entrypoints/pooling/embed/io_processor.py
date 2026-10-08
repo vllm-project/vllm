@@ -26,6 +26,7 @@ from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
+from ..late_chunking import attach_late_chunking_metadata
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
     AnyOfflineInputsContext,
@@ -33,11 +34,13 @@ from ..typing import (
     ChunkedEmbeddingMetadata,
     EncodeChatRenderParams,
     OfflineEncodeInputsContext,
+    OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingEngineInput,
     PoolingServeContext,
     RequestFactory,
+    RequestGenerator,
 )
 from .protocol import (
     CohereEmbedContent,
@@ -653,6 +656,32 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
 class TokenEmbedIOProcessor(PoolingIOProcessor):
     name = "token_embed"
+
+    def get_request_factory_offline(
+        self, ctx: AnyOfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        factory, num_requests = super().get_request_factory_offline(ctx)
+        assert isinstance(ctx, OfflineEncodeInputsContext)
+        if ctx.pooling_params is None or not any(
+            p.late_chunking_params is not None
+            for p in self._params_to_seq(ctx.pooling_params, num_requests)
+        ):
+            return factory, num_requests
+
+        def request_factory() -> RequestGenerator:
+            for request in factory():
+                ctx.late_chunking.append(request["params"].late_chunking_params)
+                yield request
+
+        return request_factory, num_requests
+
+    def post_process_offline(self, ctx: OfflineOutputsContext):
+        if ctx.late_chunking:
+            for output, params in zip(ctx.outputs, ctx.late_chunking, strict=True):
+                if params is not None:
+                    assert params.metadata is not None
+                    attach_late_chunking_metadata(output, params.metadata)
+        return ctx.outputs
 
 
 class JinaRankingTokenEmbedIOProcessor(

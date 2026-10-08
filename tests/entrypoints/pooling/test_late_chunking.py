@@ -10,14 +10,16 @@ import torch
 
 from vllm import PoolingParams
 from vllm.config import PoolerConfig
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.embed.io_processor import TokenEmbedIOProcessor
 from vllm.entrypoints.pooling.late_chunking import build_late_chunking_metadata
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
-from vllm.entrypoints.pooling.typing import OfflineEncodeInputsContext
+from vllm.entrypoints.pooling.typing import (
+    OfflineEncodeInputsContext,
+    OfflineOutputsContext,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import (
     LateChunk,
-    LateChunkingMetadata,
     PoolingOutput,
     PoolingRequestOutput,
     RequestError,
@@ -28,7 +30,7 @@ from vllm.renderers import TokenizeParams
 
 @pytest.fixture
 def late_chunk_processor():
-    processor = object.__new__(PoolingIOProcessor)
+    processor = object.__new__(TokenEmbedIOProcessor)
     processor.model_config = SimpleNamespace(
         is_encoder_decoder=False,
         architecture="NomicBertModel",
@@ -45,7 +47,7 @@ def late_chunk_processor():
     )
     processor.renderer = Mock()
     processor.renderer.default_cmpl_tok_params = TokenizeParams(max_total_tokens=32)
-    processor.renderer.render_cmpl.return_value = [
+    processor.renderer.render_cmpl.side_effect = lambda **_: [
         {
             "type": "token",
             "prompt_token_ids": [101, 1, 2, 102],
@@ -171,58 +173,60 @@ def test_late_chunk_ranges_reject_missing_or_invalid_offsets(offsets):
         build_late_chunking_metadata("abc", 2, offsets, 2)
 
 
-def _mock_chunk_tiling_engine(outputs):
+def _mock_chunk_llm(processor, outputs):
     llm = mock.Mock(spec=PoolingOfflineMixin)
+    llm.encode = PoolingOfflineMixin.encode.__get__(llm)
     llm._run_tiling_engine = PoolingOfflineMixin._run_tiling_engine.__get__(llm)
+    llm.pooling_io_processors = {"token_embed": processor}
     llm._executor = SimpleNamespace(map=map)
     llm.llm_engine = mock.Mock()
     llm.llm_engine.vllm_config.scheduler_config.max_num_seqs = 2
     llm.llm_engine.has_unfinished_requests.return_value = False
     llm.llm_engine.step.side_effect = outputs
-    llm._render_and_add_requests = mock.Mock(return_value=["0-internal", "1-internal"])
-    requests = [
-        {
-            "prompts": {"type": "token", "prompt_token_ids": [1, 2]},
-            "params": PoolingParams(
-                task="token_embed",
-                late_chunking_params=LateChunkingParams(
-                    chunk_size=2,
-                    metadata=LateChunkingMetadata(
-                        chunk_size=2,
-                        input_tokens=2,
-                        chunks=[LateChunk((0, 2), (i, i + 2))],
-                    ),
-                ),
-            ),
-            "lora_requests": None,
-            "priorities": 0,
-        }
-        for i in range(2)
-    ]
-    return llm, requests
+    llm._render_and_add_requests = mock.Mock(
+        side_effect=lambda **kw: [
+            str(i) + "-internal" for i in range(len(kw["params"]))
+        ]
+    )
+    return llm
 
 
-def _chunk_output(request_id, **kwargs):
+def _chunk_output(request_id, rows=2, **kwargs):
     return PoolingRequestOutput(
-        str(request_id), PoolingOutput(torch.ones(1, 4)), [1, 2], 0, True, **kwargs
+        str(request_id),
+        PoolingOutput(torch.ones(rows, 4)),
+        [101, 1, 2, 102],
+        0,
+        True,
+        **kwargs,
     )
 
 
-def test_late_chunk_mapping_follows_request_ids_and_preserves_request_errors():
+def test_late_chunk_mapping_preserves_order_mixed_requests_and_errors(
+    late_chunk_processor,
+):
     error = RequestError("test_error", "original error")
-    failed = _chunk_output(1, error=error)
-    # A failed request need not have a valid chunk tensor.
-    failed.outputs.data = failed.outputs.data[:0]
-    llm, requests = _mock_chunk_tiling_engine([[failed, _chunk_output(0)]])
-    outputs = llm._run_tiling_engine(
-        SimpleNamespace(render=lambda x: x), lambda: iter(requests), 2, use_tqdm=False
+    failed = _chunk_output(1, rows=0, error=error)
+    llm = _mock_chunk_llm(
+        late_chunk_processor, [[_chunk_output(2, rows=4), failed, _chunk_output(0)]]
     )
-    assert outputs[0].late_chunking is not None
-    assert (
-        outputs[0].late_chunking is requests[0]["params"].late_chunking_params.metadata
+    params = [
+        PoolingParams(late_chunking_params=LateChunkingParams(2)),
+        PoolingParams(late_chunking_params=LateChunkingParams(1)),
+        PoolingParams(),
+    ]
+    outputs = llm.encode(
+        ["a b"] * 3, pooling_task="token_embed", pooling_params=params, use_tqdm=False
     )
+    assert outputs[0].late_chunking.chunks == [
+        LateChunk((0, 2), (0, 1)),
+        LateChunk((2, 4), (2, 3)),
+    ]
     assert outputs[1].late_chunking is None
     assert outputs[1].error is error
+    assert outputs[2].late_chunking is None
+    assert params[0].late_chunking_params is not None
+    assert params[0].late_chunking_params.metadata is None
     llm.llm_engine.abort_request.assert_not_called()
 
 
@@ -233,34 +237,67 @@ def test_late_chunk_mapping_follows_request_ids_and_preserves_request_errors():
         pytest.param(KeyboardInterrupt(), False, id="keyboard-interrupt"),
     ],
 )
-def test_late_chunk_mapping_propagates_errors_and_is_not_reused(error, abort_expected):
-    llm, requests = _mock_chunk_tiling_engine(error)
-    processor = SimpleNamespace(render=lambda x: x)
+def test_late_chunk_mapping_propagates_errors_and_is_not_reused(
+    late_chunk_processor, error, abort_expected
+):
+    llm = _mock_chunk_llm(late_chunk_processor, error)
+    params = PoolingParams(late_chunking_params=LateChunkingParams(2))
     with pytest.raises(type(error)):
-        llm._run_tiling_engine(processor, lambda: iter(requests), 2, use_tqdm=False)
+        llm.encode(
+            ["a b"] * 2,
+            pooling_task="token_embed",
+            pooling_params=params,
+            use_tqdm=False,
+        )
     if abort_expected:
         llm.llm_engine.abort_request.assert_called_once()
         assert set(llm.llm_engine.abort_request.call_args.args[0]) == {"0", "1"}
     else:
         llm.llm_engine.abort_request.assert_not_called()
-    for request in requests:
-        request["params"] = PoolingParams(task="token_embed")
-    llm.llm_engine.step.side_effect = [[_chunk_output(1), _chunk_output(0)]]
-    outputs = llm._run_tiling_engine(
-        processor, lambda: iter(requests), 2, use_tqdm=False
-    )
+    llm.llm_engine.step.side_effect = [
+        [_chunk_output(1, rows=4), _chunk_output(0, rows=4)]
+    ]
+    outputs = llm.encode(["a b"] * 2, pooling_task="token_embed", use_tqdm=False)
     assert all(output.late_chunking is None for output in outputs)
+    assert params.late_chunking_params is not None
+    assert params.late_chunking_params.metadata is None
 
 
-def test_late_chunk_mapping_rejects_successful_output_with_wrong_row_count():
-    first = _chunk_output(0)
-    first.outputs.data = first.outputs.data[:0]
-    llm, requests = _mock_chunk_tiling_engine([[first, _chunk_output(1)]])
+def test_late_chunk_mapping_rejects_successful_output_with_wrong_row_count(
+    late_chunk_processor,
+):
+    llm = _mock_chunk_llm(late_chunk_processor, [[_chunk_output(0, rows=0)]])
     with pytest.raises(ValueError, match="does not match"):
-        llm._run_tiling_engine(
-            SimpleNamespace(render=lambda x: x),
-            lambda: iter(requests),
-            2,
+        llm.encode(
+            "a b",
+            pooling_task="token_embed",
+            pooling_params=PoolingParams(late_chunking_params=LateChunkingParams(2)),
             use_tqdm=False,
         )
-    assert set(llm.llm_engine.abort_request.call_args.args[0]) == {"0", "1"}
+    # All engine requests have finished before post-processing validates the output.
+    llm.llm_engine.abort_request.assert_not_called()
+
+
+def test_late_chunk_contexts_remain_isolated_when_rendering_interleaves(
+    late_chunk_processor,
+):
+    processor = late_chunk_processor
+    first, second = _late_chunk_context(), _late_chunk_context()
+    shared = PoolingParams(late_chunking_params=LateChunkingParams(2))
+    first.pooling_params = second.pooling_params = shared
+    first_factory, _ = processor.get_request_factory_offline(first)
+    second_factory, _ = processor.get_request_factory_offline(second)
+    first_request, second_request = next(first_factory()), next(second_factory())
+    processor.render(second_request)
+    assert first.late_chunking[0].metadata is None
+    processor.render(first_request)
+    first_output = processor.post_process_offline(
+        OfflineOutputsContext([_chunk_output(0)], late_chunking=first.late_chunking)
+    )[0]
+    second_output = processor.post_process_offline(
+        OfflineOutputsContext([_chunk_output(0)], late_chunking=second.late_chunking)
+    )[0]
+    assert first_output.late_chunking == second_output.late_chunking
+    assert first_output.late_chunking is not second_output.late_chunking
+    assert shared.late_chunking_params is not None
+    assert shared.late_chunking_params.metadata is None

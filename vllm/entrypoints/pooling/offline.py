@@ -14,7 +14,6 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,
-    LateChunkingMetadata,
     PoolingRequestOutput,
     ScoringRequestOutput,
 )
@@ -23,7 +22,6 @@ from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
 from .factories import init_pooling_io_processors
-from .late_chunking import attach_late_chunking_metadata
 from .scoring.io_processor import ScoringIOProcessor
 from .scoring.typing import ScoreInput
 from .typing import (
@@ -131,7 +129,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             io_processor, request_factory, num_requests, use_tqdm=use_tqdm
         )
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs)
+            ctx=OfflineOutputsContext(outputs=outputs, late_chunking=ctx.late_chunking)
         )
         return outputs
 
@@ -424,7 +422,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         outputs: list[PoolingRequestOutput] = []
         added_request_ids: set[str] = set()
-        late_chunking: dict[str, LateChunkingMetadata] = {}
 
         it = self._executor.map(io_processor.render, request_factory())
 
@@ -452,25 +449,15 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                         priorities=[x["priorities"] for x in requests],
                     )
 
-                    for request_id, request in zip(request_ids, requests):
+                    for request_id in request_ids:
                         # undo assign_request_id
                         request_id = request_id.split("-", 1)[0]
                         added_request_ids.add(request_id)
-                        chunk_params = request["params"].late_chunking_params
-                        if (
-                            chunk_params is not None
-                            and chunk_params.metadata is not None
-                        ):
-                            late_chunking[request_id] = chunk_params.metadata
 
                 step_outputs = self.llm_engine.step()
                 for output in step_outputs:
                     assert isinstance(output, PoolingRequestOutput)
                     assert output.finished
-                    if (
-                        metadata := late_chunking.pop(output.request_id, None)
-                    ) is not None:
-                        attach_late_chunking_metadata(output, metadata)
                     outputs.append(output)
                     added_request_ids.discard(output.request_id)
                     num_requests_in_core -= 1
@@ -486,7 +473,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             raise
 
         finally:
-            late_chunking.clear()
             if use_tqdm:
                 pbar.close()
 
