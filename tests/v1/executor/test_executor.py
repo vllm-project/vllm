@@ -277,3 +277,39 @@ def test_collective_rpc_worker_failure_merges_kv_output(enable_ft):
     else:
         assert aggregator._recv_remaining_count == {}
         assert aggregator._pending_invalid_block_ids == set()
+
+
+@pytest.mark.parametrize("non_block", [False, True])
+@pytest.mark.parametrize("connector", [None, "ec", "kv"])
+@pytest.mark.parametrize("second_fails", [False, True])
+def test_ft_rpc_failure_keeps_next_rpc_responses_aligned(
+    non_block, connector, second_fails
+):
+    """FT retries must consume fresh replies, including RPCs without KV output."""
+    executor = _make_failed_step_executor(enable_ft=True)
+    success = WorkerProc.ResponseStatus.SUCCESS
+    failure = WorkerProc.ResponseStatus.FAILURE
+    executor.response_mqs = [
+        _FakeResponseMQ([(failure, "device error"), (success, "recovered0")]),
+        _FakeResponseMQ(
+            [
+                (failure if second_fails else success, "previous step"),
+                (success, "recovered1"),
+            ]
+        ),
+    ]
+    kwargs = {}
+    if connector == "ec":
+        kwargs["ec_output_aggregator"] = ECOutputAggregator()
+    elif connector == "kv":
+        kwargs["kv_output_aggregator"] = KVOutputAggregator(expected_finished_count=2)
+
+    with pytest.raises(RuntimeError, match="[Ww]orker"):
+        ret = executor.collective_rpc("check_health", non_block=non_block, **kwargs)
+        if non_block:
+            ret.result()
+
+    assert executor.collective_rpc("handle_ft_command") == [
+        "recovered0",
+        "recovered1",
+    ]

@@ -456,13 +456,10 @@ class MultiprocExecutor(Executor):
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
 
-                has_kv = kv_output_aggregator is not None
-
                 if status == WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT:
                     if (
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
-                        or not has_kv
                     ):
                         raise RuntimeError("Worker failed with KV connector output")
                     has_failure = True
@@ -472,7 +469,6 @@ class MultiprocExecutor(Executor):
                     if (
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
-                        or not has_kv
                     ):
                         raise RuntimeError(
                             f"Worker failed with error '{result}', please check the"
