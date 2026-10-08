@@ -647,8 +647,6 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        # Forward kwargs unchanged so the runner's _maybe_add_ngram_kwargs
-        # path (query_start_loc / ngram_context) reaches Qwen4ExpModel.
         return self.model(
             input_ids,
             positions,

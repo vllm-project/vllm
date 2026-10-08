@@ -45,6 +45,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
@@ -2230,7 +2231,10 @@ def test_amd_pinned_embedding_output_written_under_cudagraph_capture(
         torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="only the ROCm backend runs the n-gram embedding under torch.compile",
+)
 @pytest.mark.parametrize(
     ("query_lens", "contexts"),
     [([3, 1], [[5, 6], [0, 7]]), ([1, 0, 2], [[1, 2], [3, 4], [0, 0]])],
