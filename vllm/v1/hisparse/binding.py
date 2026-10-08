@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
+    get_hisparse_kv_cache_groups,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -36,21 +37,20 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
-def resolve_hisparse_block_size(
+def resolve_hisparse_specs(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     attn_layers: Mapping[str, "AttentionLayerBase"],
-) -> None:
-    """Resolve a common kernel block size in-place for HiSparse MLA specs."""
-    if vllm_config.attention_config.hisparse_config is None:
-        return
+) -> dict[str, KVCacheSpec]:
+    """Resolve a common kernel block size for HiSparse MLA specs, and add the
+    resident/hot specs HiSparse derives from them."""
     mla_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
         if isinstance(spec, MLAAttentionSpec)
     }
     if not mla_specs:
-        return
+        return kv_cache_spec
     block_sizes = {spec.block_size for spec in mla_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
@@ -62,10 +62,18 @@ def resolve_hisparse_block_size(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec.update(
-        (name, spec.copy_with_new_block_size(block_size))
+    kv_cache_spec = kv_cache_spec | {
+        name: spec.copy_with_new_block_size(block_size)
         for name, spec in mla_specs.items()
-    )
+    }
+    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    assert groups is not None
+    return kv_cache_spec | {
+        layer_name: group.kv_cache_spec
+        for group in groups
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for layer_name in group.layer_names
+    }
 
 
 def allocate_hisparse_kv_caches(
@@ -205,9 +213,12 @@ def bind_hisparse_kv_caches(
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
     tensor_configs = {
-        name: tensor_config
+        name: (
+            tensor_config,
+            tensor_config.offset + layer_index * tensor_config.layer_stride,
+        )
         for tensor_config in kv_cache_config.kv_cache_tensors
-        for name in tensor_config.layers
+        for layer_index, name in enumerate(tensor_config.layers)
     }
     resident_source_index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
@@ -216,12 +227,12 @@ def bind_hisparse_kv_caches(
         for cache_name in group.layer_names:
             assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
-            tensor_config = tensor_configs[cache_name]
+            tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
             cache_handle.bind_cache(
                 kv_caches[cache_name],
-                byte_offset=tensor_config.offset,
+                byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
@@ -249,11 +260,11 @@ def bind_hisparse_kv_caches(
                 raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
             layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
-            tensor_config = tensor_configs[cache_name]
+            tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle.runtime.bind_hot_cache(
                 raw_tensor,
-                byte_offset=tensor_config.offset,
+                byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
@@ -273,6 +284,7 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
+            cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
             cache_handle.runtime.shared_host_region = host_pool.shared_region
             cache_handle.runtime.bind_source_cache(
                 source_cache,
