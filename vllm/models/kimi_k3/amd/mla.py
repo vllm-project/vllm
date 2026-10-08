@@ -11,6 +11,7 @@ from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.platforms import current_platform
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 
 _OPT_KV_LORA_RANK = 512
 _OPT_ROT_DIM = 64
@@ -21,11 +22,24 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm fusion and a fused
     decode Q-prep path."""
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        gate_stream: torch.cuda.Stream | None = None,
+        gate_stream_token_threshold: int = 128,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._use_eager_qk_rmsnorm_fusion = bool(rocm_aiter_ops.is_enabled())
         self._fused_qk_prep = self._fused_qk_prep_supported()
         self._identity_rope: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._gate_stream = gate_stream if self.g_proj is not None else None
+        self._gate_stream_token_threshold = gate_stream_token_threshold
+        self._gate_events = (
+            (torch.cuda.Event(), torch.cuda.Event())
+            if self._gate_stream is not None
+            else None
+        )
 
     def _fused_qk_prep_supported(self) -> bool:
         attn = self.mla_attn
@@ -170,7 +184,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         attn._v_up_proj(attn_out, out=output)
         return output
 
-    def forward(
+    def _forward_attention_frontend(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -276,7 +290,42 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 q_dcp_replicated=q_dcp_replicated,
             )
 
-        if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+        return attn_out
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        g_proj = self.g_proj
+        events = self._gate_events
+        stream = self._gate_stream
+        use_stream = (
+            g_proj is not None
+            and events is not None
+            and stream is not None
+            and hidden_states.shape[0] <= self._gate_stream_token_threshold
+        )
+        if use_stream:
+            assert g_proj is not None
+            assert events is not None
+            assert stream is not None
+            attn_out, (gate, _) = maybe_execute_in_parallel(
+                lambda: self._forward_attention_frontend(
+                    positions, hidden_states, llama_4_scaling
+                ),
+                lambda: g_proj(hidden_states),
+                events[0],
+                events[1],
+                stream,
+            )
+        else:
+            attn_out = self._forward_attention_frontend(
+                positions, hidden_states, llama_4_scaling
+            )
+            gate = g_proj(hidden_states)[0] if g_proj is not None else None
+
+        if gate is not None:
+            attn_out = attn_out * gate.sigmoid()
         return self.o_proj(attn_out)[0]
