@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import ast
-import importlib
 import json
-import sys
 from dataclasses import dataclass, field
+from re import _constants, _parser  # type: ignore[attr-defined]
 from typing import TYPE_CHECKING
 
 import torch
@@ -35,19 +34,6 @@ if TYPE_CHECKING:
 else:
     oc = LazyLoader("oc", globals(), "outlines_core")
     json_schema = LazyLoader("json_schema", globals(), "outlines_core.json_schema")
-
-# Python 3.11+ sre_parse and sre_constants
-# are deprecated, so we must import them from re
-if sys.version_info >= (3, 11):
-    # Hack to get around pre-commit regex module rule
-    # because going through re is the only way to get sre_parse
-    # and sre_constants in Python 3.11+
-    _re = importlib.import_module("re")
-    sre_parse = _re._parser
-    sre_constants = _re._constants
-else:
-    import sre_constants
-    import sre_parse
 
 
 @dataclass
@@ -261,20 +247,20 @@ def _prefix_needs_context(parsed) -> bool:
         tokens = parsed.data if hasattr(parsed, "data") else parsed
         for ttype, tval in tokens:
             # literal, character class, or dot always consumes
-            if ttype in (sre_parse.LITERAL, sre_parse.IN, sre_parse.ANY):
+            if ttype in (_parser.LITERAL, _parser.IN, _parser.ANY):
                 return True
             # quantified subpattern: check inner pattern
-            elif ttype == sre_parse.MAX_REPEAT:
+            elif ttype == _parser.MAX_REPEAT:
                 _, mx, sub = tval
                 if mx != 0 and subpattern_consumes(sub):
                     return True
             # alternation: if any branch consumes, the whole does
-            elif ttype == sre_parse.BRANCH:
+            elif ttype == _parser.BRANCH:
                 _, branches = tval
                 if any(subpattern_consumes(br) for br in branches):
                     return True
             # grouped subpattern: recurse into its contents
-            elif ttype == sre_parse.SUBPATTERN and subpattern_consumes(tval[3]):
+            elif ttype == _parser.SUBPATTERN and subpattern_consumes(tval[3]):
                 return True
         # No consumers, return False
         return False
@@ -282,14 +268,11 @@ def _prefix_needs_context(parsed) -> bool:
     tokens = parsed.data if hasattr(parsed, "data") else parsed
     for ttype, tval in tokens:
         # Direct anchors or look-around
-        if ttype == sre_parse.AT or ttype in (
-            sre_constants.ASSERT,
-            sre_constants.ASSERT_NOT,
-        ):
+        if ttype == _parser.AT or ttype in (_constants.ASSERT, _constants.ASSERT_NOT):
             return True
 
         # Nested subpattern: check
-        if ttype == sre_parse.SUBPATTERN:
+        if ttype == _parser.SUBPATTERN:
             # tval: (group, add_flags, del_flags, subpattern)
             if _prefix_needs_context(tval[3]):
                 return True
@@ -298,7 +281,7 @@ def _prefix_needs_context(parsed) -> bool:
 
         # if any branch has a prefix anchor => True,
         # else if at least one branch consumes => prefix ends => False
-        elif ttype == sre_parse.BRANCH:
+        elif ttype == _parser.BRANCH:
             saw_consumer = False
             for br in tval[1]:
                 if _prefix_needs_context(br):
@@ -309,11 +292,11 @@ def _prefix_needs_context(parsed) -> bool:
                 return False
 
         # Immediate consumer tokens
-        elif ttype in (sre_parse.LITERAL, sre_parse.IN, sre_parse.ANY):
+        elif ttype in (_parser.LITERAL, _parser.IN, _parser.ANY):
             return False
 
         # if subpattern has anchor => True, if it can consume => stop
-        elif ttype == sre_parse.MAX_REPEAT:
+        elif ttype == _parser.MAX_REPEAT:
             if _prefix_needs_context(tval[2]):
                 return True
             if subpattern_consumes(tval[2]):
@@ -327,25 +310,25 @@ def _check_unsupported(parsed) -> None:
     tokens = parsed.data if hasattr(parsed, "data") else parsed
     for ttype, tval in tokens:
         # backreference
-        if ttype in (sre_parse.GROUPREF, sre_parse.GROUPREF_EXISTS):
+        if ttype in (_parser.GROUPREF, _parser.GROUPREF_EXISTS):
             raise ValueError("Backreferences are unsupported.")
 
         # look-around assertion
-        elif ttype in (sre_constants.ASSERT, sre_constants.ASSERT_NOT):
+        elif ttype in (_constants.ASSERT, _constants.ASSERT_NOT):
             raise ValueError("Look-Around assertion are unsupported.")
 
         # unicode word boundaries
-        elif ttype == sre_parse.AT:
-            if tval in (sre_constants.AT_BOUNDARY, sre_constants.AT_NON_BOUNDARY):
+        elif ttype == _parser.AT:
+            if tval in (_constants.AT_BOUNDARY, _constants.AT_NON_BOUNDARY):
                 raise ValueError("Unicode word boundaries are unsupported.")
 
-        elif ttype == sre_parse.BRANCH:
+        elif ttype == _parser.BRANCH:
             # tval is (None, branches)
             for branch in tval[1]:
                 _check_unsupported(branch)
 
         # tval is (min, max, subpattern)
-        elif ttype == sre_parse.MAX_REPEAT:
+        elif ttype == _parser.MAX_REPEAT:
             _check_unsupported(tval[2])
 
 
@@ -357,9 +340,9 @@ def validate_regex_is_buildable(pattern: str) -> None:
     https://docs.rs/regex-automata/latest/regex_automata/dfa/trait.Automaton.html#method.universal_start_state
     """
     try:
-        parsed = sre_parse.parse(pattern)
+        parsed = _parser.parse(pattern)
 
-    except sre_constants.error as e:
+    except _constants.error as e:
         raise VLLMValidationError(f"Error parsing regex: {e}") from e
 
     try:
