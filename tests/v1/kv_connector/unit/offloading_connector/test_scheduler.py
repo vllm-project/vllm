@@ -3574,12 +3574,19 @@ class TestEagle:
             for gc, gs in zip(scheduler.config.kv_group_configs, state.group_states):
                 count = state.storable_chunks(gc, gs, end)
                 start = gs.next_stored_chunk_idx
-                mask = scheduler._reachable_store_block_mask(
-                    gc,
-                    start,
-                    count,
-                    None if gc.is_eagle_group else prompt_tokens // gc.tokens_per_chunk,
-                    (),
+                # Compare with the manager's ordinary alignment mask, before
+                # the scheduler adds the EAGLE replay window.
+                mask = gc.manager_cls.reachable_block_mask(
+                    start_block=start,
+                    end_block=count,
+                    alignment_tokens=scheduler.config.alignment_tokens,
+                    kv_cache_spec=gc.kv_cache_spec,
+                    use_eagle=gc.is_eagle_group,
+                    final_segment_end_block=(
+                        None
+                        if gc.is_eagle_group
+                        else prompt_tokens // gc.tokens_per_chunk
+                    ),
                 )
                 ordinary_keys.update(
                     gs.offload_keys[i]
@@ -3661,7 +3668,6 @@ class TestEagle:
         assert supplemental == expected_supplemental
         assert decode_keys <= decode_allowed
         assert not state.transfer_jobs
-        assert state.eagle_replay_boundaries[-1] == expected_hit
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_full_attn_store_excludes_trailing_decode_block(

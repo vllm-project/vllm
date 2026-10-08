@@ -150,27 +150,6 @@ def get_sliding_window_size_in_chunks(
     return None
 
 
-def is_eagle_replay_boundary_swa_chunk(
-    absolute_chunk_index: int,
-    storable_chunk_count: int,
-    replay_boundary_tokens: int | None,
-    tokens_per_chunk: int,
-    sliding_window_chunks: int | None,
-    is_eagle_group: bool,
-) -> bool:
-    """Return whether an SWA chunk is needed at the EAGLE replay boundary."""
-    if (
-        replay_boundary_tokens is None
-        or replay_boundary_tokens <= 0
-        or sliding_window_chunks is None
-    ):
-        return False
-    boundary_chunk_count = cdiv(replay_boundary_tokens, tokens_per_chunk)
-    window_start = max(0, boundary_chunk_count - sliding_window_chunks)
-    window_end = boundary_chunk_count + int(is_eagle_group)
-    return window_start <= absolute_chunk_index < min(window_end, storable_chunk_count)
-
-
 def resolve_mamba_align_size(
     spec: "OffloadingSpec", kv_cache_config: KVCacheConfig
 ) -> int | None:
@@ -205,6 +184,7 @@ class SchedulerOffloadConfig(NamedTuple):
     alignment_tokens: int | None = None
     retention_interval: int | None = None
     dcp_world_size: int = 1
+    eagle_tokens_per_chunk: tuple[int, ...] = ()
 
     @classmethod
     def from_spec(
@@ -363,6 +343,11 @@ class SchedulerOffloadConfig(NamedTuple):
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
             dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            eagle_tokens_per_chunk=tuple(
+                sorted(
+                    {c.tokens_per_chunk for c in kv_group_configs if c.is_eagle_group}
+                )
+            ),
         )
 
 
@@ -401,11 +386,6 @@ class RequestOffloadState:
     partial_tail_boundary: int | None = None
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
-    # Candidate shared replay boundaries while EAGLE/MTP groups remove their
-    # volatile tails. They are computed once from the prompt-final offloadable
-    # count before the first store so chunked prefill can retain each window as
-    # its chunks become storable.
-    eagle_replay_boundaries: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -515,58 +495,6 @@ class RequestOffloadState:
                 group_state.next_stored_chunk_idx,
                 self.storable_chunks(group_config, group_state, num_offloadable_tokens),
             )
-
-    def maybe_set_eagle_replay_boundaries(
-        self,
-        lookup_groups: tuple[int, ...],
-        has_sliding_window: bool,
-        mamba_align_size: int | None,
-    ) -> None:
-        """Anchor EAGLE replay boundaries to the prompt extent once."""
-        if self.eagle_replay_boundaries is not None:
-            return
-
-        prompt_offloadable_tokens = self.req.num_prompt_tokens
-        if self.max_offload_tokens is not None:
-            prompt_offloadable_tokens = min(
-                prompt_offloadable_tokens, self.max_offload_tokens
-            )
-        if not any(
-            group_config.is_eagle_group for group_config in self.config.kv_group_configs
-        ):
-            self.eagle_replay_boundaries = ()
-            return
-
-        boundary = prompt_offloadable_tokens
-        if has_sliding_window:
-            boundary = max(0, boundary - 1)
-            if mamba_align_size is not None:
-                boundary = round_down(boundary, mamba_align_size)
-
-        boundaries: list[int] = []
-        # Mirror the all-hit lookup path. Its SWA query window ends at the
-        # boundary after dropping the EAGLE tail, plus one peek chunk.
-        for group_idx in lookup_groups:
-            group_config = self.config.kv_group_configs[group_idx]
-            tokens_per_chunk = group_config.tokens_per_chunk
-            available_chunks = prompt_offloadable_tokens // tokens_per_chunk
-            query_boundary = boundary
-            if group_config.is_eagle_group:
-                query_boundary += tokens_per_chunk
-            queried_chunks = min(
-                cdiv(query_boundary, tokens_per_chunk), available_chunks
-            )
-            if group_config.is_eagle_group:
-                queried_chunks = max(0, queried_chunks - 1)
-            new_boundary = min(boundary, queried_chunks * tokens_per_chunk)
-            if (
-                group_config.sliding_window_size_in_chunks is not None
-                and new_boundary not in boundaries
-            ):
-                boundaries.append(new_boundary)
-            boundary = new_boundary
-
-        self.eagle_replay_boundaries = tuple(boundaries)
 
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
         for group_config, group_state in zip(
@@ -1545,7 +1473,7 @@ class OffloadingConnectorScheduler:
                 ),
                 extra_retained_tokens=0,
             )
-        return group_config.manager_cls.reachable_block_mask(
+        block_mask = group_config.manager_cls.reachable_block_mask(
             start_block=start_chunk_idx * blocks_per_chunk,
             end_block=end_chunk_idx * blocks_per_chunk,
             alignment_tokens=self.config.alignment_tokens,
@@ -1560,6 +1488,43 @@ class OffloadingConnectorScheduler:
                 else None
             ),
         )
+        if (
+            block_mask is None
+            or final_segment_end_chunk_idx is None
+            or not isinstance(kv_cache_spec, SlidingWindowSpec)
+        ):
+            return block_mask
+
+        chunk_sizes = (
+            (group_config.tokens_per_chunk,)
+            if group_config.is_eagle_group
+            else self.config.eagle_tokens_per_chunk
+        )
+        for eagle_chunk_size in chunk_sizes:
+            horizon_tokens = final_segment_end_chunk_idx * group_config.tokens_per_chunk
+            if self.config.alignment_tokens is not None:
+                horizon_tokens = min(
+                    horizon_tokens,
+                    round_down(horizon_tokens, self.config.alignment_tokens)
+                    + eagle_chunk_size,
+                )
+            horizon_tokens = round_down(horizon_tokens, eagle_chunk_size)
+            if not group_config.is_eagle_group:
+                horizon_tokens = max(0, horizon_tokens - eagle_chunk_size)
+            # The drafter needs the peek chunk in addition to its replay window.
+            peek = int(group_config.is_eagle_group)
+            window = group_config.load_window_size_in_chunks(
+                horizon_tokens - peek * group_config.tokens_per_chunk
+            )
+            assert window is not None
+            end = cdiv(horizon_tokens, group_config.tokens_per_chunk)
+            start = max(start_chunk_idx, end - window - peek)
+            for chunk_idx in range(start, min(end_chunk_idx, end)):
+                offset = (chunk_idx - start_chunk_idx) * blocks_per_chunk
+                block_mask[offset : offset + blocks_per_chunk] = [
+                    True
+                ] * blocks_per_chunk
+        return block_mask
 
     def _final_swa_alignment_blocks(
         self, group_config: GroupOffloadConfig
@@ -1607,11 +1572,6 @@ class OffloadingConnectorScheduler:
             prompt_offloadable_tokens = self._calc_num_offloadable_tokens(
                 req_status, req.num_prompt_tokens
             )
-            req_status.maybe_set_eagle_replay_boundaries(
-                self._lookup_groups,
-                bool(self._sliding_window_groups),
-                self._mamba_align_size,
-            )
 
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
@@ -1644,9 +1604,9 @@ class OffloadingConnectorScheduler:
                     and self.config.retention_interval is None
                     and final_swa_alignment_blocks is not None
                 )
-                if (
-                    self.config.retention_interval is not None
-                    or group_config.is_eagle_group
+                if self.config.retention_interval is not None or (
+                    group_config.is_eagle_group
+                    and num_offloadable_tokens > prompt_offloadable_tokens
                 ):
                     store_horizon_chunks = None
                 elif req.is_finished():
@@ -1731,24 +1691,10 @@ class OffloadingConnectorScheduler:
                         continue
                     # A chunk is reachable if any of its constituent
                     # blocks is reachable.
-                    ordinarily_reachable = block_mask is None or any(
+                    if block_mask is not None and not any(
                         block_mask[key_idx * blocks_per_chunk + b]
                         for b in range(blocks_per_chunk)
-                    )
-                    replay_boundary_reachable = any(
-                        is_eagle_replay_boundary_swa_chunk(
-                            abs_chunk_idx,
-                            num_chunks,
-                            replay_boundary,
-                            group_config.tokens_per_chunk,
-                            group_config.load_window_size_in_chunks(replay_boundary),
-                            group_config.is_eagle_group,
-                        )
-                        for replay_boundary in (
-                            req_status.eagle_replay_boundaries or ()
-                        )
-                    )
-                    if not ordinarily_reachable and not replay_boundary_reachable:
+                    ):
                         continue
                     new_offload_keys.append(offload_key)
 
