@@ -282,7 +282,7 @@ def maybe_make_prepare_finalize(
             and quant_config.is_block_quantized
         )
         all_to_all_args = dict(
-            num_max_tokens_per_rank=moe.max_num_tokens,
+            num_max_tokens_per_rank=moe.deepep_v2_max_num_tokens_per_rank,
             hidden=moe.hidden_dim,
             num_topk=moe.experts_per_token,
             num_experts=moe.num_experts,

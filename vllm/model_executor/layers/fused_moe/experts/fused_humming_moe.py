@@ -259,15 +259,21 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         )
 
     def _get_permute_scratch(
-        self, topk: int, indices_only: bool = False
+        self,
+        topk: int,
+        indices_only: bool = False,
+        hidden_dtype: torch.dtype | None = None,
     ) -> MoEPermuteScratch | None:
         if not moe_permute_unpermute_supported():
             return None
 
+        max_num_tokens = self.moe_config.max_num_tokens
+        dispatch_group_size = self.moe_config.dp_size
+        if self.moe_config.use_deepep_v2_kernels:
+            max_num_tokens = self.moe_config.deepep_v2_max_num_tokens_per_rank
+            dispatch_group_size = self.moe_config.ep_size
         max_expanded_rows = (
-            self.moe_config.max_num_tokens
-            * self.moe_config.dp_size
-            * self.moe_config.experts_per_token
+            max_num_tokens * dispatch_group_size * self.moe_config.experts_per_token
         )
         return get_moe_permute_scratch(
             max_num_tokens=math.ceil(max_expanded_rows / topk),
@@ -276,7 +282,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             num_local_experts=self.moe_config.num_local_experts,
             device=torch.device(self.moe_config.device),
             hidden_size=None if indices_only else self.moe_config.hidden_dim,
-            hidden_dtype=None if indices_only else self.moe_config.in_dtype,
+            hidden_dtype=(
+                None if indices_only else (hidden_dtype or self.moe_config.in_dtype)
+            ),
         )
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
@@ -926,7 +934,9 @@ class HummingGroupedExperts(HummingExpertsBase):
                 n_expert=global_num_experts,
                 n_local_expert=self.num_experts,
                 expert_map=expert_map,
-                scratch=self._get_permute_scratch(topk_ids.size(1)),
+                scratch=self._get_permute_scratch(
+                    topk_ids.size(1), hidden_dtype=hidden_states.dtype
+                ),
             )
             scatter_idx = None
             num_valid_tokens = None
