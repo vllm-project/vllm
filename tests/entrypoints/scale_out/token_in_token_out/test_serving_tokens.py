@@ -139,10 +139,6 @@ async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="sampling mask output is not supported by the Rust frontend",
-)
 @pytest.mark.parametrize(
     "server",
     [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
@@ -184,6 +180,110 @@ async def test_generate_sampling_mask(client):
         for top in entry["top_logprobs"]:
             in_support = top["token_id"] in support
             assert in_support == (top["logprob"] > -9999.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "server",
+    [
+        [
+            "--return-sampling-mask",
+            "--return-sampling-mask-logprobs",
+            "--logprobs-mode",
+            "processed_logprobs",
+        ]
+    ],
+    indirect=True,
+)
+async def test_generate_sampling_mask_logprobs(client, stream):
+    top_k = 20
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": 4,
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "top_k": top_k,
+            "ignore_eos": True,
+            "seed": 42,
+        },
+        "stream": stream,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    responses = (
+        [
+            json.loads(line[6:])
+            for line in resp.text.splitlines()
+            if line.startswith("data: {")
+        ]
+        if stream
+        else [resp.json()]
+    )
+    choices = [choice for response in responses for choice in response["choices"]]
+    token_ids = [token for choice in choices for token in choice.get("token_ids") or []]
+    masks = [row for choice in choices for row in choice.get("sampling_mask") or []]
+    scores = [
+        row for choice in choices for row in choice.get("sampling_mask_logprobs") or []
+    ]
+    assert len(token_ids) == len(masks) == len(scores) == 4
+    for token_id, mask, logprobs in zip(token_ids, masks, scores, strict=True):
+        assert 0 < len(mask) <= top_k
+        assert token_id in mask
+        assert len(mask) == len(logprobs)
+        assert np.exp(logprobs).sum() == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [
+        [
+            "--return-sampling-mask",
+            "--return-sampling-mask-logprobs",
+            "--logprobs-mode",
+            "processed_logprobs",
+        ]
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize("top_k", [-1, 4096], ids=["disabled", "above-cap"])
+async def test_generate_sampling_mask_logprobs_preserves_unbounded_support(
+    client, top_k
+):
+    """Pure top-p and large top-k retain complete paired support."""
+    resp = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": 4,
+                "temperature": 1.0,
+                "top_p": 0.9,
+                "top_k": top_k,
+                "ignore_eos": True,
+            },
+        },
+    )
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    assert (
+        len(choice["token_ids"])
+        == len(choice["sampling_mask"])
+        == len(choice["sampling_mask_logprobs"])
+        == 4
+    )
+    for token_id, mask, scores in zip(
+        choice["token_ids"],
+        choice["sampling_mask"],
+        choice["sampling_mask_logprobs"],
+        strict=True,
+    ):
+        assert token_id in mask and len(mask) == len(scores)
+        assert np.exp(scores).sum() == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio

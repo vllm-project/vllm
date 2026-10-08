@@ -52,6 +52,7 @@ class Sampler:
         use_fp64_gumbel: bool = False,
         enable_trace_replay: bool = False,
         return_sampling_mask: bool = False,
+        return_sampling_mask_logprobs: bool = False,
         custom_logits_processors: Sequence[LogitsProcessor] = (),
     ):
         self.logprobs_mode = logprobs_mode
@@ -88,6 +89,7 @@ class Sampler:
         self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
+        self.return_sampling_mask_logprobs = return_sampling_mask_logprobs
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
         )
@@ -204,6 +206,7 @@ class Sampler:
                 input_batch.cu_num_logits,
                 num_sampled,
                 max_num_kept,
+                return_logprobs=self.return_sampling_mask_logprobs,
             )
 
         # These are GPU tensors.

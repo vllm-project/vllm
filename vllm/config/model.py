@@ -298,6 +298,8 @@ class ModelConfig:
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
+    return_sampling_mask_logprobs: bool = False
+    """Whether to return normalized logprobs aligned with sampling-mask IDs."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -495,6 +497,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "return_sampling_mask",
+            "return_sampling_mask_logprobs",
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
@@ -1084,6 +1087,10 @@ class ModelConfig:
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
         """Called after __post_init__."""
+        if self.return_sampling_mask_logprobs and not self.return_sampling_mask:
+            raise ValueError(
+                "return_sampling_mask_logprobs requires return_sampling_mask"
+            )
         if not isinstance(self.tokenizer, str):
             raise ValueError(
                 f"tokenizer must be a string, got "

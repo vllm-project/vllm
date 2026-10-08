@@ -91,6 +91,49 @@ def test_sampling_mask_lists_slices_multiple_positions_by_request():
     assert multi.cu_num_generated_tokens is None
 
 
+def test_sampling_mask_lists_keep_logprobs_aligned_on_request_slice():
+    mask = SamplingMaskLists(
+        token_ids=np.array([10, 11, 20]),
+        offsets=np.array([0, 2, 3]),
+        logprobs=np.array([-0.3, -1.4, 0.0]),
+    )
+    sliced = mask.slice_request(1, 1)
+    assert sliced.token_ids.tolist() == [20]
+    assert sliced.logprobs.tolist() == [0.0]
+
+
+@pytest.mark.parametrize(
+    "counts,expected_ids",
+    [
+        ([2, 0, 1], [[0, 2], [], [1]]),
+        ([3, 3, 3], [[0, 2, 3], [5, 6, 7], [1, 4, 8]]),
+        ([2, 5, 3], [[0, 2], [5, 6, 7, 8, 9], [1, 4, 8]]),
+    ],
+    ids=["below-capacity", "at-capacity", "tie-overflow"],
+)
+def test_sampling_mask_logprobs_tolists_preserves_complete_rows(counts, expected_ids):
+    """Convert padded IDs/scores without truncating support rows."""
+    token_ids = torch.tensor(
+        [[0, 2, 3, 4, 5], [5, 6, 7, 8, 9], [1, 4, 8, 10, 11]], dtype=torch.int32
+    )
+    logprobs = -token_ids.float() / 10
+    tensors = SamplingMaskTensors(
+        token_ids=token_ids,
+        packed_mask=torch.empty((3, 0), dtype=torch.uint8),
+        counts=torch.tensor(counts, dtype=torch.int32),
+        vocab_size=16,
+        logprobs=logprobs,
+    )
+
+    mask = tensors.to_cpu_nonblocking().tolists()
+
+    assert mask.to_nested_list() == expected_ids
+    expected_logprobs = [-t / 10 for row in expected_ids for t in row]
+    assert mask.logprobs.tolist() == pytest.approx(expected_logprobs)
+    sliced = mask.slice_request(2, 1)
+    assert sliced.token_ids.tolist() == expected_ids[2]
+
+
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
 @pytest.mark.skipif(
     current_platform.is_xpu(),
@@ -196,6 +239,101 @@ def test_sampling_mask_tensors_multirow_request_layout():
     assert tensors.rows_per_request == rows_per_request
     assert result.to_nested_list() == expected
     assert result.cu_num_generated_tokens == [0, 1, 3, 7, 7]
+
+
+@pytest.mark.parametrize("max_num_kept", [5, 6])
+def test_sampling_mask_logprobs_match_processed_distribution(max_num_kept):
+    """Paired logprobs are the log-softmax over the processed logits (i.e.
+    normalized over the nucleus), aligned with the support ids, whether the
+    support fills the fixed-capacity row or not."""
+    logits = torch.tensor([[6.0, 5.0, 4.0, 3.0, 2.0, 1.0]], device=DEVICE_TYPE)
+    processed = apply_top_k_top_p(
+        logits,
+        k=torch.tensor([5], device=DEVICE_TYPE),
+        p=torch.tensor([0.9], device=DEVICE_TYPE),
+    )
+    tensors = SamplingMaskTensors.from_logits(
+        processed,
+        torch.tensor([0, 1], device=DEVICE_TYPE, dtype=torch.int32),
+        torch.tensor([1], device=DEVICE_TYPE),
+        max_num_kept=max_num_kept,
+        return_logprobs=True,
+    )
+    assert tensors.token_ids.shape == (1, logits.shape[1])
+    assert tensors.logprobs is not None
+    assert tensors.logprobs.shape == (1, logits.shape[1])
+    assert tensors.packed_mask.shape == (1, 0)
+
+    mask = tensors.to_cpu_nonblocking().tolists()
+
+    expected_ids = torch.isfinite(processed[0]).nonzero().flatten()
+    expected_scores = torch.log_softmax(processed[0], dim=-1)[expected_ids]
+    assert mask.token_ids.tolist() == expected_ids.tolist()
+    torch.testing.assert_close(torch.from_numpy(mask.logprobs), expected_scores.cpu())
+    assert np.exp(mask.logprobs).sum() == pytest.approx(1.0)
+
+
+def test_sampling_mask_logprobs_preserves_support_beyond_compact_capacity():
+    """Paired support stays complete above the compact-only capacity."""
+    from vllm.v1.worker.gpu.sample.output import MAX_COMPACT_SUPPORT
+
+    vocab_size = 10_000
+    support_sizes = [0, 1, MAX_COMPACT_SUPPORT, MAX_COMPACT_SUPPORT + 1, 40]
+    logits = torch.full((len(support_sizes), vocab_size), float("-inf"))
+    generator = torch.Generator().manual_seed(0)
+    expected_ids = []
+    expected_scores = []
+    for row, size in enumerate(support_sizes):
+        token_ids = torch.randperm(vocab_size, generator=generator)[:size].sort().values
+        logits[row, token_ids] = torch.randn(size, generator=generator)
+        expected_ids.append(token_ids.tolist())
+        expected_scores.append(torch.log_softmax(logits[row], dim=-1)[token_ids])
+    num_sampled = torch.tensor([0, 1, 1, 1, 1])
+    expected_ids[0] = []
+
+    tensors = SamplingMaskTensors.from_logits(
+        logits.to(DEVICE_TYPE),
+        torch.arange(len(support_sizes) + 1, device=DEVICE_TYPE, dtype=torch.int32),
+        num_sampled.to(DEVICE_TYPE),
+        max_num_kept=vocab_size,
+        return_logprobs=True,
+    )
+    assert tensors.token_ids.shape == (len(support_sizes), vocab_size)
+    assert tensors.packed_mask.shape[1] == 0
+
+    result = tensors.to_cpu_nonblocking().tolists()
+
+    nested = result.to_nested_list()
+    for row, size in enumerate(support_sizes):
+        assert nested[row] == expected_ids[row]
+        start, end = result.offsets[row : row + 2]
+        torch.testing.assert_close(
+            torch.from_numpy(result.logprobs[start:end]), expected_scores[row][:size]
+        )
+
+
+def test_sampling_mask_logprobs_preserves_top_k_boundary_ties():
+    """Keep every boundary-tie token together with its probability."""
+    processed_logits = torch.tensor(
+        [[6.0, 5.0, 4.0, 4.0, 4.0, float("-inf"), float("-inf"), float("-inf")]],
+        device=DEVICE_TYPE,
+    )
+    result = (
+        SamplingMaskTensors.from_logits(
+            processed_logits,
+            cu_num_logits=torch.tensor([0, 1], device=DEVICE_TYPE, dtype=torch.int32),
+            num_sampled_tokens=torch.tensor([1], device=DEVICE_TYPE),
+            max_num_kept=3,
+            return_logprobs=True,
+        )
+        .to_cpu_nonblocking()
+        .tolists()
+    )
+    assert result.to_nested_list() == [[0, 1, 2, 3, 4]]
+    torch.testing.assert_close(
+        torch.from_numpy(result.logprobs),
+        torch.log_softmax(processed_logits[0], -1)[:5].cpu(),
+    )
 
 
 def test_sampling_mask_preserves_top_k_boundary_ties():

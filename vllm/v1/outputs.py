@@ -65,6 +65,7 @@ class SamplingMaskLists(NamedTuple):
     offsets: np.ndarray | None = None
     # [num_requests + 1] for multi-position request batches.
     cu_num_generated_tokens: list[int] | None = None
+    logprobs: np.ndarray | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
         assert self.offsets is not None
@@ -72,10 +73,11 @@ class SamplingMaskLists(NamedTuple):
         start = req_idx if cu is None else cu[req_idx]
         end = start + num_positions
         lo, hi = self.offsets[start], self.offsets[end]
+        scores = self.logprobs[lo:hi] if self.logprobs is not None else None
         if num_positions == 1:
-            return SamplingMaskLists(self.token_ids[lo:hi])
+            return SamplingMaskLists(self.token_ids[lo:hi], logprobs=scores)
         return SamplingMaskLists(
-            self.token_ids[lo:hi], self.offsets[start : end + 1] - lo
+            self.token_ids[lo:hi], self.offsets[start : end + 1] - lo, logprobs=scores
         )
 
     def to_nested_list(self) -> list[list[int]]:
@@ -84,6 +86,14 @@ class SamplingMaskLists(NamedTuple):
             return [token_ids]
         offsets = self.offsets.tolist()
         return [token_ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
+
+    def to_nested_logprobs(self) -> list[list[float]]:
+        assert self.logprobs is not None
+        logprobs = self.logprobs.tolist()
+        if self.offsets is None:
+            return [logprobs]
+        offsets = self.offsets.tolist()
+        return [logprobs[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
 
 
 class LogprobsTensors(NamedTuple):

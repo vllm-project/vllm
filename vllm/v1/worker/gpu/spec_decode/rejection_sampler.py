@@ -389,6 +389,7 @@ class RejectionSampler:
                         num_sampled,
                         max_num_kept,
                         self.num_speculative_steps + 1,
+                        return_logprobs=self.sampler.return_sampling_mask_logprobs,
                     )
                 )
             del processed_logits

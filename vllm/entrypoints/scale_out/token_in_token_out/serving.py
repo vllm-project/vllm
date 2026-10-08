@@ -518,8 +518,10 @@ class ServingTokens(GenerateBaseServing):
             )
 
             sampling_mask = None
+            sampling_mask_logprobs = None
             if output.sampling_mask is not None:
                 sampling_mask = output.sampling_mask.token_ids
+                sampling_mask_logprobs = output.sampling_mask.logprobs
 
             choice_fields: dict[str, Any] = dict(
                 index=output.index,
@@ -530,6 +532,7 @@ class ServingTokens(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
                 weight_versions=output.weight_versions,
+                sampling_mask_logprobs=sampling_mask_logprobs,
             )
             if derender_mode:
                 derender_choice_fields.append(choice_fields)
@@ -570,6 +573,7 @@ class ServingTokens(GenerateBaseServing):
                     fields["logprobs"] = None
                     fields["token_ids"] = None
                     fields["sampling_mask"] = None
+                    fields["sampling_mask_logprobs"] = None
                 derender_choices.append(
                     GenerateDerenderChoice(message=message, **fields)
                 )
@@ -803,6 +807,11 @@ class ServingTokens(GenerateBaseServing):
                         routed_experts=routed_experts_b64,
                         sampling_mask=sampling_mask,
                         weight_versions=output.weight_versions,
+                        sampling_mask_logprobs=(
+                            output.sampling_mask.logprobs
+                            if output.sampling_mask is not None
+                            else None
+                        ),
                     )
                     choice: GenerateStreamChoiceBase
                     if derender_mode:
