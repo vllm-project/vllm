@@ -11,13 +11,14 @@ logits (task="generate").
 import asyncio
 import math
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import Mapping
 from typing import Literal
 
 from fastapi import Request
 from pydantic import Field
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
@@ -28,7 +29,6 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
@@ -37,7 +37,6 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
-from vllm.utils.async_utils import merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -271,37 +270,28 @@ class ServingGenerativeScoring(BaseServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
-        # Schedule requests for all inputs
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
         for i, engine_input in enumerate(engine_inputs):
-            request_id_item = f"{request_id}-{i}"
-
             self._log_inputs(
-                request_id_item,
+                f"{request_id}-{i}",
                 engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
 
-            generator = self.engine_client.generate(
-                engine_input,
-                sampling_params,
-                request_id_item,
+        try:
+            reads = await next_token_label_reads(
+                self.engine_client,
+                engine_inputs,
+                [sampling_params] * len(engine_inputs),
+                request_id,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=request.priority,
             )
-            generators.append(generator)
-
-        # Collect results
-        result_generator = merge_async_iterators(*generators)
-        results: list[RequestOutput | None] = [None] * len(engine_inputs)
-
-        try:
-            async for i, res in result_generator:
-                results[i] = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except ValueError as e:
+            return self.create_error_response(e)
         except Exception as e:
             logger.exception("Error during generation")
             return self.create_error_response(e)
@@ -311,45 +301,8 @@ class ServingGenerativeScoring(BaseServing):
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
-        for i, result in enumerate(results):
-            if result is None:
-                return self.create_error_response(
-                    f"Failed to generate result for item {i}"
-                )
-
-            # Check for errors
-            if result.outputs and result.outputs[0].finish_reason == "error":
-                return self.create_error_response(f"Generation error for item {i}")
-
-            # Get logprobs from the generated token
-            if not result.outputs or len(result.outputs) == 0:
-                return self.create_error_response(f"No output generated for item {i}")
-
-            output = result.outputs[0]
-            if output.logprobs is None or len(output.logprobs) == 0:
-                return self.create_error_response(
-                    f"No logprobs available for item {i}. "
-                    "This might indicate an issue with logprobs configuration."
-                )
-
-            # The logprobs dict maps token_id -> Logprob object
-            # For logprobs=-1, this contains all vocab tokens
-            logprobs_dict = output.logprobs[0]
-
-            # Extract logprobs for label tokens
-            label_logprobs: dict[int, float] = {}
-            missing_tokens = []
-            for token_id in request.label_token_ids:
-                if token_id in logprobs_dict:
-                    label_logprobs[token_id] = logprobs_dict[token_id].logprob
-                else:
-                    missing_tokens.append(token_id)
-
-            if missing_tokens:
-                return self.create_error_response(
-                    f"Token IDs {missing_tokens} not found in logprobs for item {i}. "
-                    "This might indicate the tokens are outside the model's vocabulary."
-                )
+        for i, read in enumerate(reads):
+            label_logprobs = dict(zip(request.label_token_ids, read.logprobs))
 
             # Compute probabilities based on apply_softmax setting
             token_probs = self._compute_probabilities(
@@ -370,7 +323,7 @@ class ServingGenerativeScoring(BaseServing):
 
             # Update token counts
             total_prompt_tokens += prompt_token_counts[i]
-            total_completion_tokens += len(output.token_ids)
+            total_completion_tokens += len(read.result.outputs[0].token_ids)
 
         # Build response
         model_name = self.models.model_name(lora_request)
