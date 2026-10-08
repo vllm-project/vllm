@@ -104,21 +104,18 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
             round-trips.
 
     """
-    import transformers
-
-    if int(transformers.__version__.split(".")[0]) >= 5:
-        init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
-        think_begin_as_special = init_kwargs.get(
-            "model_specific_special_tokens", {}
-        ).get("think_begin_token", "")
-        if think_begin_as_special:
-            raise RuntimeError(
-                "This checkpoint declares HYV4 structural tokens (think_begin_token"
-                "/toolcalls_begin_token/argkey_begin_token) in "
-                "tokenizer_config.json, which transformers 5 no longer supports. "
-                "Remove those fields and keep the tokens in the tokenizer's own "
-                "token definitions so the suffix can be read from the vocab."
-            )
+    init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
+    think_begin_as_special = init_kwargs.get("model_specific_special_tokens", {}).get(
+        "think_begin_token", ""
+    )
+    if think_begin_as_special:
+        raise RuntimeError(
+            "This checkpoint declares HYV4 structural tokens (think_begin_token"
+            "/toolcalls_begin_token/argkey_begin_token) in "
+            "tokenizer_config.json, which transformers 5 no longer supports. "
+            "Remove those fields and keep the tokens in the tokenizer's own "
+            "token definitions so the suffix can be read from the vocab."
+        )
 
     structural_token_re = re.compile(
         r"<(?:think|tool_calls|tool_call|arg_key|arg_value)(:[^\s>]+)?>"
@@ -382,6 +379,8 @@ class HYV4ToolExtractor:
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
+        # exact JSON text already sent to the client
+        self._streamed_json_prefix: str = ""
 
         self.tool_calls_start_token: str = f"<tool_calls{token_suffix}>"
         self.tool_calls_end_token: str = f"</tool_calls{token_suffix}>"
@@ -575,6 +574,29 @@ class HYV4ToolExtractor:
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
+        self._streamed_json_prefix = ""
+
+    def get_remaining_unstreamed_args(self) -> str:
+        """Return the shortest suffix that closes the streamed arguments.
+
+        Incremental streaming withholds the closing ``}`` until
+        ``</tool_call>`` arrives, and never closes a string value that is
+        still being streamed.  When generation ends early (max_tokens, a stop
+        sequence, client disconnect) the caller holds an unterminated JSON
+        fragment.  Return the suffix that makes the text already streamed
+        parse; the truncated tail of an open string is what the model
+        actually produced and has already been sent.
+        """
+        prefix = self._streamed_json_prefix
+        if self._streaming_tool_name is None or not prefix:
+            return ""
+        for suffix in ("", "}", '"}'):
+            try:
+                json.loads(prefix + suffix)
+            except ValueError:
+                continue
+            return suffix
+        return ""
 
     def extract_tool_calls_streaming(
         self,
@@ -912,6 +934,7 @@ class HYV4ToolExtractor:
             if end > self._streamed_json_len:
                 argument_diff = snapshot[self._streamed_json_len : end]
                 self._streamed_json_len = end
+            self._streamed_json_prefix = snapshot[:end]
 
         # --- construct return dict ---
         if name_new and argument_diff:
@@ -1113,18 +1136,10 @@ class HYV4ToolParser(ToolParser):
         )
 
     def get_remaining_unstreamed_args(self) -> str:
-        """At stream end, close out an in-flight tool call whose arguments
-        were partially streamed: emit the JSON tail that incremental
-        streaming intentionally withheld (e.g. the closing '}'), so a stream
-        truncated by max_tokens/stop still yields parseable arguments instead
-        of an unterminated JSON fragment."""
-        extractor = self._extractor
-        if extractor._streaming_tool_name is None or not extractor._completed_args:
-            return ""
-        final_json = json.dumps(extractor._completed_args, ensure_ascii=False)
-        if extractor._streamed_json_len < len(final_json):
-            return final_json[extractor._streamed_json_len:]
-        return ""
+        """At stream end, close out a tool call whose arguments were only
+        partially streamed -- see
+        ``HYV4ToolExtractor.get_remaining_unstreamed_args``."""
+        return self._extractor.get_remaining_unstreamed_args()
 
     def extract_tool_calls_streaming(
         self,
