@@ -2976,10 +2976,6 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         if num_invalid_spec_tokens:
             num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
-        if num_verified_draft_tokens is not None:
-            # Grammar-invalid drafts are a suffix and the verified drafts a
-            # prefix, so this keeps exactly the verified drafts that are valid.
-            num_verified_draft_tokens = min(num_verified_draft_tokens, num_draft_tokens)
         spec_decoding_stats.observe_draft_stats_per_req(
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted_tokens,
