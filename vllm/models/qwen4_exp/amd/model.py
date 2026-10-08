@@ -783,6 +783,11 @@ class Qwen4ExpForCausalLM(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def compute_top_k_logits(
+        self, hidden_states: torch.Tensor, k: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.logits_processor.get_top_k_tokens(self.lm_head, hidden_states, k)
+
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         return self.model._mtp_hidden_buffer
 
