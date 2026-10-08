@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Annotated, Any
+from dataclasses import field
+from typing import Annotated, Any, cast
 
 import regex as re
 from pydantic import (
@@ -73,20 +74,39 @@ QuantKeyField = Annotated[
     ),
 ]
 
+_UNSET = cast(QuantKey | None, object())
+
 
 @config
 class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
 
-    `None` on either side means the method class falls back to its own default
-    (typically inherited from the checkpoint, or unquantized for online).
+    An omitted activation falls back to the method's default. An explicit
+    ``activation: null`` requests unquantized activations.
     """
 
-    weight: QuantKeyField = None
+    weight: QuantKeyField = _UNSET
     """Weight quantization key, or a name from QUANT_KEY_NAMES."""
 
-    activation: QuantKeyField = None
+    activation: QuantKeyField = _UNSET
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
+
+    _fields_set: frozenset[str] = field(init=False, repr=False, compare=False)
+    """Names explicitly provided when constructing this spec."""
+
+    def __post_init__(self) -> None:
+        fields_set = set()
+        for field_name in ("weight", "activation"):
+            if getattr(self, field_name) is _UNSET:
+                setattr(self, field_name, None)
+            else:
+                fields_set.add(field_name)
+        self._fields_set = frozenset(fields_set)
+
+    @property
+    def fields_set(self) -> frozenset[str]:
+        """Names explicitly provided when constructing this spec."""
+        return self._fields_set
 
     def __str__(self) -> str:
         def quant_key_str(quant_key: QuantKey | None) -> str:

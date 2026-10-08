@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for QuantizationConfigArgs parsing."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kMxfp4Dynamic,
     kMxfp8Dynamic,
     kNvfp4DynamicToken,
     kNvfp4Static,
@@ -43,6 +45,11 @@ def test_quant_spec_accepts_quant_key_directly():
     spec = QuantSpec(weight=kFp8StaticTensorSym)
     assert spec.weight is kFp8StaticTensorSym
     assert spec.activation is None
+
+
+def test_quant_spec_distinguishes_explicit_null_activation():
+    assert "activation" not in quant_spec(weight="mxfp4").fields_set
+    assert "activation" in QuantSpec(activation=None).fields_set
 
 
 def test_quant_spec_string_representation_uses_quantization_name():
@@ -149,6 +156,21 @@ def test_resolve_activation_override(quantization, activation, expected):
     assert args is not None
     assert args.linear is None
     assert args.moe == QuantSpec(weight=None, activation=expected)
+
+
+def test_explicit_null_moe_activation_overrides_checkpoint(default_vllm_config):
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        _resolve_activation_key,
+    )
+
+    args = resolve_quantization_config(None, {"moe": {"activation": None}})
+    default_vllm_config.model_config = SimpleNamespace(quantization_config=args)
+    assert _resolve_activation_key(kMxfp4Dynamic) is None
+
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=QuantizationConfigArgs(moe=QuantSpec())
+    )
+    assert _resolve_activation_key(kMxfp4Dynamic) == kMxfp4Dynamic
 
 
 def test_resolve_merges_explicit_over_shorthand():

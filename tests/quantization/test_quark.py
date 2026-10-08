@@ -23,6 +23,7 @@ from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig, CacheDType
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
@@ -1089,6 +1090,42 @@ def test_quant_method_dispatch_mxfp8_moe_raises(default_vllm_config):
 
 
 @pytest.mark.parametrize(
+    ("activation_spec", "expected_scheme", "expected_backend"),
+    [
+        ({}, "w_mxfp4_a_mxfp4", "AITER_MXFP4_MXFP4"),
+        ({"activation": None}, "w_mxfp4", "AITER_MXFP4_BF16"),
+    ],
+)
+def test_quark_mxfp4_explicit_null_activation_selects_bf16(
+    default_vllm_config,
+    monkeypatch,
+    activation_spec,
+    expected_scheme,
+    expected_backend,
+):
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4
+    from vllm.model_executor.layers.quantization.quark import quark_moe
+
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=QuantizationConfigArgs(moe=activation_spec),
+        hf_config=SimpleNamespace(model_type="minimax_m3_vl"),
+    )
+    moe = _make_test_moe_config()
+    moe.moe_backend = "aiter"
+    monkeypatch.setattr(
+        mxfp4,
+        "_return_or_raise",
+        lambda backend, *args, **kwargs: (backend, object),
+    )
+    monkeypatch.setattr(quark_moe, "backend_to_kernel_cls", lambda backend: [object])
+
+    method = quark_moe.QuarkOCP_MX_MoEMethod(moe, kMxfp4Static, kMxfp4Dynamic)
+
+    assert method.ocp_mx_scheme == expected_scheme
+    assert method.mxfp4_backend.value == expected_backend
+
+
+@pytest.mark.parametrize(
     ("weight", "input_tensors"),
     [
         pytest.param(
@@ -1139,6 +1176,7 @@ def test_quant_method_dispatch_unsupported(weight, input_tensors):
     ids=lambda case: case.name,
 )
 def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_config):
+    default_vllm_config.model_config = SimpleNamespace(quantization_config=None)
     config = _make_qtensor_config(case.weight, case.input_tensors)
     assert case.dispatch_cls is not None
     if issubclass(case.dispatch_cls, QuarkScheme):
