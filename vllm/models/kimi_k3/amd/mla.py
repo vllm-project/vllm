@@ -373,15 +373,19 @@ class KimiK3DSparkMLAAttention(MLAAttention):
         )
 
     def _num_decode_tokens(self, attn_metadata: MLACommonMetadata | None) -> int:
-        if attn_metadata is not None:
-            return attn_metadata.num_decode_tokens or 0
-        raw = get_forward_context().attn_metadata
-        if isinstance(raw, dict):
-            attn_metadata = raw.get(self.layer_name)
-        elif isinstance(raw, list):
-            attn_metadata = raw[0].get(self.layer_name)
-        else:
-            attn_metadata = raw
+        if attn_metadata is None:
+            # ForwardContext stores the base AttentionMetadata. This layer's
+            # entry is MLACommonMetadata, which carries the decode split.
+            raw = get_forward_context().attn_metadata
+            if isinstance(raw, dict):
+                attn_metadata = cast(MLACommonMetadata | None, raw.get(self.layer_name))
+            elif isinstance(raw, list):
+                # list[dict]: speculative decoding, [0] is the base model.
+                attn_metadata = cast(
+                    MLACommonMetadata | None, raw[0].get(self.layer_name)
+                )
+            else:
+                attn_metadata = cast(MLACommonMetadata | None, raw)
         if attn_metadata is None:
             return 0
         return attn_metadata.num_decode_tokens or 0
