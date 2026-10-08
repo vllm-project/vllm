@@ -268,8 +268,8 @@ class cmake_build_ext(build_ext):
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
         cmake_args = [
-            "-DCMAKE_BUILD_TYPE={}".format(cfg),
-            "-DVLLM_TARGET_DEVICE={}".format(VLLM_TARGET_DEVICE),
+            f"-DCMAKE_BUILD_TYPE={cfg}",
+            f"-DVLLM_TARGET_DEVICE={VLLM_TARGET_DEVICE}",
         ]
 
         verbose = envs.VERBOSE
@@ -293,7 +293,7 @@ class cmake_build_ext(build_ext):
 
         # Pass the python executable to cmake so it can find an exact
         # match.
-        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(sys.executable)]
+        cmake_args += [f"-DVLLM_PYTHON_EXECUTABLE={sys.executable}"]
 
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
@@ -305,7 +305,7 @@ class cmake_build_ext(build_ext):
         # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
-        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
+        cmake_args += [f"-DFETCHCONTENT_BASE_DIR={fc_base_dir}"]
 
         #
         # Setup parallelism and build tool
@@ -313,13 +313,13 @@ class cmake_build_ext(build_ext):
         num_jobs, nvcc_threads = self.compute_num_jobs()
 
         if nvcc_threads:
-            cmake_args += ["-DNVCC_THREADS={}".format(nvcc_threads)]
+            cmake_args += [f"-DNVCC_THREADS={nvcc_threads}"]
 
         if is_ninja_available():
             build_tool = ["-G", "Ninja"]
             cmake_args += [
                 "-DCMAKE_JOB_POOL_COMPILE:STRING=compile",
-                "-DCMAKE_JOB_POOLS:STRING=compile={}".format(num_jobs),
+                f"-DCMAKE_JOB_POOLS:STRING=compile={num_jobs}",
             ]
         else:
             # Default build tool to whatever cmake picks.
@@ -1461,7 +1461,7 @@ if _is_cuda() or _is_hip():
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
-if not _is_xpu() and sys.version_info >= (3, 11):
+if not _is_xpu():
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
     ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 

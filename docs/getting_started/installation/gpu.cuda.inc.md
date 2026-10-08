@@ -143,13 +143,8 @@ You can find more information about vLLM's wheels in [Install the latest code](#
 #### Full build (with compilation) {#full-build}
 
 !!! note "Compiler requirement"
-    Building from source requires GCC/G++ ≥ 11.3. PyTorch's C++20 headers are
-    not compatible with GCC 10 or GCC < 11.3. On Ubuntu 22.04:
-    ```bash
-    sudo apt-get install -y gcc-11 g++-11
-    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 \
-        --slave /usr/bin/g++ g++ /usr/bin/g++-11
-    ```
+    Building from source requires GCC/G++ ≥ 13 ([#58158](https://github.com/vllm-project/vllm/issues/58158)).
+    Ubuntu 24.04, the base of the default vLLM image, ships GCC 13 by default.
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
@@ -441,6 +436,11 @@ mode on VR200 and R100.
 BuildKit does not automatically invalidate cached layers when a mutable Git
 ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
+
+Set `BUILD_NIXL=true` to build NIXL from source. NIXL's release wheels do not
+include the NIXL EP extension for the PyTorch nightly used by the Rubin build.
+The build uses the NIXL version pinned in `requirements/kv_connectors.txt` and
+replaces the NIXL packages installed from the KV-connector requirements.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
