@@ -766,12 +766,8 @@ def split_decodes_prefills_and_extends(
     if not torch.any(is_prefill_or_extend):
         return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
 
-    # Everything from first_prefill onwards is counted as a prefill without being
-    # re-checked, and the prefill path never reads the KV cache. If the batch is
-    # misordered, a request with computed context lands there and silently attends
-    # to its current chunk only -- well-formed output, wrong logits. Fail loudly
-    # instead. Zero-length rows are padding and carry no context, so they are
-    # excluded rather than tripping this.
+    # Precondition of the positional split below: nothing after first_prefill may
+    # carry context. Zero-length rows are padding, not requests.
     if __debug__ and torch.any(is_prefill):
         _has_context = (seq_lens != query_lens) & (query_lens > 0)
         _stray = _has_context[first_prefill:]

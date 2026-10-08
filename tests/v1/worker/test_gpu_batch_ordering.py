@@ -10,11 +10,9 @@ prefill.
 Conversely, a prompt chunk of exactly decode_query_len tokens has a decode
 batch's shape, and must not be classified as a uniform decode batch.
 
-split_decodes_prefills_and_extends assumes more: that requests carrying
-computed context precede those carrying none, since it takes the first
-context-less request as the start of the prefills. A context-less request
-sorted in front of one part-way through a long prompt makes that request a
-prefill, and the prefill path never reads the KV cache.
+split_decodes_prefills_and_extends assumes more: that requests carrying computed
+context precede those carrying none, since it takes the first context-less
+request as the start of the prefills and does not re-check the rest.
 """
 
 import ast
@@ -254,8 +252,7 @@ def test_spec_decodes_lead_short_prefill_tail():
 
 
 def test_context_carrying_requests_lead_context_less_ones():
-    # Same token count, so only computed context can separate them: the
-    # request part-way through its prompt must not sort behind a fresh one.
+    # Same token count, so only computed context can separate them.
     num_tokens_per_req = {"fresh": 4096, "resumed": 4096}
     req_id_to_index = {"fresh": 0, "resumed": 1}
     num_computed = np.array([0, 100_000], dtype=np.int32)
@@ -267,13 +264,7 @@ def test_context_carrying_requests_lead_context_less_ones():
 
 
 def test_extends_precede_prefills_through_the_splitter():
-    """The chunk with context must be classified as an extend, not a prefill.
-
-    split_decodes_prefills_and_extends takes the first context-less request as
-    the start of the prefills and does not re-check the rest, so the ordering
-    is what keeps the context-carrying request off the prefill path -- which
-    never reads the KV cache and would silently drop its history.
-    """
+    """The chunk with context must be classified as an extend, not a prefill."""
     num_tokens_per_req = {"fresh": 4096, "resumed": 4096, "d0": 1}
     req_id_to_index = {"fresh": 0, "resumed": 1, "d0": 2}
     num_computed = np.array([0, 100_000, 32], dtype=np.int32)
@@ -295,10 +286,8 @@ def test_extends_precede_prefills_through_the_splitter():
 
     assert classify(req_ids) == (1, 1, 1)
 
-    # Ordering context-less first is what the classifier cannot recover from:
-    # "resumed" would fall on the prefill side of the boundary and lose its KV
-    # history. The splitter now asserts the precondition rather than returning a
-    # well-formed but wrong answer, so the misordering is loud.
+    # Misordered, "resumed" falls on the prefill side and loses its KV history.
+    # The splitter raises rather than returning a well-formed but wrong answer.
     with pytest.raises(AssertionError, match="extends-before-prefills"):
         classify(["d0", "fresh", "resumed"])
 
@@ -306,12 +295,9 @@ def test_extends_precede_prefills_through_the_splitter():
 def test_ordering_holds_for_the_dcp_splitter_threshold():
     """The same ordering must satisfy the splitter's other caller.
 
-    split_dcp_context_queries (vllm/v1/worker/cp_utils.py) calls
-    split_decodes_prefills_and_extends with the default decode_threshold=1,
-    not decode_query_len. With spec decode a context-less chunk of exactly
-    decode_query_len tokens is decode-shaped but is a prefill to that split,
-    so leaving it among the decodes puts it at first_prefill and sweeps every
-    extend behind it onto the prefill path, which never reads the KV cache.
+    split_dcp_context_queries (vllm/v1/worker/cp_utils.py) splits at the default
+    decode_threshold=1, where a context-less chunk of exactly decode_query_len
+    tokens is a prefill rather than a decode.
     """
     decode_query_len = 4
     num_tokens_per_req = {"fresh": 4, "extend": 4096, "d0": 4}

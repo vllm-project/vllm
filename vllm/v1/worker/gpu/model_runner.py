@@ -2391,28 +2391,12 @@ def sort_batch_req_ids(
     req_id_to_index: dict[str, int] | None = None,
 ) -> list[str]:
     # Order verification/decode -> short_extend -> extend -> prefill.
-    # split_decodes_and_prefills relies on decode-like requests leading, and
-    # split_decodes_prefills_and_extends additionally relies on requests that
-    # have computed context preceding those that have none: it takes the first
-    # context-less request as the start of the prefills and does not re-check
-    # the rest, so a context-less request sorted ahead of one with context
-    # makes that request a prefill, and the prefill path never reads the KV
-    # cache.
-    #
-    # The context term precedes the decode-length term rather than following it,
-    # because the same splitter is called from two places with different
-    # thresholds. split_dcp_context_queries uses the default decode_threshold=1,
-    # and to it a context-less chunk of exactly decode_query_len tokens is not a
-    # decode but a prefill, so leaving such a chunk among the decodes puts it at
-    # first_prefill and sweeps every extend behind it onto the prefill path.
-    #
-    # Ordering it after the extends is also what this module's classifier already
-    # requires: a prompt chunk of exactly decode_query_len tokens has a decode
-    # batch's shape but must not be counted as a uniform decode.
-    #
-    # num > 1 keeps genuine single-token requests out of this term, which is what
-    # bounds the change: without that guard the decode boundary moves on roughly
-    # three times as many batches.
+    # split_decodes_prefills_and_extends takes the first context-less request as
+    # the start of the prefills and does not re-check the rest, and the prefill
+    # path never reads the KV cache, so a context-less request sorted ahead of one
+    # with context silently drops that request's history. The context term
+    # precedes the decode-length term because split_dcp_context_queries splits at
+    # decode_threshold=1, where a context-less decode_query_len chunk is a prefill.
     def key(r: str) -> tuple[bool, bool, bool, int]:
         num = num_tokens_per_req[r]
         # seq_len == query_len in the classifier, i.e. no computed context.
@@ -2423,7 +2407,7 @@ def sort_batch_req_ids(
         )
         return (
             not draft_tokens.get(r),
-            num > 1 and no_context,
+            num > 1 and no_context,  # single-token requests stay with the decodes
             num != decode_query_len,
             num,
         )
