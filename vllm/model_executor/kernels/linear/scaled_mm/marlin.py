@@ -85,6 +85,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Apply the FP8 Marlin linear kernel using the runtime input width."""
         if self.block_quant:
             weight_scale = getattr(layer, self._block_scale_name(layer))
         else:

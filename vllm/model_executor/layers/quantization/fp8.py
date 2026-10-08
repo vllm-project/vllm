@@ -236,12 +236,14 @@ class _Fp8SubBlockWeightParameter(ModelWeightParameter):
         padded_output_sizes: list[int],
         **kwargs,
     ):
+        """Track logical and padded dimensions for sub-block FP8 weight loading."""
         self.logical_input_size = logical_input_size
         self.logical_output_sizes = logical_output_sizes
         self.padded_output_sizes = padded_output_sizes
         super().__init__(**kwargs)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        """Load the logical input shard into the padded weight destination."""
         dst = self.data.narrow(self.input_dim, 0, self.logical_input_size)
         dst.copy_(
             loaded_weight.narrow(
@@ -252,6 +254,7 @@ class _Fp8SubBlockWeightParameter(ModelWeightParameter):
         )
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        """Load the logical output shard without filling padded rows."""
         if self.padded_output_sizes == self.logical_output_sizes:
             return super().load_column_parallel_weight(loaded_weight)
         logical_size = self.logical_output_sizes[0]
@@ -262,6 +265,7 @@ class _Fp8SubBlockWeightParameter(ModelWeightParameter):
         )
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        """Load one merged output shard at its padded destination offset."""
         if self.padded_output_sizes == self.logical_output_sizes:
             return super().load_merged_column_weight(loaded_weight, **kwargs)
         shard_id = self._shard_id_as_int(kwargs["shard_id"])
@@ -287,6 +291,7 @@ class _Fp8SubBlockScaleParameter(BlockQuantScaleParameter):
         block_k: int,
         **kwargs,
     ):
+        """Track the checkpoint block grid and logical tensor-parallel dimensions."""
         self.logical_input_size = logical_input_size
         self.logical_output_sizes = logical_output_sizes
         self.padded_output_sizes = padded_output_sizes
@@ -295,6 +300,7 @@ class _Fp8SubBlockScaleParameter(BlockQuantScaleParameter):
         super().__init__(**kwargs)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        """Load the checkpoint scale block covering this input shard."""
         src_offset = self.tp_rank * self.logical_input_size // self.block_k
         self.data.copy_(
             loaded_weight.narrow(
@@ -303,6 +309,7 @@ class _Fp8SubBlockScaleParameter(BlockQuantScaleParameter):
         )
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        """Load the checkpoint scale blocks covering this output shard."""
         if self.padded_output_sizes == self.logical_output_sizes:
             return super().load_column_parallel_weight(loaded_weight)
         logical_size = self.logical_output_sizes[0]
@@ -314,6 +321,7 @@ class _Fp8SubBlockScaleParameter(BlockQuantScaleParameter):
         )
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        """Load scale blocks for one merged output shard into its padded grid."""
         if self.padded_output_sizes == self.logical_output_sizes:
             return super().load_merged_column_weight(loaded_weight, **kwargs)
         shard_id = self._shard_id_as_int(kwargs["shard_id"])
@@ -395,6 +403,7 @@ class Fp8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        """Allocate FP8 weights and scales with safe sub-block TP padding."""
         logical_input_size = input_size_per_partition
         logical_output_sizes = output_partition_sizes
         padded_input_size = logical_input_size
@@ -536,6 +545,7 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Convert loaded weights and scales into the selected kernel layout."""
         if is_weights_pre_processed():
             # Weights are already in runtime format; the only state tensor
             # export cannot carry is the `input_scale = None` stamp that dynamic
@@ -608,6 +618,7 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Apply FP8 linear weights and discard padded output dimensions."""
         input_padding = layer.fp8_sub_block_input_padding
         if input_padding:
             x = torch.nn.functional.pad(x, (0, input_padding))
@@ -741,6 +752,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         act_dtype: torch.dtype,
         moe_parallel_config,
     ) -> tuple[int, int]:
+        """Round native-grid expert partitions while preserving refined block grids."""
         hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
             hidden_size,
             intermediate_size_per_partition,
@@ -772,6 +784,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        """Allocate expert weights and scales on the selected FP8 block grid."""
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None

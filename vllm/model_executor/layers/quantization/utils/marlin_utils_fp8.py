@@ -105,6 +105,7 @@ def prepare_fp8_layer_for_marlin(
     size_k_first: bool = True,
     input_dtype: torch.dtype | None = None,
 ) -> None:
+    """Pad and repack FP8 linear weights and scales for Marlin execution."""
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "

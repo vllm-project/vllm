@@ -536,6 +536,7 @@ class RoutedExperts(PluggableLayer):
     ):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
+        """Load one gate or up-projection tensor-parallel checkpoint shard."""
         if self.moe_config.is_act_and_mul:
             shard_size = expert_data.shape[shard_dim] // 2
         else:
@@ -600,6 +601,7 @@ class RoutedExperts(PluggableLayer):
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Padded TP weights have already been sliced by the grouped loader.
+        """Load one down-projection tensor-parallel checkpoint shard."""
         if not load_full and loaded_weight.ndim > 0:
             # Same padding fix as _load_w13: use unpadded per-rank size.
             if is_block_scale:
@@ -718,6 +720,7 @@ class RoutedExperts(PluggableLayer):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
+        """Load an expert parameter using its projection and quantization layout."""
         quant_config_name = self.quant_config and self.quant_config.get_name()
         if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
