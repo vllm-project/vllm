@@ -73,6 +73,8 @@ class PoolingParams(
             `None` uses the pooler's default, which is `True` in most cases.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
+        late_chunking_params: Mean-pool contextual token states into fixed-size
+            chunks for the token embedding task.
 
     """
 
@@ -97,8 +99,11 @@ class PoolingParams(
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
+    ## for token embedding models
+    # --8<-- [start:token-embed-pooling-params]
     late_chunking_params: LateChunkingParams | None = None
     """Mean-pool contextual tokens into fixed-size chunks for `token_embed`."""
+    # --8<-- [end:token-embed-pooling-params]
 
     @property
     def all_parameters(self) -> list[str]:
