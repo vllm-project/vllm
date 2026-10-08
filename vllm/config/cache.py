@@ -275,15 +275,13 @@ class CacheConfig:
     KV offloading is only activated when kv_offloading_size is set."""
 
     def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+        """Compute a stable hash of compilation-relevant cache settings.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        All dataclass fields are included by default, except those listed
+        in `ignored_factors` because they do not affect the compiled graph.
+
+        When adding a new field, exclude it only if it is safe to omit
+        from the compilation cache key.
         """
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
