@@ -99,7 +99,15 @@ class BeamSearchOnlineMixin(ABC):
                 )
                 tasks.append(task)
 
-            output = [x[0] for x in await asyncio.gather(*tasks)]
+            try:
+                output = [x[0] for x in await asyncio.gather(*tasks)]
+            except BaseException:
+                # gather does not cancel siblings when one candidate fails.
+                # Wait for their cleanup so engine requests are aborted too.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
             for result in output:
                 # check for error finish reason and abort beam search

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from collections.abc import Callable, Sequence
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -148,6 +149,68 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
     assert outputs[0].outputs[0].finish_reason == "stop"
     assert outputs[0].outputs[0].token_ids == []
     assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-0.1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_beam_search_cleans_up_siblings_after_failure(
+    monkeypatch, error_type: type[BaseException]
+) -> None:
+    """A failed candidate must not leave another engine request running."""
+    sibling_started = asyncio.Event()
+    sibling_closed = asyncio.Event()
+    tasks: list[asyncio.Task[Any]] = []
+
+    async def generate(prompt, *args, **kwargs):
+        if len(prompt["prompt_token_ids"]) == 1:
+            result = await anext(_EngineClient().generate(prompt, *args, **kwargs))
+            result.outputs[0].logprobs = [{11: Logprob(-0.1), 12: Logprob(-0.2)}]
+            yield result
+            return
+
+        task = asyncio.current_task()
+        assert task is not None
+        tasks.append(task)
+        if prompt["prompt_token_ids"][-1] == 11:
+            await sibling_started.wait()
+            raise error_type("beam failed")
+
+        try:
+            sibling_started.set()
+            await asyncio.Event().wait()
+        finally:
+            # Cleanup may itself need to yield, as when aborting an engine request.
+            await asyncio.sleep(0)
+            sibling_closed.set()
+
+    serving = _AsyncServing()
+    monkeypatch.setattr(serving.engine_client, "generate", generate)
+    prompt: TokensInput = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+    output = serving.beam_search(
+        prompt,
+        "request",
+        BeamSearchParams(
+            beam_width=2, max_tokens=2, ignore_eos=True, watermarking=False
+        ),
+    )
+    try:
+        with pytest.raises(error_type, match="beam failed"):
+            await asyncio.wait_for(anext(output), timeout=2)
+        cleaned_up = sibling_closed.is_set()
+        pending = [task for task in tasks if not task.done()]
+    finally:
+        # Keep the regression safe to run against the unfixed implementation.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await output.aclose()
+
+    assert cleaned_up, "Sibling cleanup did not finish before failure propagated"
+    assert not pending, "A beam request was left running after beam search failed"
 
 
 @pytest.mark.asyncio
