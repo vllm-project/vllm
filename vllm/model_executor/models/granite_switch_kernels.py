@@ -415,7 +415,7 @@ def _switch_lora_expand_kernel(
     out_ptrs = XExt + m_range[:, None] * stride_xe_m + n_range[None, :] * stride_xe_n
     store_mask = row_active[:, None] & mask_n[None, :]
     existing = tl.load(out_ptrs, mask=store_mask, other=0.0).to(tl.float32)
-    tl.store(out_ptrs, (existing + delta).to(tl.bfloat16), mask=store_mask)
+    tl.store(out_ptrs, (existing + delta).to(XExt.dtype.element_ty), mask=store_mask)
 
 
 def _granite_switch_lora_expand(
