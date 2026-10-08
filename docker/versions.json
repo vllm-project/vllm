@@ -37,6 +37,9 @@
     "INSTALL_KV_CONNECTORS": {
       "default": "false"
     },
+    "BUILD_NIXL": {
+      "default": "false"
+    },
     "SCCACHE_BUCKET_NAME": {
       "default": "vllm-build-sccache"
     },
