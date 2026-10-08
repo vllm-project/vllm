@@ -108,9 +108,12 @@ def _resolve_gdn_prefill_backend(
     * Blackwell (SM10.x) with ``head_k_dim == 128``;
 
     AITER FlyDSL GDN prefill kernels are chosen when:
-    * "aiter_flydsl" is requested; (opt-in only)
+    * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
     * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
     * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
+
+    Under "auto", a model or build FlyDSL cannot serve stays on Triton/FLA
+    without a warning; only an explicit "aiter_flydsl" request fails closed.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -154,6 +157,17 @@ def _resolve_gdn_prefill_backend(
                 )
                 return backend, "triton"
             return backend, "aiter_flydsl"
+        if backend == "auto":
+            from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+            if (
+                (on_gfx942() or on_gfx950())
+                and head_k_dim == 128
+                and head_v_dim == 128
+                and vllm_config.model_config.dtype == torch.bfloat16
+                and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
+            ):
+                return backend, "aiter_flydsl"
         return backend, "triton"
 
     if backend == "aiter_flydsl":

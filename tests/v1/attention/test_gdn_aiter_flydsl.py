@@ -35,7 +35,7 @@ def _make_config(
     )
 
 
-def _resolve_on_rocm(config, *, kernels_available: bool = True):
+def _resolve_on_rocm(config, *, kernels_available: bool = True, arch: str = "gfx950"):
     with (
         patch.object(
             qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=True
@@ -45,6 +45,8 @@ def _resolve_on_rocm(config, *, kernels_available: bool = True):
             "is_gdn_flydsl_prefill_available",
             return_value=kernels_available,
         ),
+        patch("vllm.platforms.rocm.on_gfx942", return_value=arch == "gfx942"),
+        patch("vllm.platforms.rocm.on_gfx950", return_value=arch == "gfx950"),
     ):
         return _resolve_gdn_prefill_backend(config)
 
@@ -72,16 +74,52 @@ def test_resolve_aiter_flydsl_gdn_prefill_backend(
     assert active == expected
 
 
-def test_kda_style_model_cannot_select_flydsl():
+@pytest.mark.parametrize(
+    "arch,kernels_available,head_k_dim,dtype,expected",
+    [
+        ("gfx942", True, 128, torch.bfloat16, "aiter_flydsl"),
+        ("gfx950", True, 128, torch.bfloat16, "aiter_flydsl"),
+        ("gfx90a", True, 128, torch.bfloat16, "triton"),
+        ("gfx950", False, 128, torch.bfloat16, "triton"),
+        ("gfx950", True, 64, torch.bfloat16, "triton"),
+        ("gfx950", True, 128, torch.float16, "triton"),
+    ],
+)
+def test_auto_defaults_to_flydsl_on_gfx942_and_gfx950(
+    arch: str,
+    kernels_available: bool,
+    head_k_dim: int,
+    dtype: torch.dtype,
+    expected: str,
+):
+    """Under auto, FlyDSL is the default where it was validated, and anything
+    it cannot serve stays on Triton instead of raising like an explicit request.
+    """
+    config = _make_config(backend="auto", head_k_dim=head_k_dim, dtype=dtype)
+
+    assert _resolve_on_rocm(config, kernels_available=kernels_available, arch=arch) == (
+        "auto",
+        expected,
+    )
+
+
+def test_explicit_triton_opts_out_of_flydsl_default():
+    config = _make_config(backend="triton")
+
+    assert _resolve_on_rocm(config) == ("triton", "triton")
+
+
+@pytest.mark.parametrize("backend", ["aiter_flydsl", "auto"])
+def test_kda_style_model_cannot_select_flydsl(backend: str):
     """Kimi K3 KDA reports head dims through linear_attn_config, not these.
 
     Its builder overrides _build_chunk_metadata, which the AITER path skips,
     so this pins the reason the two never meet: the resolver turns the model
-    down before the builder is ever constructed.
+    down before the builder is ever constructed, including by default.
     """
-    config = _make_config(head_k_dim=None, head_v_dim=None)
+    config = _make_config(backend=backend, head_k_dim=None, head_v_dim=None)
 
-    assert _resolve_on_rocm(config) == ("aiter_flydsl", "triton")
+    assert _resolve_on_rocm(config) == (backend, "triton")
 
 
 @pytest.mark.parametrize("on_rocm", [True, False], ids=["kernels_missing", "not_rocm"])
