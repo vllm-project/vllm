@@ -38,7 +38,10 @@ def decode_opencv(
         int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
     )
+    has_frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0
     source = loader_cls._prepare_source(OpenCVVideoBackendMixin.get_video_metadata(cap))
+    if not has_frame_count:
+        cap = OpenCVVideoBackendMixin.open_video_capture(data)
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
@@ -78,6 +81,14 @@ class OpenCVVideoBackendMixin:
     def get_video_metadata(cap: "cv2.VideoCapture") -> VideoSourceMetadata:
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
+        if total_frames_num <= 0:
+            total_frames_num = 0
+            while cap.grab():
+                total_frames_num += 1
+
+            if total_frames_num == 0:
+                raise ValueError("Could not determine the number of video frames")
+
         # CAP_PROP_FRAME_COUNT counts every physical sample in the container,
         # overstating the presentable frames when an mp4 edit list hides the
         # decode lead-in (e.g. a lossless `ffmpeg -ss ... -c copy` trim).

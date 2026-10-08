@@ -103,6 +103,34 @@ def create_long_gop_video(
     return buf.getvalue()
 
 
+def create_live_webm_video(
+    num_frames: int = 20,
+    fps: int = 10,
+    width: int = 64,
+    height: int = 64,
+) -> bytes:
+    """Encode a WebM stream without container duration or frame-count metadata."""
+    import io
+
+    import av
+
+    buf = io.BytesIO()
+    with av.open(buf, mode="w", format="webm", options={"live": "1"}) as container:
+        stream = container.add_stream("libvpx", rate=fps)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"
+        for i in range(num_frames):
+            img = np.zeros((height, width, 3), dtype=np.uint8)
+            img[:, :, 1] = i % 256
+            frame = av.VideoFrame.from_ndarray(img, format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return buf.getvalue()
+
+
 def create_edit_list_trimmed_video(
     num_frames: int = 90,
     trim_start_frame: int = 60,
