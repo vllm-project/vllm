@@ -1727,7 +1727,7 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("deduplicate_contexts", ["none", "single_turn", "all"])
 def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dtype):
-    """The fused CUDA `sample_parallel` is bit-exact with sampling step by step."""
+    """The fused CUDA `sample_block` is bit-exact with sampling step by step."""
     num_reqs, num_steps, vocab_size, max_num_reqs = 4, 5, 1500, 6
     generator = torch.Generator().manual_seed(0)
     # Tokens 0-2 dominate, so contexts repeat and deduplication fires.
@@ -1767,7 +1767,7 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
         args = (temperature, seeds)
         kwargs = dict(apply_temperature=True, is_drafting=True)
         if fused:
-            sampled = draft_watermarker.sample_parallel(
+            sampled = draft_watermarker.sample_block(
                 logits.view(-1, vocab_size),
                 idx_mapping,
                 *args,

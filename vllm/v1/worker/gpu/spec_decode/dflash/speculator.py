@@ -310,7 +310,7 @@ class DFlashSpeculator(DraftModelSpeculator):
     def _draft_sampler(self) -> Callable[..., torch.Tensor]:
         if self.draft_watermarker is None:
             return super()._draft_sampler()
-        return self.draft_watermarker.sample_parallel
+        return self.draft_watermarker.sample_block
 
     def _num_graph_context_tokens(self, num_reqs: int) -> int:
         # Context rows a captured draft step stores: one full verify per request.

@@ -3806,7 +3806,7 @@ def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
         draft_model_config=SimpleNamespace(architectures=[architecture]),
     )
 
-    with pytest.raises(ValueError, match="excluding DFlash2 and LiLiCorr"):
+    with pytest.raises(ValueError, match="candidate-head drafters"):
         config._check_supports_watermarking()
 
 
@@ -3820,7 +3820,7 @@ def test_dual_key_gumbel_rejects_unsupported_speculative_method():
         parallel_drafting=False,
     )
 
-    with pytest.raises(ValueError, match="excluding DFlash2 and LiLiCorr"):
+    with pytest.raises(ValueError, match="Watermarking supports only"):
         config._check_supports_watermarking()
 
 
