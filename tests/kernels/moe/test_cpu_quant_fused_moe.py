@@ -1118,7 +1118,7 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
 def test_int8_w8a8_cpu_fused_moe_small_expert_blocks(dtype):
     """Test INT8 dispatch at exact and multi-block expert boundaries."""
     set_random_seed(0)
-    block_sizes = (4, 5, 33)
+    block_sizes = (3, 4, 5, 33)
     N, K, E = 128, 128, len(block_sizes)
     M = sum(block_sizes)
 
