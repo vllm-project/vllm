@@ -403,6 +403,5 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
 
     scheduler.build_connector_meta(scheduler_output)
 
-    assert scheduler_output.block_table_updates is None
-    resident_ids = scheduler_output.scheduled_new_reqs[0].block_ids[2]
+    resident_ids = scheduler_output.block_table_updates[resumed.request_id][2]
     assert resident_ids[:3] == copy_ids[:3]
