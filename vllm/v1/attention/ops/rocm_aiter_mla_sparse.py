@@ -53,10 +53,8 @@ def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
 
     if not _ON_GFX942 or not rocm_aiter_ops.is_enabled():
         return None
-    try:
-        from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
-    except ImportError:
-        return None
+    from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+
     return pa_prefill_sparse
 
 
@@ -64,8 +62,9 @@ def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
 # gfx942 gate against the in-tree ragged prefill, not the gfx950 OPUS
-# crossover. MI325, H=16, D=512, bf16: AITER is behind through 256 rows at
-# fanout 128 and ahead from 512 rows at fanouts 128, 512, and 2048.
+# crossover. MI325, H=16, D=512, bf16: from 512 rows AITER is ahead at
+# fanouts 128, 512, and 2048. At 256 rows and fanout 128 the ratio is 1.04,
+# on a flat ~0.025 ms.
 _GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES = 512
 
 
