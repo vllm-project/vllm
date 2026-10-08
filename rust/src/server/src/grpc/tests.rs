@@ -1366,22 +1366,24 @@ async fn unary_generate_invalid_sampling_params_returns_invalid_argument() {
     )
     .await;
 
-    let status = client
-        .generate(pb::GenerateRequest {
-            request_id: "test-invalid-sampling".to_string(),
-            model: "test-model".to_string(),
-            prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
-            sampling: Some(pb::RandomSampling {
-                top_p: 2.0,
+    for top_p in [0.0, 2.0] {
+        let status = client
+            .generate(pb::GenerateRequest {
+                request_id: "test-invalid-sampling".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+                sampling: Some(pb::RandomSampling {
+                    top_p: Some(top_p),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
-        .expect_err("should fail when top_p is out of range");
+            })
+            .await
+            .expect_err("should fail when top_p is out of range");
 
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert!(status.message().contains("top_p"));
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("top_p"));
+    }
 
     server_task.abort();
 }
@@ -1519,8 +1521,8 @@ async fn unary_generate_with_sampling_params() {
             prompt: Some(pb::generate_request::Prompt::Text("test".to_string())),
             temperature: Some(0.7),
             sampling: Some(pb::RandomSampling {
-                top_k: 50,
-                top_p: 0.9,
+                top_k: Some(50),
+                top_p: Some(0.9),
                 seed: Some(42),
                 ..Default::default()
             }),
