@@ -860,9 +860,6 @@ class ParallelConfig:
             "nnodes",
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
-            # IPC-transport optimization for the engine->worker broadcast
-            # queue; doesn't change the computation graph or any compiled
-            # kernel, so it must not affect the compilation cache / DP hash.
             "enable_shm_tensor_arena",
             "ray_workers_use_nsight",
             "ray_runtime_env",

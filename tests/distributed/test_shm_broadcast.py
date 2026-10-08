@@ -841,15 +841,9 @@ def _make_arena(n_reader: int = 2, slot_bytes: int = 4 << 20, n_slots: int = 3):
 
 
 def _get_view(reader: ShmTensorArena, idx: int, ref: torch.Tensor) -> torch.Tensor:
-    """Like `_rebuild_arena_tensor`: build the zero-copy view and schedule
-    its release on that exact object, the same two calls the real unpickle
-    hook makes (`get_tensor` no longer schedules release itself -- see
-    `ShmTensorArena.schedule_release`)."""
-    t = reader.get_tensor(
+    return reader.get_tensor(
         idx, ref.numel() * ref.element_size(), ref.dtype, tuple(ref.shape)
     )
-    reader.schedule_release(t, idx)
-    return t
 
 
 def _drain(reader: ShmTensorArena) -> None:
@@ -897,8 +891,8 @@ def test_arena_dtype_roundtrip(dtype):
 def test_arena_slot_lifecycle():
     """A slot must not be reusable until EVERY reader has released it —
     the writer overwriting a slot a reader still consumes would corrupt data.
-    Release is tied to the returned tensor's own lifetime (`get_tensor`): a
-    reader that still holds its view keeps the slot reserved even across
+    Release is tied to the returned tensor's storage lifetime (`get_tensor`):
+    a reader that still holds its view keeps the slot reserved even across
     repeated `flush_releases()` calls, not just until the "next" one."""
     writer, readers = _make_arena(n_reader=2, n_slots=3)
     t = torch.ones(1000)
@@ -909,7 +903,7 @@ def test_arena_slot_lifecycle():
     assert writer.write_tensor(t) is None  # exhausted -> caller falls back
 
     # Flushing while both readers still hold their view releases nothing:
-    # the slot is only queued once the returned tensor is garbage-collected.
+    # the slot is only queued once the returned tensor's storage is freed.
     readers[0].flush_releases()
     readers[1].flush_releases()
     assert writer.write_tensor(t) is None
@@ -943,6 +937,25 @@ def test_arena_slot_not_released_while_tensor_retained_across_multiple_flushes()
     assert torch.equal(retained, t)
     # Only once the caller drops its reference is the slot released.
     del retained
+    _drain(reader)
+    assert writer.write_tensor(t) == idx
+
+
+def test_arena_slot_not_released_while_view_retained():
+    """A view/slice (or wrapper) sharing the returned tensor's storage keeps
+    the slot reserved even after the original tensor object is dropped."""
+    writer, (reader,) = _make_arena(n_reader=1, n_slots=1)
+    t = torch.arange(1000, dtype=torch.float32)
+    idx = writer.write_tensor(t)
+    view = _get_view(reader, idx, t)[10:20].unsqueeze(0)
+    param = torch.nn.Parameter(view, requires_grad=False)
+    del view
+    reader.flush_releases()
+    assert reader._pending_release == []
+    assert writer.write_tensor(t) is None
+    assert torch.equal(param[0], t[10:20])
+    del param
+    assert reader._pending_release == [idx]
     _drain(reader)
     assert writer.write_tensor(t) == idx
 
@@ -988,9 +1001,7 @@ def _dumps_arena(obj, arena: ShmTensorArena) -> tuple[bytes, list, list[int]]:
     """Pickle `obj` the same way `MessageQueue.enqueue` does when an arena is
     attached: arena diversion first (reducer_override), then the tensor
     dispatch table, with out-of-band buffers >= 1MiB. Also returns the slot
-    indices the arena actually wrote to, in write order (release is no longer
-    observable immediately from `arena._pending_release` -- see `get_tensor`
-    -- so tests that need the index must capture it at write time)."""
+    indices the arena actually wrote to, in write order."""
     buffers = []
 
     def callback(buf: pickle.PickleBuffer) -> bool:
@@ -1091,13 +1102,10 @@ def test_arena_pickler_excludes_requires_grad_and_conj(monkeypatch, case: str):
 
 def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
     """`torch.nn.Parameter` is diverted via its own `_rebuild_arena_parameter`
-    hook rather than falling through to `Parameter.__reduce_ex__`, which
-    would rebuild it from an intermediate tensor it keeps no Python
-    reference to. Regression test: scheduling release on that intermediate
-    tensor (instead of the constructed `Parameter`) would queue the slot the
-    instant it's collected, silently corrupting the still-live Parameter on
-    the next writer reuse -- the `_pending_release` assertions below catch
-    that even though `type(out) is torch.nn.Parameter` alone would not."""
+    hook, which wraps an intermediate tensor it keeps no Python reference to.
+    The slot must stay reserved while the Parameter is alive -- the
+    `_pending_release` assertions below check this even though
+    `type(out) is torch.nn.Parameter` alone would not."""
     writer, (reader,) = _make_arena(n_reader=1)
     monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
     monkeypatch.setitem(
@@ -1120,10 +1128,7 @@ def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
     assert type(out) is torch.nn.Parameter
     assert torch.equal(out, param)
     assert out.requires_grad == param.requires_grad
-    # Not yet queued for release: `out` -- the object that actually keeps
-    # the arena slot's data alive -- is still referenced here. Fails
-    # against the pre-fix code, where the intermediate tensor
-    # `_rebuild_parameter` wraps (and drops) had already queued it.
+    # Not yet queued for release: `out` still shares the slot's storage.
     assert reader._pending_release == []
     del out
     assert reader._pending_release == written
@@ -1296,10 +1301,8 @@ def worker_fn_arena_broadcast():
             arena.shared_memory.buf, dtype=torch.uint8
         ).data_ptr()
         assert arena_base <= huge_ptr < arena_base + arena.total_bytes
-        # Dropping the reference queues the slot for release (get_tensor's
-        # weakref.finalize) -- this is the fix for the corruption reported
-        # in review: release now tracks the tensor's own lifetime instead of
-        # a fixed "next dequeue" schedule.
+        # Dropping the last reference to the slot's storage queues it for
+        # release (see get_tensor).
         del received
         assert len(arena._pending_release) == 1
 

@@ -138,8 +138,7 @@ Note the exact-type dict lookup (not `isinstance`), matching how
 `dispatch_table` itself dispatches: an unrecognized `Tensor` subclass must
 decline here too, or it would come back as a plain `Tensor`, silently
 losing its subclass identity. `torch.nn.Parameter` is the one subclass this
-*does* divert safely, via its own rebuild function — see §2.3 for why that
-needs more than just handling the type-identity case.
+*does* divert, via its own rebuild function (§2.3).
 
 `reducer_override` is consulted before an object's normal reduction, and
 returning `NotImplemented` falls through to the `dispatch_table` — so a diverted
@@ -162,44 +161,16 @@ The stub unpickles through a module-level rebuild function:
 ```python
 def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
     arena = _TENSOR_ARENAS[arena_name]             # this process's registry of attached arenas
-    t = arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
-    # get_tensor: torch.frombuffer over the mapped slot — zero bytes copied
-    arena.schedule_release(t, slot_idx)            # see below — must be `t` itself here
-    return t
+    # get_tensor: a view over the mapped slot — zero bytes copied
+    return arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
 ```
 
-**The `torch.nn.Parameter` trap.** `get_tensor` and release scheduling are
-separate calls because they aren't always scheduled on the same object. For
-a plain tensor, `t` is exactly what the caller ends up holding. But
-`torch.nn.Parameter(data_tensor, requires_grad)` shares `data_tensor`'s
-storage at the C++ level **without keeping a Python reference to
-`data_tensor` itself** — enough for PyTorch, not enough for a
-`weakref.finalize` scheme that watches one specific Python object.
-Scheduling release on `data_tensor` would queue the slot the instant it's
-constructed (nothing references `data_tensor` anymore), while the
-`Parameter` — still a live zero-copy view into that slot — is what the
-caller actually holds; the writer could then overwrite the slot underneath
-it with no error raised anywhere.
-
-The arena closes this with a dedicated rebuild function for
-`torch.nn.Parameter` that schedules release on the constructed `Parameter`
-instead:
-
-```python
-def _rebuild_arena_parameter(arena_name, slot_idx, nbytes, dtype_str, shape):
-    arena = _TENSOR_ARENAS[arena_name]
-    t = arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
-    param = torch.nn.Parameter(t, requires_grad=False)
-    arena.schedule_release(param, slot_idx)        # schedule on `param`, not `t`
-    return param
-```
-
+`_rebuild_arena_parameter` wraps the same tensor in
+`torch.nn.Parameter(t, requires_grad=False)`, which shares its storage.
 `_ARENA_REBUILD_FNS = {torch.Tensor: _rebuild_arena_tensor, torch.nn.
 Parameter: _rebuild_arena_parameter}` is the full set of types the arena
-knows how to divert correctly today; anything else (any other `Tensor`
-subclass) declines in `reducer_override` and takes the out-of-band path,
-which needs no such scheme — `_reduce_tensor` never constructs a new
-wrapper object around its payload.
+diverts; anything else (any other `Tensor` subclass) declines in
+`reducer_override` and takes the out-of-band path.
 
 The registry is keyed by arena shm name (`_TENSOR_ARENAS:
 weakref.WeakValueDictionary[str, ShmTensorArena]`) rather than a single
@@ -216,14 +187,18 @@ on any rank.
 
 **Slot lifecycle.** The rebuilt tensor is the *source* of an async H2D while
 the worker executes that step, so the reader must not release the slot at
-unpickle time. Release is tied to **garbage collection of the
-caller-retained object** (`weakref.finalize` in `schedule_release`), not a
-fixed "next dequeue" schedule — needed for callers like `prompt_embeds` that
-retain the tensor across many `dequeue` calls during chunked prefill, where
-a fixed schedule would let the writer reclaim (and corrupt) the slot while
-the worker was still reading it. Once queued, the pinned fast path (§2.4)
-adds a second gate: the H2D is a true async DMA that can outlive
-`execute_model`, so "the tensor was collected" alone isn't sufficient.
+unpickle time. Release is tied to **the lifetime of the slot's tensor
+storage**, not a fixed "next dequeue" schedule — needed for callers like
+`prompt_embeds` that retain the tensor across many `dequeue` calls during
+chunked prefill, where a fixed schedule would let the writer reclaim (and
+corrupt) the slot while the worker was still reading it. `get_tensor` builds
+the tensor via `torch.from_numpy` over a numpy array wrapping the slot; the
+tensor's storage holds the only reference to that array, so a
+`weakref.finalize` on it fires only once every tensor, view/slice and wrapper
+(e.g. `Parameter`) sharing the storage has been freed. Once queued, the
+pinned fast path (§2.4) adds a second gate: the H2D is a true async DMA that
+can outlive `execute_model`, so "the storage was freed" alone isn't
+sufficient.
 `flush_releases` records a CUDA event on the compute stream after each
 step's H2D and only marks a slot done once that event completes
 (non-blocking `event.query()`; not-yet-done just waits one more dequeue).
@@ -231,16 +206,8 @@ Unpinned, `cudaMemcpyAsync` from pageable memory already stages
 synchronously, so the slot releases immediately. Either way, the writer
 requires every reader's done flag before reusing a slot.
 
-> **Known residual limitation.** `weakref.finalize` tracks the garbage
-> collection of the *specific* object each rebuild function passes to
-> `schedule_release` (see §2.3). A caller that takes a view/slice of that
-> object and drops the original — instead of keeping it alive, as vLLM's
-> current callers do — would not delay the release, since PyTorch views
-> keep the underlying storage alive via the C++ refcount independent of
-> this (Python-object-level) finalizer.
->
-> Assumes the multimodal H2D is issued on the worker's current/default compute
-> stream (true today: mm inputs are copied eagerly, outside the decode CUDA
+> **Note.** Assumes the multimodal H2D is issued on the worker's
+> current/default compute stream (true today: mm inputs are copied eagerly, outside the decode CUDA
 > graph). If a future vLLM issues that copy on a dedicated side stream, the event
 > must be recorded at the copy site rather than at `flush_releases`.
 
@@ -321,15 +288,12 @@ than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
   separate shared-memory caching path for multimodal tensors; this arena is
   not yet unified with it (see the experimental note in §1). Reconciling the
   two is follow-up work.
-- **Slot release granularity**: releases are tied to the returned tensor's
-  garbage collection and, on the pinned path, further gated on a per-slot
+- **Slot release granularity**: releases are tied to the slot's tensor
+  storage being freed and, on the pinned path, further gated on a per-slot
   CUDA event recorded after the consuming H2D (§2.3), which closes both the
   multi-step-retention and the async-DMA reuse windows. Bursts deeper than
   the slot count safely fall back to the out-of-band path when the arena is
-  exhausted. The one case this does *not* cover is a caller that drops the
-  base tensor while still holding a view into it (see the residual-
-  limitation callout in §2.3) — that remains a real, if currently
-  theoretical, hazard.
+  exhausted.
 - **Fallback observability**: arena exhaustion (no free slot) is a
   rate-limited log line today; a counter metric would be better. An
   oversize tensor (bigger than a slot) falls back silently, with no log at
