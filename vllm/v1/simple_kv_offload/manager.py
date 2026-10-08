@@ -764,6 +764,11 @@ class SimpleCPUOffloadScheduler:
                 continue
 
             block_ids_by_group = state.block_ids
+            # SWA recycling and CoW can invalidate append-only placement state.
+            if block_state is not None:
+                current_blocks = block_state.get_block_ids(req_id)
+                if current_blocks is not None:
+                    block_ids_by_group = current_blocks
             if not block_ids_by_group:
                 continue
 
