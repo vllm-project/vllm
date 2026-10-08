@@ -35,7 +35,6 @@ from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    HiddenStateRecordSpec,
     MambaSpec,
     SlidingWindowSpec,
 )
@@ -52,6 +51,9 @@ logger = init_logger(__name__)
 
 class NixlBaseConnectorScheduler:
     """Base implementation of Scheduler side methods shared by pull and push."""
+
+    # P/D hidden-state handoff (set from the config in __init__).
+    _hidden_state_handoff: bool = False
 
     # Emitted in kv_transfer_params so an external router can distinguish a
     # pull (READ) producer from a push (WRITE) one. Overridden by the push
@@ -107,11 +109,10 @@ class NixlBaseConnectorScheduler:
             for g in kv_cache_config.kv_cache_groups
         )
         # P/D hidden-state handoff: the prefiller computes the whole prompt and
-        # transfers the last position's hidden state as its own cache group.
-        self._hidden_state_handoff = any(
-            isinstance(g.kv_cache_spec, HiddenStateRecordSpec)
-            for g in kv_cache_config.transfer_groups
-        )
+        # hands over the last positions' hidden states in the KV blocks just
+        # past the prompt (see vllm.v1.core.hidden_state_record).
+        assert vllm_config.kv_transfer_config is not None
+        self._hidden_state_handoff = vllm_config.kv_transfer_config.hidden_state_handoff
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:

@@ -110,11 +110,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
-from vllm.v1.worker.gpu.hidden_state_handoff import (
-    HIDDEN_STATE_RECORD_LAYER,
-    HiddenStateHandoff,
-    get_hidden_state_record_spec,
-)
+from vllm.v1.worker.gpu.hidden_state_handoff import HiddenStateHandoff
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -602,9 +598,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
                 kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
-        record_spec = get_hidden_state_record_spec(self.vllm_config, self.model)
-        if record_spec is not None:
-            kv_cache_spec[HIDDEN_STATE_RECORD_LAYER] = record_spec
         return kv_cache_spec
 
     def initialize_kv_cache(
@@ -791,7 +784,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
-        if HIDDEN_STATE_RECORD_LAYER in kv_caches_dict:
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.hidden_state_handoff:
             assert self.pcp_manager is None
             self.hidden_state_handoff = HiddenStateHandoff(self, kv_caches_dict)
         if is_profiling:
@@ -2325,6 +2319,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.pp_handler.broadcast_drafts(
                     self.req_states.draft_tokens, input_batch
                 )
+
+        if self.hidden_state_handoff is not None:
+            # P: store this step's records past the prompts, after the drafter
+            # has written its KV there.
+            self.hidden_state_handoff.finish_step()
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)

@@ -35,6 +35,10 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
+from vllm.v1.core.hidden_state_record import (
+    get_record_carrier_group,
+    get_record_tail_tokens,
+)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -55,7 +59,6 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
-    HiddenStateRecordSpec,
     KVCacheConfig,
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
@@ -304,13 +307,18 @@ class Scheduler(SchedulerInterface):
             f"Prefix replay windows should agree: {sorted(replay_windows)}"
         )
         self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
-        # P/D hidden-state handoff: the cache group that carries the record.
-        group_id_iter = (
-            group_id
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(group.kv_cache_spec, HiddenStateRecordSpec)
-        )
-        self.hidden_state_record_group_id = next(group_id_iter, None)
+        # P/D hidden-state handoff: the cache group whose blocks carry the
+        # record, in the token slots just past the prompt.
+        self.hidden_state_record_group_id: int | None = None
+        self.hidden_state_record_tail_tokens = 0
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.hidden_state_handoff:
+            self.hidden_state_record_group_id = get_record_carrier_group(
+                kv_cache_config
+            )
+            self.hidden_state_record_tail_tokens = get_record_tail_tokens(
+                vllm_config, kv_cache_config
+            )
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
@@ -777,7 +785,9 @@ class Scheduler(SchedulerInterface):
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
+                        num_lookahead_tokens=max(
+                            self.num_lookahead_tokens, self._record_tail_tokens(request)
+                        ),
                     )
 
                     if new_blocks is not None:
@@ -1230,6 +1240,11 @@ class Scheduler(SchedulerInterface):
                 effective_lookahead_tokens = (
                     0 if limit_lookahead_tokens else self.num_lookahead_tokens
                 )
+                # P/D hidden-state handoff: the record's slots past the prompt,
+                # which P hands over with the prompt's blocks.
+                effective_lookahead_tokens = max(
+                    effective_lookahead_tokens, self._record_tail_tokens(request)
+                )
 
                 # Determine if we need to allocate cross-attention blocks.
                 num_encoder_tokens = 0
@@ -1285,6 +1300,16 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                if load_kv_async and self._record_tail_tokens(request):
+                    # The load writes the hidden-state record into the slots
+                    # past the prompt; don't zero their blocks under it.
+                    assert self.hidden_state_record_group_id is not None
+                    self.kv_cache_manager.skip_zeroing_blocks(
+                        request_id,
+                        self.hidden_state_record_group_id,
+                        num_computed_tokens,
+                    )
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -3052,7 +3077,10 @@ class Scheduler(SchedulerInterface):
 
         block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
             request_id=request.request_id,
-            num_computed_tokens=request.num_computed_tokens,
+            # P/D hidden-state handoff: P also hands over the record's slots
+            # just past the prompt (see vllm.v1.core.hidden_state_record).
+            num_computed_tokens=request.num_computed_tokens
+            + self._record_tail_tokens(request),
         )
         partial_tail_delay = False
         if finished_partial_tails:
@@ -3204,6 +3232,7 @@ class Scheduler(SchedulerInterface):
             request.num_computed_tokens -= num_replay_tokens
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
+            # The record came in the carrier group's blocks past the prompt.
             request.sample_from_hidden_state_record = (
                 not load_failed
                 and self.hidden_state_record_group_id is not None
@@ -3211,6 +3240,16 @@ class Scheduler(SchedulerInterface):
                 in self.connector.get_loaded_kv_cache_group_ids(request)
             )
         self.finished_recving_kv_req_ids.remove(request.request_id)
+
+    def _record_tail_tokens(self, request: Request) -> int:
+        """P/D hidden-state handoff: the token slots past the prompt that a P/D
+        request reserves for the record (P writes it, D loads it there)."""
+        params = request.kv_transfer_params
+        if not self.hidden_state_record_tail_tokens or not params:
+            return 0
+        if params.get("do_remote_decode") or params.get("do_remote_prefill"):
+            return self.hidden_state_record_tail_tokens
+        return 0
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if

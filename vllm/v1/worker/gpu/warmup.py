@@ -21,7 +21,6 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     CrossAttentionSpec,
-    HiddenStateRecordSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -48,9 +47,8 @@ def _reserved_block_count(
     """
     if isinstance(kvcache_spec, UniformTypeKVCacheSpecs):
         kvcache_spec = kvcache_spec.first_spec
-    if isinstance(kvcache_spec, (CircularBufferSpec, HiddenStateRecordSpec)):
-        # Circular caches keep one physical ring block for the request lifetime,
-        # and a P/D hidden-state record is one block.
+    if isinstance(kvcache_spec, CircularBufferSpec):
+        # Circular caches keep one physical ring block for the request lifetime.
         return 1
     if isinstance(kvcache_spec, CrossAttentionSpec):
         # Cross-attention blocks cover the encoder sequence only.

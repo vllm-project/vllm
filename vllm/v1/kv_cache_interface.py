@@ -278,14 +278,6 @@ class KVCacheSpec:
         return True
 
     @property
-    def has_attention_module(self) -> bool:
-        """Whether the spec's layers are attention modules in the forward
-        context, taking part in attention-backend and kernel-block selection
-        and in KV cache layout selection.
-        """
-        return self.has_layer_views
-
-    @property
     def uses_slot_mapping(self) -> bool:
         """Whether the worker computes a per-token slot mapping for this spec.
 
@@ -934,56 +926,6 @@ class CircularBufferSpec(AttentionSpec):
 
     @property
     def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return False
-
-
-@dataclass(frozen=True, kw_only=True)
-class HiddenStateRecordSpec(AttentionSpec):
-    """One block per request holding the hidden states a P/D prefiller hands
-    to the decoder alongside the KV cache, so the decoder can sample the first
-    output token (and seed its drafter) without recomputing the last prompt
-    token: the model output at the last prompt position, plus any drafter
-    inputs for the trailing prompt positions (see
-    ``vllm.v1.worker.gpu.hidden_state_handoff.RecordLayout``).
-
-    The record is a ``[1, 1, head_size]`` page (``block_size`` 1, one state)
-    with ``head_size = num_slots * hidden_size``, padded to the page size
-    shared with the other groups. It has no attention
-    module: the model runner writes and reads it directly, and since its head
-    and state dims are singletons, any KV cache layout can express it.
-    """
-
-    dcp_sharded: bool = False
-
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return None
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        del vllm_config
-        return self.page_size_bytes
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        del vllm_config, max_len
-        return 1
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(
-            isinstance(spec, HiddenStateRecordSpec) for spec in kv_cache_specs.values()
-        )
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def has_attention_module(self) -> bool:
         return False
 
     @property

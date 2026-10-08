@@ -595,6 +595,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         finished_recving_kv_req_ids={request.request_id},
         prefix_replay_tokens=0,
         prefix_replay_group_ids=(),
+        hidden_state_record_group_id=None,
     )
     scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
     scheduler._load_restores_replay_window = MethodType(

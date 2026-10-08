@@ -31,7 +31,6 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
-    HiddenStateRecordSpec,
     HiSparseHotSpec,
     KpoolTailSpec,
     KVCacheConfig,
@@ -2404,50 +2403,6 @@ def _ensure_min_page_size(
     return scaled, common_page
 
 
-def _add_hidden_state_record_groups(
-    vllm_config: VllmConfig,
-    groups: list[KVCacheGroupSpec],
-    record_specs: dict[str, HiddenStateRecordSpec],
-) -> list[KVCacheGroupSpec]:
-    """Append one single-layer group per P/D hidden-state record layer.
-
-    Groups alias the same blocks, so with a uniform per-layer page the record
-    page is padded to it (and the other groups are scaled up if the record is
-    larger). Mixed page sizes use a block-outermost layout, where blocks are
-    strided by the widest group and the record needs no alignment.
-    """
-    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
-        raise ValueError(
-            "P/D hidden-state handoff requires the hybrid KV cache manager."
-        )
-    if not groups:
-        raise ValueError("P/D hidden-state handoff requires a KV cache.")
-    layer_pages = {
-        _get_per_layer_spec(group, name).page_size_bytes
-        for group in groups
-        for name in group.layer_names
-    }
-    if len(layer_pages) == 1:
-        common_page = layer_pages.pop()
-        groups, common_page = _ensure_min_page_size(
-            groups,
-            common_page,
-            record_specs,  # type: ignore[arg-type]
-        )
-        record_specs = {
-            name: replace(spec, page_size_padded=common_page)
-            for name, spec in record_specs.items()
-        }
-        logger.info(
-            "Hidden-state record page padded from %d to %d bytes",
-            next(iter(record_specs.values())).unpadded_page_size_bytes,
-            common_page,
-        )
-    groups = list(groups)
-    groups.extend(KVCacheGroupSpec([name], spec) for name, spec in record_specs.items())
-    return groups
-
-
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -2462,18 +2417,6 @@ def get_kv_cache_groups(
         The generated KVCacheGroups
 
     """
-    record_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if isinstance(spec, HiddenStateRecordSpec)
-    }
-    if record_specs:
-        groups = get_kv_cache_groups(
-            vllm_config,
-            {k: v for k, v in kv_cache_spec.items() if k not in record_specs},
-        )
-        return _add_hidden_state_record_groups(vllm_config, groups, record_specs)
-
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
