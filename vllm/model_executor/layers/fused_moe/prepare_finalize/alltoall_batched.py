@@ -98,6 +98,12 @@ class AllToAllBatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         flat_weight = topk_weights.reshape(-1)
         if apply_router_weight_on_input:
             flat_weight = torch.ones_like(flat_weight)
+        # The router marks padding rows with expert id -1: they take no part in
+        # the dispatch, and their output rows stay zero.
+        routed = flat_expert >= 0
+        flat_expert = flat_expert[routed]
+        flat_token = flat_token[routed]
+        flat_weight = flat_weight[routed]
         dest = torch.div(flat_expert, e_local, rounding_mode="floor")
 
         # Deduplicate (dest, token) pairs so send_x stays token-sized.
@@ -109,7 +115,10 @@ class AllToAllBatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         uniq_dest = d_sorted[new_slot]
         uniq_token = t_sorted[new_slot]
         base = torch.zeros(world + 1, dtype=torch.int64, device=dev)
-        base[1:] = torch.bincount(uniq_dest, minlength=world).cumsum(0)
+        # scatter_add_ instead of bincount: XPU's bincount rejects empty input.
+        per_dest = torch.zeros(world, dtype=torch.int64, device=dev)
+        per_dest.scatter_add_(0, uniq_dest, torch.ones_like(uniq_dest))
+        base[1:] = per_dest.cumsum(0)
         send_cnt = base[1:] - base[:-1]
         local_slot = torch.arange(uniq_dest.numel(), device=dev) - base[uniq_dest]
 
