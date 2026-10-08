@@ -180,6 +180,122 @@ def test_ple_metadata_preserves_request_and_token_order(
     assert metadata.token_chunk_offset_ptr is None
 
 
+@pytest.mark.parametrize("full_graph", [False, True])
+@pytest.mark.parametrize(
+    "query_lens,computed,drafts",
+    [
+        # All rows speculative: the steady state with MTP (spec rows are the
+        # first num_spec_decodes requests, trailing zero-length padding).
+        pytest.param([4, 4, 0], [31, 16, 0], [3, 3, -1], id="all-spec"),
+        # Spec, decode and resumed-prefill rows in one batch.
+        pytest.param([4, 1, 20, 0], [31, 47, 32, 0], [3, -1, -1, -1], id="mixed"),
+        pytest.param([1, 37], [16, 0], [-1, -1], id="non-spec"),
+    ],
+)
+def test_ple_align_carry_blocks(full_graph, query_lens, computed, drafts):
+    """In align mode every row gets the block of its last computed token (src)
+    and of its last scheduled token (dst), built without a GPU sync; decode and
+    spec rows land in persistent buffers padded with NULL_BLOCK_ID."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required (align-mode block-table gather is a Triton kernel)")
+    device = torch.device("cuda")
+    block_size = 16
+    config = VllmConfig()
+    config.cache_config.mamba_cache_mode = "align"
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=3
+    )
+    config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.FULL if full_graph else CUDAGraphMode.NONE
+    )
+    config.compilation_config.max_cudagraph_capture_size = 32
+    builder = PleShortConvAttentionMetadataBuilder(
+        MambaSpec(block_size=block_size, shapes=((16, 64),), dtypes=(torch.float32,)),
+        ["ple"],
+        config,
+        device,
+    )
+    seq_lens = [c + q for c, q in zip(computed, query_lens)]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size,
+        device,
+        arange_block_indices=True,
+    )
+    common.is_prefilling = torch.tensor(
+        [q > 1 and d < 0 for q, d in zip(query_lens, drafts)]
+    )
+    accepted = torch.ones(len(query_lens), dtype=torch.int32, device=device)
+    drafts_cpu = torch.tensor(drafts, dtype=torch.int32)
+    sync_mode = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        metadata = builder.build(
+            0,
+            common,
+            num_accepted_tokens=accepted,
+            num_decode_draft_tokens_cpu=drafts_cpu,
+        )
+    finally:
+        torch.cuda.set_sync_debug_mode(sync_mode)
+
+    bt = common.block_table_tensor
+
+    def expected(rows):
+        src, dst = [], []
+        for r in rows:
+            dst.append(int(bt[r, max(seq_lens[r] - 1, 0) // block_size]))
+            c = computed[r]
+            src.append(int(bt[r, (c - 1) // block_size]) if c > 0 else dst[-1])
+        return src, dst
+
+    def check(actual, values):
+        torch.testing.assert_close(
+            actual[: len(values)],
+            torch.tensor(values, dtype=actual.dtype, device=device),
+        )
+
+    real = [i for i, q in enumerate(query_lens) if q > 0]
+    spec = [i for i in real if drafts[i] >= 0]
+    dec = [i for i in real if drafts[i] < 0 and query_lens[i] == 1]
+    pre = [i for i in real if drafts[i] < 0 and query_lens[i] > 1]
+    assert metadata.ple_block_size == block_size
+    for name, rows, buf in (
+        ("spec", spec, builder.ple_src_spec),
+        ("d", dec, builder.ple_src_d),
+        ("p", pre, None),
+    ):
+        src = getattr(metadata, f"ple_src_{name}")
+        dst = getattr(metadata, f"ple_dst_{name}")
+        if not rows:
+            assert src is None and dst is None
+            continue
+        exp_src, exp_dst = expected(rows)
+        check(src, exp_src)
+        check(dst, exp_dst)
+        # Rows past the real ones are graph padding and must stay inert.
+        if src.numel() > len(rows):
+            assert buf is not None and src.data_ptr() == buf.data_ptr()
+            assert bool((src[len(rows) :] == NULL_BLOCK_ID).all())
+            assert bool((dst[len(rows) :] == NULL_BLOCK_ID).all())
+
+
+def test_ple_carry_state_copies_from_computed_block() -> None:
+    """The carry moves the state window into the addressed block and leaves
+    rows already in place (src == dst) and other blocks untouched."""
+    conv_state = torch.arange(6 * 2 * 4, dtype=torch.float32).view(6, 2, 4)
+    before = conv_state.clone()
+    src = torch.tensor([1, 4], dtype=torch.int32)
+    dst = torch.tensor([3, 4], dtype=torch.int32)
+    out = Qwen4ExpPLELayer._ple_carry_state(None, conv_state, src, dst, 3)
+    assert out is dst
+    torch.testing.assert_close(conv_state[3, :, :3], before[1, :, :3])
+    torch.testing.assert_close(conv_state[3, :, 3:], before[3, :, 3:])
+    for b in (0, 1, 2, 4, 5):
+        torch.testing.assert_close(conv_state[b], before[b])
+    assert Qwen4ExpPLELayer._ple_carry_state(None, conv_state, None, dst, 3) is None
+
+
 def _mock_etp_group(
     monkeypatch: pytest.MonkeyPatch,
     world_size: int = 1,

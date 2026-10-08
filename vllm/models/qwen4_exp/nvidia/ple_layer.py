@@ -219,6 +219,21 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=grid
         )
 
+    def _ple_carry_state(
+        self,
+        conv_state: torch.Tensor,
+        src: torch.Tensor | None,
+        dst: torch.Tensor | None,
+        ncols: int,
+    ) -> torch.Tensor | None:
+        """Copy the state from the last computed token's block (src) into the
+        block the kernels address (dst). Rows with src == dst are no-ops."""
+        if src is None or dst is None or dst.numel() == 0:
+            return None
+        sub = conv_state[..., :ncols]
+        sub.index_copy_(0, dst.long(), sub.index_select(0, src.long()))
+        return dst
+
     def _short_conv_dilated_dispatch(
         self,
         inputs: torch.Tensor,
@@ -258,6 +273,13 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             spec_state_indices = metadata.spec_state_indices_tensor[
                 : metadata.num_spec_decodes
             ]
+            if metadata.ple_block_size > 0:
+                self._ple_carry_state(
+                    conv_state,
+                    metadata.ple_src_spec,
+                    metadata.ple_dst_spec,
+                    conv_state.shape[-1],
+                )
             # Mixed batches stay in their original row order; the kernels map
             # logical spec/non-spec rows instead of materializing both groups.
             ple_conv(
@@ -312,6 +334,13 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 )
 
             if has_decode:
+                if metadata.ple_block_size > 0:
+                    self._ple_carry_state(
+                        conv_state,
+                        metadata.ple_src_d,
+                        metadata.ple_dst_d,
+                        conv_state.shape[-1],
+                    )
                 ple_conv(
                     inputs=inputs_d,
                     residual=residual_d,
@@ -332,6 +361,14 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             if has_initial_states is None:
                 raise ValueError(
                     "has_initial_states_p is required for prefill short-conv"
+                )
+            dst_p = None
+            if metadata.ple_block_size > 0:
+                dst_p = self._ple_carry_state(
+                    conv_state,
+                    metadata.ple_src_p,
+                    metadata.ple_dst_p,
+                    self.conv_state_len,
                 )
             ple_conv(
                 inputs=inputs_p,
@@ -355,12 +392,23 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                     cu_seqlens=metadata.non_spec_query_start_loc,
                     token_indices=non_spec_token_indices,
                 )
+            if dst_p is not None:
+                # No speculative rows survive a prefill: keep the scratch clean
+                # so stored/offloaded blocks never carry uninitialized memory.
+                conv_state[..., self.conv_state_len :].index_fill_(0, dst_p.long(), 0)
         else:
             num_decode_rows = (
                 non_spec_token_indices.numel()
                 if non_spec_token_indices is not None
                 else inputs.size(0)
             )
+            if metadata.ple_block_size > 0:
+                self._ple_carry_state(
+                    conv_state,
+                    metadata.ple_src_d,
+                    metadata.ple_dst_d,
+                    conv_state.shape[-1],
+                )
             ple_conv(
                 inputs=inputs,
                 residual=residual,
