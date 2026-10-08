@@ -7,6 +7,7 @@
 use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
@@ -15,6 +16,32 @@ use vllm_text::{
 };
 
 use super::pb;
+
+fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
+    KvHintsEnvelope {
+        protocol_version: hints.protocol_version,
+        message_id: hints.message_id,
+        actions: hints
+            .actions
+            .into_iter()
+            .map(|action| KvHintAction {
+                action_id: action.action_id,
+                action_type: action.action_type,
+                action_version: action.action_version,
+                payload: action
+                    .payload
+                    .map(|payload| {
+                        payload
+                            .fields
+                            .into_iter()
+                            .map(|(key, value)| (key, proto_value_to_json(&value)))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    }
+}
 
 // ========================================================================================
 // Request conversion
@@ -56,6 +83,7 @@ pub fn to_text_request(
         req.request_id
     };
     let session_id = req.session_id.filter(|s| !s.is_empty());
+    let kv_hints = req.kv_hints.map(kv_hints_from_proto);
 
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
@@ -108,7 +136,9 @@ pub fn to_text_request(
         add_special_tokens: true,
         data_parallel_rank: None,
         session_id,
-        reasoning_parser_kwargs: None,
+        kv_hints,
+        reasoning_parser_kwargs: Default::default(),
+        reasoning_ended: None,
         lora_request: None,
         arrival_time: None,
     })
@@ -131,10 +161,7 @@ fn build_sampling_params(
         ..SamplingParams::default()
     };
 
-    // RandomSampling: for every remaining sampling field the protobuf default (`0`)
-    // is treated as "unset" and leaves the resolved value to the lowering
-    // stage, which falls back to the model-provided default or a
-    // neutral/disabled value otherwise.
+    // Preserve explicit values; omitted fields inherit model defaults during lowering.
     if let Some(s) = sampling {
         // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
         // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
@@ -144,15 +171,9 @@ fn build_sampling_params(
                 "num_sequences > 1 is not supported",
             ));
         }
-        if s.top_k != 0 {
-            params.top_k = Some(s.top_k);
-        }
-        if s.top_p != 0.0 {
-            params.top_p = Some(s.top_p);
-        }
-        if s.min_p != 0.0 {
-            params.min_p = Some(s.min_p);
-        }
+        params.top_k = s.top_k;
+        params.top_p = s.top_p;
+        params.min_p = s.min_p;
         params.seed = s.seed;
     }
 
@@ -172,6 +193,10 @@ fn build_sampling_params(
         }
         if !d.allowed_token_ids.is_empty() {
             params.allowed_token_ids = Some(d.allowed_token_ids.clone());
+        }
+        if !d.bad_words_token_ids.is_empty() {
+            params.bad_words_token_ids =
+                Some(d.bad_words_token_ids.iter().map(|sequence| sequence.ids.clone()).collect());
         }
         params.structured_outputs = convert_structured_output(d)?;
     }
@@ -373,6 +398,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
+        num_cached_tokens: Some(finished.usage.cached_token_count as u32),
     })
 }
 
@@ -537,7 +563,9 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
-    use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
+    use super::{
+        ResponseOpts, json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
+    };
 
     fn base_request() -> pb::GenerateRequest {
         pb::GenerateRequest {
@@ -545,6 +573,41 @@ mod tests {
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn grpc_bad_words_token_ids_survive_protobuf_conversion_and_lowering() {
+        let request = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                bad_words_token_ids: vec![
+                    pb::TokenIds { ids: vec![5] },
+                    pb::TokenIds { ids: vec![7, 11] },
+                ],
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let encoded = request.encode_to_vec();
+        for stream in [false, true] {
+            let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+            let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+            let engine = vllm_text::lower_text_request(
+                text,
+                vec![1],
+                SamplingHints::default(),
+                SamplingLimits {
+                    max_model_len: 256,
+                    max_logprobs: 20,
+                    model_vocab_size: 512,
+                    tokenizer_vocab_size: 512,
+                },
+                &TestTokenizer::new(),
+            )
+            .unwrap()
+            .generate_request;
+            let params = engine.sampling_params;
+            assert_eq!(params.bad_words_token_ids, Some(vec![vec![5], vec![7, 11]]));
         }
     }
 
@@ -576,6 +639,35 @@ mod tests {
         };
         let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
         assert_eq!(text.sampling_params.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn kv_hints_propagate_from_top_level_request_field() {
+        let req = pb::GenerateRequest {
+            kv_hints: Some(pb::KvHintsEnvelope {
+                protocol_version: "0.1".to_string(),
+                message_id: "msg-1".to_string(),
+                actions: vec![pb::KvHintAction {
+                    action_id: "action-1".to_string(),
+                    action_type: "example.action".to_string(),
+                    action_version: "1.0".to_string(),
+                    payload: json_to_proto_struct(&serde_json::json!({"source": "g2"})),
+                }],
+            }),
+            ..base_request()
+        };
+
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let hints = text.kv_hints.expect("kv hints");
+        assert_eq!(hints.protocol_version, "0.1");
+        assert_eq!(hints.message_id, "msg-1");
+        assert_eq!(hints.actions[0].action_id, "action-1");
+        assert_eq!(hints.actions[0].action_type, "example.action");
+        assert_eq!(hints.actions[0].action_version, "1.0");
+        assert_eq!(
+            hints.actions[0].payload.get("source"),
+            Some(&serde_json::json!("g2"))
+        );
     }
 
     #[test]
@@ -690,6 +782,52 @@ mod tests {
     }
 
     #[test]
+    fn grpc_sampling_preserves_explicit_values_and_model_defaults_through_lowering() {
+        for ((top_k, top_p, min_p), expected) in [
+            ((None, None, None), (8, 0.9, 0.2)),
+            ((Some(0), Some(1.0), Some(0.0)), (0, 1.0, 0.0)),
+            ((Some(50), Some(0.8), Some(0.1)), (50, 0.8, 0.1)),
+        ] {
+            let request = pb::GenerateRequest {
+                temperature: Some(0.7),
+                sampling: Some(pb::RandomSampling {
+                    top_k,
+                    top_p,
+                    min_p,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+                let engine = vllm_text::lower_text_request(
+                    text,
+                    vec![1],
+                    SamplingHints {
+                        default_top_k: Some(8),
+                        default_top_p: Some(0.9),
+                        default_min_p: Some(0.2),
+                        ..Default::default()
+                    },
+                    SamplingLimits {
+                        max_model_len: 256,
+                        max_logprobs: 20,
+                        model_vocab_size: 512,
+                        tokenizer_vocab_size: 512,
+                    },
+                    &TestTokenizer::new(),
+                )
+                .unwrap()
+                .generate_request;
+                let params = engine.sampling_params;
+                assert_eq!((params.top_k, params.top_p, params.min_p), expected);
+            }
+        }
+    }
+
+    #[test]
     fn bypass_prefix_cache_maps_to_skip_reading_prefix_cache() {
         let req = pb::GenerateRequest {
             kv: Some(pb::KvCacheParameters {
@@ -798,7 +936,9 @@ mod tests {
 
     #[test]
     fn to_sequence_output_threads_token_ids_into_eos_id() {
-        let fin = finished(FinishReason::Stop(None));
+        let mut fin = finished(FinishReason::Stop(None));
+        fin.usage.prompt_token_count = 8;
+        fin.usage.cached_token_count = 5;
         let opts = ResponseOpts {
             output_text: true,
             output_token_ids: true,
@@ -807,10 +947,12 @@ mod tests {
 
         let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts)
             .expect("sequence output");
+        let out = pb::SequenceOutput::decode(out.encode_to_vec().as_slice()).unwrap();
 
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(finish.stop_reason, Some(PbStopReason::EosTokenId(30)));
+        assert_eq!(finish.num_cached_tokens, Some(5));
     }
 
     #[test]

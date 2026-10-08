@@ -84,7 +84,18 @@ class Config:
 
     world_size: int
 
+    activation: MoEActivation = MoEActivation.SILU
+
     torch_trace_dir_path: str | None = None
+
+    # Force AiterExperts's hidden_pad/intermediate_pad computation
+    # (`experts/rocm_aiter_moe.py`) to diverge from the padded K/N sizes above.
+    # None (default) preserves today's behavior: FusedMoEConfig defaults both
+    # to the (unpadded) K/intermediate_size_per_partition, so hidden_pad and
+    # intermediate_pad come out to 0.
+    # See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
+    hidden_dim_unpadded: int | None = None
+    intermediate_size_per_partition_unpadded: int | None = None
 
     def __post_init__(self):
         if self.quant_config is None:
@@ -310,6 +321,16 @@ class Config:
                 f"per_act_token={self.is_per_act_token_quant}, "
                 f"block={self.quant_block_shape})"
             )
+
+        # Check activation support; NotImplementedError means no opinion.
+        try:
+            if not self.fused_experts_type._supports_activation(self.activation):
+                return False, (
+                    f"FE {self.fused_experts_type.__name__} does not support "
+                    f"activation {self.activation}"
+                )
+        except NotImplementedError:
+            pass
 
         # Check block quantization support
         is_block_quantized = self.quant_block_shape is not None
@@ -605,6 +626,7 @@ def reference_moe_impl(
         topk_ids=rank_tensors.topk_ids,
         global_num_experts=config.E,
         expert_map=None,
+        activation=config.activation,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a_scale,
@@ -648,9 +670,13 @@ def make_modular_kernel(
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
-        activation=MoEActivation.SILU,
+        activation=config.activation,
         device=vllm_config.device_config.device,
         routing_method=RoutingMethodType.DeepSeekV3,
+        hidden_dim_unpadded=config.hidden_dim_unpadded,
+        intermediate_size_per_partition_unpadded=(
+            config.intermediate_size_per_partition_unpadded
+        ),
     )
 
     prepare_finalize = maybe_make_prepare_finalize(
@@ -774,7 +800,7 @@ def run_modular_kernel(
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
         "topk_ids": topk_ids,
-        "activation": MoEActivation.SILU,
+        "activation": config.activation,
         "expert_map": rank_tensors.expert_map,
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1

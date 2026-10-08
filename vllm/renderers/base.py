@@ -5,13 +5,15 @@ import time
 import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
+from dataclasses import replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EmbedsInput,
     EmbedsPrompt,
@@ -30,7 +32,11 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.cache import (
+    BaseMultiModalProcessorCache,
+    processor_cache_from_config,
+    processor_only_cache_from_config,
+)
 from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
 from vllm.multimodal.parse import (
     MultiModalDataItems,
@@ -71,6 +77,31 @@ logger = init_logger(__name__)
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
+class _SwappableExecutor(Executor):
+    """Executor whose inner pool can be replaced without changing identity.
+
+    ``make_async`` captures the executor object at wrap time. Replacing
+    ``self._executor`` with a new ``ThreadPoolExecutor`` would leave those
+    wrappers (tokenize, decode, pooling, derender) bound to a shutdown pool.
+    """
+
+    def __init__(self, max_workers: int) -> None:
+        super().__init__()
+        self._max_workers = max_workers
+        self._inner = ThreadPoolExecutor(max_workers=max_workers)
+
+    def submit(self, fn, /, *args, **kwargs):
+        return self._inner.submit(fn, *args, **kwargs)
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self._inner.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    def replace_inner(self) -> None:
+        old = self._inner
+        old.shutdown(wait=False)
+        self._inner = ThreadPoolExecutor(max_workers=self._max_workers)
+
+
 class BaseRenderer(ABC, Generic[_T]):
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
@@ -109,7 +140,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal processor receives a deep-copied tokenizer (see #36557)
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
-        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._executor = _SwappableExecutor(max_workers=pool_workers)
         self._resources.callback(self._executor.shutdown, wait=False)
 
         # Separate single-worker executor so tokenization never queues behind
@@ -147,7 +178,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._mm_cache_stats: MultiModalCacheStats | None = None
 
-        if mm_registry.supports_multimodal_inputs(config.model_config):
+        if config.model_config.supports_multimodal_inputs:
             # Install the process-global GPU memory pool used to gate
             # frontend GPU-side multimodal decoding (no-op when the budget
             # is 0). Lives in the API-server process only.
@@ -164,10 +195,8 @@ class BaseRenderer(ABC, Generic[_T]):
                     tokenizer=self.tokenizer,
                 )
 
-            self._mm_processor_cache = mm_registry.processor_cache_from_config(config)
-            self._mm_processor_only_cache = (
-                mm_registry.processor_only_cache_from_config(config)
-            )
+            self._mm_processor_cache = processor_cache_from_config(config)
+            self._mm_processor_only_cache = processor_only_cache_from_config(config)
 
             # This is used to generate internal request ID for MM processing
             # It has no relation to the request ID for engine core
@@ -188,6 +217,10 @@ class BaseRenderer(ABC, Generic[_T]):
             raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
 
         return tokenizer
+
+    def render_completion_suffix(self, prompt: str, suffix: str) -> str | None:
+        """Render OpenAI completion suffix input when the renderer supports FIM."""
+        return None
 
     def _decode(self, *args, **kwargs):
         return self.get_tokenizer().decode(*args, **kwargs)
@@ -383,6 +416,43 @@ class BaseRenderer(ABC, Generic[_T]):
             return None
 
         return self.tokenizer.eos_token_id
+
+    def validate_token_ids(
+        self, token_ids: Sequence[int], *, parameter: str | None = None
+    ) -> None:
+        """Raise VLLMValidationError if a token id is out of vocabulary.
+
+        Skipped when the tokenizer is not initialized.
+        """
+        tokenizer = self.tokenizer
+        if not token_ids or tokenizer is None:
+            return
+
+        max_input_id = max(token_ids)
+        min_input_id = min(token_ids)
+
+        # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
+        # self.model_config.get_vocab_size() is the model’s vocab size.
+        # For Qwen3 models, the language model has extra tokens that do
+        # not exist in the tokenizer, and vice versa for multimodal
+        # placeholder tokens in some multimodal models.
+        # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
+        # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
+
+        # Here we take the max of the two to determine if a token id is
+        # truly out-of-vocabulary.
+        model_vocab_size = self.model_config.get_vocab_size()
+        # A negative id is out of vocabulary just like an over-large one,
+        # but is not caught by the upper-bound check below. Reject it here
+        # so it is not used as an embedding index downstream.
+        if min_input_id < 0:
+            raise VLLMValidationError(
+                f"Token id {min_input_id} is out of vocabulary", parameter=parameter
+            )
+        if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
+            raise VLLMValidationError(
+                f"Token id {max_input_id} is out of vocabulary", parameter=parameter
+            )
 
     def get_dec_start_token_id(self) -> int:
         """Obtain the decoder start token id employed by an encoder/decoder model,
@@ -962,27 +1032,103 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return engine_input
 
+    def _truncate_expanded_prompt(
+        self,
+        engine_input: TokensInput | MultiModalInput,
+        params: TokenizeParams | None,
+    ) -> None:
+        """Re-apply `truncate_prompt_tokens` once placeholders are expanded.
+
+        `TokenizeParams.apply_post_tokenization` truncates the prompt before
+        multimodal expansion, so a single placeholder token can expand into
+        many and push the result back over the requested bound.
+
+        Multimodal spans are never cut: a request whose spans would not all
+        survive intact is rejected, matching the post-expansion rejection in
+        `vllm.v1.engine.input_processor._validate_model_input`.
+
+        Only multimodal inputs can grow after `apply_post_tokenization`, so
+        everything else returns immediately.
+        """
+        if engine_input["type"] != "multimodal":
+            return
+
+        if params is None or params.truncate_prompt_tokens is None:
+            return
+
+        prompt_token_ids = engine_input.get("prompt_token_ids")
+        if prompt_token_ids is None:
+            return
+
+        num_tokens = len(prompt_token_ids)
+        truncation = params._truncation_slice(self.tokenizer, num_tokens)
+        if truncation is None:
+            return
+
+        start, stop, _ = truncation.indices(num_tokens)
+
+        mm_placeholders = engine_input["mm_placeholders"]
+        for modality, positions in mm_placeholders.items():
+            for position in positions:
+                end = position.offset + position.length
+                if position.offset >= start and end <= stop:
+                    continue
+                raise VLLMValidationError(
+                    f"truncate_prompt_tokens={params.truncate_prompt_tokens} "
+                    f"would split or drop a(n) {modality} item, which spans "
+                    f"tokens {position.offset} to {end} of the "
+                    f"{num_tokens}-token prompt. Multimodal placeholders "
+                    f"expand after truncation is applied, so the limit must "
+                    f"leave every multimodal item intact. Please raise "
+                    f"truncate_prompt_tokens or shorten the multimodal input.",
+                    parameter="truncate_prompt_tokens",
+                    value=params.truncate_prompt_tokens,
+                )
+
+        if start:
+            engine_input["mm_placeholders"] = {
+                modality: [
+                    replace(position, offset=position.offset - start)
+                    for position in positions
+                ]
+                for modality, positions in mm_placeholders.items()
+            }
+
+        engine_input["prompt_token_ids"] = prompt_token_ids[truncation]
+
     def _process_singleton(
         self,
         prompt: SingletonTokPrompt,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        return self._process_tokens(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
+        engine_input = self._process_tokens(  # type: ignore[arg-type]
+            prompt,  # type: ignore[arg-type]
+            skip_mm_cache=skip_mm_cache,
+        )
+        self._truncate_expanded_prompt(engine_input, tok_params)
+        return engine_input
 
     async def _process_singleton_async(
         self,
         prompt: SingletonTokPrompt,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        return await self._process_tokens_async(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
+        engine_input = await self._process_tokens_async(  # type: ignore[arg-type]
+            prompt,  # type: ignore[arg-type]
+            skip_mm_cache=skip_mm_cache,
+        )
+        self._truncate_expanded_prompt(engine_input, tok_params)
+        return engine_input
 
     def _get_skip_decoder_start_token(self) -> bool:
         """Whether the multimodal processor supplies a complete decoder prefix."""
@@ -1048,12 +1194,15 @@ class BaseRenderer(ABC, Generic[_T]):
         arrival_time: float,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
             engine_input = self._process_enc_dec(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
         else:
-            engine_input = self._process_singleton(prompt, skip_mm_cache=skip_mm_cache)
+            engine_input = self._process_singleton(
+                prompt, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+            )
 
         engine_input["arrival_time"] = arrival_time
 
@@ -1065,6 +1214,7 @@ class BaseRenderer(ABC, Generic[_T]):
         arrival_time: float,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
@@ -1074,7 +1224,7 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         else:
             engine_input = await self._process_singleton_async(
-                prompt, skip_mm_cache=skip_mm_cache
+                prompt, skip_mm_cache=skip_mm_cache, tok_params=tok_params
             )
 
         engine_input["arrival_time"] = arrival_time
@@ -1101,7 +1251,9 @@ class BaseRenderer(ABC, Generic[_T]):
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         return [
-            self.process_for_engine(prompt, arrival_time, skip_mm_cache=skip_mm_cache)
+            self.process_for_engine(
+                prompt, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+            )
             for prompt in tok_prompts
         ]
 
@@ -1126,7 +1278,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return await asyncio.gather(
             *(
                 self.process_for_engine_async(
-                    p, arrival_time, skip_mm_cache=skip_mm_cache
+                    p, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
                 )
                 for p in tok_prompts
             )
@@ -1164,7 +1316,9 @@ class BaseRenderer(ABC, Generic[_T]):
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = [
-            self.process_for_engine(prompt, arrival_time, skip_mm_cache=skip_mm_cache)
+            self.process_for_engine(
+                prompt, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+            )
             for prompt in tok_prompts
         ]
 
@@ -1204,7 +1358,7 @@ class BaseRenderer(ABC, Generic[_T]):
         eng_prompts = await asyncio.gather(
             *(
                 self.process_for_engine_async(
-                    p, arrival_time, skip_mm_cache=skip_mm_cache
+                    p, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
                 )
                 for p in tok_prompts
             )
