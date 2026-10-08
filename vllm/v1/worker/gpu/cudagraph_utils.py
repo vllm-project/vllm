@@ -37,7 +37,7 @@ from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import current_stream
+from vllm.utils.torch_utils import current_stream, is_quantized_kv_cache
 from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
@@ -867,6 +867,9 @@ def prepare_inputs_to_capture(
 _FULL_GRAPH_PROFILING_SAMPLES = 2
 # Floor for the extrapolated per-graph cost (driver overhead per graph).
 _MIN_PER_GRAPH_BYTES = 1 << 20
+# Floor for quantized/FP8 KV caches where graph bindings & dequant scales
+# require additional memory per graph.
+_MIN_QUANTIZED_PER_GRAPH_BYTES = 16 << 20
 
 
 @torch.inference_mode()
@@ -953,7 +956,12 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # they share the global pool at runtime, so the overlap is not
             # double-counted.
             num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
-            full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
+            kv_cache_dtype = str(
+                getattr(getattr(runner, "cache_config", None), "cache_dtype", "auto")
+            )
+            full_estimate = _extrapolate_full_graph_memory(
+                mem_samples, num_full_graphs, kv_cache_dtype=kv_cache_dtype
+            )
             return max(measured - sum(mem_samples) + full_estimate, 0)
         finally:
             compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
@@ -976,14 +984,23 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         platform_cls._global_graph_pool = saved_global_pool
 
 
-def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
+def _extrapolate_full_graph_memory(
+    mem_samples: list[int],
+    total_graphs: int,
+    kv_cache_dtype: str | None = None,
+) -> int:
     """Extrapolate the total FULL capture cost from samples of the largest
     graphs. The first capture allocates the pool baseline; later graphs mostly
     reuse it, so the second sample is taken as the per-graph cost."""
     if not mem_samples:
         return 0
     first_capture = mem_samples[0]
-    per_graph = max(mem_samples[1], _MIN_PER_GRAPH_BYTES) if len(mem_samples) > 1 else 0
+    min_per_graph = (
+        _MIN_QUANTIZED_PER_GRAPH_BYTES
+        if kv_cache_dtype and is_quantized_kv_cache(kv_cache_dtype)
+        else _MIN_PER_GRAPH_BYTES
+    )
+    per_graph = max(mem_samples[1], min_per_graph) if len(mem_samples) > 1 else 0
     return first_capture + (total_graphs - 1) * per_graph
 
 

@@ -241,6 +241,20 @@ def test_extrapolate_full_graph_memory():
     )
     # Per-graph cost is floored to account for driver overhead.
     assert cgu._extrapolate_full_graph_memory([100 * mib, 0], 3) == (100 + 2 * 1) * mib
+    # Quantized/FP8 KV caches apply a higher floor for graph bindings/scales.
+    assert (
+        cgu._extrapolate_full_graph_memory([100 * mib, 0], 3, kv_cache_dtype="fp8")
+        == (100 + 2 * 16) * mib
+    )
+    assert (
+        cgu._extrapolate_full_graph_memory([100 * mib, 0], 3, kv_cache_dtype="fp8_e4m3")
+        == (100 + 2 * 16) * mib
+    )
+    # When sample exceeds quantized floor, measured sample is preserved.
+    assert (
+        cgu._extrapolate_full_graph_memory([100 * mib, 25 * mib], 3, kv_cache_dtype="fp8")
+        == (100 + 2 * 25) * mib
+    )
 
 
 def test_profile_cudagraph_memory_clears_captured_graphs(monkeypatch):
