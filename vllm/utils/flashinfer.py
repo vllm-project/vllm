@@ -13,7 +13,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeVar
 
 import requests
 import torch
@@ -25,6 +25,8 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
+
+_T = TypeVar("_T")
 
 
 _bf16_autotune_buckets: ContextVar[tuple[int, ...] | None] = ContextVar(
@@ -198,6 +200,13 @@ def _missing_sparse_mla(*_: Any, **__: Any) -> NoReturn:
     )
 
 
+def _missing_sm120_paged_mqa_logits(*_: Any, **__: Any) -> NoReturn:
+    raise RuntimeError(
+        "FlashInfer SM120 paged MQA-logits APIs are not available. Install a "
+        "FlashInfer build that ships flashinfer.sm120_paged_mqa_logits."
+    )
+
+
 def _get_submodule(module_name: str) -> Any | None:
     """Safely import a submodule and return it, or None if not available."""
     try:
@@ -312,6 +321,18 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
 flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
     "xqa_batch_decode_with_kv_cache",
+)
+# DeepSeek sparse-attention indexer: FP8 paged MQA logits on SM12x. Same call
+# shape as DeepGEMM's pair (schedule metadata, then the persistent kernel).
+flashinfer_sm120_get_paged_mqa_logits_metadata = _lazy_import_wrapper(
+    "flashinfer.sm120_paged_mqa_logits",
+    "get_paged_mqa_logits_metadata",
+    fallback_fn=_missing_sm120_paged_mqa_logits,
+)
+flashinfer_sm120_fp8_paged_mqa_logits = _lazy_import_wrapper(
+    "flashinfer.sm120_paged_mqa_logits",
+    "fp8_paged_mqa_logits",
+    fallback_fn=_missing_sm120_paged_mqa_logits,
 )
 flashinfer_packed_fused_kda_decode = _lazy_import_wrapper(
     "flashinfer", "packed_fused_kda_decode"
@@ -447,6 +468,151 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
     mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
     dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
     return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
+
+
+@functools.cache
+def has_flashinfer_sm120_paged_mqa_logits() -> bool:
+    """Return ``True`` if FlashInfer ships the SM120 FP8 paged MQA-logits
+    kernels used by the DeepSeek sparse-attention indexer decode path."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.sm120_paged_mqa_logits")
+    return mod is not None and all(
+        callable(getattr(mod, name, None))
+        for name in ("get_paged_mqa_logits_metadata", "fp8_paged_mqa_logits")
+    )
+
+
+_SM120_PAGED_MQA_LOGITS_MODULE = (
+    "flashinfer.experimental.deepgemm_sm120_paged_mqa_logits.sm120_paged_mqa"
+)
+# Catalog read errors of the SM120 paged MQA-logits policy queries, by query
+# name (see _sm120_paged_mqa_logits_policy).
+_sm120_paged_mqa_logits_catalog_errors: dict[str, str] = {}
+
+
+def _sm120_paged_mqa_logits_policy(
+    name: str, read: Callable[[Any], _T], unavailable: _T
+) -> _T:
+    """Read one policy entry of FlashInfer's SM120 paged MQA-logits route.
+
+    ``read`` converts the attribute ``name`` of FlashInfer's ``sm120_paged_mqa``
+    module (a query function or a constant). Returns ``unavailable`` when the
+    package, the module or the attribute is absent, and when the read raises:
+    the policy comes from a catalog JSON the wheel ships, so a schema mismatch
+    (RuntimeError), a missing file (OSError) or malformed data (ValueError,
+    KeyError, TypeError) surfaces at the first query, and a catalog that cannot
+    be read must make the route unavailable rather than fail model
+    construction. The error is logged once and recorded for
+    :func:`flashinfer_sm120_paged_mqa_logits_catalog_error`.
+    """
+    if not has_flashinfer_sm120_paged_mqa_logits():
+        return unavailable
+    mod = _get_submodule(_SM120_PAGED_MQA_LOGITS_MODULE)
+    attr = getattr(mod, name, None) if mod else None
+    if attr is None:
+        return unavailable
+    try:
+        return read(attr)
+    except (RuntimeError, OSError, ValueError, KeyError, TypeError) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        logger.warning_once(
+            "FlashInfer SM120 paged MQA-logits catalog query %s failed (%s); "
+            "the route is unavailable and the sparse indexer uses DeepGEMM.",
+            name,
+            error,
+        )
+        _sm120_paged_mqa_logits_catalog_errors[name] = error
+        return unavailable
+
+
+def flashinfer_sm120_paged_mqa_logits_catalog_error() -> str | None:
+    """Why FlashInfer's SM120 paged MQA-logits catalog could not be read, as
+    ``"<query>: <error>"`` entries joined by "; ", or ``None`` when every policy
+    query so far read it.
+
+    The queries report "unavailable" (no capability, depth, route or request
+    ceiling) on such an error so that "auto" falls back to DeepGEMM; the
+    indexer reports this for an explicit backend request.
+    """
+    if not _sm120_paged_mqa_logits_catalog_errors:
+        return None
+    return "; ".join(
+        f"{name}: {error}"
+        for name, error in sorted(_sm120_paged_mqa_logits_catalog_errors.items())
+    )
+
+
+@functools.cache
+def flashinfer_sm120_paged_mqa_logits_capabilities() -> tuple[tuple[int, int], ...]:
+    """Compute capabilities ``(major, minor)`` FlashInfer exports its SM120
+    paged MQA-logits kernels for, ascending (``SUPPORTED_CAPABILITIES`` of its
+    ``sm120_paged_mqa`` module: (12, 0), sm_120a, at the pinned package).
+
+    The module compiles an exact-architecture payload per exported capability
+    and raises at the first metadata build on any other device of the family
+    (12.1, the GB10 SoC), so the route is gated on the device's exact
+    capability, not the family. A build without the export admits no device,
+    like the other policy queries report nothing without theirs.
+    """
+    return _sm120_paged_mqa_logits_policy(
+        "SUPPORTED_CAPABILITIES",
+        lambda capabilities: tuple(
+            sorted((int(major), int(minor)) for major, minor in capabilities)
+        ),
+        (),
+    )
+
+
+@functools.cache
+def flashinfer_sm120_paged_mqa_logits_route_available(
+    num_heads: int, page_kv: int, next_n: int
+) -> bool:
+    """Whether FlashInfer ships an SM120 paged MQA-logits kernel for this
+    (indexer heads, KV page size, Q rows per request) combination.
+
+    The package exports a fixed set of routes; ask its capability query rather
+    than assuming, so an unshipped shape is never selected only to abort at
+    the first decode. A build without the query, or whose catalog cannot be
+    read, reports no routes.
+    """
+    return _sm120_paged_mqa_logits_policy(
+        "route_available",
+        lambda route_available: bool(
+            route_available(int(num_heads), int(page_kv), int(next_n))
+        ),
+        False,
+    )
+
+
+@functools.cache
+def flashinfer_sm120_paged_mqa_logits_next_n() -> tuple[int, ...]:
+    """Q rows per request (next_n = 1 + num_speculative_tokens) for which
+    FlashInfer's SM120 paged MQA-logits catalog exports kernels, ascending.
+
+    The catalog is the source of truth: read its policy (``exported_next_n``)
+    rather than assuming a depth set, so a build that adds a depth widens the
+    native decode depths without a code change. A build without the query, or
+    whose catalog cannot be read, exports no depths, like
+    :func:`flashinfer_sm120_paged_mqa_logits_route_available`.
+    """
+    return _sm120_paged_mqa_logits_policy(
+        "exported_next_n",
+        lambda exported_next_n: tuple(
+            sorted({int(next_n) for next_n in exported_next_n()})
+        ),
+        (),
+    )
+
+
+@functools.cache
+def flashinfer_sm120_paged_mqa_logits_max_batch() -> int | None:
+    """Request-row ceiling of FlashInfer's SM120 paged MQA-logits scheduler
+    (the ``context_lens.shape[0]`` it accepts), or ``None`` when the package,
+    its policy query or its catalog is unavailable."""
+    return _sm120_paged_mqa_logits_policy(
+        "max_batch", lambda max_batch: int(max_batch()), None
+    )
 
 
 @functools.cache
@@ -1315,6 +1481,12 @@ __all__ = [
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "flashinfer_xqa_batch_decode_with_kv_cache",
+    "flashinfer_sm120_get_paged_mqa_logits_metadata",
+    "flashinfer_sm120_fp8_paged_mqa_logits",
+    "flashinfer_sm120_paged_mqa_logits_route_available",
+    "flashinfer_sm120_paged_mqa_logits_next_n",
+    "flashinfer_sm120_paged_mqa_logits_max_batch",
+    "has_flashinfer_sm120_paged_mqa_logits",
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",
     "autotune",

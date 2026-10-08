@@ -34,6 +34,7 @@ from vllm.utils.deep_gemm import (
     fp8_fp4_paged_mqa_logits,
     has_deep_gemm,
 )
+from vllm.utils.flashinfer import flashinfer_sm120_fp8_paged_mqa_logits
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -710,6 +711,17 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        # The logits kernels (DeepGEMM and FlashInfer) index weights by the
+        # (B, next_n) q row. On the padded path q was packed from the ragged
+        # decode tokens while weights still has one row per real token, so
+        # pack it the same way: rows then line up and padded slots (whose
+        # logits are discarded by the unpack below) weigh zero.
+        if needs_padded_path and num_decode_tokens > 0:
+            weights_rows = pack_seq_triton(
+                weights[:num_decode_tokens], decode_lens, pad_value=0
+            ).reshape(num_padded_tokens, -1)
+        else:
+            weights_rows = weights[:num_padded_tokens]
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
@@ -725,11 +737,44 @@ def sparse_attn_indexer(
                 decode_metadata.schedule_metadata,
                 max_model_len,
             )
+        elif decode_metadata.mqa_logits_backend == "flashinfer_sm120":
+            # The metadata builder scheduled for FlashInfer's SM120 kernel
+            # (see resolve_sparse_indexer_mqa_logits_backend). It reads the
+            # same fused FP8 page layout DeepGEMM does ([blocks, page_kv, 1,
+            # head_dim + 4] as bytes) and takes the native (B, next_n) rows;
+            # the MXFP4 cache and the varlen row indices are SM100-only.
+            assert not use_fp4_cache and padded_q_scale is None, (
+                "FlashInfer SM120 paged MQA logits require the FP8 indexer cache"
+            )
+            assert decode_metadata.indices is None
+            block_table = decode_metadata.block_table
+            # The kernel needs a unit column stride; a trailing size-1 dim can
+            # be a transposed view where .contiguous() is a no-op.
+            if block_table.dim() >= 2 and block_table.stride(-1) != 1:
+                block_table = block_table.clone(memory_format=torch.contiguous_format)
+            # Sized by max_model_len exactly like DeepGEMM, so the top-k below
+            # sees the same [B * next_n, max_model_len] fp32 view (a row-padded
+            # buffer underneath; every consumer indexes through stride(0)).
+            kv_cache_bytes = (
+                kv_cache
+                if kv_cache.dtype == torch.uint8
+                else kv_cache.view(torch.uint8)
+            )
+            logits = flashinfer_sm120_fp8_paged_mqa_logits(
+                padded_q_quant_cast,
+                kv_cache_bytes,
+                weights_rows,
+                seq_lens,
+                block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len,
+                clean_logits=False,
+            )
         else:
             logits = fp8_fp4_paged_mqa_logits(
                 (padded_q_quant_cast, padded_q_scale),
                 kv_cache,
-                weights[:num_padded_tokens],
+                weights_rows,
                 seq_lens,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
@@ -904,10 +949,13 @@ class SparseAttnIndexer(CustomOp):
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         self._cp_kv_cache_interleave_size: int | None = None
+        # The dense prefill logits (fp8_fp4_mqa_logits) run on DeepGEMM even
+        # when the paged decode logits take the FlashInfer SM120 route.
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
-                "the current vLLM environment."
+                "the current vLLM environment (the FlashInfer SM120 route covers "
+                "only the paged decode logits)."
             )
 
         if vllm_config.kernel_config.enable_jit_warmup:

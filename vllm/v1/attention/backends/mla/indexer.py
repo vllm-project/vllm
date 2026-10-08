@@ -25,6 +25,15 @@ from vllm.utils.deep_gemm import (
     has_deep_gemm,
     native_next_n_supported,
 )
+from vllm.utils.flashinfer import (
+    flashinfer_sm120_get_paged_mqa_logits_metadata,
+    flashinfer_sm120_paged_mqa_logits_capabilities,
+    flashinfer_sm120_paged_mqa_logits_catalog_error,
+    flashinfer_sm120_paged_mqa_logits_max_batch,
+    flashinfer_sm120_paged_mqa_logits_next_n,
+    flashinfer_sm120_paged_mqa_logits_route_available,
+    has_flashinfer_sm120_paged_mqa_logits,
+)
 from vllm.utils.math_utils import round_down
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
@@ -46,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 logger = init_logger(__name__)
@@ -658,6 +668,10 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    # Kernel that schedule_metadata was built for ("deep_gemm" or
+    # "flashinfer_sm120"); the layer launches the matching logits kernel, so
+    # the two can never disagree.
+    mqa_logits_backend: str = "deep_gemm"
 
 
 @dataclass
@@ -874,24 +888,249 @@ def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     )
 
 
-def _supports_native_decode(next_n: int) -> bool:
+def indexer_mqa_logits_kv_pages(
+    kv_cache_spec: AttentionSpec, kernel_block_size: int | None
+) -> list[int]:
+    """KV pages (cache states per kernel block) the paged MQA-logits kernel
+    can read from ``kv_cache_spec``.
+
+    With ``kernel_block_size`` this is the one page the kernel reads; the
+    metadata builder passes its spec's block, which ``create_metadata_builders``
+    already set to the kernel block. The model runner holds the manager-block
+    spec instead, which the worker may split into kernel blocks
+    (``select_common_block_size``): every split into whole states is a page the
+    kernel could read, so a route check over them is exact when the actual
+    split is shipped and conservative otherwise.
+    """
+    tokens_per_state = kv_cache_spec.tokens_per_state
+    if not isinstance(tokens_per_state, int) or tokens_per_state < 1:
+        return []
+    if kernel_block_size is not None:
+        if kernel_block_size % tokens_per_state:
+            return []
+        return [kv_cache_spec.get_num_kernel_states(kernel_block_size)]
+    block_size = kv_cache_spec.block_size
+    return sorted(
+        {
+            kv_cache_spec.get_num_kernel_states(split)
+            for split in range(tokens_per_state, block_size + 1, tokens_per_state)
+            if block_size % split == 0
+        },
+        reverse=True,
+    )
+
+
+def _flashinfer_sm120_mqa_logits_constraints(
+    vllm_config: VllmConfig,
+    kv_cache_spec: AttentionSpec | None,
+    kernel_block_size: int | None,
+) -> list[str]:
+    """Unmet constraints of the FlashInfer SM120 paged MQA-logits route (empty
+    when it can serve this deployment).
+
+    The route scores the FP8 indexer cache on the SM12x compute capabilities
+    FlashInfer exports kernels for (12.0 at the pinned package), reads each
+    layer's cache as a dense ``[blocks, page_kv, 1, 132]`` view, sizes its logits by
+    the request block table, schedules at most ``max_batch`` request rows per
+    call and ships the (indexer heads, KV page, next_n) kernels its catalog
+    exports. The kpool indexer (GLM) is excluded because its layer calls
+    DeepGEMM directly, and the two must agree on who built the schedule
+    metadata.
+
+    ``kv_cache_spec`` is the indexer layer's spec and ``kernel_block_size`` its
+    kernel block when the caller knows it (see
+    :func:`indexer_mqa_logits_kv_pages`).
+    """
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ):
+        return ["requires an SM12x (consumer Blackwell) CUDA device"]
+    if not has_flashinfer_sm120_paged_mqa_logits():
+        return ["flashinfer.sm120_paged_mqa_logits is not importable"]
+    # The route's policy (exported capabilities, depths, request ceiling and
+    # routes) is read from the package's catalog. A catalog the queries cannot
+    # read makes the route unavailable here rather than failing model
+    # construction or the first decode.
+    exported_capabilities = flashinfer_sm120_paged_mqa_logits_capabilities()
+    native_depths = flashinfer_sm120_paged_mqa_logits_next_n()
+    max_batch = flashinfer_sm120_paged_mqa_logits_max_batch()
+    catalog_error = flashinfer_sm120_paged_mqa_logits_catalog_error()
+    if catalog_error is not None:
+        return [f"FlashInfer SM120 catalog unavailable: {catalog_error}"]
+    # FlashInfer compiles the route for the exact capabilities its module
+    # exports (12.0, sm_120a, at the pinned package) and raises at the first
+    # metadata build on any other device of the family (12.1, the GB10 SoC),
+    # so the family check above is only the cheap filter.
+    capability = current_platform.get_device_capability()
+    if (
+        capability is None
+        or (capability.major, capability.minor) not in exported_capabilities
+    ):
+        device = "unknown" if capability is None else capability.as_version_str()
+        exported = (
+            "compute capability "
+            + ", ".join(f"{major}.{minor}" for major, minor in exported_capabilities)
+            + " only"
+            if exported_capabilities
+            else "no compute capability (the build exports none)"
+        )
+        return [
+            f"the device is compute capability {device}, but FlashInfer exports "
+            f"SM120 paged MQA-logits kernels for {exported}"
+        ]
+    failures: list[str] = []
+    next_n = 1 + vllm_config.num_speculative_tokens
+    # The depths (Q rows per request) with an exported kernel come from the
+    # package's catalog; a depth outside it is not native on this route.
+    if next_n not in native_depths:
+        failures.append(
+            "next_n (1 + num_speculative_tokens) must be a depth FlashInfer "
+            f"exports {native_depths}, got {next_n}"
+        )
+    hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    if (getattr(hf_text_config, "index_kpool", None) or 1) > 1:
+        failures.append("the kpool indexer (index_kpool > 1) runs DeepGEMM directly")
+    # The kernel requires max_context_len <= block_table.shape[1] * page_kv;
+    # the layer passes max_model_len while a DCP-sharded block table only
+    # spans max_model_len / dcp_world_size (AttentionSpec.max_num_blocks_per_req).
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        failures.append(
+            "decode context parallelism shards the request block table, but "
+            "the route sizes its logits by max_model_len"
+        )
+    # FlashInfer's scheduler caps the request rows of one call. Native rows
+    # are one per request; a step whose depth has no exported kernel (a
+    # 3-token step under next_n=4 when the catalog skips 3) or a flattening
+    # route hands it one row per token.
+    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+    if _use_flattening(vllm_config, "flashinfer_sm120"):
+        rows_per_request = next_n
+    else:
+        rows_per_request = max(
+            (
+                depth
+                for depth in range(2, next_n + 1)
+                if not _supports_native_decode(depth, "flashinfer_sm120")
+            ),
+            default=1,
+        )
+    if max_batch is None:
+        failures.append(
+            "FlashInfer does not report its scheduler's request ceiling (max_batch)"
+        )
+    elif max_num_seqs * rows_per_request > max_batch:
+        failures.append(
+            f"max_num_seqs={max_num_seqs} x {rows_per_request} decode rows per "
+            f"request exceeds FlashInfer's scheduler request ceiling {max_batch}"
+        )
+    # FlashInfer reads the layer's [blocks, page_kv, 1, 132] view through a TMA
+    # descriptor that carries the physical block stride, exactly like DeepGEMM:
+    # the strided per-layer view of a block-outermost layout (every layer's
+    # page in one block) and an alignment-padded page are both accepted, so
+    # only the page size has to resolve.
+    if kv_cache_spec is None:
+        failures.append("the indexer KV cache spec (its page size) is unresolved")
+        return failures
+    num_heads = getattr(hf_text_config, "index_n_heads", None)
+    if num_heads is None:
+        failures.append("hf_text_config.index_n_heads is missing")
+    pages = indexer_mqa_logits_kv_pages(kv_cache_spec, kernel_block_size)
+    if not pages:
+        failures.append(
+            f"no whole-state KV page fits a {kv_cache_spec.block_size}-token block"
+        )
+    if failures:
+        return failures
+    # A step may hand the kernel fewer rows than next_n (partial drafts, the
+    # draft-model refresh), so every exported depth up to next_n must be
+    # reachable on the page the kernel reads.
+    depths = [d for d in native_depths if d <= next_n]
+    if not any(
+        all(
+            flashinfer_sm120_paged_mqa_logits_route_available(num_heads, page, depth)
+            for depth in depths
+        )
+        for page in pages
+    ):
+        failures.append(
+            "FlashInfer ships no SM120 paged MQA-logits route for "
+            f"index_n_heads={num_heads}, page_kv in {pages}, next_n in {depths}"
+        )
+    return failures
+
+
+def resolve_sparse_indexer_mqa_logits_backend(
+    vllm_config: VllmConfig,
+    kv_cache_spec: AttentionSpec | None = None,
+    kernel_block_size: int | None = None,
+    *,
+    raise_on_unmet: bool = True,
+) -> str:
+    """Resolve ``kernel_config.sparse_indexer_mqa_logits_backend`` for the
+    paged (decode) MQA-logits kernel: "auto" picks FlashInfer's SM120 route
+    when every constraint holds and DeepGEMM otherwise; an explicit
+    "flashinfer_sm120" raises when a constraint fails (unless
+    ``raise_on_unmet`` is False, for a caller that only asks what the metadata
+    builder will select).
+
+    ``kv_cache_spec`` is the indexer layer's spec and ``kernel_block_size`` its
+    kernel block (the metadata builder passes both); without a spec the page is
+    unresolved and the route is unavailable. See
+    :func:`indexer_mqa_logits_kv_pages` for a manager-block spec.
+    """
+    kernel_config = getattr(vllm_config, "kernel_config", None)
+    backend = (
+        "auto"
+        if kernel_config is None
+        else kernel_config.sparse_indexer_mqa_logits_backend
+    )
+    if backend == "deep_gemm":
+        return backend
+    failures = _flashinfer_sm120_mqa_logits_constraints(
+        vllm_config, kv_cache_spec, kernel_block_size
+    )
+    if backend == "auto" or not raise_on_unmet:
+        return "deep_gemm" if failures else "flashinfer_sm120"
+    assert backend == "flashinfer_sm120", backend
+    if failures:
+        raise RuntimeError(
+            f"sparse_indexer_mqa_logits_backend='{backend}' was requested, but: "
+            + "; ".join(failures)
+        )
+    return backend
+
+
+def _supports_native_decode(next_n: int, mqa_logits_backend: str = "deep_gemm") -> bool:
     """Whether decode can pass `next_n` Q rows per request to the kernel
     instead of flattening to one single-token row per query, which re-reads
     the KV tile once per row.
     """
+    if mqa_logits_backend == "flashinfer_sm120":
+        return next_n in flashinfer_sm120_paged_mqa_logits_next_n()
     if not (current_platform.is_cuda() and has_deep_gemm()):
         return next_n in (1, 2)
     if current_platform.is_device_capability_family(100):
+        return True
+    if current_platform.is_device_capability_family(120):
+        # DeepGEMM's SM120 paged MQA-logits kernel accepts every depth as a
+        # template parameter (kNextN, scheduled as two-token Q atoms), so it
+        # takes every next_n natively like SM100; only SM90 ships a fixed set.
+        # The hardware check is the DeepGEMM-vs-reference GPU test over
+        # next_n 1..6 (test_deep_gemm_sm120_fp8_paged_mqa_logits_native_next_n).
         return True
     if current_platform.is_device_capability_family(90):
         return native_next_n_supported(next_n)
     return next_n in (1, 2)
 
 
-def _use_flattening(vllm_config: VllmConfig) -> bool:
+def _use_flattening(
+    vllm_config: VllmConfig, mqa_logits_backend: str | None = None
+) -> bool:
+    if mqa_logits_backend is None:
+        mqa_logits_backend = resolve_sparse_indexer_mqa_logits_backend(vllm_config)
     speculative_config = vllm_config.speculative_config
     next_n = 1 + vllm_config.num_speculative_tokens
-    return not _supports_native_decode(next_n) or (
+    return not _supports_native_decode(next_n, mqa_logits_backend) or (
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
         and (
@@ -913,9 +1152,32 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
-        if _supports_varlen_paged_mqa_logits() or _use_flattening(vllm_config):
+        if _supports_varlen_paged_mqa_logits():
             return AttentionCGSupport.ALWAYS
-        return AttentionCGSupport.UNIFORM_BATCH
+        # The runner passes the manager-block spec: the KV cache group's (a
+        # UniformTypeKVCacheSpecs over the MLA and indexer layers on the V1
+        # runner) or the layer's. The builder resolves the kernel-block copy
+        # of the indexer layer's spec, so resolve every member spec over its
+        # possible kernel splits and report the weakest support: the
+        # FlashInfer SM120 route takes the native (B, next_n) layout only (the
+        # varlen row->request indices are a DeepGEMM SM100 feature) and keeps
+        # UNIFORM_BATCH like the SM90 native path, while a flattening DeepGEMM
+        # route replays any batch.
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            member_specs: list[KVCacheSpec] = list(
+                kv_cache_spec.kv_cache_specs.values()
+            )
+        else:
+            member_specs = [kv_cache_spec]
+        for spec in member_specs:
+            mqa_logits_backend = resolve_sparse_indexer_mqa_logits_backend(
+                vllm_config,
+                spec if isinstance(spec, AttentionSpec) else None,
+                raise_on_unmet=False,
+            )
+            if not _use_flattening(vllm_config, mqa_logits_backend):
+                return AttentionCGSupport.UNIFORM_BATCH
+        return AttentionCGSupport.ALWAYS
 
     def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -948,15 +1210,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
-        self.use_flattening = _use_flattening(self.vllm_config)
+        # Paged MQA-logits kernel this builder schedules for; recorded on the
+        # decode metadata so the layer launches the same one. This spec is
+        # the kernel-block copy (create_metadata_builders), so its block is
+        # the page the kernel reads.
+        self.mqa_logits_backend = resolve_sparse_indexer_mqa_logits_backend(
+            self.vllm_config,
+            self.kv_cache_spec
+            if isinstance(self.kv_cache_spec, AttentionSpec)
+            else None,
+            self.kv_cache_spec.block_size,
+        )
+        self.use_flattening = _use_flattening(self.vllm_config, self.mqa_logits_backend)
         self.supports_varlen = _supports_varlen_paged_mqa_logits()
         logger.info_once(
             "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
-            "(next_n=%d, use_fp4_cache=%s)",
+            "(next_n=%d, use_fp4_cache=%s, mqa_logits_backend=%s)",
             self.use_flattening,
             self.supports_varlen,
             next_n,
             self.indexer_uses_fp4,
+            self.mqa_logits_backend,
         )
 
         sm_count = num_compute_units(self.device.index)
@@ -1550,7 +1824,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # so legality is per-step: on SM90 a uniformly 3-deep batch has no
             # native kernel. max_decode_len <= 1 always has one.
             step_next_n_ok = max_decode_len <= 1 or _supports_native_decode(
-                max_decode_len
+                max_decode_len, self.mqa_logits_backend
             )
             use_native = (
                 not (self.use_flattening or self.supports_varlen)
@@ -1681,7 +1955,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             schedule_metadata = self.scheduler_metadata_buffer
-            if current_platform.is_cuda() and has_deep_gemm():
+            if self.mqa_logits_backend == "flashinfer_sm120":
+                # FlashInfer schedules from the (B, next_n) int32 context
+                # lengths alone and fills (num_sms + 1, 2); the varlen
+                # row->request indices never reach this route.
+                assert decode_indices is None
+                metadata = flashinfer_sm120_get_paged_mqa_logits_metadata(
+                    seq_lens,
+                    self.kv_cache_spec.num_states,
+                    self.num_sms,
+                )
+                schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
+                schedule_metadata[:] = metadata
+            elif current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.num_states,
@@ -1698,6 +1984,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 requires_padding=requires_padding,
                 schedule_metadata=schedule_metadata,
                 indices=decode_indices,
+                mqa_logits_backend=self.mqa_logits_backend,
                 global_seq_lens=global_seq_lens_for_decode,
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
@@ -1773,7 +2060,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             decode.seq_lens.view(-1).copy_(metadata.seq_lens)
         decode.decode_lens.fill_(1)
 
-        if current_platform.is_cuda() and has_deep_gemm():
+        # Refresh the schedule with the kernel that build() scheduled for; the
+        # metadata records it, so a replayed graph keeps launching the same one.
+        if decode.mqa_logits_backend == "flashinfer_sm120":
+            assert decode.indices is None
+            schedule_metadata = flashinfer_sm120_get_paged_mqa_logits_metadata(
+                decode.seq_lens,
+                self.kv_cache_spec.num_states,
+                self.num_sms,
+            )
+            assert schedule_metadata.shape == decode.schedule_metadata.shape
+            decode.schedule_metadata.copy_(schedule_metadata)
+        elif current_platform.is_cuda() and has_deep_gemm():
             schedule_metadata = get_paged_mqa_logits_metadata(
                 decode.seq_lens,
                 self.kv_cache_spec.num_states,
