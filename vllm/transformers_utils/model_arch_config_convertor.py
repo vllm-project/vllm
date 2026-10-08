@@ -329,7 +329,6 @@ class ModelArchConfigConvertorBase:
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
-            "longcat_flash_ngram",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
@@ -714,6 +713,12 @@ class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
+class LongCatFlashModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        # `num_hidden_layers` counts attention sublayers, two per decoder layer
+        return self.hf_text_config.num_layers
+
+
 class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
@@ -825,6 +830,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "longcat_flash": LongCatFlashModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "medusa": MedusaModelArchConfigConvertor,
