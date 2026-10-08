@@ -39,12 +39,11 @@ def _make_moe(*, max_deferred_tokens: int = 128, enabled: bool = True):
     return moe
 
 
-def _make_runner(modules, *, max_tokens: int = 8192, linear_backend: str = "auto"):
+def _make_runner(modules, *, max_tokens: int = 8192):
     """Create a runner carrying only the state used by FlashInfer warmup."""
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
-            kernel_config=SimpleNamespace(linear_backend=linear_backend),
             attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(data_parallel_rank=0),
         ),
@@ -63,21 +62,19 @@ def test_flashinfer_autotune_token_counts_include_deferred_moe_limits():
             _make_moe(max_deferred_tokens=128),
             _make_moe(max_deferred_tokens=64, enabled=False),
             _make_moe(max_deferred_tokens=-1),
-        ],
-        linear_backend="flashinfer_cutedsl",
+        ]
     )
 
     with patch("vllm.model_executor.layers.fused_moe.MoERunner", _FakeMoERunner):
         token_counts = _flashinfer_autotune_token_counts(runner)
 
-    assert token_counts == (8192, 32, 128)
+    assert token_counts == (8192, 128)
 
 
 def test_flashinfer_autotune_token_counts_are_bounded_and_deduplicated():
     runner = _make_runner(
         [_make_moe(max_deferred_tokens=4096)],
         max_tokens=32,
-        linear_backend="flashinfer_cutedsl",
     )
 
     with patch("vllm.model_executor.layers.fused_moe.MoERunner", _FakeMoERunner):
