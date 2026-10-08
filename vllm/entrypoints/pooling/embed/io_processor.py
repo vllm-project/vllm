@@ -17,6 +17,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     CustomChatCompletionMessageParam,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
@@ -26,7 +27,11 @@ from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
-from ..late_chunking import attach_late_chunking_metadata
+from ..late_chunking import (
+    attach_late_chunking_metadata,
+    build_late_chunking_metadata,
+    prepare_late_chunking_input,
+)
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
     AnyOfflineInputsContext,
@@ -668,12 +673,39 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
         ):
             return factory, num_requests
 
+        if (ctx.tokenization_kwargs or {}).get("padding") not in (
+            None,
+            False,
+            "do_not_pad",
+        ):
+            raise VLLMValidationError("Late chunking does not support input padding")
+
         def request_factory() -> RequestGenerator:
             for request in factory():
                 ctx.late_chunking.append(request["params"].late_chunking_params)
                 yield request
 
         return request_factory, num_requests
+
+    def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
+        late_chunking = render_params["params"].late_chunking_params
+        if late_chunking is None:
+            return super().render(render_params)
+
+        text, tok_params = prepare_late_chunking_input(self.vllm_config, render_params)
+        render_params = render_params.copy()
+        render_params["tok_params"] = tok_params
+        result = super().render(render_params)
+        prompt = result["prompts"]
+        if prompt["type"] != "token":
+            raise VLLMValidationError("Late chunking requires tokenized text")
+        late_chunking.metadata = build_late_chunking_metadata(
+            text,
+            len(prompt["prompt_token_ids"]),
+            prompt.pop("prompt_token_offsets", None),
+            late_chunking.chunk_size,
+        )
+        return result
 
     def post_process_offline(self, ctx: OfflineOutputsContext):
         if ctx.late_chunking:
