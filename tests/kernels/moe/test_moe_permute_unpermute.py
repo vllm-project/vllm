@@ -504,3 +504,9 @@ def test_moe_permute_scratch_grows_until_workspace_lock(workspace_init) -> None:
     run(64, 6, torch.bfloat16)
     with pytest.raises(AssertionError, match="Scratch growth is not allowed"):
         run(65, 6, torch.bfloat16)
+
+    # Experts rebuilt after the lock (e.g. a weight reload) keep the capacity.
+    rebuilt = get_moe_permute_scratch(
+        num_experts=16, num_local_experts=16, device=device
+    )
+    assert rebuilt.max_expanded_rows == 384
