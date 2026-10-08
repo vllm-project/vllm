@@ -1245,8 +1245,12 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
         worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
 
 
-def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
-    """``scratch_aliases`` selects which pages the compressor ring overlays."""
+def _make_csa_linear_ple_worker(
+    scratch_aliases: str = "compressed", ple_page_size: int = 256
+):
+    """``scratch_aliases`` selects which pages the compressor ring overlays;
+    ``ple_page_size`` widens the PLE page beyond the page it shares a region
+    with (block-outer layout: both start at byte 0 of the block)."""
     from unittest.mock import MagicMock
 
     from vllm.config import set_current_vllm_config
@@ -1305,7 +1309,7 @@ def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
         block_size=1,
         shapes=((6, 3),),
         dtypes=(torch.float16,),
-        page_size_padded=256,
+        page_size_padded=ple_page_size,
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
         tp_replicated=True,
     )
@@ -1339,17 +1343,22 @@ def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
             ("compressed.0",),
             ("compressed.1",),
         )
-    region_size = 512
     page_size = 256
+    # Region 0 hosts the PLE page: its blocks are as wide as the widest page.
+    block_strides = [max(page_size, ple_page_size)] + [page_size] * (
+        len(tensor_regions) - 1
+    )
+    region_sizes = [2 * stride for stride in block_strides]
+    region_offsets = [sum(region_sizes[:index]) for index in range(len(region_sizes))]
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=len(tensor_regions) * region_size,
+                size=sum(region_sizes),
                 layers=[layer_name],
-                layer_stride=region_size,
-                block_stride=page_size,
-                offset=region_index * region_size,
+                layer_stride=region_sizes[region_index],
+                block_stride=block_strides[region_index],
+                offset=region_offsets[region_index],
             )
             for region_index, layer_names in enumerate(tensor_regions)
             for layer_name in layer_names
@@ -1386,10 +1395,14 @@ def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
         set_current_vllm_config(vllm_config),
     ):
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
-        tensors = [torch.zeros((2, 256), dtype=torch.uint8) for _ in range(4)]
+        tensors = [
+            torch.zeros((2, stride), dtype=torch.uint8) for stride in block_strides
+        ]
         worker.register_kv_caches(
             {
-                layer_name: tensors[region_index]
+                layer_name: tensors[region_index][
+                    :, : (ple_page_size if layer_name == "mamba.ple" else page_size)
+                ]
                 for region_index, layer_names in enumerate(tensor_regions)
                 for layer_name in layer_names
             }
@@ -1523,6 +1536,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
         kv_cache_layout="HND",
         block_size=4,
         ssm_sizes=(24, 32),
+        ple_block_len=256,
         attn_backend_name="test",
         physical_blocks_per_logical_kv_block=1,
     )
@@ -1535,13 +1549,37 @@ def test_csa_linear_remote_ple_is_copied_whole():
     assert descriptors[-2:, 0].tolist() == [0x10000, 0x10100]
     assert descriptors[-2:, 1].tolist() == [256, 256]
 
-    metadata.block_lens[0] = 128
+    metadata.ple_block_len = 128
     with pytest.raises(ValueError, match="PLE pages require identical"):
         worker._build_mamba_remote(
             metadata,
             tp_ratio=-2,
             transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
         )
+
+
+@pytest.mark.cpu_test
+def test_csa_linear_ple_page_wider_than_the_shared_region_page():
+    """The PLE page is discovered in the region of the main KV page registered
+    first (both start at byte 0 of the block); its descriptors must still cover
+    the whole PLE page, not the region's block_len."""
+    worker = _make_csa_linear_ple_worker(ple_page_size=384)
+
+    assert worker._ple_region_index == 0
+    assert worker.block_len_per_layer[0] == 256
+    assert worker.block_stride_per_layer[0] == 384
+    assert worker._ple_block_len == 384
+
+    bases = [0x10000, 0x20000, 0x30000, 0x40000]
+    mamba = worker._build_mamba_local(bases)
+    assert mamba[-2:, 0].tolist() == [0x10000, 0x10000 + 384]
+    assert mamba[-2:, 1].tolist() == [384, 384]
+
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    assert metadata.ple_block_len == 384
+    assert metadata.block_lens[0] == 256
 
 
 def _make_ring_worker():
