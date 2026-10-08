@@ -734,6 +734,10 @@ def moe_gptq_gemm_rdna3(
     )
 
 
+def skinny_wmma_f16(x: torch.Tensor, w: torch.Tensor, split: int) -> torch.Tensor:
+    return torch.ops._rocm_C.skinny_wmma_f16(x, w, split)
+
+
 # cutlass
 def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)

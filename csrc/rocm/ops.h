@@ -50,6 +50,9 @@ std::vector<torch::Tensor> qwen4_hc_mix_xn(const torch::Tensor& xn,
                                            const torch::Tensor& wd,
                                            const torch::Tensor& wu);
 
+torch::Tensor skinny_wmma_f16(const torch::Tensor& x, const torch::Tensor& w,
+                              int64_t split);
+
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,

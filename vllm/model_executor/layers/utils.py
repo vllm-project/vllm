@@ -291,7 +291,13 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import (
+        on_gfx1x,
+        on_gfx9,
+        on_gfx950,
+        on_gfx1100,
+        on_gfx1250,
+    )
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -347,6 +353,24 @@ def rocm_unquantized_gemm_impl(
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         # Note: Only build that view inside the branches that consume it.
+        # N = 17..32 on gfx1100: the WMMA kernel reads every weight byte once,
+        # where wvSplitK stops at 16 and hipBLASLt picks slow tiles (N=24: HC
+        # down 51 -> 27 us, router 18 -> 10). With K < 512 rocBLAS stays ahead.
+        # At N = 13..16 it beats wvSplitK on the tall weights up to K = 2560
+        # (GDN in_proj 39 -> 33 us, out_proj 20 -> 16).
+        if (
+            (
+                (16 < n <= 32 and k >= 512)
+                or (12 < n <= 16 and m >= 2048 and 512 <= k <= 2560)
+            )
+            and bias is None
+            and x.dtype == torch.float16
+            and on_gfx1100()
+            and hasattr(torch.ops._rocm_C, "skinny_wmma_f16")
+        ):
+            x_view = x.reshape(-1, x.size(-1)).contiguous()
+            out = ops.skinny_wmma_f16(x_view, weight, 0)
+            return out.reshape(*x.shape[:-1], m)
         # N = 13..16 in one call from M = 256 (K >= 1024), and N = 20 for tall
         # weights: with in_proj_ba (24x5120) at N=16 wvSplitK is 6x slower than
         # rocBLAS on gfx1100, while at N <= 12 it is 2.6x faster for any M. At

@@ -414,3 +414,21 @@ def test_rocm_wvsplitk_fp8_kernel(
         torch.testing.assert_close(out, ref_out, atol=0.07, rtol=5e-2)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not hasattr(torch.ops._rocm_C, "skinny_wmma_f16"),
+    reason="WMMA skinny GEMM is built for gfx1100 only",
+)
+@pytest.mark.parametrize("n", [1, 8, 16, 17, 24, 32])
+@pytest.mark.parametrize("m,k", [(24, 2560), (336, 10240), (2560, 160), (4096, 2560)])
+@pytest.mark.parametrize("split", [0, 1, 3])
+def test_rocm_skinny_wmma_f16(n, m, k, split):
+    # Row tails (24, 336), short K (160) and both token tiles (n > 16), with
+    # the K split picked, off and forced.
+    torch.manual_seed(0)
+    x = torch.randn(n, k, dtype=torch.float16, device="cuda")
+    w = torch.randn(m, k, dtype=torch.float16, device="cuda") * 0.02
+    out = ops.skinny_wmma_f16(x, w, split)
+    ref = (x.float() @ w.float().t()).half()
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)

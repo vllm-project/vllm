@@ -246,3 +246,33 @@ def test_rocm_unquantized_gemm_gfx1x_n16_dispatch(monkeypatch, m, k, wvsplitk_ca
 
     assert wvsplitk_mock.call_count == wvsplitk_calls
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("k,uses_wmma", [(2560, True), (320, False)])
+def test_rocm_unquantized_gemm_gfx1100_n24_wmma(monkeypatch, k, uses_wmma):
+    # At N = 17..32 the WMMA kernel takes K >= 512; shorter K stays elsewhere.
+    x = torch.randn(24, k, dtype=torch.float16)
+    weight = torch.randn(256, k, dtype=torch.float16)
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1100", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+    wmma_mock = MagicMock(side_effect=lambda x_view, w, _: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "skinny_wmma_f16", wmma_mock)
+    monkeypatch.setattr(
+        utils.ops,
+        "wvSplitK",
+        MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t()),
+    )
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    assert wmma_mock.called == uses_wmma
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
