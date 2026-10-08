@@ -49,18 +49,98 @@ def test_triton_sparse_mla_gate(monkeypatch) -> None:
         rocm_aiter_ops.refresh_env_variables()
 
 
+def test_triton_sparse_mla_gate_gfx942(monkeypatch) -> None:
+    """gfx942 takes the flag only for callers that opt in, and only with an aiter
+    whose kernel lists gfx942."""
+    import vllm._aiter_ops as aiter_ops
+    import vllm.platforms.rocm as rocm
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        aiter_ops.logger,
+        "warning_once",
+        lambda msg, *args, **kwargs: warnings.append(msg % args),
+    )
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: False)
+    monkeypatch.setattr(rocm, "on_gfx942", lambda: True)
+    archs = {"SUPPORTED_ARCHS": ("gfx942", "gfx950")}
+    monkeypatch.setattr(
+        aiter_ops, "_aiter_sparse_mla_archs", lambda name: archs.get(name, ())
+    )
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        assert rocm_aiter_ops.is_triton_sparse_mla_enabled(gfx942_ok=True)
+        assert not warnings
+        # DeepSeek V4 does not opt in: its packed caches are gfx950-only.
+        assert not rocm_aiter_ops.is_triton_sparse_mla_enabled()
+        assert "gfx950-only" in warnings.pop()
+        # An aiter from before ROCm/aiter#5721 has no gfx942 kernel.
+        archs["SUPPORTED_ARCHS"] = ("gfx950",)
+        assert not rocm_aiter_ops.is_triton_sparse_mla_enabled(gfx942_ok=True)
+        assert "ROCm/aiter#5721" in warnings.pop()
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize(
+    ("rope_dim", "kv_cache_dtype", "reads_fp8", "reason"),
+    [
+        (0, "auto", False, None),
+        (0, "fp8", True, None),
+        (0, "fp8", False, "ROCm/aiter#6199"),
+        (64, "auto", True, "rope-free"),
+    ],
+    ids=["bf16", "fp8", "fp8_old_aiter", "rope"],
+)
+def test_aiter_sparse_mla_gfx942_scope(
+    monkeypatch, rope_dim: int, kv_cache_dtype: str, reads_fp8: bool, reason
+) -> None:
+    """On gfx942 the backend takes aiter's kernel for rope-free sparse MLA only,
+    and with an fp8 cache only if the installed aiter reads it there."""
+    import vllm.platforms.rocm as rocm
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    monkeypatch.setattr(rocm, "on_gfx942", lambda: True)
+    monkeypatch.setattr(
+        rocm_aiter_ops, "triton_sparse_mla_reads_fp8_on_gfx942", lambda: reads_fp8
+    )
+    impl = ROCMAiterMLASparseImpl.__new__(ROCMAiterMLASparseImpl)
+    impl.kv_cache_dtype = kv_cache_dtype
+    impl.qk_rope_head_dim = rope_dim
+    impl.dcp_world_size = impl.pcp_world_size = 1
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
+
+    got = impl._aiter_sparse_mla_unsupported_reason(vllm_config)
+    if reason is None:
+        assert got is None
+    else:
+        assert got is not None and reason in got
+
+
 @pytest.mark.parametrize(
     "rope_dim",
     [0, 64],
     ids=["rope_free", "appended_rope"],  # GLM-5.3-Flash; GLM-5.1/5.2, V3.2
 )
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "quantizes_q"),
+    [("auto", False), ("fp8", False), ("fp8", True)],
+    ids=["bf16", "fp8", "fp8_bf16_q"],  # fp8_bf16_q: gfx942's kernel
+)
 @torch.inference_mode()
 def test_forward_mqa_prepares_triton_sparse_mla_inputs(
-    monkeypatch, rope_dim: int, kv_cache_dtype: str
+    monkeypatch, rope_dim: int, kv_cache_dtype: str, quantizes_q: bool
 ) -> None:
     """What forward_mqa hands aiter: global slots built from the request-local
-    top-k rows, q quantized with the layer's scale, and the cache as stored."""
+    top-k rows, q quantized with the layer's scale (or, where the kernel
+    quantizes q itself, q as is with fp8 dots), and the cache as stored."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
         ROCMAiterMLASparseImpl,
@@ -97,6 +177,7 @@ def test_forward_mqa_prepares_triton_sparse_mla_inputs(
     impl.kv_cache_dtype = kv_cache_dtype
     impl.topk_indices_buffer = topk_indices.to(device)
     impl.use_aiter_sparse_mla = True
+    impl.aiter_sparse_mla_quantizes_q = quantizes_q
     layer = SimpleNamespace(
         _q_scale=torch.tensor([0.02], device=device),
         _k_scale=torch.tensor([0.01], device=device),
@@ -128,7 +209,7 @@ def test_forward_mqa_prepares_triton_sparse_mla_inputs(
     (q_in, kv_in, o, sm_scale, kv_indptr, kv_indices), kwargs = calls[0]
     assert _rows_from_ragged(kv_indices, kv_indptr) == rows
     assert q_in.shape[0] == num_tokens
-    if fp8:
+    if fp8 and not quantizes_q:
         assert q_in.dtype == cache_dtype
         torch.testing.assert_close(
             q_in.float() * layer._q_scale, q[:num_tokens].float(), atol=1e-3, rtol=0.07
@@ -144,6 +225,7 @@ def test_forward_mqa_prepares_triton_sparse_mla_inputs(
     assert kwargs["q_scale"] is layer._q_scale
     assert kwargs["kv_scale"] is layer._k_scale
     assert kwargs["attn_sink"] is impl.sinks
+    assert kwargs["dot_precision"] == ("fp8" if quantizes_q else None)
     assert lse is None
 
 
