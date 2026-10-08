@@ -363,6 +363,7 @@ class ResponsesRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = []
+    stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -521,6 +522,7 @@ class ResponsesRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,
+            stop_token_ids=self.stop_token_ids,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
