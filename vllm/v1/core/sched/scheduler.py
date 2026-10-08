@@ -360,6 +360,17 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
+        # Cache-aware admission needs a prefix cache to consult, and reorders by
+        # position, which only a FCFS queue has.
+        self.cache_aware_window = (
+            self.scheduler_config.cache_aware_admission_window
+            if self.policy == SchedulingPolicy.FCFS
+            and self.cache_config.enable_prefix_caching
+            else 0
+        )
+        self.cache_aware_threshold = (
+            self.scheduler_config.cache_aware_admission_threshold
+        )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -888,11 +899,25 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+            # Match the admission slot limit before probing cached prefixes.
+            # Paused streaming sessions also retain a model-runner slot.
+            if (
+                self.cache_aware_window
+                and not getattr(self, "_qwenfuse_risk_enabled", False)
+                and not defer_prefills
+                and len(self.running) + self.num_waiting_for_streaming_input
+                < self.max_num_active_reqs
+            ):
+                self._reorder_waiting_by_cached_prefix()
+
+            risk_reorder_checked = False
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
             def skip_request(from_queue: RequestQueue) -> None:
+                nonlocal risk_reorder_checked
                 request_to_skip = from_queue.pop_request()
+                risk_reorder_checked = False
                 self.deferred_waiting.add(request_to_skip)
                 if self._holds_kv_blocks(request_to_skip):
                     step_skipped_kv_holding.appendleft(request_to_skip)
@@ -1240,6 +1265,25 @@ class Scheduler(SchedulerInterface):
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
+                if (
+                    getattr(self, "_qwenfuse_risk_enabled", False)
+                    and not risk_reorder_checked
+                    and request_queue is self.waiting
+                    and request.status == RequestStatus.WAITING
+                    and request.num_computed_tokens == 0
+                    and len(self.waiting) >= 2
+                ):
+                    # One ranking attempt per admission position, including retry.
+                    risk_reorder_checked = True
+                    if self._qwenfuse_risk_reorder(
+                        request,
+                        num_tokens_past_hit,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks,
+                    ):
+                        # No blocks allocated yet: recompute the new head's inputs.
+                        continue
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_tokens_past_hit,
@@ -1328,6 +1372,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 request = request_queue.pop_request()
+                risk_reorder_checked = False
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
                 if num_external_computed_tokens > 0:
@@ -2458,6 +2503,55 @@ class Scheduler(SchedulerInterface):
             self.kv_holding_waiting.add_request(request)
         else:
             self.waiting.add_request(request)
+
+    def _qwenfuse_risk_reorder(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_local_computed_tokens: int,
+        new_computed_blocks: KVCacheBlocks,
+    ) -> bool:
+        """Hook for risk admission subclasses; the base scheduler does not reorder."""
+        return False
+
+    def _reorder_waiting_by_cached_prefix(self) -> None:
+        """Move waiting requests with a cached prefix to the front of the window.
+
+        Reordering is confined to the slots held by plain waiting requests, so a
+        request in a blocked status or one already partially computed keeps its
+        exact position. Eligible requests may swap across those positions;
+        requests beyond the window are left untouched.
+        """
+        if len(self.waiting) < 2:
+            return
+        if self.kv_cache_manager.usage < self.cache_aware_threshold:
+            return
+
+        head = list(itertools.islice(self.waiting, self.cache_aware_window))
+        slots = [
+            i
+            for i, request in enumerate(head)
+            if request.status == RequestStatus.WAITING
+            and not request.num_computed_tokens
+        ]
+        if len(slots) < 2:
+            return
+
+        # Deepest cached prefix first, arrival order breaking ties.
+        get_num_cached = self.kv_cache_manager.get_num_cached_tokens
+        cached = {i: get_num_cached(head[i]) for i in slots}
+        order = sorted(slots, key=lambda i: (-cached[i], i))
+        if order == slots:
+            return
+
+        reordered = list(head)
+        for slot, source in zip(slots, order):
+            reordered[slot] = head[source]
+        # One pass to drop the whole window, then re-insert in the new order;
+        # removing each request individually would be quadratic.
+        self.waiting.remove_requests(head)
+        for request in reversed(reordered):
+            self.waiting.prepend_request(request)
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
