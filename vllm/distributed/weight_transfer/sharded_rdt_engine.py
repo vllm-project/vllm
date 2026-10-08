@@ -50,6 +50,7 @@ results behind the choices here.
 """
 
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from math import prod
 from typing import TYPE_CHECKING, Any, cast
@@ -1379,9 +1380,17 @@ class ShardedRDTWeightTransferEngine(
         from vllm.model_executor.layers.quantization.base_config import (
             QuantizeMethodBase,
         )
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
         from vllm.model_executor.model_loader.reload.layerwise import (
             LAYERWISE_INFO,
             _copy_and_restore_kernel_tensors,
+        )
+        from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+        from vllm.model_executor.model_loader.utils import (
+            online_quantization_timing_context,
         )
 
         stream = self._quant_stream or self._proc_stream
@@ -1395,11 +1404,27 @@ class ShardedRDTWeightTransferEngine(
             for layer in layers:
                 info = LAYERWISE_INFO.get(layer)
                 assert info is not None  # completed leaf module is set up for reload
+                # The layer tensors were allocated on the process stream, but
+                # this stream reads and then drops them. Keep their storage live
+                # until those reads complete.
+                for tensor in get_layer_tensors(layer).values():
+                    if tensor.is_cuda:
+                        tensor.record_stream(stream)
                 quant_method = getattr(layer, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
                     if hasattr(layer, "_already_called_process_weights_after_loading"):
                         delattr(layer, "_already_called_process_weights_after_loading")
-                    quant_method.process_weights_after_loading(layer)
+                    timing_context = (
+                        online_quantization_timing_context(layer, quant_method)
+                        if isinstance(
+                            quant_method, (OnlineLinearBase, OnlineMoEMethodBase)
+                        )
+                        else nullcontext()
+                    )
+                    with timing_context:
+                        quant_method.process_weights_after_loading(layer)
+                    if hasattr(layer, "update_param_tp_status"):
+                        layer.update_param_tp_status()
                 # Copy into persistent kernel storage (preserves cudagraph refs).
                 if info.kernel_tensors is not None:
                     _copy_and_restore_kernel_tensors(layer, info)
