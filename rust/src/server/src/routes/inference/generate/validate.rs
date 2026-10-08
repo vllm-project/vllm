@@ -23,6 +23,13 @@ pub(crate) fn validate_request_compat(
         );
     }
 
+    if request.return_token_logprobs == Some(true) && request.stream {
+        bail_invalid_request!(
+            param = "return_token_logprobs",
+            "return_token_logprobs is not supported with stream=True"
+        );
+    }
+
     if request.return_top_k_logprobs == Some(true) {
         if request.stream {
             bail_invalid_request!(
@@ -145,6 +152,26 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
+    }
+
+    #[test]
+    fn validate_request_compat_return_token_logprobs_rejects_stream() {
+        let served = served(&["Qwen/Qwen1.5-0.5B-Chat"]);
+        let request = |stream: bool| -> GenerateRequest {
+            serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "return_token_logprobs": true,
+                "stream": stream,
+                "sampling_params": {}
+            }))
+            .expect("parse request")
+        };
+        assert!(validate_request_compat(&request(false), &served).is_ok());
+        let error = validate_request_compat(&request(true), &served).expect_err("stream");
+        assert_eq!(
+            axum::response::IntoResponse::into_response(error).status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]

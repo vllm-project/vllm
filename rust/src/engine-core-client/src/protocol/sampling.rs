@@ -143,6 +143,16 @@ pub struct EngineCoreSamplingParams {
     /// Tokenized bad words to avoid during generation.
     #[serde(rename = "_bad_words_token_ids")]
     pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
+    /// Transport only the sampled token's logprob per generated position, as
+    /// `EngineCoreOutput.new_sampled_logprobs`; requires `logprobs == 0`.
+    ///
+    /// This mirrors Python's internal `_sampled_logprobs_only` field, set by the
+    /// frontend for `return_token_logprobs` rather than by end users.
+    #[serde(
+        rename = "_sampled_logprobs_only",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub sampled_logprobs_only: bool,
     /// Parameters for configuring structured outputs (guided decoding).
     pub structured_outputs: Option<StructuredOutputsParams>,
     /// Specific token IDs for which log probabilities should be returned at
@@ -190,6 +200,7 @@ impl EngineCoreSamplingParams {
             logit_bias: None,
             allowed_token_ids: None,
             bad_words_token_ids: None,
+            sampled_logprobs_only: false,
             structured_outputs: None,
             logprob_token_ids: None,
             skip_reading_prefix_cache: None,

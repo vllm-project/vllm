@@ -416,6 +416,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         }),
         token_ids: vec![33, 44],
         logprobs: None,
+        sampled_logprobs: None,
         finish_reason: Some(FinishReason::Length),
         cached_token_count: 0,
         kv_transfer_params: None,

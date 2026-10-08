@@ -32,7 +32,7 @@ use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{PositionLogprobs, TokenLogprob};
 
 use super::top_k::TopKLogprobs;
-use super::types::GenerateResponse;
+use super::types::{GenerateLogProbs, GenerateResponse};
 use super::{top_logprob_entries, wire_rank};
 use crate::error::ApiError;
 use crate::routes::openai::utils::logprobs::clamp_logprob;
@@ -41,12 +41,16 @@ use crate::routes::openai::utils::logprobs::clamp_logprob;
 pub(super) enum ChoiceLogprobs {
     /// `"logprobs": null`.
     None,
-    /// `{"content": [...]}` for `sampling_params.logprobs = requested`.
-    /// Positions must be non-empty.
+    /// `{"content": [...]}` for `sampling_params.logprobs = requested`, plus
+    /// `"sampled"` for `return_token_logprobs`. Positions must be non-empty.
     Generate {
         positions: Vec<PositionLogprobs>,
         requested: i32,
+        sampled: Option<Vec<f64>>,
     },
+    /// `{"content":null,"sampled":[...]}` for `return_token_logprobs` with
+    /// `logprobs = 0`.
+    Sampled(Vec<f64>),
     /// `{"content":null,"sampled":[...],"top_k":{...}}` for
     /// `return_top_k_logprobs` (`sampled` only with `return_token_logprobs`).
     TopK(TopKLogprobs),
@@ -61,18 +65,38 @@ const BODY_CHANNEL_CHUNKS: usize = 2;
 
 /// Build the HTTP response for one non-streaming generate request whose choice
 /// carries no `logprobs` (they are passed separately).
-pub(super) fn generate_response(response: GenerateResponse, logprobs: ChoiceLogprobs) -> Response {
+pub(super) fn generate_response(
+    mut response: GenerateResponse,
+    logprobs: ChoiceLogprobs,
+) -> Response {
     let body = match logprobs {
         ChoiceLogprobs::None => return Json(response).into_response(),
+        ChoiceLogprobs::Sampled(sampled) => {
+            let logprobs = GenerateLogProbs {
+                content: None,
+                sampled: Some(sampled),
+            };
+            let Ok(logprobs) = serde_json::value::to_raw_value(&logprobs) else {
+                return serialize_error();
+            };
+            response.choices[0].logprobs = Some(logprobs);
+            return Json(response).into_response();
+        }
         ChoiceLogprobs::Generate {
             positions,
             requested,
+            sampled,
         } => {
             let Some((mut head, choice_tail)) = split_response(response) else {
-                return split_error();
+                return serialize_error();
             };
             head.extend_from_slice(b"{\"content\":[");
-            let mut tail = b"]}".to_vec();
+            let mut tail = b"]".to_vec();
+            if let Some(sampled) = sampled {
+                tail.extend_from_slice(b",\"sampled\":");
+                json(&mut tail, &sampled);
+            }
+            tail.push(b'}');
             tail.extend_from_slice(&choice_tail);
 
             let (tx, rx) = mpsc::channel(BODY_CHANNEL_CHUNKS);
@@ -87,7 +111,7 @@ pub(super) fn generate_response(response: GenerateResponse, logprobs: ChoiceLogp
         }
         ChoiceLogprobs::TopK(logprobs) => {
             let Some((head, tail)) = split_response(response) else {
-                return split_error();
+                return serialize_error();
             };
             top_k_body(head, tail, logprobs)
         }
@@ -193,7 +217,7 @@ impl http_body::Body for PartsBody {
     }
 }
 
-fn split_error() -> Response {
+fn serialize_error() -> Response {
     ApiError::server_error("failed to serialize raw generate response".to_string()).into_response()
 }
 
@@ -498,6 +522,7 @@ mod tests {
         ChoiceLogprobs::Generate {
             positions,
             requested: 2,
+            sampled: None,
         }
     }
 

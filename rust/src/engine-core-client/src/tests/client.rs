@@ -2782,6 +2782,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             logit_bias: None,
             allowed_token_ids: None,
             bad_words_token_ids: None,
+            sampled_logprobs_only: false,
             structured_outputs: None,
             logprob_token_ids: None,
             skip_reading_prefix_cache: None,

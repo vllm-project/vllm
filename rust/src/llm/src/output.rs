@@ -157,6 +157,9 @@ pub struct GenerateOutput {
     pub token_ids: Vec<u32>,
     /// Sample logprobs for the generated positions in this step.
     pub logprobs: Option<Logprobs>,
+    /// Sampled-token logprob per new token, for requests that set
+    /// `sampled_logprobs_only` (instead of `logprobs`).
+    pub sampled_logprobs: Option<Vec<f64>>,
     /// Terminal finish reason, when this is the final output for the request.
     pub finish_reason: Option<FinishReason>,
     /// Number of prompt tokens served from cache, when reported by prefill stats.
@@ -214,6 +217,7 @@ impl GenerateOutput {
             }),
             token_ids,
             logprobs: None,
+            sampled_logprobs: None,
             finish_reason,
             cached_token_count: 0,
             kv_transfer_params: None,
@@ -321,6 +325,7 @@ impl Stream for GenerateOutputStream {
             prompt_info: self.pending_prompt_info.take(),
             token_ids: raw.new_token_ids,
             logprobs,
+            sampled_logprobs: raw.new_sampled_logprobs,
             finish_reason,
             cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,

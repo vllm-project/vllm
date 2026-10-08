@@ -8311,8 +8311,7 @@ async fn raw_generate_http_framing_through_production_serve_loop() {
     };
     // Rejected before reaching the engine.
     for (logprobs, flags) in [
-        // `return_token_logprobs` alone is still unsupported here.
-        (1, json!({"return_token_logprobs": true})),
+        (1, json!({"return_token_logprobs": true, "stream": true})),
         (0, json!({"return_top_k_logprobs": true})),
         (-1, json!({"return_top_k_logprobs": true})),
         (1, json!({"return_top_k_logprobs": true, "stream": true})),
@@ -8352,4 +8351,96 @@ async fn raw_generate_http_framing_through_production_serve_loop() {
     shutdown.cancel();
     server.await.expect("serve task").expect("serve_connections");
     engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn raw_generate_return_token_logprobs_round_trips_engine_sampled_logprobs() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-raw-generate-sampled".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                assert_eq!(params.logprobs, Some(0));
+                assert!(params.sampled_logprobs_only);
+                // Python's private field name on the wire.
+                let raw: Value = rmp_serde::from_slice(&add[1]).expect("decode raw request");
+                assert!(format!("{raw}").contains("\"_sampled_logprobs_only\": true"));
+
+                let output = |token_ids: Vec<u32>, sampled: Vec<f64>, finish| EngineCoreOutput {
+                    new_sampled_logprobs: Some(sampled),
+                    ..request_output(&request.request_id, token_ids, finish)
+                };
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![
+                            output(vec![33, 34], vec![-0.25, f64::NEG_INFINITY], None),
+                            output(vec![35], vec![-1.5], Some(EngineCoreFinishReason::Length)),
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "return_token_logprobs": true,
+                        "sampling_params": {"max_tokens": 3}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["choices"][0]["token_ids"], json!([33, 34, 35]));
+    assert_eq!(
+        json["choices"][0]["logprobs"],
+        json!({"content": null, "sampled": [-0.25, -9999.0, -1.5]})
+    );
 }

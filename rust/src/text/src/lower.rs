@@ -124,6 +124,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         vllm_xargs,
+        sampled_logprobs_only,
     } = sampling_params;
 
     validate_logprobs(
@@ -208,6 +209,7 @@ pub fn lower_sampling_params(
         logit_bias,
         allowed_token_ids,
         bad_words_token_ids: (!bad_words_token_ids.is_empty()).then_some(bad_words_token_ids),
+        sampled_logprobs_only,
         // TODO: Validate structured-output schemas and regexes before submitting requests to engine-core.
         structured_outputs,
         logprob_token_ids,
@@ -688,6 +690,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                sampled_logprobs_only: false,
                 structured_outputs: None,
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
@@ -741,6 +744,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                sampled_logprobs_only: false,
                 structured_outputs: None,
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
@@ -916,6 +920,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                sampled_logprobs_only: false,
                 structured_outputs: None,
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
@@ -987,6 +992,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                sampled_logprobs_only: false,
                 structured_outputs: None,
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
@@ -1051,6 +1057,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                sampled_logprobs_only: false,
                 structured_outputs: None,
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
@@ -1396,6 +1403,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                sampled_logprobs_only: false,
                 structured_outputs: None,
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,

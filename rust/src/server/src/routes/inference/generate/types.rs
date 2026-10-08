@@ -49,9 +49,9 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
-    /// Flat per-token sampled logprobs (Python frontend feature); the Rust
-    /// frontend rejects it explicitly rather than ignoring it, unless it comes
-    /// with `return_top_k_logprobs`.
+    /// Return the sampled token's logprob per generated position as the flat
+    /// `logprobs.sampled`; non-streaming only. Defaults `logprobs` to 0, where
+    /// `logprobs.content` is null.
     pub return_token_logprobs: Option<bool>,
     /// Return the top-k candidates of every position as the packed
     /// `logprobs.top_k` block instead of `logprobs.content`; non-streaming
@@ -212,6 +212,10 @@ pub(super) struct PlaceholderRangeInfo {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateLogProbs {
     pub content: Option<Vec<GenerateLogProbsContent>>,
+    /// The sampled token's logprob per generated position, set only for
+    /// `return_token_logprobs` requests (and omitted otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampled: Option<Vec<f64>>,
 }
 
 /// Mirrors the Python vLLM `GenerateLogProbsContent` class: the sampled token

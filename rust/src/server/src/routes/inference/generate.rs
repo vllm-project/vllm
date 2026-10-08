@@ -57,15 +57,6 @@ pub async fn generate(
     ValidatedJson(mut body): ValidatedJson<GenerateRequest>,
 ) -> Response {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    if body.return_token_logprobs.unwrap_or(false) && !body.return_top_k_logprobs.unwrap_or(false) {
-        return ApiError::invalid_request(
-            "return_token_logprobs is not supported by the Rust frontend yet; \
-             use the Python frontend"
-                .to_string(),
-            Some("return_token_logprobs"),
-        )
-        .into_response();
-    }
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     let mm_features = if let Some(parts) = body.content_parts.take() {
@@ -176,8 +167,21 @@ async fn collect_response(
         .and_then(|k| usize::try_from(k).ok())
         .filter(|_| options.return_top_k_logprobs)
         .map(|k| TopKLogprobsAccumulator::new(k, options.return_token_logprobs));
+    // The engine's sampled-token logprobs (`return_token_logprobs` with
+    // `logprobs == 0`), which it sends instead of rows.
+    let mut engine_sampled: Option<Vec<f64>> = None;
     let mut collected = match top_k.as_mut() {
-        None => raw_stream.collect_output().await?,
+        None => {
+            raw_stream
+                .map_ok(|mut output| {
+                    if let Some(sampled) = output.sampled_logprobs.take() {
+                        engine_sampled.get_or_insert_default().extend(sampled);
+                    }
+                    output
+                })
+                .collect_output()
+                .await?
+        }
         // Top-k block: encode each step's logprobs as it arrives.
         Some(accumulator) => {
             raw_stream
@@ -190,7 +194,12 @@ async fn collect_response(
         }
     };
     let logprobs = match top_k {
-        None => output_logprobs(collected.logprobs.take(), options.logprobs),
+        None => output_logprobs(
+            collected.logprobs.take(),
+            engine_sampled,
+            collected.token_ids.len(),
+            options,
+        ),
         Some(accumulator) => {
             accumulator.finish().map(ChoiceLogprobs::TopK).map_err(ApiError::server_error)
         }
@@ -210,11 +219,31 @@ async fn collect_response(
 /// Validate collected output logprobs for rendering.
 fn output_logprobs(
     logprobs: Option<Logprobs>,
-    requested: Option<i32>,
+    engine_sampled: Option<Vec<f64>>,
+    num_tokens: usize,
+    ResponseOptions {
+        logprobs: requested,
+        return_token_logprobs,
+        ..
+    }: ResponseOptions,
 ) -> Result<ChoiceLogprobs, ApiError> {
     let Some(requested) = requested else {
         return Ok(ChoiceLogprobs::None);
     };
+    // An engine that ignores `_sampled_logprobs_only` sends one-entry rows
+    // instead; their sampled slot is used below.
+    if return_token_logprobs && requested == 0 && logprobs.is_none() {
+        let sampled: Vec<f64> = (engine_sampled.unwrap_or_default().into_iter())
+            .map(|logprob| logprob.max(-9999.0))
+            .collect();
+        if sampled.len() != num_tokens {
+            bail_server_error!(
+                "raw generate returned {} sampled logprobs for {num_tokens} tokens",
+                sampled.len()
+            );
+        }
+        return Ok(ChoiceLogprobs::Sampled(sampled));
+    }
     let logprobs = logprobs.ok_or_else(|| {
         ApiError::server_error(
             "raw generate response requested logprobs but generation returned none".to_string(),
@@ -224,9 +253,18 @@ fn output_logprobs(
     if logprobs.positions.iter().any(|position| position.entries.is_empty()) {
         return Err(empty_position_error());
     }
-    Ok(ChoiceLogprobs::Generate {
-        positions: logprobs.positions,
-        requested,
+    let sampled = return_token_logprobs.then(|| {
+        (logprobs.positions.iter())
+            .map(|position| f64::from(clamp_logprob(position.entries[0].logprob)))
+            .collect()
+    });
+    Ok(match sampled {
+        Some(sampled) if requested == 0 => ChoiceLogprobs::Sampled(sampled),
+        sampled => ChoiceLogprobs::Generate {
+            positions: logprobs.positions,
+            requested,
+            sampled,
+        },
     })
 }
 
@@ -475,6 +513,7 @@ fn raw_logprobs_to_generate(
 
     Ok(GenerateLogProbs {
         content: Some(content),
+        sampled: None,
     })
 }
 
@@ -720,6 +759,7 @@ mod tests {
                 prompt_info: None,
                 token_ids: Vec::new(),
                 logprobs: None,
+                sampled_logprobs: None,
                 finish_reason: None,
                 cached_token_count: 0,
                 kv_transfer_params: None,
@@ -736,6 +776,7 @@ mod tests {
                 }),
                 token_ids: vec![33],
                 logprobs: None,
+                sampled_logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
                 cached_token_count: 2,
                 kv_transfer_params: None,
@@ -820,6 +861,7 @@ mod tests {
             }),
             token_ids,
             logprobs: None,
+            sampled_logprobs: None,
             finish_reason,
             cached_token_count: 0,
             kv_transfer_params: None,
@@ -1268,7 +1310,8 @@ mod tests {
         options: ResponseOptions,
         mm_placeholders: Option<MultiModalPlaceholders>,
     ) -> (String, String) {
-        let logprobs = output_logprobs(collected.logprobs.take(), options.logprobs)
+        let num_tokens = collected.token_ids.len();
+        let logprobs = output_logprobs(collected.logprobs.take(), None, num_tokens, options)
             .unwrap_or_else(|_| panic!("valid logprobs"));
         let mut response = collect_generate(
             collected,
@@ -1281,14 +1324,16 @@ mod tests {
         if let ChoiceLogprobs::Generate {
             positions,
             requested,
+            sampled,
         } = &logprobs
         {
             let logprobs = Logprobs {
                 positions: positions.clone(),
             };
-            let logprobs = raw_logprobs_to_generate(&logprobs, *requested).expect("convert");
+            let mut reference = raw_logprobs_to_generate(&logprobs, *requested).expect("convert");
+            reference.sampled = sampled.clone();
             response.choices[0].logprobs =
-                Some(serde_json::value::to_raw_value(&logprobs).unwrap());
+                Some(serde_json::value::to_raw_value(&reference).unwrap());
         }
         // Serialized from the same value (map iteration order included).
         let expected = serde_json::to_vec(&response).expect("serialize reference");
@@ -1370,6 +1415,15 @@ mod tests {
                 None,
             ),
             (
+                collected_output(Some(tricky_positions()), FinishReason::Length),
+                "content-and-sampled",
+                ResponseOptions {
+                    return_token_logprobs: true,
+                    ..logprobs(2)
+                },
+                None,
+            ),
+            (
                 collected_output(Some(tricky_positions()), FinishReason::Repetition(None)),
                 "all",
                 logprobs(-1),
@@ -1442,6 +1496,7 @@ mod tests {
             ChoiceLogprobs::Generate {
                 positions: rows,
                 requested: 2,
+                sampled: None,
             },
         );
         let actual = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
@@ -1704,5 +1759,163 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    fn sampled_options(k: Option<i32>) -> ResponseOptions {
+        ResponseOptions {
+            logprobs: k,
+            return_token_logprobs: true,
+            ..Default::default()
+        }
+    }
+
+    fn sampled_step(
+        token_ids: Vec<u32>,
+        sampled: Option<Vec<f64>>,
+        finish_reason: Option<FinishReason>,
+    ) -> vllm_llm::Result<GenerateOutput> {
+        let mut output = stream_output(None, token_ids, finish_reason);
+        output.sampled_logprobs = sampled;
+        Ok(output)
+    }
+
+    const EMPTY_TAIL: &str = concat!(
+        r#""prompt_logprobs":null,"prompt_token_id_logprobs":null,"#,
+        r#""prompt_token_ids":null,"mm_placeholders":null,"#,
+        r#""kv_transfer_params":null,"ec_transfer_params":null,"metrics":null}"#
+    );
+
+    #[tokio::test]
+    async fn sampled_only_body_from_engine_sampled_logprobs() {
+        let body = response_body(
+            vec![
+                sampled_step(vec![7, 8], Some(vec![-0.5, f64::NAN]), None),
+                sampled_step(
+                    vec![9],
+                    Some(vec![f64::from(-0.1_f32)]),
+                    Some(FinishReason::Length),
+                ),
+            ],
+            sampled_options(Some(0)),
+        )
+        .await
+        .expect("sampled response");
+        assert_eq!(
+            body,
+            [
+                r#"{"request_id":"top-k-1","choices":[{"index":0,"logprobs":{"#,
+                r#""content":null,"sampled":[-0.5,-9999.0,-0.10000000149011612]},"#,
+                r#""finish_reason":"length","token_ids":[7,8,9],"sampling_mask":null}],"#,
+                EMPTY_TAIL,
+            ]
+            .concat()
+        );
+    }
+
+    #[tokio::test]
+    async fn sampled_only_falls_back_to_rows_and_checks_counts() {
+        // An engine that ignores `_sampled_logprobs_only` sends one-entry rows.
+        let json: serde_json::Value = serde_json::from_str(
+            &response_body(
+                vec![step(
+                    vec![7, 8],
+                    Some(vec![
+                        position(&[(7, -0.5, 1)]),
+                        position(&[(8, f32::NEG_INFINITY, 4)]),
+                    ]),
+                    Some(FinishReason::Length),
+                )],
+                sampled_options(Some(0)),
+            )
+            .await
+            .expect("sampled response"),
+        )
+        .unwrap();
+        assert_eq!(
+            json["choices"][0]["logprobs"],
+            serde_json::json!({"content": null, "sampled": [-0.5, -9999.0]})
+        );
+
+        // A zero-token abort has no sampled logprobs.
+        let json: serde_json::Value = serde_json::from_str(
+            &response_body(
+                vec![sampled_step(vec![], None, Some(FinishReason::Abort))],
+                sampled_options(Some(0)),
+            )
+            .await
+            .expect("sampled response"),
+        )
+        .unwrap();
+        assert_eq!(
+            json["choices"][0]["logprobs"]["sampled"],
+            serde_json::json!([])
+        );
+
+        let error = response_body(
+            vec![sampled_step(
+                vec![7, 8],
+                Some(vec![-0.5]),
+                Some(FinishReason::Length),
+            )],
+            sampled_options(Some(0)),
+        )
+        .await
+        .expect_err("one sampled logprob for two tokens");
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn content_and_sampled_body() {
+        let body = response_body(
+            vec![step(
+                vec![7],
+                Some(vec![position(&[(7, -0.1, 1), (3, -1.0, 2), (9, -2.0, 3)])]),
+                Some(FinishReason::Length),
+            )],
+            sampled_options(Some(1)),
+        )
+        .await
+        .expect("content and sampled response");
+        assert_eq!(
+            body,
+            [
+                r#"{"request_id":"top-k-1","choices":[{"index":0,"logprobs":{"content":["#,
+                r#"{"token_id":7,"logprob":-0.1,"rank":1,"#,
+                r#""top_logprobs":[{"token_id":7,"logprob":-0.1,"rank":1}]}],"#,
+                r#""sampled":[-0.10000000149011612]},"#,
+                r#""finish_reason":"length","token_ids":[7],"sampling_mask":null}],"#,
+                EMPTY_TAIL,
+            ]
+            .concat()
+        );
+
+        // `sampled` is the clamped `content[i].logprob` (`+inf`, which both
+        // write as null, left out).
+        let mut rows = tricky_positions();
+        rows.remove(2);
+        let json: serde_json::Value = serde_json::from_str(
+            &response_body(
+                vec![step(
+                    rows.iter().map(|row| row.entries[0].token_id).collect(),
+                    Some(rows),
+                    Some(FinishReason::Length),
+                )],
+                sampled_options(Some(2)),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let logprobs = &json["choices"][0]["logprobs"];
+        let as_f32 = |value: &serde_json::Value| value.as_f64().unwrap() as f32;
+        let content = logprobs["content"].as_array().unwrap();
+        let sampled = logprobs["sampled"].as_array().unwrap();
+        assert_eq!(
+            sampled.iter().map(as_f32).collect::<Vec<_>>(),
+            content.iter().map(|c| as_f32(&c["logprob"])).collect::<Vec<_>>()
+        );
     }
 }

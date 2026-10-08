@@ -147,6 +147,11 @@ pub struct SamplingParams {
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
+    /// Transport only the sampled token's logprob per position (requires
+    /// `logprobs == 0`). Set by the generate route for
+    /// `return_token_logprobs`; not settable by clients.
+    #[serde(skip)]
+    pub sampled_logprobs_only: bool,
 }
 
 #[allow(clippy::derivable_impls)] // more explicit
@@ -180,6 +185,7 @@ impl Default for SamplingParams {
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             vllm_xargs: None,
+            sampled_logprobs_only: false,
         }
     }
 }

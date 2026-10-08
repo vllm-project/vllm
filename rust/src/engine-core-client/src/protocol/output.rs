@@ -139,10 +139,10 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub prompt_token_id_logprobs: Option<WireNdArray>,
     /// Sampled-token logprob per new token for requests that set
-    /// `SamplingParams.sampled_logprobs_only`; replaces `new_logprobs` for
-    /// them. Opaque here; the Rust frontend does not surface it yet.
+    /// `SamplingParams._sampled_logprobs_only`; replaces `new_logprobs` for
+    /// them.
     #[serde(default)]
-    pub new_sampled_logprobs: Option<OpaqueValue>,
+    pub new_sampled_logprobs: Option<Vec<f64>>,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -489,10 +489,7 @@ mod tests {
         let output = EngineCoreOutput {
             request_id: "req-1".into(),
             new_token_ids: vec![7, 8],
-            new_sampled_logprobs: Some(OpaqueValue::Array(vec![
-                OpaqueValue::F64(-0.5),
-                OpaqueValue::F64(-1.25),
-            ])),
+            new_sampled_logprobs: Some(vec![-0.5, -1.25]),
             ..Default::default()
         };
         let wire = (0, vec![output.clone()]);

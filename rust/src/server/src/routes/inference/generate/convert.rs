@@ -34,7 +34,7 @@ pub(super) struct ResponseOptions {
     pub include_prompt_logprobs: bool,
     /// Whether the caller requested final prompt token metadata.
     pub return_token_ids: bool,
-    /// Whether output logprobs carry `sampled` (with `return_top_k_logprobs`).
+    /// Whether output logprobs carry `sampled`.
     pub return_token_logprobs: bool,
     /// Whether output logprobs are the packed `top_k` block.
     pub return_top_k_logprobs: bool,
@@ -62,12 +62,18 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let logprobs = request.sampling_params.inner.logprobs;
+    let return_token_logprobs = request.return_token_logprobs.unwrap_or(false);
+    // As on the Python generate server, `return_token_logprobs` defaults
+    // `logprobs` to 0.
+    let logprobs = (request.sampling_params.inner.logprobs).or(return_token_logprobs.then_some(0));
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
     let return_token_ids = request.return_token_ids.unwrap_or(false);
-    let return_token_logprobs = request.return_token_logprobs.unwrap_or(false);
     let return_top_k_logprobs = request.return_top_k_logprobs.unwrap_or(false);
     let mut sampling_params = request.sampling_params.inner;
+    sampling_params.logprobs = logprobs;
+    // Only the sampled token's logprob is needed: the engine transports one
+    // float per token instead of the per-position candidates.
+    sampling_params.sampled_logprobs_only = return_token_logprobs && logprobs == Some(0);
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),
@@ -255,5 +261,46 @@ mod tests {
 
         assert!(!prepared.options.include_usage);
         assert!(!prepared.options.include_continuous_usage);
+    }
+
+    #[test]
+    fn prepare_generate_request_return_token_logprobs_defaults_to_sampled_only() {
+        let prepare = |body: serde_json::Value| {
+            let request: GenerateRequest = serde_json::from_value(body).expect("parse request");
+            let prepared = prepare_generate_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare");
+            let params = prepared.text_request.sampling_params;
+            (
+                prepared.options.logprobs,
+                params.logprobs,
+                params.sampled_logprobs_only,
+            )
+        };
+        let request = |flag: bool, sampling_params: serde_json::Value| json!({"token_ids": [11], "return_token_logprobs": flag, "sampling_params": sampling_params});
+        // As on the Python generate server: `logprobs` defaults to 0, where the
+        // engine transports only the sampled logprob.
+        assert_eq!(prepare(request(true, json!({}))), (Some(0), Some(0), true));
+        assert_eq!(
+            prepare(request(true, json!({"logprobs": 0}))),
+            (Some(0), Some(0), true)
+        );
+        assert_eq!(
+            prepare(request(true, json!({"logprobs": 3}))),
+            (Some(3), Some(3), false)
+        );
+        assert_eq!(prepare(request(false, json!({}))), (None, None, false));
+        // Not settable by clients.
+        assert_eq!(
+            prepare(request(
+                false,
+                json!({"sampled_logprobs_only": true, "_sampled_logprobs_only": true})
+            )),
+            (None, None, false)
+        );
     }
 }

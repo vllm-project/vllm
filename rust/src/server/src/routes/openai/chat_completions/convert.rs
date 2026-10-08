@@ -175,6 +175,7 @@ pub(super) fn prepare_chat_request(
             logprob_token_ids: None,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            sampled_logprobs_only: false,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
