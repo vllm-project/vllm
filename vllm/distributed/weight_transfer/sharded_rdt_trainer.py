@@ -45,9 +45,11 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
+    StagingDevice,
     buffer_alloc_bytes,
     check_ray_rdt_version,
     register_nixl_memory,
+    validate_sharded_rdt_settings,
 )
 from vllm.logger import init_logger
 
@@ -185,6 +187,21 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S
     """Seconds of no publish/serve/free progress before the producer fails the
     sync (see ``DEFAULT_STALL_TIMEOUT_S``)."""
+    staging_device: StagingDevice = "gpu"
+    """Where every worker's receive buffers live. Forwarded unchanged."""
+    stages_in_flight: int = 1
+    """Maximum trainer stages each worker pulls from concurrently. Forwarded
+    unchanged."""
+
+    def __post_init__(self) -> None:
+        validate_sharded_rdt_settings(
+            staging_device=self.staging_device,
+            stages_in_flight=self.stages_in_flight,
+            num_rdt_buffers=self.num_rdt_buffers,
+            buffer_presize_gb=self.buffer_presize_gb,
+            num_consumers=self.num_consumers,
+            allow_zero_consumers=False,
+        )
 
 
 class _RDTProducerServer:
@@ -1160,11 +1177,11 @@ class ShardedRDTTrainerWeightTransferEngine(
         import ray
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+        ii = self._init_info
         # The trainer is usually a separate install from the workers, so it gets
         # its own check rather than trusting the consumer side's.
-        check_ray_rdt_version()
+        check_ray_rdt_version(ii.staging_device)
 
-        ii = self._init_info
         self._server_name = f"vllm_rdt_producer_{uuid.uuid4().hex[:12]}_rk{ii.rank}"
         node_id = ray.get_runtime_context().get_node_id()
         # Pin the server to this rank's physical GPU: num_gpus=0 so Ray does not
@@ -1249,6 +1266,8 @@ class ShardedRDTTrainerWeightTransferEngine(
             num_consumers=self._init_info.num_consumers,
             num_rdt_buffers=self._init_info.num_rdt_buffers,
             buffer_presize_gb=self._init_info.buffer_presize_gb,
+            staging_device=self._init_info.staging_device,
+            stages_in_flight=self._init_info.stages_in_flight,
         )
 
     # ---------------- per-round ----------------

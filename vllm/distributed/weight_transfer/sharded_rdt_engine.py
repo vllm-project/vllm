@@ -65,9 +65,11 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
+    StagingDevice,
     buffer_alloc_bytes,
     check_ray_rdt_version,
     register_nixl_memory,
+    validate_sharded_rdt_settings,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     BakeSink,
@@ -230,6 +232,12 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     model's largest atomic chunk (e.g. an untied lm_head). Sizing buffers ONCE
     matters beyond perf -- see the doc's "Sizing buffers once matters beyond
     throughput"."""
+
+    staging_device: StagingDevice = "gpu"
+    """Where receive buffers live: GPU HBM or pinned host memory."""
+
+    stages_in_flight: int = 1
+    """Maximum trainer stages pulled from concurrently."""
 
     replica_rank: int = 0
     """This inference engine's ordinal in the fleet (0..``num_replicas``-1).
@@ -399,6 +407,14 @@ class ShardedRDTWeightTransferEngine(
         RPCs to the producers, so this is a heavyweight one-off; every later
         ``update_weights`` is pure replay.
         """
+        validate_sharded_rdt_settings(
+            staging_device=init_info.staging_device,
+            stages_in_flight=init_info.stages_in_flight,
+            num_rdt_buffers=init_info.num_rdt_buffers,
+            buffer_presize_gb=init_info.buffer_presize_gb,
+            num_consumers=init_info.num_consumers,
+            allow_zero_consumers=True,
+        )
         # Read the attribute directly: if a vLLM bump renames it, this guard
         # must fail loudly at init rather than silently disappear.
         if self.parallel_config.enable_eplb:
@@ -412,7 +428,8 @@ class ShardedRDTWeightTransferEngine(
             )
         # The worker is often a different install from whatever spawned it, so
         # check here too and not only where the actor options are set.
-        check_ray_rdt_version()
+        check_ray_rdt_version(init_info.staging_device)
+        self._refuse_unbuilt_settings(init_info)
         self._configure_ring(init_info)
         self._resolve_producers(init_info)
 
@@ -429,18 +446,34 @@ class ShardedRDTWeightTransferEngine(
         # Start the background post-processing worker (pull/process pipelining).
         self._ensure_proc_worker()
 
+    @staticmethod
+    def _refuse_unbuilt_settings(
+        init_info: ShardedRDTWeightTransferInitInfo,
+    ) -> None:
+        """Do not silently run settings whose execution paths land later."""
+        if init_info.staging_device != "gpu":
+            raise NotImplementedError(
+                f"staging_device={init_info.staging_device!r}: only 'gpu' is "
+                "implemented in this build"
+            )
+        if init_info.stages_in_flight != 1:
+            raise NotImplementedError(
+                f"stages_in_flight={init_info.stages_in_flight!r}: only 1 is "
+                "implemented in this build"
+            )
+
     def _configure_ring(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Ring depth K.
 
         Must run before ``_ensure_proc_worker`` creates the per-slot events and
         counters, and before any buffer is grown (both happen on the first pull).
         """
-        self._num_consumers_override = int(init_info.num_consumers or 0)
-        k = max(1, int(init_info.num_rdt_buffers))
+        self._num_consumers_override = init_info.num_consumers
+        k = init_info.num_rdt_buffers
         self._ring_depth = k
         self._dest_buffers = [{} for _ in range(k)]
         self._targets_cache = {}
-        self._buffer_presize = int(float(init_info.buffer_presize_gb) * (1 << 30))
+        self._buffer_presize = int(init_info.buffer_presize_gb * (1 << 30))
         logger.info(
             "[RDT-RING] active_pulls=%d slots=%d presize=%.2fGiB",
             k,
