@@ -371,15 +371,22 @@ fn bootstrapped_test_config_with_start_index(
 
 #[test]
 fn client_config_validates_bootstrapped_dp_range() {
-    let mut config = bootstrapped_test_config_with_start_index(
-        "ipc://unused-input".to_string(),
-        "ipc://unused-output".to_string(),
-        1,
-        2,
-        Duration::from_secs(1),
-        0,
-        None,
-    );
+    // Validation never consumes the descriptors, so placeholders avoid opening
+    // listeners that nothing would close.
+    let mut config = EngineCoreClientConfig {
+        transport_mode: TransportMode::Bootstrapped {
+            input_listener_fd: -1,
+            output_listener_fd: -1,
+            engine_start_index: 1,
+            engine_count: 2,
+            data_parallel_size: 3,
+            ready_timeout: Duration::from_secs(1),
+        },
+        coordinator_mode: None,
+        model_name: "test-model".to_string(),
+        client_index: 0,
+        engine_stats_enabled: true,
+    };
     config.validate().expect("frontend may own a subset of global DP ranks");
 
     let TransportMode::Bootstrapped {
