@@ -360,7 +360,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     metadata_handle = _OrderedHandle(log, "meta")
     tensor_handle = _OrderedHandle(log, "tensor")
 
-    def isend_tensor_dict(tensors, all_gather_group=None):
+    def isend_tensor_dict(tensors, all_gather_group=None, all_gather_tensors=None):
         log.append("isend")
         return [metadata_handle, tensor_handle]
 
