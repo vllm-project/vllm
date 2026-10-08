@@ -95,6 +95,8 @@ class GDNAttentionMetadata:
     consumer_shared_state_sources: torch.Tensor | None = None
     private_final_state_destination: torch.Tensor | None = None
     checkpoint_source_block_ids: torch.Tensor | None = None
+    producer_slice: slice | None = None
+    consumer_slice: slice | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -476,6 +478,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         shared_state_destinations = None
         consumer_shared_state_sources = None
         private_final_state_destination = None
+        producer_slice = None
+        consumer_slice = None
         producer_indices = m.mamba_prefix_producer_indices
         source_block_ids = m.mamba_checkpoint_source_block_ids
         has_producers = producer_indices is not None and bool(
@@ -507,7 +511,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 for consumer_idx, src_id in enumerate(source_block_ids_cpu):
                     if src_id >= 0:
                         consumer_srcs.append(src_id)
-                        consumer_dsts.append(int(prefill_state_indices[consumer_idx].item()))
+                        consumer_dsts.append(
+                            int(prefill_state_indices[consumer_idx].item())
+                        )
                 if consumer_srcs:
                     consumer_shared_state_sources = torch.tensor(
                         consumer_srcs, dtype=torch.long, device=device
@@ -535,7 +541,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                         continue
                     checkpoint_position = checkpoint_positions_cpu[consumer_idx]
                     if checkpoint_position <= 0:
-                        raise ValueError("grouped GDN checkpoint position must be positive")
+                        raise ValueError(
+                            "grouped GDN checkpoint position must be positive"
+                        )
                     if producer_idx >= 0:
                         producer_rows.add(producer_idx)
                         if producer_idx not in producer_to_index:
@@ -551,7 +559,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                                 checkpoint_position - 1
                             ) // self.kv_cache_spec.block_size
                             shared_destinations_list.append(
-                                int(m.block_table_tensor[producer_idx, block_idx].item())
+                                int(
+                                    m.block_table_tensor[producer_idx, block_idx].item()
+                                )
                             )
                     consumer_rows.add(consumer_idx)
                     consumer_ranges_list.append(
@@ -592,7 +602,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     query_start_loc = [0]
                     for start, end in ranges:
                         query_start_loc.append(query_start_loc[-1] + end - start)
-                    query_start_loc_cpu = torch.tensor(query_start_loc, dtype=torch.int32)
+                    query_start_loc_cpu = torch.tensor(
+                        query_start_loc, dtype=torch.int32
+                    )
                     conv_metadata = None
                     if ranges:
                         nums_dict, batch_ptr, token_chunk_offset_ptr = (
@@ -623,6 +635,28 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                         consumer_query_start_loc,
                         consumer_conv_metadata,
                     ) = build_packed_phase(consumer_ranges_list)
+
+                    if (
+                        producer_ranges_list
+                        and consumer_ranges_list
+                        and all(
+                            producer_ranges_list[idx][1]
+                            == producer_ranges_list[idx + 1][0]
+                            for idx in range(len(producer_ranges_list) - 1)
+                        )
+                        and all(
+                            consumer_ranges_list[idx][1]
+                            == consumer_ranges_list[idx + 1][0]
+                            for idx in range(len(consumer_ranges_list) - 1)
+                        )
+                    ):
+                        p_start = producer_ranges_list[0][0]
+                        p_end = producer_ranges_list[-1][1]
+                        c_start = consumer_ranges_list[0][0]
+                        c_end = consumer_ranges_list[-1][1]
+                        producer_slice = slice(p_start, p_end)
+                        consumer_slice = slice(c_start, c_end)
+
                     prefix_producer_ranges = torch.tensor(
                         producer_ranges_list, dtype=torch.int32, device=device
                     ).reshape(-1, 2)
@@ -748,6 +782,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             consumer_shared_state_sources=consumer_shared_state_sources,
             private_final_state_destination=private_final_state_destination,
             checkpoint_source_block_ids=m.mamba_checkpoint_source_block_ids,
+            producer_slice=producer_slice,
+            consumer_slice=consumer_slice,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,

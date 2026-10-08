@@ -288,6 +288,55 @@ def test_grouped_metadata_builder_builds_mixed_batch():
     ]
 
 
+def test_grouped_metadata_builder_continuous_slices():
+    """Verify contiguous producer and consumer token slices when batches align."""
+    from types import SimpleNamespace
+
+    vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
+        speculative_config=None,
+        model_config=SimpleNamespace(max_model_len=1024),
+        scheduler_config=SimpleNamespace(max_num_seqs=64),
+        cache_config=SimpleNamespace(mamba_cache_mode="align"),
+        additional_config={},
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+    )
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+
+    # Request 0: Producer (16 tokens)
+    # Request 1: Consumer (20 tokens)
+    batch = BatchSpec(seq_lens=[16, 36], query_lens=[16, 20])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    common.mamba_prefix_producer_indices = torch.tensor(
+        [-1, 0], dtype=torch.int32, device=DEVICE
+    )
+    common.mamba_checkpoint_positions = torch.tensor(
+        [16, 16], dtype=torch.int32, device=DEVICE
+    )
+    common.mamba_checkpoint_source_block_ids = torch.tensor(
+        [-1, -1], dtype=torch.int32, device=DEVICE
+    )
+
+    meta = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    assert meta.prefix_producer_ranges is not None
+    assert meta.prefix_producer_ranges.tolist() == [[0, 16]]
+    assert meta.consumer_ranges is not None
+    assert meta.consumer_ranges.tolist() == [[16, 36]]
+    assert meta.producer_slice == slice(0, 16)
+    assert meta.consumer_slice == slice(16, 36)
+
+
 def test_full_cudagraph_spec_metadata_uses_request_count():
     """FULL cudagraph token padding must not pad request-indexed metadata."""
     num_speculative_tokens = 3

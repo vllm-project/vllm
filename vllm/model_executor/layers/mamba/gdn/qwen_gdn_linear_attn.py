@@ -1317,6 +1317,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_metadata: object | None,
             sources: torch.Tensor,
             destinations: torch.Tensor,
+            token_slice: slice | None = None,
         ) -> None:
             if destinations.numel() == 0:
                 return
@@ -1338,9 +1339,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_state.index_copy_(0, destination_indices, source_conv)
             ssm_state.index_copy_(0, destination_indices, source_ssm)
 
-            packed_mixed_qkv = mixed_qkv.index_select(0, token_indices)
-            packed_a = a.index_select(0, token_indices)
-            packed_b = b.index_select(0, token_indices)
+            if token_slice is not None:
+                packed_mixed_qkv = mixed_qkv[token_slice]
+                packed_a = a[token_slice]
+                packed_b = b[token_slice]
+            else:
+                packed_mixed_qkv = mixed_qkv.index_select(0, token_indices)
+                packed_a = a.index_select(0, token_indices)
+                packed_b = b.index_select(0, token_indices)
             conv_output = causal_conv1d_fn(
                 packed_mixed_qkv.transpose(0, 1),
                 conv_weights,
@@ -1380,7 +1386,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ssm_state_indices=state_indices,
                 use_qk_l2norm_in_kernel=False,
             )
-            core_attn_out.index_copy_(0, token_indices, output.squeeze(0))
+            if token_slice is not None:
+                core_attn_out[token_slice] = output.squeeze(0)
+            else:
+                core_attn_out.index_copy_(0, token_indices, output.squeeze(0))
 
         run_phase(
             producer_token_indices,
@@ -1388,6 +1397,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             producer_conv_metadata,
             initial_sources,
             shared_destinations,
+            token_slice=attn_metadata.producer_slice,
         )
         run_phase(
             consumer_token_indices,
@@ -1395,6 +1405,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             consumer_conv_metadata,
             consumer_sources,
             private_destinations,
+            token_slice=attn_metadata.consumer_slice,
         )
 
     def _forward_core(
@@ -1484,8 +1495,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         if has_real_producer:
             self._forward_core_grouped_prefill(
-                mixed_qkv, b, a, core_attn_out, attn_metadata,
-                conv_state, ssm_state, conv_weights,
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                attn_metadata,
+                conv_state,
+                ssm_state,
+                conv_weights,
             )
             return
 
