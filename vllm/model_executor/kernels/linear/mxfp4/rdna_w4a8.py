@@ -8,14 +8,16 @@ Routes on the number of activation rows M:
       HIP W4A8 GEMV (``_rocm_C.mxfp4_w4a8_gemv``). Activations are quantized
       to int8 per 32-element group and reduced with int8 dot instructions.
   otherwise (prefill, profiling):
-      dequantize the weight and run a high-precision GEMM, the same math as
-      ``EmulationMxfp4LinearKernel``.
+      dequantize the weight and run a high-precision GEMM on the unquantized
+      activations (weight-only).
 
 Both paths read the checkpoint layout directly ([N, K/2] uint8 E2M1 codes,
 [N, K/32] uint8 E8M0 scales), so there is no weight repack.
 
-Opt-in with ``VLLM_ROCM_MXFP4_W4A8=1``: the int8 activation rounding is not the
-numerics the checkpoint specifies.
+Opt-in with ``VLLM_ROCM_MXFP4_W4A8=1``: for W4A4 checkpoints the MXFP4
+activation QDQ is not applied. Decode uses int8 activations and prefill uses
+the model dtype, which kept accuracy where mixing MXFP4-QDQ prefill with int8
+decode did not.
 """
 
 import torch
@@ -23,10 +25,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    dequant_mxfp4,
-    quant_dequant_mxfp4,
-)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
@@ -45,7 +44,6 @@ def _rdna_mxfp4_w4a8_apply_impl(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     bias: torch.Tensor | None,
-    act_qdq: bool,
 ) -> torch.Tensor:
     import vllm._custom_ops as ops
 
@@ -56,8 +54,7 @@ def _rdna_mxfp4_w4a8_apply_impl(
             out.add_(bias)
         return out
 
-    x_in = quant_dequant_mxfp4(x_2d) if act_qdq else x_2d
-    return F.linear(x_in, dequant_mxfp4(weight, weight_scale, x_2d.dtype), bias)
+    return F.linear(x_2d, dequant_mxfp4(weight, weight_scale, x_2d.dtype), bias)
 
 
 def _rdna_mxfp4_w4a8_apply_fake(
@@ -65,7 +62,6 @@ def _rdna_mxfp4_w4a8_apply_fake(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     bias: torch.Tensor | None,
-    act_qdq: bool,
 ) -> torch.Tensor:
     return torch.empty(
         (x_2d.shape[0], weight.shape[0]), dtype=x_2d.dtype, device=x_2d.device
@@ -83,12 +79,6 @@ direct_register_custom_op(
 class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
     """MXFP4 GEMM for RDNA3/RDNA3.5: W4A8 int8-dot GEMV for M <= 8, dequant +
     high-precision GEMM above."""
-
-    def __init__(self, config: MxFp4LinearLayerConfig) -> None:
-        super().__init__(config)
-        # Larger batches keep the checkpoint's MXFP4 activation QDQ, as the
-        # emulation kernel does.
-        self.act_qdq = config.activation_quant_key == kMxfp4Dynamic
 
     @classmethod
     def is_supported(
@@ -149,6 +139,6 @@ class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
         if not x_2d.is_contiguous():
             x_2d = x_2d.contiguous()
         out = torch.ops.vllm.rdna_mxfp4_w4a8_apply(
-            x_2d, layer.weight, layer.weight_scale, bias, self.act_qdq
+            x_2d, layer.weight, layer.weight_scale, bias
         )
         return out.reshape(*x.shape[:-1], out.shape[-1])

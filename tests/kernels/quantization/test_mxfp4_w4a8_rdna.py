@@ -19,9 +19,6 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.kernels.linear.mxfp4.rdna_w4a8 import (
     MAX_W4A8_BATCH_SIZE,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    quant_dequant_mxfp4,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp6E3M2Dynamic,
@@ -162,7 +159,8 @@ def _make_layer(N: int, K: int):
 @pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic])
 @pytest.mark.parametrize("M", [1, 8, 9, 64])
 def test_linear_kernel_dispatch(activation_quant_key, M, monkeypatch):
-    """M <= 8 takes the W4A8 GEMV, larger M the dequant + GEMM fallback."""
+    """M <= 8 takes the W4A8 GEMV, larger M the weight-only dequant + GEMM
+    fallback, for both W4A16 and W4A4 checkpoints."""
     pytest.importorskip("quark")
     monkeypatch.setattr(envs, "VLLM_ROCM_MXFP4_W4A8", True)
     torch.manual_seed(0)
@@ -182,11 +180,7 @@ def test_linear_kernel_dispatch(activation_quant_key, M, monkeypatch):
     uses_w4a8 = M <= MAX_W4A8_BATCH_SIZE
     assert gemv.called == uses_w4a8
 
-    x_ref = x
-    if activation_quant_key == kMxfp4Dynamic and not uses_w4a8:
-        # The M > 8 path keeps the checkpoint's MXFP4 activation QDQ.
-        x_ref = quant_dequant_mxfp4(x)
-    ref = x_ref.double() @ _dequant_ref(layer.weight, layer.weight_scale).t()
+    ref = x.double() @ _dequant_ref(layer.weight, layer.weight_scale).t()
     ref = ref + bias.double()
     rel = (out.double() - ref).norm() / ref.norm()
     assert rel < 2e-2, f"relative error {rel.item():.3e}"
