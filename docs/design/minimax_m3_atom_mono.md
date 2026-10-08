@@ -5,23 +5,22 @@ vLLM. It is disabled by default. vLLM retains scheduling, cache allocation,
 EAGLE3, the model loop, and CUDA graph ownership. ATOM supplies kernels, without
 loading its engine, runner, or platform plugin.
 
-## Draft status and upstream compatibility
+## Library interface and ownership
 
-The implementation was measured on vLLM `2eaa3bc5ac` and ATOM `922b35196`
-with the accompanying scalar-cache compatibility patch. It requires
-`VLLM_CACHE_ABI_VERSION=1`; an unmodified ATOM installation is insufficient.
+The paired ATOM change exposes `AtomM3Mono(layer_specs, cache_specs, tp_context)`
+with `prepare_step`, `forward_layer`, and `close`. vLLM supplies native tensors,
+cache views, the existing TP group, and each batch's metadata. ATOM owns weight
+conversion, metadata expansion, compilation, scratch, IPC, graph operations,
+and kernel launch details. Its native runner shares the same sparse execution
+implementation. vLLM keeps model dispatch, auxiliary-state capture, and teardown
+ordering.
 
-This snapshot predates ATOM's shared mono refactor and correctness fixes in
-[2479](https://github.com/ROCm/ATOM/pull/2479),
-[2483](https://github.com/ROCm/ATOM/pull/2483), and
-[2485](https://github.com/ROCm/ATOM/pull/2485). Before merge, port the cache ABI
-and adapter to the current kernel and runtime interfaces, preserve the
-upstream store-publication and batch-invariance fixes, and repeat validation.
-The old snapshot can publish completion before global stores finish and can
-let padding change live rows' MoE reduction order. Its previous accuracy and
-performance results do not exclude these defects. ATOM
-[2452](https://github.com/ROCm/ATOM/pull/2452) records the original diagnosis;
-it is not an outstanding dependency on current ATOM main.
+The port uses ATOM's shared mono runtime and retains its store-publication,
+per-step mailbox reset/fence, and padded-row expert-reduction fixes. It requires
+the paired ATOM library revision; the earlier low-level cache ABI is insufficient.
+The current interface supports eager execution and CUDA graphs. Direct
+`torch.compile` of the mono library is rejected because it cannot safely follow
+functionalization's replacement storage.
 
 This is an alternative ownership boundary to vLLM
 [59705](https://github.com/vllm-project/vllm/pull/59705), which vendors the
@@ -64,6 +63,7 @@ export VLLM_ROCM_USE_AITER=1
 export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
 export VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ROCM_USE_ATOM_M3_MONO=1
 
 vllm serve "$TARGET_MODEL" \
@@ -82,41 +82,19 @@ settings unchanged. Accuracy requests must use the checkpoint's chat template
 with `thinking_mode=enabled`; the recorded evaluation rendered it client-side.
 Never use synthetic acceptance for accuracy evaluation.
 
-## Recorded validation and limits
+## Validation
 
-The October 2, 2026 experiment used Python 3.12.14, Torch
-`2.13.0+git733fca1`, ROCm 7.2.3, AITER 0.1.23, and FlyDSL 0.3.4.1.
-Full GSM8K, fixed five-shot multiturn prompts, thinking enabled, standard
-EAGLE3, temperature zero, and an 8192-token generation limit gave native
-1277/1319 (96.8158%) and mono 1276/1319 (96.7400%). The earlier raw-completion
-protocol gave 1142 versus 1108; that regression remains unresolved.
+The refactor is validated separately from the earlier October 2 experiment.
+The current checks cover kernel compilation for both cache modes and every
+supported width, the public tensor interface on saved native layers, graph
+replay with changed cache addresses, poisoned padding, collective startup
+failures, and shutdown. CPU worker tests retain the weight-update guards.
+The paired Draft PRs record commands, exact results, and remaining evaluation
+limits for the current revisions.
 
-Performance used fixed random token requests, 256 output tokens, and synthetic
-expected acceptance length 2.83. Three paired rounds (A/C, C/A, A/C), each with
-16 warmup and 128 measured requests per cell, produced 36 valid cells and 4608
-measured requests. Values below are three-round means, not natural-acceptance
-production predictions.
-
-| Input | Concurrency | Native TPOT (ms) | Mono TPOT (ms) | E2E change | Output throughput change |
-| ----- | ----------- | ---------------- | -------------- | ---------- | ------------------------ |
-| 1024 | 1 | 2.647 | 1.763 | -29.38% | +41.59% |
-| 1024 | 2 | 3.162 | 2.376 | -21.32% | +27.09% |
-| 1024 | 4 | 3.390 | 3.012 | -9.38% | +10.35% |
-| 8192 | 1 | 3.563 | 2.716 | -18.58% | +22.81% |
-| 8192 | 2 | 4.393 | 3.784 | -12.53% | +14.32% |
-| 8192 | 4 | 5.784 | 5.957 | -3.75% | +3.89% |
-
-Mono TPOT at 8K/concurrency 4 was 6.208/6.201/5.462 ms across rounds, so this
-case did not establish stable decode acceleration. Extra sampled memory was
-approximately 1.64-1.69 GiB per rank. FP8 projection copies, BF16 router, and
-MoE arithmetic differ from native; there was no same-precision unfused control.
-The gains cannot be attributed exclusively to fusion.
-
-Layer-stage checks, native/mono cache interoperability, graph replay, request
-cancellation, preemption/recompute, page reuse, and shutdown were exercised
-outside CI. They do not cover the newly identified synchronization and batch
-invariance defects. Before readiness, retain the external GPU validation
-harness in an appropriate test/benchmark location, exercise repeated identical
-inputs and poisoned padding, and rerun graph/lifecycle, GSM8K, and performance
-on the ported kernels. The existing worker test suite contains CPU regression
-checks for rejecting weight updates before mutation.
+The historical full GSM8K chat-template experiment scored 1277/1319 native and
+1276/1319 mono. The earlier raw-completion protocol scored 1142 versus 1108.
+Those results and the historical synthetic-acceptance throughput measurements
+are evidence for the old implementation only; they do not qualify this refactor.
+FP8 projection copies, the BF16 router, and MoE arithmetic differ from native,
+so layer outputs are not expected to be bitwise identical to the native model.

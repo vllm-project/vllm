@@ -942,6 +942,7 @@ class CoreEngineActorManager:
         runtime_env = RuntimeEnv(
             env_vars=self.env_vars_dict | {"VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"}
         )
+        new_actors = []
         for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
             rank = cur_data_parallel_size + i
             dp_vllm_config = copy.deepcopy(cur_vllm_config)
@@ -985,6 +986,7 @@ class CoreEngineActorManager:
                     local_dp_rank=local_rank,
                 )
             )
+            new_actors.append(actor)
 
             if local_client:
                 self.local_engine_actors.append(actor)
@@ -993,14 +995,8 @@ class CoreEngineActorManager:
             self.created_placement_groups.append(pg)
             self.placement_group_is_local.append(local_client)
 
-        actors = (
-            self.local_engine_actors[-new_local_engines:]
-            if new_local_engines > 0
-            else []
-        ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
-
-        ray.get([actor.wait_for_init.remote() for actor in actors])
-        for actor in actors:
+        ray.get([actor.wait_for_init.remote() for actor in new_actors])
+        for actor in new_actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)
             self.actor_run_ref_dict[actor] = ref
@@ -1198,6 +1194,23 @@ def launch_core_engines(
         logger.info("Started DP Coordinator process (PID: %d)", coordinator.proc.pid)
     else:
         coordinator = None
+
+    # Hold a coordination TCPStore (alive for this frame) so engines pick DP
+    # master ports at bind time; pre-allocated ports can be taken before use.
+    coord_store = None
+    if (
+        dp_size > 1
+        and not offline_mode
+        and dp_rank == 0
+        and local_engine_count > 0
+        and not parallel_config.enable_elastic_ep
+    ):
+        from vllm.distributed.utils import create_tcp_store
+
+        coord_store = create_tcp_store(
+            host, 0, is_master=True, world_size=-1, wait_for_workers=False
+        )
+        parallel_config._coord_store_port = coord_store.port
 
     if parallel_config.data_parallel_backend == "ray":
         logger.info("Starting ray-based data parallel backend")
@@ -1419,6 +1432,7 @@ def wait_for_engine_startup(
                             "data_parallel_master_ip",
                             "data_parallel_master_port",
                             "_data_parallel_master_port_list",
+                            "_coord_store_port",
                             "data_parallel_size",
                         )
                     }
