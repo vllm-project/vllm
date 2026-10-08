@@ -365,3 +365,66 @@ def test_record_size_agrees_with_mixed_layer_sizes():
     worker_config.hidden_state_record_layers = get_record_layers(worker_config)
     scheduler_config = generate_scheduler_kv_cache_config([worker_config])
     assert get_record_tail_tokens(vllm_config, scheduler_config) == worker_tail
+
+
+def _layers_config(block_size, layers):
+    return KVCacheConfig(
+        num_blocks=1000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [f"model.layers.{i}.self_attn.attn" for i in layers],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=96,
+                    dtype=torch.float16,
+                ),
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize("pp_size", [1, 2, 3])
+def test_record_layers_of_pipelined_prefiller(pp_size):
+    """A prefiller with PP keeps the records in its last stage's layers; a
+    decoder configured with the prefiller's PP size reads them there."""
+    from vllm.v1.core.hidden_state_record import (
+        get_record_tail_tokens,
+        resolve_record_layers,
+    )
+
+    p_config = create_vllm_config(
+        kv_connector_extra_config={"hidden_state_handoff": True},
+        kv_role="kv_producer",
+    )
+    p_config.parallel_config.pipeline_parallel_size = pp_size
+    d_config = create_vllm_config(
+        kv_connector_extra_config={
+            "hidden_state_handoff": True,
+            "hidden_state_handoff_producer_pp_size": pp_size,
+        },
+        kv_role="kv_consumer",
+    )
+    bs = p_config.cache_config.block_size
+    # opt-125m has 12 layers: P's per-stage worker configs, D's single one.
+    stages = [
+        list(range(12))[stage * 12 // pp_size : (stage + 1) * 12 // pp_size]
+        for stage in range(pp_size)
+    ]
+    p_layers = resolve_record_layers(
+        p_config, [_layers_config(bs, stage) for stage in stages]
+    )
+    d_layers = resolve_record_layers(d_config, [_layers_config(bs, range(12))])
+    last_stage = {1: range(12), 2: range(6, 12), 3: range(8, 12)}[pp_size]
+    assert (
+        p_layers
+        == d_layers
+        == tuple((f"model.layers.{i}.self_attn.attn", 384) for i in last_stage)
+    )
+    # 3072 stored bytes, 384 per layer and token slot.
+    d_kv_cache_config = _layers_config(bs, range(12))
+    d_kv_cache_config.hidden_state_record_layers = d_layers
+    assert get_record_tail_tokens(d_config, d_kv_cache_config) == cdiv(
+        3072, 384 * len(last_stage)
+    )

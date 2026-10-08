@@ -90,7 +90,13 @@ def _check_record_layout(
 def check_hidden_state_handoff_supported(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
     unsupported = {
-        "pipeline parallelism": parallel_config.pipeline_parallel_size > 1,
+        # A prefiller keeps the records on its last stage (NIXL supports PP
+        # only there).
+        "pipeline parallelism on the decoder": (
+            parallel_config.pipeline_parallel_size > 1
+            and vllm_config.kv_transfer_config is not None
+            and not vllm_config.kv_transfer_config.is_kv_producer
+        ),
         "context parallelism": (
             parallel_config.decode_context_parallel_size > 1
             or parallel_config.prefill_context_parallel_size > 1
@@ -137,17 +143,22 @@ class HiddenStateHandoff:
             layout.num_slots * layout.hidden_size * get_dtype_size(self.dtype)
         )
 
-        # The carrier group's layers, as byte views [blocks, heads, tokens,
+        # The layers holding the record, as byte views [blocks, heads, tokens,
         # bytes per head]. A token slot holds the record bytes, split over the
-        # layers, in each head.
+        # layers, in each head. They are on the prefiller's last pipeline
+        # stage, which has the hidden states; earlier stages never touch them.
         self.group_id = group_id = get_record_carrier_group(kv_cache_config)
         self.tail_tokens = get_record_tail_tokens(vllm_config, kv_cache_config)
         record_layers = get_record_layers(kv_cache_config)
-        self.layer_views = [
-            kv_caches[name].view(torch.uint8) for name, _ in record_layers
-        ]
+        self.layer_views = (
+            [kv_caches[name].view(torch.uint8) for name, _ in record_layers]
+            if runner.is_last_pp_rank
+            else []
+        )
         self.head_bytes = sum(size for _, size in record_layers)
-        assert self.head_bytes == sum(v.shape[-1] for v in self.layer_views)
+        assert not self.layer_views or self.head_bytes == sum(
+            v.shape[-1] for v in self.layer_views
+        )
         assert (
             self.tail_tokens * self.head_bytes
             >= self.record_bytes * RECORD_ENCODING_EXPANSION
