@@ -30,8 +30,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateResponseBase,
     RenderedGenerateResponse,
 )
-from vllm.exceptions import GenerationError
-from vllm.logprobs import ArrayLogprobs, Logprob, create_sample_logprobs
+from vllm.logprobs import Logprob, create_sample_logprobs
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -183,15 +182,6 @@ def test_aborted_choice_without_tokens():
     serving = _build_serving_tokens(_mock_engine())
     legacy, fast = _outcome(serving, 3, [([], [])], finish_reason="abort")
     assert fast == legacy
-
-
-def test_broken_storage_fails_the_request():
-    serving = _build_serving_tokens(_mock_engine())
-    ids, lps, ranks = _rows(2, 2)
-    stored = _stored(1, (ids, lps.astype(np.float64), ranks), array=True)
-    assert isinstance(stored, ArrayLogprobs) and stored.broken
-    with pytest.raises(GenerationError):
-        _body(serving, 1, [(ids[:, 0].tolist(), stored)])
 
 
 def test_float_reprs_match_repr():

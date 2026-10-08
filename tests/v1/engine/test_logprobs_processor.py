@@ -167,25 +167,6 @@ def test_array_logprobs_irregular_rows_fall_back_to_dicts():
 
 
 @pytest.mark.parametrize(
-    "token_ids,ranks",
-    [
-        (np.zeros((2, 2), dtype=np.int32), np.zeros(1, dtype=np.int32)),
-        (np.full((1, 2), 2**31, dtype=np.int64), np.zeros(1, dtype=np.int32)),
-    ],
-)
-def test_array_logprobs_malformed_rows_break_the_request(token_ids, ranks):
-    """Malformed engine rows never raise in the shared output loop: the
-    container is broken and fails when the response reads it."""
-    container = ArrayLogprobs()
-    container.append_rows(token_ids, np.zeros(token_ids.shape, np.float32), ranks)
-    assert container.broken and not container.is_regular
-    with pytest.raises(ValueError):
-        container.arrays()
-    with pytest.raises(ValueError):
-        list(container)
-
-
-@pytest.mark.parametrize(
     "array_logprobs,logprobs,output_kind,expected",
     [
         (True, 2, RequestOutputKind.FINAL_ONLY, ArrayLogprobs),

@@ -7,10 +7,6 @@ from typing import overload
 
 import numpy as np
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 # We use dataclass for now because it is used for
 # openai server output, and msgspec is not serializable.
@@ -161,19 +157,6 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
             yield self.__getitem__(i)
 
 
-def _fits_int32(values: np.ndarray) -> bool:
-    """Whether an integer array holds only values that int32 represents."""
-    dtype = values.dtype
-    if dtype.kind not in "iu":
-        return False
-    if dtype.itemsize < 4 or (dtype.kind == "i" and dtype.itemsize == 4):
-        return True
-    if values.size == 0:
-        return True
-    info = np.iinfo(np.int32)
-    return info.min <= int(values.min()) and int(values.max()) <= info.max
-
-
 class ArrayLogprobs(Sequence[LogprobsOnePosition]):
     """Sample logprobs of a request kept as the engine's rows.
 
@@ -188,8 +171,7 @@ class ArrayLogprobs(Sequence[LogprobsOnePosition]):
     Rows of another width than the first (e.g. when a co-batched request's
     ``logprob_token_ids`` replaced the batch's logprob tensors) are kept from
     then on as ``dict[int, Logprob]`` entries, and :attr:`is_regular` becomes
-    False. Any storage failure marks the container :attr:`broken` instead of
-    raising in the shared output processing loop.
+    False.
 
     Positions read as ``dict[int, Logprob]`` (``decoded_token`` None), like
     the list representation, so any consumer works, slowly; the generate
@@ -208,12 +190,11 @@ class ArrayLogprobs(Sequence[LogprobsOnePosition]):
         self._num_rows = 0
         # Positions after the array rows, once an irregular row was seen.
         self._irregular: list[LogprobsOnePosition] | None = None
-        self.broken = False
 
     @property
     def is_regular(self) -> bool:
         """Whether every position is stored as an array row."""
-        return self._irregular is None and not self.broken
+        return self._irregular is None
 
     @property
     def num_slots(self) -> int | None:
@@ -224,42 +205,8 @@ class ArrayLogprobs(Sequence[LogprobsOnePosition]):
         self, token_ids: np.ndarray, logprobs: np.ndarray, ranks: np.ndarray
     ) -> None:
         """Append ``n`` positions given as ``[n, S]``, ``[n, S]`` and ``[n]``
-        engine arrays (copied). Never raises: a failure marks the container
-        broken, failing only its request when it is rendered."""
-        if self.broken:
-            return
-        try:
-            self._append_rows(token_ids, logprobs, ranks)
-        except Exception:
-            logger.exception("Storing sample logprobs failed; failing the request")
-            self.broken = True
-            self._token_ids, self._logprobs, self._ranks = [], [], []
-            self._irregular = None
-
-    def _append_rows(
-        self, token_ids: np.ndarray, logprobs: np.ndarray, ranks: np.ndarray
-    ) -> None:
+        engine arrays (copied)."""
         n = len(ranks)
-        if (
-            token_ids.ndim != 2
-            or logprobs.shape != token_ids.shape
-            or ranks.shape != (n,)
-            or token_ids.shape[0] != n
-        ):
-            raise ValueError(
-                f"Inconsistent logprob rows: token_ids {token_ids.shape}, "
-                f"logprobs {logprobs.shape}, ranks {ranks.shape}"
-            )
-        if not (
-            logprobs.dtype.kind == "f"
-            and logprobs.dtype.itemsize <= 4
-            and _fits_int32(token_ids)
-            and _fits_int32(ranks)
-        ):
-            raise TypeError(
-                f"Unsupported logprob rows: token_ids {token_ids.dtype}, "
-                f"logprobs {logprobs.dtype}, ranks {ranks.dtype}"
-            )
         if n == 0:
             return
         width = token_ids.shape[1]
@@ -332,8 +279,6 @@ class ArrayLogprobs(Sequence[LogprobsOnePosition]):
 
     def __getitem__(self, index: int | slice):
         """Extracts logprobs of a given position or slice."""
-        if self.broken:
-            raise ValueError("Sample logprobs are unavailable: storing them failed")
         if isinstance(index, slice):
             return [self[i] for i in range(*index.indices(len(self)))]
         position = range(len(self))[index]
@@ -348,8 +293,6 @@ class ArrayLogprobs(Sequence[LogprobsOnePosition]):
 
     def __iter__(self) -> Iterator[LogprobsOnePosition]:
         """Iterates the positions in order."""
-        if self.broken:
-            raise ValueError("Sample logprobs are unavailable: storing them failed")
         remaining = self._num_rows
         for t, lp, r in zip(self._token_ids, self._logprobs, self._ranks):
             for j in range(min(len(r), remaining)):
