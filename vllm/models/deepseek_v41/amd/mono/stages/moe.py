@@ -49,6 +49,13 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
+from vllm.models.deepseek_v41.amd.mono.common.gfx942 import (
+    fp4x8_fnuz,
+    mfma_fp8,
+    pair_i64,
+    pin_acc,
+)
 from vllm.models.deepseek_v41.amd.mono.common.mx import (
     FP4,
     FP8,
@@ -80,10 +87,10 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
     popcount,
     row_sum,
     rsrc,
-    stamp,
     sum_partials,
     traced,
 )
+from vllm.models.deepseek_v41.amd.mono.common.ops import stamp as stamp_lds
 from vllm.models.deepseek_v41.amd.mono.common.plan import (
     BLOCKS,
     THREADS,
@@ -153,6 +160,19 @@ RED0 = 0
 # ``timeline`` stamps: kernel start, then the end of each stage's task loop
 TL_STAGES = ("xq", "router", "route", "shared", "ug", "down", "reduce")
 TL_POINTS = 1 + len(TL_STAGES)
+# More stamps inside the ug stage of a step with one token tile, after the
+# stage points: when this CTA has the X8R rows and the route table in LDS,
+# when wave 0 of the CTA has finished the GEMV of its last ug task, and when
+# all 8 waves have (the barrier before the epilogue). The last two are the
+# shader clock counter at the first two points, for the clock rate in
+# between. Only K2 and the FFN launch store them (their ``c["tl_mark"]``).
+TL_UG_POINTS = (
+    "ug inputs",
+    "ug gemv",
+    "ug gemv all",
+    "ug inputs clock",
+    "ug gemv clock",
+)
 
 
 # the MoE stages' kernel arguments, in launch order
@@ -260,10 +280,19 @@ def put_mxfp8_group(c, words_mb, codes_mb, t, g, v, amax):
     inv = rcp_pow2(code)
     words = []
     for w4 in range_constexpr(4):
-        ws = [
-            fp8_pack4(*[clamp_fp8(v[8 * w4 + 4 * h + i] * inv) for i in range(4)])
-            for h in range(2)
-        ]
+        if const_expr(GFX942):
+            # The routed experts' FP4 conversion on gfx942 gives the even K of
+            # each 8-value chunk first, then the odd K (``fp4x8_fnuz``), so
+            # their activations are stored in that order too.
+            ws = [
+                fp8_pack4(*[clamp_fp8(v[8 * w4 + 2 * i + h] * inv) for i in range(4)])
+                for h in range(2)
+            ]
+        else:
+            ws = [
+                fp8_pack4(*[clamp_fp8(v[8 * w4 + 4 * h + i] * inv) for i in range(4)])
+                for h in range(2)
+            ]
         words.append(ws)
     for h in range_constexpr(2):
         st_dev(
@@ -967,7 +996,24 @@ def ug_pass(c, e, part0, first, count, col):
     # a group past the real width (the padding to inter) has zero weights:
     # its GEMV is zero unread, and the epilogue still writes its zero MID
     acc = fx.Vector.filled(8, 0.0, fx.Float32)
-    if real:
+    if const_expr(GFX942):
+        if real:
+            acc = gemv_fp4_pair_942(
+                c,
+                a["w13"],
+                a["w13_s"],
+                e,
+                2 * d.inter_real,
+                HIDDEN,
+                rg0,
+                ks,
+                c["xl"],
+                c["xsl"],
+                col,
+            )
+        if const_expr(c.get("ug_mark") is not None):
+            c["ug_mark"](0)
+    elif real:
         acc = gemv_fp4_pair(
             c,
             a["w13"],
@@ -989,6 +1035,8 @@ def ug_pass(c, e, part0, first, count, col):
             red + (slot * 64 + lane) * 4,
         )
     gpu.barrier()
+    if const_expr(c.get("ug_mark") is not None):
+        c["ug_mark"](1)
     # thread (p, j, i): group p, the slot's pick j, intermediate column
     # 32 part + i, a pass of THREADS at a time; a group's 32 threads stay
     # lane-aligned
@@ -1052,16 +1100,19 @@ def ug_epilogue(c, part0, idx, first, count):
         i = idx % UG_PART
         tile = i // 16
         r = i % 16
-        at = (16 * (r // 4) + t) * 4 + r % 4
-        g, up = [
-            pairwise_sum(
-                [
-                    fx.ptr_load(red + ug_red_slot(rs, p, tile, ks, t) * 64 * 4 + at)
-                    for ks in range(rs.ug_k_slices)
-                ]
-            )
-            for t in range(2)
-        ]
+        if const_expr(GFX942):
+            g, up = ug_gate_up_942(red, rs, p, tile, r, t)
+        else:
+            at = (16 * (r // 4) + t) * 4 + r % 4
+            g, up = [
+                pairwise_sum(
+                    [
+                        fx.ptr_load(red + ug_red_slot(rs, p, tile, ks, t) * 64 * 4 + at)
+                        for ks in range(rs.ug_k_slices)
+                    ]
+                )
+                for t in range(2)
+            ]
         gc = fx.min(g, fx.Float32(LIMIT))
         uc = fx.max(fx.min(up, fx.Float32(LIMIT)), fx.Float32(-LIMIT))
         sig = hw_rcp(fx.Float32(1.0) + hw_exp2(gc * fx.Float32(-LOG2E)))
@@ -1072,17 +1123,389 @@ def ug_epilogue(c, part0, idx, first, count):
         amax = fx.max(butterfly(abs(v), (1, 2, 4, 8, 16), fx.max), fx.Float32(1e-10))
         code = code_ceil(amax * fx.Float32(1.0 / FP8_MAX))
         q8 = clamp_fp8(v * rcp_pow2(code))
-        nb = [
-            lane_gather(q8.bitcast(fx.Int32), fx.min(lane + q, 63)).bitcast(fx.Float32)
-            for q in range(1, 4)
-        ]
-        # 4 threads' bytes -> one word
-        word = fp8_pack4(q8, *nb)
         row = first + t
-        if (i % 4 == 0) & (t < count):
-            st_dev(word, c["mid"], row * d.mid_words + part * 8 + i // 4)
-        if (i == 0) & (t < count):
-            st_dev(code, c["mids"], mid_code_index(d, row, part))
+        if const_expr(GFX942):
+            ug_mid_store_942(c, d, q8, code, part, i, row, t < count)
+        else:
+            nb = [
+                lane_gather(q8.bitcast(fx.Int32), fx.min(lane + q, 63)).bitcast(
+                    fx.Float32
+                )
+                for q in range(1, 4)
+            ]
+            # 4 threads' bytes -> one word
+            word = fp8_pack4(q8, *nb)
+            if (i % 4 == 0) & (t < count):
+                st_dev(word, c["mid"], row * d.mid_words + part * 8 + i // 4)
+            if (i == 0) & (t < count):
+                st_dev(code, c["mids"], mid_code_index(d, row, part))
+
+
+# ---------------------------------------------------------------- gfx942 routed
+# K blocks of 32 a gfx942 ug round, and the rounds whose loads are in flight
+# past the one computing. ``weights942.codes_tile_rounds`` stores the w13
+# codes in rounds of UG_ROUND_942 blocks, so the two must change together.
+UG_ROUND_942 = 8
+UG_AHEAD_942 = 2
+
+
+def fp4_round_loads_942(c, w, ws, e, n_rows, k, rg0, kb0):
+    """gfx942 ug: one round's loads (``UG_ROUND_942`` K blocks from block kb0,
+    a multiple of UG_ROUND_942) for tiles rg0 and rg0 + 1 of expert e's MXFP4
+    weight: [experts * n_rows, k / 2] bytes (two e2m1 a byte, the lower K in
+    the low nibble) in ``weights942.fp4_tile_major`` order, and e8m0 codes
+    [experts * n_rows, k / 32] in ``weights942.codes_tile_rounds`` order. A
+    lane (row lane % 16 of a tile, K chunk j = lane / 16) needs a dword a
+    block, the 8 e2m1 of K 32 b + 8 j .. + 8, and gets the dwords of 4 blocks
+    with one 16-byte load. The 64 lanes of such a load read 1 KB that is
+    contiguous. A lane also loads the round's codes of rows 4 j .. 4 j + 3 of
+    each tile, the rows of its accumulator values, which are 4 UG_ROUND_942
+    contiguous bytes. Loads only, nothing waits on them here."""
+    lane = c["lane"]
+    j = lane // 16
+    kd, kc = k // 8, k // 32
+    per_row = UG_ROUND_942 // 4
+    wds, scs = [], []
+    for t in range_constexpr(2):
+        tile_row = e * n_rows + (rg0 + t) * 16
+        # A 64-byte step of the tile's 16 rows is 256 dwords, and the round
+        # starts at step kb0 / 4.
+        base = fresh(tile_row * kd + 4 * lane) + kb0 * 64
+        steps = [
+            fx.Vector(
+                bo.buffer_load(
+                    rsrc(w),
+                    base + 256 * m,
+                    vec_width=4,
+                    dtype=T.i32,
+                    cache_modifier=CM_NT,
+                )
+            )
+            for m in range(UG_ROUND_942 // 4)
+        ]
+        wds.append([fx.Int32(steps[b // 4][b % 4]) for b in range(UG_ROUND_942)])
+        # A round of the tile's codes is 16 rows x UG_ROUND_942 bytes, which is
+        # 4 UG_ROUND_942 dwords, and lane group j's rows start UG_ROUND_942 j
+        # dwords into it.
+        sbase = fresh(tile_row * (kc // 4) + UG_ROUND_942 * j) + kb0 * 4
+        words = []
+        for h in range_constexpr(per_row):
+            v = fx.Vector(
+                bo.buffer_load(
+                    rsrc(ws),
+                    sbase + 4 * h,
+                    vec_width=4,
+                    dtype=T.i32,
+                    cache_modifier=CM_NT,
+                )
+            )
+            words += [fx.Int32(v[i]) for i in range(4)]
+        scs.append([words[q * per_row : (q + 1) * per_row] for q in range(4)])
+    return wds, scs
+
+
+def fp4_mfma_942(acc, wword, bx, codes, sxm):
+    """One 32-wide K block of a gfx942 FP4 tile: the lane's e2m1 dword
+    ``wword`` to FNUZ bytes (``fp4x8_fnuz``), the FP8 MFMA against the B
+    operand ``bx`` with a zero accumulator, then each of the lane's 4 values
+    (rows 4 (lane / 16) + q) added times 2^(code_q + 7 + sx - 254): ``codes``
+    the rows' e8m0 codes of the block, ``sxm`` the activation code minus
+    120. The + 7 undoes the 2^-7 of the FP4 to FNUZ conversion."""
+    even, odd = fp4x8_fnuz(wword)
+    d = mfma_fp8(pair_i64(even, odd), bx, fx.Vector.filled(4, 0.0, fx.Float32))
+    vals = []
+    for q in range_constexpr(4):
+        f = ((codes[q] + sxm) << 23).bitcast(fx.Float32)
+        vals.append(fx.Float32(fmath.fma(d[q], f, acc[q])))
+    return fx.Vector.from_elements(vals, fx.Float32)
+
+
+def code_byte(words, i):
+    """Byte i of a list of dwords, as an Int32."""
+    return (words[i // 4] >> (8 * (i % 4))) & 0xFF
+
+
+@traced
+def gemv_fp4_pair_942(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, col):
+    """gfx942 ``gemv_fp4_pair``: tiles rg0 and rg0 + 1 of expert e's MXFP4
+    weight against 16 MXFP8 rows in LDS over this wave's K slice ``ks`` ->
+    both tiles' partial C, a Vector of 8 (tile t's rows 4 (lane / 16) + q,
+    column lane % 16, whose LDS row is ``col``). The activations hold each
+    8-value chunk even K first (``put_mxfp8_group``). A block's B operand and
+    code, read once from LDS, feed both tiles' MFMAs."""
+    lane = c["lane"]
+    j = lane // 16
+    slices = c["rs"].ug_k_slices
+    per = k // 32 // slices
+    assert per % UG_ROUND_942 == 0, (k, slices)
+    rounds = per // UG_ROUND_942
+    kb0 = ks * per
+    x_row, s_row = lds_row(k // 4), lds_row(k // 32)
+    accs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(2)]
+    ops = [
+        fp4_round_loads_942(c, w, ws, e, n_rows, k, rg0, kb0 + UG_ROUND_942 * r)
+        for r in range(min(UG_AHEAD_942, rounds))
+    ]
+    for r in range_constexpr(rounds):
+        if const_expr(r + UG_AHEAD_942 < rounds):
+            ops.append(
+                fp4_round_loads_942(
+                    c, w, ws, e, n_rows, k, rg0, kb0 + UG_ROUND_942 * (r + UG_AHEAD_942)
+                )
+            )
+        accs = ug_round_942(
+            accs, *ops[r], kb0 + UG_ROUND_942 * r, xl, xsl, col, x_row, s_row, j
+        )
+        # Without this barrier LLVM moves the next round's FP4 conversions and
+        # MFMAs, which do not depend on the pinned accumulators, up into this
+        # round. They read the next round's loads, so the wave then waits for
+        # loads issued only one round earlier instead of UG_AHEAD_942 rounds
+        # earlier.
+        rocdl.sched_barrier(0)
+    return fx.Vector.from_elements(
+        [accs[t][q] for t in range(2) for q in range(4)], fx.Float32
+    )
+
+
+def ug_round_942(accs, wds, scs, kr, xl, xsl, col, x_row, s_row, j):
+    """One round of the gfx942 ug GEMV: UG_ROUND_942 K blocks from block kr
+    (an int or a traced Int32) for both tiles, the B operand and activation
+    code of a block read once from LDS for both. Returns the accumulators
+    through ``pin_acc``."""
+    for b4 in range_constexpr(UG_ROUND_942 // 4):
+        sx4 = fx.Vector(
+            fx.ptr_load(
+                xsl + (col * s_row + kr + 4 * b4),
+                result_type=fx.Vector.make_type(4, fx.Int32),
+            )
+        )
+        for i in range_constexpr(4):
+            b = 4 * b4 + i
+            xv = fx.Vector(
+                fx.ptr_load(
+                    xl + (col * x_row + (kr + b) * 8 + 2 * j),
+                    result_type=fx.Vector.make_type(2, fx.Int32),
+                )
+            )
+            bx = pair_i64(xv[0], xv[1])
+            sxm = sx4[i] - 120
+            for t in range_constexpr(2):
+                codes = [code_byte(scs[t][q], b) for q in range(4)]
+                accs[t] = fp4_mfma_942(accs[t], wds[t][b], bx, codes, sxm)
+    return [pin_acc(a) for a in accs]
+
+
+def ug_gate_up_942(red, rs, p, half, r, t):
+    """gfx942 ug epilogue: the gate and up sums of intermediate column 16 half
+    + r of group p for pick t. vLLM's gfx942 w13 interleaves gate and up a
+    row (row 2 i the gate of column i, row 2 i + 1 its up), so a wave's two
+    16-row tiles hold columns 16 half .. + 7 (tile 0) and + 8 .. + 15 (tile
+    1), the gate in an even row and the up in the next."""
+    tile = r // 8
+    rg = 2 * (r % 8)
+    out = []
+    for row in (rg, rg + 1):
+        at = (16 * (row // 4) + t) * 4 + row % 4
+        out.append(
+            pairwise_sum(
+                [
+                    fx.ptr_load(red + ug_red_slot(rs, p, half, ks, tile) * 64 * 4 + at)
+                    for ks in range(rs.ug_k_slices)
+                ]
+            )
+        )
+    return out
+
+
+def mid_word_942(d, row, part, i):
+    """gfx942 MID word of a pick row: intermediate columns 32 part + i (i % 8
+    in 0, 1: the chunk's even, then odd values). Within each 128-column step
+    a lane group's four 8-byte chunks lie together (``mid_operands_942``):
+    chunk (block part % 4, j = i / 8) at bytes 32 j + 8 (part % 4)."""
+    return row * d.mid_words + part // 4 * 32 + 8 * (i // 8) + 2 * (part % 4) + i % 8
+
+
+@traced
+def ug_mid_store_942(c, d, q8, code, part, i, row, live):
+    """gfx942 ug epilogue: thread i's FP8 value ``q8`` of group ``part`` into
+    MID, 4 threads a word: values i, i + 2, i + 4, i + 6 of an 8-value chunk
+    (``mid_word_942``), and the group's code into MIDS ([pick row][inter / 32]
+    i32)."""
+    lane = c["lane"]
+    nb = [
+        lane_gather(q8.bitcast(fx.Int32), fx.min(lane + 2 * q, 63)).bitcast(fx.Float32)
+        for q in range(1, 4)
+    ]
+    word = fp8_pack4(q8, *nb)
+    if (i % 8 < 2) & live:
+        st_dev(word, c["mid"], mid_word_942(d, row, part, i))
+    if (i == 0) & live:
+        st_dev(code, c["mids"], row * (d.inter // 32) + part)
+
+
+def down_weights_942(c, e, task):
+    """gfx942 down: rows 16 task .. of expert e's w2 ([experts * 5120,
+    inter_real / 2] bytes in ``weights942.fp4_tile_major`` order, e8m0 codes
+    [experts * 5120, inter_real / 32] row-major): a dword of 8 e2m1 a K block
+    a lane (row lane % 16, K chunk lane / 16), 4 blocks a 16-byte load (the
+    64 lanes 1 KB in a row) and the last 2 blocks with one 8-byte load (512
+    bytes in a row), and the codes of rows 4 (lane / 16) .. + 3, 4 rows x
+    inter_real / 32 contiguous bytes. Loads only."""
+    lane, a, d = c["lane"], c["args"], c["d"]
+    j = lane // 16
+    kd, kc = d.inter_real // 8, d.inter_real // 32
+    assert kc % 4 in (0, 2), kc
+    # The tile's 16 rows are 16 kd dwords, a 64-byte step of them 256 dwords.
+    tile0 = (e * HIDDEN + task * 16) * kd
+    base = fresh(tile0 + 4 * lane)
+    wd = []
+    for m in range_constexpr(kc // 4):
+        v = fx.Vector(
+            bo.buffer_load(
+                rsrc(a["w2"]),
+                base + 256 * m,
+                vec_width=4,
+                dtype=T.i32,
+                cache_modifier=CM_NT,
+            )
+        )
+        wd += [fx.Int32(v[i]) for i in range(4)]
+    if const_expr(kc % 4 == 2):
+        v = fx.Vector(
+            bo.buffer_load(
+                rsrc(a["w2"]),
+                fresh(tile0 + 2 * lane) + 256 * (kc // 4),
+                vec_width=2,
+                dtype=T.i32,
+                cache_modifier=CM_NT,
+            )
+        )
+        wd += [fx.Int32(v[i]) for i in range(2)]
+    # 4 rows' codes: 4 kc bytes from a multiple of 4 kc, so whole dwords.
+    sw0 = (e * HIDDEN + task * 16 + 4 * j) * kc // 4
+    nwords = kc
+    sc = []
+    for w0 in range_constexpr(0, nwords, 4):
+        n = min(4, nwords - w0)
+        v = bo.buffer_load(
+            rsrc(a["w2_s"]), sw0 + w0, vec_width=n, dtype=T.i32, cache_modifier=CM_NT
+        )
+        if const_expr(n == 1):
+            sc.append(fx.Int32(v))
+        else:
+            v = fx.Vector(v)
+            sc += [fx.Int32(v[q]) for q in range(n)]
+    return wd, sc
+
+
+def mid_operands_942(c, first, count):
+    """gfx942 down: the B operands of picks first .. first + min(count, 16)
+    (column lane % 16 the pick, past them the last) from MID at device scope:
+    8 bytes a K block (``mid_word_942``: a lane group's chunks of a step
+    together, two 16-byte loads a step), and the pick's codes (MIDS)."""
+    lane, d = c["lane"], c["d"]
+    j = lane // 16
+    kc = d.inter_real // 32
+    row = first + fx.min(lane % 16, count - 1)
+    lane_word = fresh(row * d.mid_words + 8 * j)
+    bvs = []
+    for st in range_constexpr(-(-kc // 4)):
+        for h in range_constexpr(2):
+            if const_expr(4 * st + 2 * h < kc):
+                v = fx.Vector(
+                    bo.buffer_load(
+                        rsrc(c["mid"].value),
+                        lane_word + (st * 32 + 4 * h),
+                        vec_width=4,
+                        dtype=T.i32,
+                        cache_modifier=CM_DEV,
+                    )
+                )
+                bvs.append(pair_i64(v[0], v[1]))
+                if const_expr(4 * st + 2 * h + 1 < kc):
+                    bvs.append(pair_i64(v[2], v[3]))
+    base = row * (d.inter // 32)
+    sxs = []
+    for w0 in range_constexpr(0, kc, 4):
+        n = min(4, kc - w0)
+        v = bo.buffer_load(
+            rsrc(c["mids"].value),
+            base + w0,
+            vec_width=n,
+            dtype=T.i32,
+            cache_modifier=CM_DEV,
+        )
+        if const_expr(n == 1):
+            sxs.append(fx.Int32(v))
+        else:
+            v = fx.Vector(v)
+            sxs += [fx.Int32(v[q]) for q in range(n)]
+    return bvs, sxs
+
+
+@traced
+def down_mfma_942(c, j, task, mid, first, count, wop, live):
+    """gfx942 ``down_mfma``: down task ``task`` (the CTA's j-th) on a slot of
+    U, its picks first .. first + min(count, 16): a K block at a time
+    (``fp4_mfma_942``) -> each pick's contribution."""
+    lane, tab, d = c["lane"], c["tab"], c["d"]
+    kc = d.inter_real // 32
+    jj = lane % 16
+    col = fx.min(jj, count - 1)
+    bvs, sxs = mid
+    wd, sc = wop
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for b in range_constexpr(kc):
+        codes = [code_byte(sc, q * kc + b) for q in range(4)]
+        acc = fp4_mfma_942(acc, wd[b], bvs[b], codes, sxs[b] - 120)
+        if const_expr(b % 6 == 5):
+            acc = pin_acc(acc)
+    pick = c["rs"].pick_at(tab, first + col)
+    for q in range_constexpr(4):
+        r = 4 * (lane // 16) + q
+        if live & (jj < count):
+            contrib_store(c, j, pick * 16 + r, acc[q])
+
+
+@traced
+def stage_down_942(c, tasks):
+    """gfx942 ``stage_down``: a slot of U a wave a round (round robin), its
+    weights loaded straight into registers, so no LDS scale blocks; the
+    shared expert first, then the routed slots, then the combine."""
+    s, wave, tab = c["S"], c["wave"], c["tab"]
+    n = len(tasks)
+    nu = c["rs"].n_union(tab, s)
+    down_shared(c, tasks)
+    for rnd in range(0, (nu + WAVES - 1) // WAVES, 1):
+        u = wave + WAVES * rnd
+        uc = fx.min(u, nu - 1)
+        first = c["rs"].slot_first(tab, uc)
+        e = c["rs"].union_expert(tab, s, uc)
+        wops = [down_weights_942(c, e, task) for task in tasks]
+        c["poll"]([(c["ugf"], f, 1) for f in down_ug_flags(c, [uc])])
+        count = c["rs"].slot_first(tab, uc + 1) - first
+        mid = mid_operands_942(c, first, count)
+        for jt in range_constexpr(n):
+            down_mfma_942(c, jt, tasks[jt], mid, first, count, wops[jt], u < nu)
+        if const_expr(s > TILE):
+            for j0 in range_constexpr(TILE, s, TILE):
+                if j0 < count:
+                    more = mid_operands_942(c, first + j0, count - j0)
+                    for jt in range_constexpr(n):
+                        down_mfma_942(
+                            c,
+                            jt,
+                            tasks[jt],
+                            more,
+                            first + j0,
+                            count - j0,
+                            wops[jt],
+                            u < nu,
+                        )
+    gpu.barrier()
+    for t0, nn in token_tiles(s):
+        for jt in range_constexpr(n):
+            down_combine(c, tasks[jt], jt, t0, nn)
 
 
 # ---------------------------------------------------------------- down
@@ -1092,6 +1515,9 @@ def stage_down(c, tasks):
     two, run together: a second pass would double the CTA's time): routed
     experts of U (a wave each, round robin), the shared expert, their sum ->
     pushed to every rank."""
+    if const_expr(GFX942):
+        stage_down_942(c, tasks)
+        return
     s, wave, tab, d = c["S"], c["wave"], c["tab"], c["d"]
     n = len(tasks)
     nu = c["rs"].n_union(tab, s)
@@ -1474,7 +1900,8 @@ def stage_lds(s, rs):
     rows = tile_rows(s)
     x8 = rows * lds_row(X8_WORDS)
     groups = rows * lds_row(HIDDEN // 32)
-    wsl = WAVES * wsl_words(d)
+    # gfx942 loads the routed weights' scale codes straight into registers.
+    wsl = 0 if GFX942 else WAVES * wsl_words(d)
     shared_xl = rows * lds_row(d.sh_inter // 4) + lds_tail(d.sh_inter)
     shared_xsl = rows * lds_row(d.sh_inter // 32)
     contrib = 2 * rs.picks * 16  # two down tasks' at most
@@ -1536,8 +1963,30 @@ def moe_context(s, rs, lds, mb, bases, layout, scratch, args, rank, sym):
 
 @traced
 def run_moe(c, key, bid, tls, tl0):
-    """The MoE stages, in order; ``timeline`` stamps from point ``tl0`` + 1."""
-    s, timeline, tid = key.tokens, key.timeline, c["tid"]
+    """The MoE stages, in order; ``timeline`` stamps from point ``tl0`` + 1.
+    ``c["tl_mark"]``, when set, stores a stamp at a point of the launch's own
+    timeline record instead (K2's, ``layer.run_ffn``)."""
+    s, tid = key.tokens, c["tid"]
+    mark = c.get("tl_mark")
+    timeline = key.timeline or mark is not None
+    ug_in_point = tl0 + 1 + len(TL_STAGES)
+
+    def ug_mark(step):
+        # step 0: wave 0's GEMV done, step 1: every wave's GEMV done.
+        if step == 0:
+            mark(ug_in_point + 1)
+            mark(ug_in_point + 4, core_clock=True)
+        else:
+            mark(ug_in_point + 2)
+
+    c["ug_mark"] = None if mark is None else ug_mark
+
+    def stamp(on, tls, tid, k):
+        if const_expr(mark is not None):
+            mark(k)
+        else:
+            stamp_lds(on, tls, tid, k)
+
     router_tasks = c["rs"].router_tasks
     route0, shared0 = c["rs"].route0, c["rs"].shared0
     shared_tasks = c["d"].shared_tasks
@@ -1598,6 +2047,9 @@ def run_moe(c, key, bid, tls, tl0):
                 # lands only its own poll remains
                 load_x8_rows(c, "x8r", "x8rs", c["x8rl"], c["x8rsl"], lambda j: j, s)
                 load_route(c, c["tab"])
+                if const_expr(mark is not None):
+                    mark(ug_in_point)
+                    mark(ug_in_point + 3, core_clock=True)
             loaded = fx.Int32(1)
             stage_ug(c, task)
     stamp(timeline, tls, tid, tl0 + 5)

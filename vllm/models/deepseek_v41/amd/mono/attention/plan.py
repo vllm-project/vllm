@@ -5,6 +5,8 @@ rank's share of them, task counts and the scratch (mailbox) layout."""
 
 from dataclasses import dataclass
 
+from ..common.arch import GFX942
+
 HIDDEN = 5120
 Q_RANK = 1280
 KV_DIM = 512
@@ -144,7 +146,7 @@ def back_scratch(s: int, d: Dims, start: int = 0) -> dict:
     """K2's scratch regions, laid out past ``start``: published data (plain)
     and flag pairs."""
     ck = (
-        64 if d.head_tiles == 2 and s * cdiv(KEYS, 64) <= 256 else 128
+        64 if GFX942 or (d.head_tiles == 2 and s * cdiv(KEYS, 64) <= 256) else 128
     )  # back.chunk_keys
     nchunk = cdiv(KEYS, ck)
     return byte_layout(

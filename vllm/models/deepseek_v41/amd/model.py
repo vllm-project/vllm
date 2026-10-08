@@ -282,7 +282,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.mono is not None:
-            out = self.mono(self, x, positions, residual, post_mix, res_mix, pre_mix)
+            out = self.mono(
+                self,
+                x,
+                positions,
+                residual,
+                post_mix,
+                res_mix,
+                pre_mix,
+                input_ids=input_ids,
+                engram_hashes=engram_hashes,
+                engram_mask=engram_mask,
+            )
             if out is not None:
                 return out
         # Layer 0's attention seam projects the 2-D embedding with the folded
@@ -299,9 +310,19 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
+                # When layer 0 runs as a whole mono layer (gfx942), the
+                # entry seam projects the expanded residual with the
+                # unfolded hc_attn_fn, as K1 does, instead of the embedding
+                # with the folded copy. The hc copies are equal, so the
+                # products are the same and only their order of addition
+                # changes, and pre_mix None still selects copy 0 as the
+                # layer input. AITER's fused delayed seam takes this form.
+                # The folded form has no AITER kernel on gfx942 and runs the
+                # eager reference instead, about 120 small kernels a step.
+                unfolded = self.mono is not None and self.mono.window
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
-                    self.hc_attn_fn_broadcast,
+                    self.hc_attn_fn if unfolded else self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
                     self.hc_attn_base,
                     self.rms_norm_eps,
@@ -309,7 +330,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_eps,
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
-                    x=x,
+                    x=None if unfolded else x,
                 )
             else:
                 residual = x

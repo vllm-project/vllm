@@ -35,6 +35,8 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
+from vllm.models.deepseek_v41.amd.mono.common.gfx942 import mfma_bf16_k32
 from vllm.models.deepseek_v41.amd.mono.common.plan import THREADS, WAVES
 
 # ---------------------------------------------------------------- primitives
@@ -152,8 +154,11 @@ def xshfl(v, off):
 
 
 def xred(v, off, op):
-    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap."""
-    if off < 16:
+    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap.
+    gfx942 has no permlane swap: it reads lane ^ off with a shuffle instead.
+    The lanes then see op(a, b) or op(b, a), which is the same value for the
+    commutative ops used here (add, max)."""
+    if off < 16 or GFX942:
         return op(v, xshfl(v, off))
     is_f = isinstance(v, fx.Float32)
     x = v.bitcast(fx.Int32) if is_f else fx.Int32(v)
@@ -204,6 +209,8 @@ def batched_rounds(tid, n, load, use, batch=LOAD_BATCH):
 
 
 def mfma_bf16(a, b, c):
+    if GFX942:
+        return mfma_bf16_k32(a, b, c)
     return fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
 
 

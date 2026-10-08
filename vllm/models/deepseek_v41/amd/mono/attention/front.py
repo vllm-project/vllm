@@ -37,6 +37,7 @@ from flydsl.expr.typing import T
 from .device import (
     BLOCKS,
     CM_DEV,
+    FP8_MAX,
     THREADS,
     Mailbox,
     bf16_round,
@@ -106,6 +107,10 @@ class FrontBuild:
     tp: int
     ratio: int  # the layer's compress ratio (0: no top-k keys)
     timeline: bool = False
+    # An index layer's build. Its top-k comes from vLLM's indexer after this
+    # launch, so the launch writes no keys (stage_kt). It writes the normed q
+    # latent in bf16 to the ``qr_out`` argument instead, for the indexer.
+    index: bool = False
 
 
 def plus(t0, v):
@@ -352,6 +357,18 @@ def stage_qkv(c, t):
     )
     # q: bf16 normed row, then vLLM's MXFP8 (a 32-group = 4 threads)
     ys = [bf16_round((xq[j] * rq) * qw[j]) for j in range(8)]
+    if const_expr(c["index"]):  # noqa: SIM102 (a build-time and a run-time test)
+        # An index layer's build also writes the bf16 row for vLLM's indexer,
+        # whose wq_b reads vLLM's bf16 qr on gfx942. The values are bf16
+        # already, so the conversion is exact.
+        if mine & (tt * 8 < Q_RANK):
+            bo.buffer_store(
+                fx.Vector.from_elements(ys, fx.Float32)
+                .to(fx.BFloat16)
+                .bitcast(fx.Int32),
+                rsrc(a["qr_out"]),
+                t * (Q_RANK // 2) + 4 * tt,
+            )
     amax = abs(ys[0])
     for y in ys[1:]:
         amax = fx.max(amax, abs(y))
@@ -377,11 +394,15 @@ def stage_qkv(c, t):
     kn = [bf16_round((xk[j] * rk) * kw[j]) for j in range(2)]
     e0 = bf16_round(kn[0] * cs - kn[1] * sn)
     e1 = bf16_round(kn[0] * sn + kn[1] * cs)
-    # record quant of the nope dims: a 64-block = 32 threads (half a wave)
+    # record quant of the nope dims: a 64-block = 32 threads (half a wave).
+    # On gfx942 FP8_MAX is 224: vLLM's gfx942 cache writer and reader use
+    # FNUZ records with that maximum.
     amax = butterfly(fx.max(abs(e0), abs(e1)), (1, 2, 4, 8, 16), fx.max)
     rcode = ceil_exp(
         div_rn(
-            fx.max(amax, fx.Float32(1e-4)), fx.Float32(448.0), fx.Float32(1.0 / 448.0)
+            fx.max(amax, fx.Float32(1e-4)),
+            fx.Float32(FP8_MAX),
+            fx.Float32(1.0 / FP8_MAX),
         )
     )
     inv = mx_mul(rcode)
@@ -515,6 +536,7 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "mb": Mailbox(tag),
         "d": d,
         "ratio": key.ratio,
+        "index": key.index,
         "ldbf": lambda ptr, i: fx.Float32(
             fx.BFloat16(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.bf16))
         ),
@@ -597,8 +619,9 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
                 u = free + n_free * tid
                 if u < xq_units:
                     c["mb"].put(c["xrdy"], u, fx.Int32(1))
-    for t in range(is_free.select(free, fx.Int32(s)), s, n_free):
-        stage_kt(c, t)
+    if const_expr(not key.index):
+        for t in range(is_free.select(free, fx.Int32(s)), s, n_free):
+            stage_kt(c, t)
     stamp(c, 1)
     poss = [wqb_pos(c, t0, n) for t0, n in tiles]
 

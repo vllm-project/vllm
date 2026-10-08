@@ -12,6 +12,12 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
+from vllm.models.deepseek_v41.amd.mono.common.gfx942 import (
+    mfma_fp8_scaled,
+    pair_i64,
+    pin_acc,
+)
 from vllm.models.deepseek_v41.amd.mono.common.mx import (
     UNIT_SCALE,
     mfma_scaled,
@@ -88,6 +94,9 @@ def _fp8_step_load(c, r_w, r_ws, k, rg, st, row_major=False):
     lane = c["lane"]
     j = lane // 16
     kg = k // 32
+    if const_expr(GFX942):
+        assert row_major, "gfx942 reads the runner's row-major FP8 copies only"
+        return _fp8_step_load_942(r_w, r_ws, k, rg, st, lane)
     if const_expr(row_major):
         assert k % 64 == 0
         row = rg * 16 + lane % 16
@@ -121,11 +130,87 @@ def _fp8_step_load(c, r_w, r_ws, k, rg, st, row_major=False):
     return lo, hi, (word >> (wsi % 4 * 8)) & 0xFF
 
 
+def _fp8_step_load_942(r_w, r_ws, k, rg, st, lane):
+    """gfx942: K step ``st`` of rows 16 ``rg`` .. of the runner's tile-major
+    FP8 copy (``weights942.dense_copy``): K padded to a multiple of 128, the
+    step's four FNUZ scale codes in one dword. Lane 16 j + r takes row r's
+    four 8-byte chunks of lane group j with two 16-byte loads, blocks 0 and 1
+    of the step, then blocks 2 and 3. Each load of the wave reads 1 KB that
+    is contiguous."""
+    kp = -(-k // 128) * 128
+    # A step of the 16 rows is 2 KB, the first halves of the lanes and then
+    # the second halves.
+    base = (rg * 16 * kp + 2048 * st) // 4 + 4 * lane
+    lo = fx.Vector(
+        bo.buffer_load(r_w, base, vec_width=4, dtype=T.i32, cache_modifier=CM_NT)
+    )
+    hi = fx.Vector(
+        bo.buffer_load(r_w, base + 256, vec_width=4, dtype=T.i32, cache_modifier=CM_NT)
+    )
+    wsi = (rg // 2) * (kp // 32) + st * 4
+    word = fx.Int32(bo.buffer_load(r_ws, wsi // 4, vec_width=1, dtype=T.i32))
+    return lo, hi, word
+
+
+def _fp8_step_mfma_942(c, k, xl, xsl, st, ops, acc, live, rows):
+    """gfx942: ``acc`` through K step st as four FP8 MFMAs, one a 32-wide
+    scale block, each times its block's scale factor. Block b reads the
+    activation bytes K 32 b + 8 j .. + 8 of the lane's token from LDS. A block
+    past K (k % 128 != 0) reads past the LDS row, so its activation bytes are
+    replaced by zeros (a stray 0x80 byte is the FNUZ NaN, and 0 x NaN is NaN)
+    and its code sum by 127, whose factor is 0. A step past the end
+    (``live`` false) gets factor 0 too."""
+    s, lane = c["S"] if rows is None else rows, c["lane"]
+    lo, hi, sw = ops
+    kg = k // 32
+    x_row, s_row = lds_row(k // 4), lds_row(kg)
+    j = lane // 16
+    col = fx.min(lane % 16, s - 1)
+    if const_expr(live is not None):
+        st = fx.min(st, (k + 127) // 128 - 1)
+    if const_expr(k % 128 == 0):
+        sx = fx.Vector(
+            fx.ptr_load(
+                xsl + (col * s_row + st * 4),
+                result_type=fx.Vector.make_type(4, fx.Int32),
+            )
+        )
+    else:
+        # The LDS rows of codes are not 16-byte aligned here (K / 32 + 4
+        # words), so the codes are read one at a time, clamped into the row.
+        sx = [
+            fx.ptr_load(xsl + (col * s_row + fx.min(st * 4 + b, kg - 1)))
+            for b in range(4)
+        ]
+    for b in range_constexpr(4):
+        xw = fx.Vector(
+            fx.ptr_load(
+                xl + (col * x_row + st * 32 + 8 * b + 2 * j),
+                result_type=fx.Vector.make_type(2, fx.Int32),
+            )
+        )
+        x0, x1 = xw[0], xw[1]
+        code = ((sw >> (8 * b)) & 0xFF) + sx[b]
+        if const_expr(k % 128 != 0):
+            past = 4 * st + b >= kg
+            x0 = past.select(fx.Int32(0), x0)
+            x1 = past.select(fx.Int32(0), x1)
+            code = past.select(fx.Int32(127), code)
+        if const_expr(live is not None):
+            code = live.select(code, fx.Int32(127))
+        w = lo if b < 2 else hi
+        a = pair_i64(w[2 * (b % 2)], w[2 * (b % 2) + 1])
+        acc = mfma_fp8_scaled(acc, a, pair_i64(x0, x1), code)
+    return pin_acc(acc)
+
+
 def _fp8_step_mfma(c, k, xl, xsl, st, ops, acc, live=None, rows=None):
     """``acc`` through K step st's scaled MFMA: ``_fp8_step_load``'s operands
     against every token's MXFP8 row in LDS. ``live`` false: a step past the end
     (its operands those of the last step), zero at unit scale. ``k`` % 64 = 32:
     a lane's lower block past the row is zero on both sides."""
+    if const_expr(GFX942):
+        return _fp8_step_mfma_942(c, k, xl, xsl, st, ops, acc, live, rows)
     s, lane = c["S"] if rows is None else rows, c["lane"]
     lo, hi, sa = ops
     kg = k // 32
