@@ -300,10 +300,10 @@ class PoolingIOProcessor:
         )
         if chunk_size is not None:
             prompt = engine_input[0]
-            assert text is not None
+            assert text is not None and late_chunking is not None
             if prompt["type"] != "token":
                 raise VLLMValidationError("Late chunking requires tokenized text")
-            result["late_chunking"] = build_late_chunking_metadata(
+            late_chunking.metadata = build_late_chunking_metadata(
                 text,
                 len(prompt["prompt_token_ids"]),
                 prompt.pop("prompt_token_offsets", None),

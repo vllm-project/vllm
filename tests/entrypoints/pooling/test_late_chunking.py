@@ -83,9 +83,12 @@ def test_late_chunk_render_requests_offsets_once_and_keeps_params_isolated(
     ].return_token_offsets
     assert not render_params["tok_params"].return_token_offsets
     assert ctx.pooling_params.task is None
+    assert ctx.pooling_params.late_chunking_params.metadata is None
     assert "prompt_token_offsets" not in result["prompts"]
-    assert [c.char_range for c in result["late_chunking"].chunks] == [(0, 1), (2, 3)]
-    assert result["late_chunking"].input_tokens == 4
+    assert [
+        c.char_range for c in result["params"].late_chunking_params.metadata.chunks
+    ] == [(0, 1), (2, 3)]
+    assert result["params"].late_chunking_params.metadata.input_tokens == 4
 
 
 @pytest.mark.parametrize(
@@ -182,15 +185,17 @@ def _mock_chunk_tiling_engine(outputs):
             "prompts": {"type": "token", "prompt_token_ids": [1, 2]},
             "params": PoolingParams(
                 task="token_embed",
-                late_chunking_params=LateChunkingParams(chunk_size=2),
+                late_chunking_params=LateChunkingParams(
+                    chunk_size=2,
+                    metadata=LateChunkingMetadata(
+                        chunk_size=2,
+                        input_tokens=2,
+                        chunks=[LateChunk((0, 2), (i, i + 2))],
+                    ),
+                ),
             ),
             "lora_requests": None,
             "priorities": 0,
-            "late_chunking": LateChunkingMetadata(
-                chunk_size=2,
-                input_tokens=2,
-                chunks=[LateChunk((0, 2), (i, i + 2))],
-            ),
         }
         for i in range(2)
     ]
@@ -212,7 +217,10 @@ def test_late_chunk_mapping_follows_request_ids_and_preserves_request_errors():
     outputs = llm._run_tiling_engine(
         SimpleNamespace(render=lambda x: x), lambda: iter(requests), 2, use_tqdm=False
     )
-    assert outputs[0].late_chunking is requests[0]["late_chunking"]
+    assert outputs[0].late_chunking is not None
+    assert (
+        outputs[0].late_chunking is requests[0]["params"].late_chunking_params.metadata
+    )
     assert outputs[1].late_chunking is None
     assert outputs[1].error is error
     llm.llm_engine.abort_request.assert_not_called()
@@ -236,7 +244,6 @@ def test_late_chunk_mapping_propagates_errors_and_is_not_reused(error, abort_exp
     else:
         llm.llm_engine.abort_request.assert_not_called()
     for request in requests:
-        del request["late_chunking"]
         request["params"] = PoolingParams(task="token_embed")
     llm.llm_engine.step.side_effect = [[_chunk_output(1), _chunk_output(0)]]
     outputs = llm._run_tiling_engine(
