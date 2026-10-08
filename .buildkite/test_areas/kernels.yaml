@@ -1013,3 +1013,25 @@ steps:
   - amd-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
+
+- label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Kernels"
+  key: dsv41-mono-decode-gfx942-amd
+  dind: false
+  device: mi300_1
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/amd/
+  - vllm/model_executor/layers/dsv41_gfx942/
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - tests/kernels/test_dsv41_gfx942_topk.py
+  - tests/kernels/test_dsv41_gfx942_cand_logits.py
+  - tests/kernels/test_dsv41_gfx942_decode_meta.py
+  - tests/kernels/test_dsv41_gfx942_fused_markov.py
+  - tests/kernels/test_dsv41_mono_gfx942.py
+  commands:
+  - pytest -v -s tests/kernels/test_dsv41_gfx942_topk.py tests/kernels/test_dsv41_gfx942_cand_logits.py tests/kernels/test_dsv41_gfx942_decode_meta.py tests/kernels/test_dsv41_gfx942_fused_markov.py tests/kernels/test_dsv41_mono_gfx942.py
