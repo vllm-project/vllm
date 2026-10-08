@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.block_table import get_block_table_width
 
 
@@ -739,3 +740,94 @@ def prepare_sparse_mla_safe_lengths(
             BLOCK=256,
         )
     return safe_lengths
+
+
+@triton.jit(do_not_specialize=["num_tokens"])
+def _neutralize_dcp_empty_rows_kernel(
+    out_ptr,  # [num_tokens, num_heads, head_dim]
+    lse_ptr,  # [num_tokens, num_heads]
+    topk_ptr,  # int32 [num_tokens, topk]
+    out_stride_t,
+    out_stride_h,
+    out_stride_d,
+    lse_stride_t,
+    lse_stride_h,
+    topk_stride_t,
+    topk_stride_k,
+    num_tokens,
+    num_heads,
+    head_dim,
+    topk,
+    BLOCK_K: tl.constexpr,
+    NUM_HEADS_PADDED: tl.constexpr,
+    HEAD_DIM_PADDED: tl.constexpr,
+):
+    for token in range(tl.program_id(0).to(tl.int64), num_tokens, tl.num_programs(0)):
+        # The DCP filter marks slots this rank does not own -1. If none
+        # survive, the rank contributes nothing to this row.
+        k_offsets = tl.arange(0, BLOCK_K)
+        indices = tl.load(
+            topk_ptr + token * topk_stride_t + k_offsets * topk_stride_k,
+            mask=k_offsets < topk,
+            other=-1,
+        )
+        is_empty = tl.max(indices) < 0
+
+        head_offsets = tl.arange(0, NUM_HEADS_PADDED)
+        tl.store(
+            lse_ptr + token * lse_stride_t + head_offsets * lse_stride_h,
+            tl.full([NUM_HEADS_PADDED], float("-inf"), lse_ptr.dtype.element_ty),
+            mask=is_empty & (head_offsets < num_heads),
+        )
+
+        if is_empty:
+            d_offsets = tl.arange(0, HEAD_DIM_PADDED)
+            d_mask = d_offsets < head_dim
+            zeros = tl.zeros([HEAD_DIM_PADDED], out_ptr.dtype.element_ty)
+            for head in range(num_heads):
+                row_ptr = out_ptr + token * out_stride_t + head * out_stride_h
+                tl.store(row_ptr + d_offsets * out_stride_d, zeros, mask=d_mask)
+
+
+def neutralize_dcp_empty_rows_(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    topk_indices: torch.Tensor,
+) -> None:
+    """Zero `out` and -inf `lse` on rows where this DCP rank owns no top-k slot."""
+    assert out.ndim == 3, f"expected out [T, H, D], got {tuple(out.shape)}"
+    assert lse.ndim == 2, f"expected lse [T, H], got {tuple(lse.shape)}"
+    assert topk_indices.ndim == 2, (
+        f"expected topk_indices [T, topk], got {tuple(topk_indices.shape)}"
+    )
+    num_tokens, num_heads, head_dim = out.shape
+    assert lse.shape == (num_tokens, num_heads), (
+        f"lse {tuple(lse.shape)} does not match out {tuple(out.shape)}"
+    )
+    assert topk_indices.shape[0] == num_tokens, (
+        f"topk_indices has {topk_indices.shape[0]} rows, expected {num_tokens}"
+    )
+    if num_tokens == 0:
+        return
+
+    # Fewer than ~4 programs per SM leave HBM bandwidth unused on large batches.
+    grid = (min(num_tokens, 4 * num_compute_units(out.device.index)),)
+    _neutralize_dcp_empty_rows_kernel[grid](
+        out,
+        lse,
+        topk_indices,
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        lse.stride(0),
+        lse.stride(1),
+        topk_indices.stride(0),
+        topk_indices.stride(1),
+        num_tokens,
+        num_heads,
+        head_dim,
+        topk_indices.shape[1],
+        BLOCK_K=triton.next_power_of_2(topk_indices.shape[1]),
+        NUM_HEADS_PADDED=triton.next_power_of_2(num_heads),
+        HEAD_DIM_PADDED=triton.next_power_of_2(head_dim),
+    )
