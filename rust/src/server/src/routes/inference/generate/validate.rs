@@ -23,6 +23,22 @@ pub(crate) fn validate_request_compat(
         );
     }
 
+    if request.return_top_k_logprobs == Some(true) {
+        if request.stream {
+            bail_invalid_request!(
+                param = "return_top_k_logprobs",
+                "return_top_k_logprobs is not available when `stream=true`."
+            );
+        }
+        if request.sampling_params.inner.logprobs.is_none_or(|k| k < 1) {
+            bail_invalid_request!(
+                param = "return_top_k_logprobs",
+                "return_top_k_logprobs requires `sampling_params.logprobs` >= 1; use \
+                 return_token_logprobs for the sampled token's logprob only."
+            );
+        }
+    }
+
     if request.sampling_params.n.unwrap_or(1) != 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
@@ -129,6 +145,38 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
+    }
+
+    #[test]
+    fn validate_request_compat_top_k_logprobs_rejects_stream_and_k_below_one() {
+        let served = served(&["Qwen/Qwen1.5-0.5B-Chat"]);
+        let request = |stream: bool, sampling_params: serde_json::Value| -> GenerateRequest {
+            serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "return_top_k_logprobs": true,
+                "stream": stream,
+                "sampling_params": sampling_params
+            }))
+            .expect("parse request")
+        };
+        for k in [1, 128] {
+            assert!(
+                validate_request_compat(&request(false, json!({"logprobs": k})), &served).is_ok()
+            );
+        }
+        for (stream, sampling_params) in [
+            (true, json!({"logprobs": 5})),
+            (false, json!({})),
+            (false, json!({"logprobs": 0})),
+            (false, json!({"logprobs": -1})),
+        ] {
+            let error = validate_request_compat(&request(stream, sampling_params), &served)
+                .expect_err("return_top_k_logprobs 400");
+            assert_eq!(
+                axum::response::IntoResponse::into_response(error).status(),
+                axum::http::StatusCode::BAD_REQUEST
+            );
+        }
     }
 
     #[test]

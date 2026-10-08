@@ -50,8 +50,13 @@ pub struct GenerateRequest {
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
     /// Flat per-token sampled logprobs (Python frontend feature); the Rust
-    /// frontend rejects it explicitly rather than ignoring it.
+    /// frontend rejects it explicitly rather than ignoring it, unless it comes
+    /// with `return_top_k_logprobs`.
     pub return_token_logprobs: Option<bool>,
+    /// Return the top-k candidates of every position as the packed
+    /// `logprobs.top_k` block instead of `logprobs.content`; non-streaming
+    /// only, requires `sampling_params.logprobs >= 1`.
+    pub return_top_k_logprobs: Option<bool>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }

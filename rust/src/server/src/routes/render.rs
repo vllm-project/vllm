@@ -107,6 +107,7 @@ fn lower_render_request(
         content_parts: None,
         return_token_ids: None,
         return_token_logprobs: None,
+        return_top_k_logprobs: None,
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;

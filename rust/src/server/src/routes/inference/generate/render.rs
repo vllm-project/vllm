@@ -11,8 +11,11 @@
 //! route) into a bounded channel that the HTTP body drains. The produced bytes
 //! are identical to serializing the `GenerateResponse` carrying the
 //! `GenerateLogProbs` built by `raw_logprobs_to_generate` with `serde_json`.
+//! The `return_top_k_logprobs` form hands its pre-encoded base64 segments to the
+//! body without copying.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::convert::Infallible;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -21,13 +24,14 @@ use axum::body::Body;
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use http_body::Frame;
+use http_body::{Frame, SizeHint};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{PositionLogprobs, TokenLogprob};
 
+use super::top_k::TopKLogprobs;
 use super::types::GenerateResponse;
 use super::{top_logprob_entries, wire_rank};
 use crate::error::ApiError;
@@ -43,6 +47,9 @@ pub(super) enum ChoiceLogprobs {
         positions: Vec<PositionLogprobs>,
         requested: i32,
     },
+    /// `{"content":null,"sampled":[...],"top_k":{...}}` for
+    /// `return_top_k_logprobs` (`sampled` only with `return_token_logprobs`).
+    TopK(TopKLogprobs),
 }
 
 /// Rendered output logprobs per body chunk (~160 positions at top-128).
@@ -55,36 +62,139 @@ const BODY_CHANNEL_CHUNKS: usize = 2;
 /// Build the HTTP response for one non-streaming generate request whose choice
 /// carries no `logprobs` (they are passed separately).
 pub(super) fn generate_response(response: GenerateResponse, logprobs: ChoiceLogprobs) -> Response {
-    let (positions, requested) = match logprobs {
+    let body = match logprobs {
         ChoiceLogprobs::None => return Json(response).into_response(),
         ChoiceLogprobs::Generate {
             positions,
             requested,
-        } => (positions, requested),
-    };
-    let Some((mut head, choice_tail)) = split_response(response) else {
-        return ApiError::server_error("failed to serialize raw generate response".to_string())
-            .into_response();
-    };
-    head.extend_from_slice(b"{\"content\":[");
-    let mut tail = b"]}".to_vec();
-    tail.extend_from_slice(&choice_tail);
+        } => {
+            let Some((mut head, choice_tail)) = split_response(response) else {
+                return split_error();
+            };
+            head.extend_from_slice(b"{\"content\":[");
+            let mut tail = b"]}".to_vec();
+            tail.extend_from_slice(&choice_tail);
 
-    let (tx, rx) = mpsc::channel(BODY_CHANNEL_CHUNKS);
-    tokio::spawn(
-        produce_body(head.into(), positions, requested, tail.into(), tx)
-            .instrument(tracing::Span::current()),
-    );
-    let mut response = Body::new(ChannelBody {
-        rx,
-        complete: false,
-    })
-    .into_response();
+            let (tx, rx) = mpsc::channel(BODY_CHANNEL_CHUNKS);
+            tokio::spawn(
+                produce_body(head.into(), positions, requested, tail.into(), tx)
+                    .instrument(tracing::Span::current()),
+            );
+            Body::new(ChannelBody {
+                rx,
+                complete: false,
+            })
+        }
+        ChoiceLogprobs::TopK(logprobs) => {
+            let Some((head, tail)) = split_response(response) else {
+                return split_error();
+            };
+            top_k_body(head, tail, logprobs)
+        }
+    };
+    let mut response = body.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+/// `{"content":null,"sampled":[...],"top_k":{...}}` as the choice's `logprobs`,
+/// with the pre-encoded base64 segments sent without copying and an exact
+/// `Content-Length`.
+fn top_k_body(head: Vec<u8>, tail: Vec<u8>, logprobs: TopKLogprobs) -> Body {
+    let mut out = PartsWriter {
+        parts: Vec::new(),
+        current: head,
+    };
+    out.current.extend_from_slice(b"{\"content\":null");
+    if let Some(sampled) = &logprobs.sampled {
+        out.current.extend_from_slice(b",\"sampled\":");
+        json(&mut out.current, sampled);
+    }
+    let top_k = logprobs.top_k;
+    out.current.extend_from_slice(b",\"top_k\":{\"num_positions\":");
+    json(&mut out.current, &top_k.num_positions);
+    out.current.extend_from_slice(b",\"k\":");
+    json(&mut out.current, &top_k.k);
+    out.current.extend_from_slice(b",\"token_ids\":");
+    out.encoded(top_k.token_ids);
+    out.current.extend_from_slice(b",\"logprobs\":");
+    out.encoded(top_k.logprobs);
+    out.current.extend_from_slice(b"}}");
+    out.flush();
+    out.parts.push(tail.into());
+    Body::new(PartsBody::new(out.parts))
+}
+
+/// Body bytes as a list of parts.
+struct PartsWriter {
+    parts: Vec<Bytes>,
+    current: Vec<u8>,
+}
+
+impl PartsWriter {
+    fn flush(&mut self) {
+        if !self.current.is_empty() {
+            self.parts.push(Bytes::from(std::mem::take(&mut self.current)));
+        }
+    }
+
+    /// A JSON string made of pre-encoded base64 segments.
+    fn encoded(&mut self, segments: Vec<Bytes>) {
+        self.current.push(b'"');
+        self.flush();
+        self.parts.extend(segments);
+        self.current.push(b'"');
+    }
+}
+
+/// Fixed list of byte parts with an exact size hint (so the response carries a
+/// `Content-Length`).
+struct PartsBody {
+    parts: VecDeque<Bytes>,
+    remaining: u64,
+}
+
+impl PartsBody {
+    fn new(parts: Vec<Bytes>) -> Self {
+        let remaining = parts.iter().map(|p| p.len() as u64).sum();
+        Self {
+            parts: parts.into_iter().filter(|p| !p.is_empty()).collect(),
+            remaining,
+        }
+    }
+}
+
+impl http_body::Body for PartsBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        match self.parts.pop_front() {
+            Some(part) => {
+                self.remaining -= part.len() as u64;
+                Poll::Ready(Some(Ok(Frame::data(part))))
+            }
+            None => Poll::Ready(None),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.parts.is_empty()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.remaining)
+    }
+}
+
+fn split_error() -> Response {
+    ApiError::server_error("failed to serialize raw generate response".to_string()).into_response()
 }
 
 /// Serialize `response` around the first choice's `logprobs` value: the bytes

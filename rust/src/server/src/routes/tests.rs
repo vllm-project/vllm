@@ -8212,7 +8212,7 @@ async fn raw_generate_http_framing_through_production_serve_loop() {
             boxed_test_future(async move {
                 // 20,000 positions: several render chunks.
                 let tokens: Vec<u32> = (100..20_100).collect();
-                for _ in 0..2 {
+                for _ in 0..3 {
                     let add = recv_engine_message(dealer).await;
                     let request: EngineCoreRequest =
                         rmp_serde::from_slice(&add[1]).expect("decode request");
@@ -8300,6 +8300,54 @@ async fn raw_generate_http_framing_through_production_serve_loop() {
     );
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert!(json["choices"][0]["logprobs"].is_null());
+
+    let with_flags = |logprobs: i64, flags: serde_json::Value| {
+        let mut body: serde_json::Value = serde_json::from_str(&request(
+            json!({"max_tokens": 20_000, "logprobs": logprobs}),
+        ))
+        .unwrap();
+        body.as_object_mut().unwrap().extend(flags.as_object().unwrap().clone());
+        body.to_string()
+    };
+    // Rejected before reaching the engine.
+    for (logprobs, flags) in [
+        // `return_token_logprobs` alone is still unsupported here.
+        (1, json!({"return_token_logprobs": true})),
+        (0, json!({"return_top_k_logprobs": true})),
+        (-1, json!({"return_top_k_logprobs": true})),
+        (1, json!({"return_top_k_logprobs": true, "stream": true})),
+    ] {
+        let (head, _) = post(with_flags(logprobs, flags.clone())).await;
+        assert!(head.starts_with("http/1.1 400"), "{flags}: {head}");
+    }
+
+    // Top-k block plus `sampled`: exact Content-Length.
+    let (head, body) = post(with_flags(
+        1,
+        json!({"return_top_k_logprobs": true, "return_token_logprobs": true}),
+    ))
+    .await;
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("content-type: application/json"), "{head}");
+    assert!(
+        head.contains(&format!("content-length: {}", body.len())),
+        "{head}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let logprobs = &json["choices"][0]["logprobs"];
+    assert!(logprobs["content"].is_null());
+    assert_eq!(
+        logprobs["sampled"].as_array().expect("sampled").len(),
+        20_000
+    );
+    assert_eq!(logprobs["top_k"]["num_positions"], 20_000);
+    let ids = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        logprobs["top_k"]["token_ids"].as_str().expect("token_ids"),
+    )
+    .expect("base64");
+    assert_eq!(ids.len(), 4 * 20_000);
+    assert_eq!(ids[..4], 101_i32.to_le_bytes());
 
     shutdown.cancel();
     server.await.expect("serve task").expect("serve_connections");
