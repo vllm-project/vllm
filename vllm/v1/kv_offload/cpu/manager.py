@@ -370,11 +370,11 @@ class CPUOffloadingManager(OffloadingManager):
             self._num_evictable_cache_chunks -= len(evicted)
             assert self._num_evictable_cache_chunks >= 0
 
+            now = time.monotonic()
             for key, chunk in evicted:
                 self._free_chunk(chunk)
                 to_evict.append(key)
-            now = time.monotonic()
-            self._recent_evictions.extend((key, now) for key in to_evict)
+                self._recent_evictions.append((key, now))
 
         if to_evict and self.events is not None:
             self.events.append(
