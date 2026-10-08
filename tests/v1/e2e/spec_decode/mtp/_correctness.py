@@ -25,6 +25,7 @@ def check_mtp_correctness(
     expected_accuracy_threshold: float,
     vllm_runner,
     extra_speculative_config: dict[str, Any] | None = None,
+    spec_llm_kwargs: dict[str, Any] | None = None,
 ):
     """Compare the outputs of a original LLM and a speculative LLM
     which should be the same when using MTP speculative decoding. Due to some variance
@@ -88,6 +89,7 @@ def check_mtp_correctness(
             enable_chunked_prefill=None,
             compilation_config=CompilationConfig(),
             **extra_kwargs,
+            **(spec_llm_kwargs or {}),
         ) as spec_runner:
             # MTP supports async scheduling by default.
             has_async = (

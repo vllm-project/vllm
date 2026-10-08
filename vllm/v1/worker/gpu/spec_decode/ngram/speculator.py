@@ -147,7 +147,9 @@ def _ngram_finalize_kernel(
     # ordinary (rejectable) drafts, so the fill value only affects efficiency.
     out = tl.where(slot_valid, gathered, last_tok)
     tl.store(drafts_ptr + b * K + k_iota, out, mask=k_in_range)
-    tl.store(has_match_ptr + b, write_ok & (tokens_avail > 0))
+    # A partial copy pads with rejectable filler, so it does not count as a
+    # match for callers that would otherwise replace a full model draft.
+    tl.store(has_match_ptr + b, write_ok & (tokens_avail >= K))
 
 
 @triton.jit
@@ -262,7 +264,8 @@ class NgramLookup:
         """Returns ([num_reqs, num_tokens] drafts, [num_reqs] has_match).
 
         Requests without a match (or that sampled nothing this step) get their
-        last sampled token in every slot and has_match False.
+        last sampled token in every slot and has_match False; so do the
+        slots past a partial copy, which also leaves has_match False.
         """
         token_ids = req_states.all_token_ids.gpu
         _ngram_scan_kernel[(num_reqs, self.n_blocks)](

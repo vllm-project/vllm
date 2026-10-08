@@ -76,10 +76,11 @@ class MTPSpeculator(TargetDependentARSpeculator):
 class NgramMTPSpeculator(MTPSpeculator):
     """MTP drafting that copies from the context on an n-gram match.
 
-    The MTP draft prefill always runs, so the draft KV cache stays complete.
-    The MTP decode steps are skipped when every request matched. Deciding that
-    waits for the lookup, overlapped with the draft prefill, and only while the
-    previous round matched every request.
+    Only batches of one request use the lookup: the gain comes from skipping
+    the MTP decode steps, which needs every request to match, and a copy that
+    does not skip them only displaces the MTP draft. On a match the host waits
+    for the lookup (overlapped with the draft prefill, which always runs so the
+    draft KV cache stays complete) and skips the decode steps.
     """
 
     def __init__(
@@ -101,23 +102,17 @@ class NgramMTPSpeculator(MTPSpeculator):
             self.max_model_len,
             device,
         )
-        # Skipping draft forwards on one DP rank would desync the others.
-        self.can_skip_decode = self.dp_size == 1
-        # Double-buffered so the previous round's flag can be read while this
-        # round's copy is in flight.
-        self.all_matched_cpu = torch.zeros(2, dtype=torch.bool, pin_memory=True)
-        self.all_matched_events = (torch.cuda.Event(), torch.cuda.Event())
-        self.round = 0
+        self.matched_cpu = torch.zeros(1, dtype=torch.bool, pin_memory=True)
+        self.matched_event = torch.cuda.Event()
         self.wait_for_lookup = False
 
     def num_draft_steps(self, num_speculative_tokens: int) -> int:
         if not self.wait_for_lookup:
             return num_speculative_tokens
         self.wait_for_lookup = False
-        cur = self.round % 2
         with gpu_sync_allowed():
-            self.all_matched_events[cur].synchronize()
-        return 1 if self.all_matched_cpu[cur] else num_speculative_tokens
+            self.matched_event.synchronize()
+        return 1 if self.matched_cpu.item() else num_speculative_tokens
 
     @torch.inference_mode()
     def propose(
@@ -140,29 +135,18 @@ class NgramMTPSpeculator(MTPSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
-        num_reqs = input_batch.num_reqs
-        if not dummy_run:
+        use_lookup = input_batch.num_reqs == 1 and not dummy_run
+        if use_lookup:
             ngram_drafts, has_match = self.ngram.lookup(
                 self.req_states,
                 input_batch.idx_mapping,
                 num_sampled,
                 last_sampled,
-                num_reqs,
+                1,
             )
-            if self.can_skip_decode:
-                # Wait for this round's lookup only while the previous round
-                # matched every request, read without blocking: batches
-                # without matches never wait.
-                prev = self.round % 2
-                self.wait_for_lookup = bool(
-                    self.all_matched_events[prev].query() and self.all_matched_cpu[prev]
-                )
-                self.round += 1
-                cur = self.round % 2
-                # Requests that sampled nothing (chunked prefill) need no draft.
-                all_matched = (has_match | (num_sampled == 0)).all()
-                self.all_matched_cpu[cur].copy_(all_matched, non_blocking=True)
-                self.all_matched_events[cur].record()
+            self.matched_cpu.copy_(has_match, non_blocking=True)
+            self.matched_event.record()
+            self.wait_for_lookup = True
 
         draft_tokens = super().propose(
             input_batch,
@@ -184,7 +168,7 @@ class NgramMTPSpeculator(MTPSpeculator):
             num_speculative_tokens=num_speculative_tokens,
         )
         self.wait_for_lookup = False
-        if dummy_run:
+        if not use_lookup:
             return draft_tokens
         torch.where(has_match[:, None], ngram_drafts, draft_tokens, out=draft_tokens)
         if self.draft_logits is not None:

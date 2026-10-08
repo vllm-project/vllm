@@ -474,9 +474,10 @@ class SpeculativeConfig:
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
     ngram_lookup: bool = False
-    """With method='mtp', a request whose last `prompt_lookup_min` to
-    `prompt_lookup_max` tokens occur earlier in its context is drafted by
-    copying the tokens that followed; other requests keep their MTP drafts.
+    """With method='mtp' and a single running request, draft by copying the
+    tokens that followed the last `prompt_lookup_min` to `prompt_lookup_max`
+    tokens where they occur earlier in the context, and skip the MTP decode
+    steps; without a match, or with more requests, draft with MTP alone.
     Requires Model Runner V2."""
 
     # Alternative drafting strategies
@@ -1857,6 +1858,12 @@ class SpeculativeConfig:
                 raise ValueError(
                     "ngram_lookup is incompatible with enable_adaptive_verification."
                 )
+            if (
+                self.target_parallel_config is not None
+                and self.target_parallel_config.data_parallel_size > 1
+            ):
+                # Skipping draft forwards on one rank would desync the others.
+                raise ValueError("ngram_lookup does not support data parallelism.")
 
         if self.use_heterogeneous_vocab and not self.uses_draft_model():
             raise ValueError(

@@ -279,12 +279,15 @@ def test_construction_validates_speculative_config():
     spec.capture()
 
 
-def test_lookup_reports_which_requests_matched():
-    """has_match is set only where a draft was gathered from the context."""
-    spec = _make_speculator(min_n=2, max_n=2, k=2)
+@pytest.mark.parametrize(
+    ("k", "expected"), [(2, [True, False, False]), (4, [False] * 3)]
+)
+def test_lookup_reports_full_length_matches(k, expected):
+    """has_match is set only where all k drafts were copied from the context."""
+    spec = _make_speculator(min_n=2, max_n=2, k=k)
     rows = [[1, 2, 3, 1, 2], [4, 5, 6], [1, 2, 3, 1, 2]]
     _propose(spec, rows, num_sampled=[1, 1, 0])
-    assert spec.lookup.has_match[:3].tolist() == [True, False, False]
+    assert spec.lookup.has_match[:3].tolist() == expected
 
 
 class _FakeMTPPropose:
@@ -324,37 +327,34 @@ def _make_ngram_mtp(min_n: int, max_n: int, k: int):
     speculator.ngram = NgramLookup(
         min_n, max_n, k, ngram.max_num_reqs, ngram.max_model_len, DEVICE
     )
-    speculator.can_skip_decode = True
-    speculator.all_matched_cpu = torch.zeros(2, dtype=torch.bool, pin_memory=True)
-    speculator.all_matched_events = (torch.cuda.Event(), torch.cuda.Event())
-    speculator.round = 0
+    speculator.matched_cpu = torch.zeros(1, dtype=torch.bool, pin_memory=True)
+    speculator.matched_event = torch.cuda.Event()
     speculator.wait_for_lookup = False
     speculator.draft_logits = None
     return speculator
 
 
 @pytest.mark.parametrize(
-    ("rows", "num_sampled", "expected_drafts", "expected_steps"),
+    ("rows", "expected_drafts", "expected_steps"),
     [
-        # One request without a match: the MTP chain runs in full.
-        ([[1, 2, 3, 1, 2], [4, 5, 6]], [1, 1], [[3, 1, 2], [9, 9, 9]], [3, 3]),
-        # Every request matched: from the second round only the prefill runs.
-        ([[1, 2, 3, 1, 2], [7, 8, 7]], [1, 1], [[3, 1, 2], [8, 7, 9]], [3, 1]),
-        # A request that sampled nothing (chunked prefill) needs no draft.
-        ([[1, 2, 3, 1, 2], [4, 5, 6]], [1, 0], [[3, 1, 2], [9, 9, 9]], [3, 1]),
+        # A full match: copied drafts, only the MTP draft prefill runs.
+        ([[1, 2, 3, 1, 2, 3, 1, 2]], [[3, 1, 2]], [1]),
+        # No match: the MTP chain runs in full.
+        ([[4, 5, 6]], [[9, 9, 9]], [3]),
+        # A partial copy (2 of 3 tokens) falls back to MTP.
+        ([[1, 2, 1, 2]], [[9, 9, 9]], [3]),
+        # More than one request: MTP alone, no lookup.
+        ([[1, 2, 3, 1, 2]] * 2, [[9, 9, 9]] * 2, [3]),
     ],
 )
-def test_ngram_mtp_uses_lookup_first_and_skips_mtp_decode(
-    monkeypatch, rows, num_sampled, expected_drafts, expected_steps
+def test_ngram_mtp_copies_and_skips_for_a_single_request(
+    monkeypatch, rows, expected_drafts, expected_steps
 ):
     fake = _FakeMTPPropose(fill=9)
     fake.install(monkeypatch)
-    speculator = _make_ngram_mtp(min_n=1, max_n=2, k=3)
-    for _ in range(2):
-        drafts = _propose(
-            speculator, rows, num_sampled=num_sampled, last_sampled=[9, 9]
-        )
-        assert drafts == expected_drafts
+    speculator = _make_ngram_mtp(min_n=2, max_n=2, k=3)
+    drafts = _propose(speculator, rows, last_sampled=[9] * len(rows))
+    assert drafts == expected_drafts
     assert fake.draft_steps == expected_steps
 
 
