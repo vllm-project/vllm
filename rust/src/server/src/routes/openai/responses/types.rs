@@ -110,9 +110,10 @@ pub enum ResponseToolChoice {
 /// `background`, `store=true` retention, and `previous_response_id` require
 /// server-side state. `max_tool_calls` requires server-side tool execution.
 /// Neither is provided by this stateless frontend; see `validate.rs`.
-/// Output presentation controls such as `include`, `reasoning.summary`, and
-/// `text.verbosity` are accepted for compatibility. They do not add output
-/// fields that this frontend cannot produce.
+/// `reasoning.encrypted_content`, `reasoning.summary`, and `text.verbosity`
+/// are accepted for Codex/Python compatibility, without generating encrypted
+/// state, summaries, or applying a verbosity policy. Other `include` values
+/// that this frontend cannot produce are rejected.
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct ResponsesRequest {
     /// The model ID served by this frontend. Optional; defaults to the
@@ -139,7 +140,7 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
     #[serde(default)]
-    pub metadata: Option<Value>,
+    pub metadata: Option<HashMap<String, String>>,
     #[serde(default)]
     pub previous_response_id: Option<String>,
     /// Harmony-only stateless replay history. The Rust frontend does not
@@ -163,7 +164,7 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub background: Option<bool>,
     #[serde(default)]
-    pub stream: bool,
+    pub stream: Option<bool>,
     #[serde(default)]
     pub temperature: Option<f32>,
     /// Whether to apply the engine's configured watermark to generated text.
@@ -516,7 +517,7 @@ pub struct ResponsesResponse {
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
     #[serde(default)]
-    pub metadata: Option<Value>,
+    pub metadata: Option<HashMap<String, String>>,
     pub model: String,
     pub output: Vec<ResponseOutputItem>,
     pub parallel_tool_calls: bool,

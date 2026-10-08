@@ -64,6 +64,96 @@ async fn responses_empty_model_uses_served_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn responses_sampling_metadata_matches_engine_defaults_and_overrides() {
+    for (overrides, temperature, top_p) in [
+        (json!({}), 0.6, 0.95),
+        (json!({"temperature": 0.2, "top_p": 0.8}), 0.2, 0.8),
+    ] {
+        let backend = FakeChatBackend {
+            sampling_hints: vllm_text::SamplingHints {
+                default_temperature: Some(0.6),
+                default_top_p: Some(0.95),
+                ..Default::default()
+            },
+            ..FakeChatBackend::new()
+        };
+        let (app, engine_task) =
+            test_app_with_backend_and_engine_request_check(Arc::new(backend), move |request| {
+                let params = request.sampling_params.as_ref().unwrap();
+                assert_eq!(params.temperature, temperature);
+                assert_eq!(params.top_p, top_p);
+            })
+            .await;
+        let mut request = json!({"input": "hello", "stream": null});
+        request.as_object_mut().unwrap().extend(overrides.as_object().unwrap().clone());
+        let response = responses_call(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        engine_task.await.expect("mock engine task");
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!((response["temperature"].as_f64().unwrap() - f64::from(temperature)).abs() < 1e-6);
+        assert!((response["top_p"].as_f64().unwrap() - f64::from(top_p)).abs() < 1e-6);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_rejects_invalid_controls_before_inference() {
+    let (app, _engine_task) = test_app_with_engine_handle().await;
+    for (field, value) in [
+        ("metadata", json!([])),
+        ("metadata", json!({"nested": {"value": "no"}})),
+        ("metadata", json!({"number": 1})),
+        ("metadata", json!({"x".repeat(65): "value"})),
+        ("metadata", json!({"key": "x".repeat(513)})),
+        (
+            "metadata",
+            serde_json::to_value(
+                (0..17)
+                    .map(|i| (i.to_string(), "value"))
+                    .collect::<std::collections::HashMap<_, _>>(),
+            )
+            .unwrap(),
+        ),
+        ("service_tier", json!("bogus")),
+        ("include", json!(["message.output_text.logprobs"])),
+        ("include", json!(["unknown"])),
+        ("top_logprobs", json!(1)),
+        ("reasoning", json!({"summary": "unknown"})),
+        ("text", json!({"verbosity": "unknown"})),
+    ] {
+        let response = responses_call(&app, json!({"input": "hello", field: value})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_accepts_codex_controls_and_metadata_boundaries() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let metadata = (0..16)
+        .map(|i| (format!("{i:064}"), "é".repeat(512)))
+        .collect::<std::collections::HashMap<_, _>>();
+    let response = responses_call(
+        &app,
+        json!({
+            "input": "hello", "stream": null, "metadata": metadata,
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": {"summary": "auto"}, "text": {"verbosity": "low"},
+            "service_tier": "default"
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    engine_task.await.expect("mock engine task");
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["metadata"], json!(metadata));
+    assert_eq!(response["service_tier"], "default");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn responses_empty_history_is_client_error() {
     let (app, _engine_task) = test_app_with_engine_handle().await;
     for input in [

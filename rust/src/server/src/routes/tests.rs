@@ -451,6 +451,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    sampling_hints: vllm_text::SamplingHints,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -475,6 +476,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            sampling_hints: Default::default(),
         }
     }
 
@@ -482,6 +484,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            sampling_hints: Default::default(),
         }
     }
 
@@ -491,6 +494,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            sampling_hints: Default::default(),
         }
     }
 }
@@ -504,6 +508,10 @@ impl fmt::Debug for FakeChatBackend {
 }
 
 impl TextBackend for FakeChatBackend {
+    fn sampling_hints(&self) -> vllm_text::Result<vllm_text::SamplingHints> {
+        Ok(self.sampling_hints.clone())
+    }
+
     fn tokenizer(&self) -> DynTokenizer {
         Arc::new(fake_chat_tokenizer())
     }
