@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from vllm.entrypoints.serve.dev.rlhf.api_router import router as rlhf_router
+from vllm.entrypoints.rl.online.api_router import router as rl_router
 from vllm.entrypoints.serve.dev.rpc.api_router import router as rpc_router
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 
@@ -30,7 +30,7 @@ class Engine:
 @pytest.fixture
 def client():
     app = FastAPI()
-    app.include_router(rlhf_router)
+    app.include_router(rl_router)
     app.include_router(rpc_router)
     init_exception_handler(app)
     app.state.engine_client = Engine()

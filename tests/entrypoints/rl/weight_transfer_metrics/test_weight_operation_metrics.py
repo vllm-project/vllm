@@ -13,9 +13,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 
-from vllm.entrypoints.serve.dev.rlhf import api_router
-from vllm.entrypoints.serve.dev.rlhf import metrics as rlhf_metrics
-from vllm.entrypoints.serve.dev.rlhf.metrics import WeightOperationMetrics
+from vllm.entrypoints.rl.online import api_router
+from vllm.entrypoints.rl.online import metrics as rl_metrics
+from vllm.entrypoints.rl.online.metrics import WeightOperationMetrics
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 
@@ -52,13 +52,13 @@ class Engine:
 @pytest.fixture
 def registry(monkeypatch):
     registry = CollectorRegistry()
-    monkeypatch.setattr(rlhf_metrics, "_metrics", WeightOperationMetrics(registry))
+    monkeypatch.setattr(rl_metrics, "_metrics", WeightOperationMetrics(registry))
     return registry
 
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_record_releases_in_flight_and_observes_duration(registry, fail):
-    metrics = rlhf_metrics.weight_operation_metrics()
+    metrics = rl_metrics.weight_operation_metrics()
     with (
         pytest.raises(RuntimeError) if fail else nullcontext(),
         metrics.record("update"),
@@ -108,7 +108,7 @@ async def test_cancelled_route_releases_in_flight(registry):
 
 HOLD_OPERATION = """
 import sys
-from vllm.entrypoints.serve.dev.rlhf.metrics import weight_operation_metrics
+from vllm.entrypoints.rl.online.metrics import weight_operation_metrics
 with weight_operation_metrics().record("update"):
     print("entered", flush=True)
     sys.stdin.readline()
@@ -163,19 +163,19 @@ def test_default_recorder_is_created_lazily_on_the_default_registry():
     probe = """
 from prometheus_client import REGISTRY
 
-from vllm.entrypoints.serve.dev.rlhf import metrics as rlhf_metrics
+from vllm.entrypoints.rl.online import metrics as rl_metrics
 
 NAMES = [
     "vllm:rl_weight_update_operation_duration_seconds",
     "vllm:rl_weight_update_operations_in_flight",
 ]
-assert rlhf_metrics._metrics is None
+assert rl_metrics._metrics is None
 assert not set(NAMES) & set(REGISTRY._names_to_collectors)
 
-metrics = rlhf_metrics.weight_operation_metrics()
+metrics = rl_metrics.weight_operation_metrics()
 assert REGISTRY._names_to_collectors[NAMES[0]] is metrics.duration
 assert REGISTRY._names_to_collectors[NAMES[1]] is metrics.in_flight
-assert rlhf_metrics.weight_operation_metrics() is metrics
+assert rl_metrics.weight_operation_metrics() is metrics
 print("lazy registration ok")
 """
     result = subprocess.run(
