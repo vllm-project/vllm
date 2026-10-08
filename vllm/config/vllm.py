@@ -3140,9 +3140,6 @@ class VllmConfig:
 
         if speculative_config is not None:
             if speculative_config.method in (
-                # https://github.com/vllm-project/vllm/pull/40704
-                "ngram",
-                "ngram_gpu",
                 "suffix",
                 "medusa",
                 "mlp_speculator",
