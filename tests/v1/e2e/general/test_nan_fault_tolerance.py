@@ -57,9 +57,10 @@ def _assert_fault_tolerance_config(runner: VllmRunner) -> None:
 def _record_full_cudagraph_replays(
     runner: VllmRunner, monkeypatch: pytest.MonkeyPatch
 ) -> list[int]:
-    manager = _model_runner(runner).cudagraph_manager
+    model_runner = _model_runner(runner)
+    manager = model_runner.cudagraph_manager
     assert manager is not None
-    assert 1 in manager.captured_token_counts()
+    assert model_runner.decode_query_len in manager.captured_token_counts()
 
     calls = [0]
     original = manager.run_fullgraph
@@ -111,7 +112,6 @@ def _run_abort_cache_recovery(
     prompt = TokensPrompt(prompt_token_ids=PROMPT_TOKEN_IDS)
 
     corrupted_before = _metric_value(runner, "vllm:corrupted_requests")
-    hits_before = _metric_value(runner, "vllm:prefix_cache_hits")
 
     corrupted = runner.llm.generate(prompt, sampling_params)[0]
     assert corrupted.finished
@@ -124,22 +124,20 @@ def _run_abort_cache_recovery(
         assert not corrupted.outputs[0].token_ids
 
     assert _metric_value(runner, "vllm:corrupted_requests") == corrupted_before + 1
-    hits_after_abort = _metric_value(runner, "vllm:prefix_cache_hits")
-    assert hits_after_abort == hits_before
 
     # The first clean retry must recompute the prompt: the corrupted request's
     # KV blocks must not have entered, or remained in, the prefix cache.
     recovered = runner.llm.generate(prompt, sampling_params)[0]
     assert recovered.outputs[0].finish_reason == "length"
     assert list(recovered.outputs[0].token_ids) == [FORCED_TOKEN_ID] * MAX_TOKENS
-    hits_after_recovery = _metric_value(runner, "vllm:prefix_cache_hits")
-    assert hits_after_recovery == hits_after_abort
+    assert recovered.num_cached_tokens == 0
 
     # A subsequent request must reuse the now-validated prefix.
     cached = runner.llm.generate(prompt, sampling_params)[0]
     assert cached.outputs[0].finish_reason == "length"
     assert list(cached.outputs[0].token_ids) == [FORCED_TOKEN_ID] * MAX_TOKENS
-    assert _metric_value(runner, "vllm:prefix_cache_hits") > hits_after_recovery
+    assert cached.num_cached_tokens is not None
+    assert cached.num_cached_tokens > 0
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires NVIDIA CUDA")
