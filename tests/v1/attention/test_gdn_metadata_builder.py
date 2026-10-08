@@ -413,10 +413,8 @@ def _create_checkpoint_builder_and_batch(
         vllm_config=vllm_config,
         device=DEVICE,
     )
-    builder.checkpoint_builder.set_block_sizes(
-        hash_block_size=prefix_match_unit or 64,
-        mamba_ckpt_block_size=prefix_match_unit or 64,
-    )
+    vllm_config.cache_config.hash_block_size = prefix_match_unit or 64
+    vllm_config.cache_config.cache_hit_alignment_tokens = prefix_match_unit or 64
     batch = BatchSpec(
         seq_lens=[65, 100, 100], query_lens=[3 if num_spec else 1, 100, 99]
     )

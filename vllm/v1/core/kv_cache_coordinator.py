@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
 
-from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -29,8 +28,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -700,26 +697,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.enable_partial_hash_hits = (
             allow_partial_hash_hits
             and partial_hash_hits_enabled(
-                kv_cache_config.kv_cache_groups, hash_block_size, dcp_world_size
+                kv_cache_config.kv_cache_groups,
+                hash_block_size,
+                dcp_world_size,
+                [type(manager) for manager in self.single_type_managers],
             )
         )
-        if self.enable_partial_hash_hits:
-            unsupported_partial_hit_managers = {
-                type(manager).__name__
-                for manager, group in zip(
-                    self.single_type_managers, kv_cache_config.kv_cache_groups
-                )
-                if group.kv_cache_spec.prefix_cacheable
-                and not manager.supports_fine_grained_hash_lookup
-                and manager.block_size != hash_block_size
-            }
-            if unsupported_partial_hit_managers:
-                self.enable_partial_hash_hits = False
-                logger.warning_once(
-                    "Disabling fine-grained prefix-cache hits because these KV "
-                    "cache managers require block-aligned lookups: %s.",
-                    ", ".join(sorted(unsupported_partial_hit_managers)),
-                )
         cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
         for manager in self.single_type_managers:
             manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens

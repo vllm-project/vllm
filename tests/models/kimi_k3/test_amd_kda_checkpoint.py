@@ -91,9 +91,9 @@ def _builder(
         vllm_config=vllm_config,
         device=torch.device("cuda"),
     )
-    builder.checkpoint_builder.set_block_sizes(
-        hash_block_size=prefix_match_unit or block_size,
-        mamba_ckpt_block_size=prefix_match_unit or block_size,
+    vllm_config.cache_config.hash_block_size = prefix_match_unit or block_size
+    vllm_config.cache_config.cache_hit_alignment_tokens = (
+        prefix_match_unit or block_size
     )
     return builder
 

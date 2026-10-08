@@ -876,9 +876,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block are intentionally skipped.
         """
         hash_block_size = self.block_pool.hash_block_size
-        # Prompt resend caps hit length by `prompt_len - 1`
-        # so also cap the cached by that limit to guarantee hit
-        # no need for EAGLE as it drops by one hash unit anyway
+        # A resend matches at most `prompt_len - 1` tokens, but EAGLE lookups
+        # read the whole prompt before dropping a hash unit.
         token_limit = (
             request.num_prompt_tokens
             if self.use_eagle

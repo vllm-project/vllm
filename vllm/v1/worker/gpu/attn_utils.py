@@ -39,7 +39,6 @@ from vllm.v1.worker.utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
     bind_kv_cache_to_layers,
-    initialize_mamba_checkpoint_builders,
     prepare_kernel_block_sizes,
 )
 
@@ -279,11 +278,6 @@ def init_attn_backend(
                 elif hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
     attn_cg_support_info = get_attn_cg_support(attn_groups, vllm_config)
-    initialize_mamba_checkpoint_builders(
-        (group for groups in attn_groups for group in groups),
-        kv_cache_config,
-        vllm_config,
-    )
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 

@@ -100,7 +100,7 @@ def _make_builder(
     prefix_match_unit: int | None = None,
     use_eagle: bool = False,
     disable_eagle_block_drop: bool = False,
-    mamba_ckpt_block_size: int | None = None,
+    cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
@@ -125,6 +125,10 @@ def _make_builder(
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     hash_block_size = hash_block_size or prefix_match_unit or mamba_block_size
+    vllm_config.cache_config.hash_block_size = hash_block_size
+    vllm_config.cache_config.cache_hit_alignment_tokens = (
+        cache_hit_alignment_tokens or hash_block_size
+    )
     builder = builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=mamba_block_size,
@@ -140,10 +144,6 @@ def _make_builder(
         layer_names=["layer.0"],
         vllm_config=vllm_config,
         device=device,
-    )
-    builder.checkpoint_builder.set_block_sizes(
-        hash_block_size=hash_block_size,
-        mamba_ckpt_block_size=mamba_ckpt_block_size or hash_block_size,
     )
     if use_recoverssm:
         assert isinstance(builder, KimiK3KDAMetadataBuilder)
@@ -227,7 +227,8 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         vllm_config=builder_config,
         device=DEVICE,
     )
-    builder.checkpoint_builder.set_block_sizes(BLOCK_SIZE, BLOCK_SIZE)
+    builder_config.cache_config.hash_block_size = BLOCK_SIZE
+    builder_config.cache_config.cache_hit_alignment_tokens = BLOCK_SIZE
 
     # An all-prefill speculative batch used to leave an all-false spec mask
     # alive, then access active_non_spec_mask_cpu before it was initialized.
@@ -296,7 +297,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize(
-    "batch,prefix_match_unit,mamba_ckpt_block_size,expected_offsets,expected_states",
+    "batch,prefix_match_unit,hit_alignment,expected_offsets,expected_states",
     [
         (
             BatchSpec(seq_lens=[50, 32], query_lens=[50, 16]),
@@ -319,7 +320,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     ],
 )
 def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
-    batch, prefix_match_unit, mamba_ckpt_block_size, expected_offsets, expected_states
+    batch, prefix_match_unit, hit_alignment, expected_offsets, expected_states
 ):
     device = torch.device("cuda")
     common_attn_metadata = create_common_attn_metadata(
@@ -332,7 +333,7 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
         mamba_cache_mode="align",
         num_prefill_checkpoint_blocks=1,
         prefix_match_unit=prefix_match_unit,
-        mamba_ckpt_block_size=mamba_ckpt_block_size,
+        cache_hit_alignment_tokens=hit_alignment,
         hash_block_size=16,
         device=device,
     )

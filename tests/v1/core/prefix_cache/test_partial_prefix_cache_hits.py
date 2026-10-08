@@ -22,6 +22,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_block_hash,
     get_group_id,
     init_none_hash,
+    resolve_cache_hit_alignment_tokens,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
@@ -2214,6 +2215,72 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
     assert len(computed_blocks.blocks[0]) * hash_block_size == num_computed
 
 
+@pytest.mark.parametrize("with_sliding_window", [False, True])
+def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
+    """Workers place Mamba checkpoints on the engine-resolved alignment, so it
+    must be where the coordinator lands hits, including when a group without
+    fine-grained lookups disables partial hits."""
+    hash_block_size = 2
+    mamba_block_size = 4 * hash_block_size
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["full"],
+            FullAttentionSpec(
+                block_size=hash_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=mamba_block_size,
+                shapes=(1, 1),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
+    ]
+    if with_sliding_window:
+        kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["swa"],
+                SlidingWindowSpec(
+                    block_size=2 * hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * hash_block_size,
+                ),
+            )
+        )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
+    )
+    coordinator = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    ).coordinator
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=True),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+
+    assert coordinator.enable_partial_hash_hits != with_sliding_window
+    assert (
+        resolve_cache_hit_alignment_tokens(
+            kv_cache_config,
+            vllm_config,
+            coordinator.scheduler_block_size,
+            hash_block_size,
+        )
+        == coordinator._cache_hit_alignment_tokens
+    )
+
+
 def test_opted_out_scratch_group_keeps_partial_hash_hits():
     hash_block_size = 2
     mamba_block_size = 2 * hash_block_size
@@ -2783,6 +2850,7 @@ def test_checkpoint_reservation_matches_worker(
             mamba_block_size=mamba_block_size,
             checkpoint_alignment=16,
             drop_eagle_block=use_eagle,
+            cache_hit_alignment_tokens=mamba_manager.cache_hit_alignment_tokens,
         )
         reserved = mamba_manager._checkpoints.get(request.request_id)
         if reserved is not None:
