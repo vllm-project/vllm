@@ -585,7 +585,7 @@ def sparse_attn_indexer_kpool(
             padded_weights[:num_padded_tokens],
             seq_lens,
             decode_metadata.block_table,
-            decode_metadata.schedule_metadata,
+            decode_metadata.get_schedule_metadata(),
             max_model_len=max_pool_len,
             clean_logits=False,
             indices=decode_metadata.indices,
