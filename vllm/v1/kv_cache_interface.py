@@ -11,10 +11,9 @@ from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Self, TypeVar
 
 import torch
-from typing_extensions import Self
 
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
@@ -55,6 +54,7 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
+    ULTRAQUANT_4BIT = 11  # packed FP4 values + UE8M0 group scales
 
     @property
     def is_per_token_head(self) -> bool:
@@ -80,6 +80,11 @@ class KVQuantMode(IntEnum):
             KVQuantMode.TURBOQUANT_3BIT_NC,
         )
 
+    @property
+    def is_ultraquant(self) -> bool:
+        """True for the UltraQuant 4-bit KV-cache format."""
+        return self == KVQuantMode.ULTRAQUANT_4BIT
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -98,6 +103,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
         return KVQuantMode[kv_cache_dtype.upper()]
+    if kv_cache_dtype == "ultraquant_4bit":
+        return KVQuantMode.ULTRAQUANT_4BIT
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
@@ -158,6 +165,8 @@ class KVCacheSpec:
 
     # number of tokens in a block
     block_size: int
+    dcp_sharded: bool = field(default=False, kw_only=True)
+    """Whether DCP shards this cache's token positions across ranks."""
 
     block_stride_alignment: int | None = field(default=None, kw_only=True)
     """Required byte alignment between physical blocks, including packed layers."""
@@ -470,9 +479,11 @@ class HiSparseResidentSpec(KVCacheSpec):
         return cdiv(num_tokens, self.block_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        return cdiv(vllm_config.model_config.max_model_len, self.block_size) * (
-            self.page_size
+        max_blocks = self.max_admission_blocks_per_request(
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
+        return max_blocks * self.page_size
 
     @property
     def has_layer_views(self) -> bool:
@@ -481,6 +492,10 @@ class HiSparseResidentSpec(KVCacheSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
+    dcp_sharded: bool = True
+    max_tp_shards: int | None = None
+    """Distinct shards this cache splits into across TP; TP ranks beyond this
+    hold replicas. None: unknown, treated as not replicated."""
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -536,7 +551,9 @@ class AttentionSpec(KVCacheSpec):
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         parallel_config = vllm_config.parallel_config
-        kv_shard_count = parallel_config.decode_context_parallel_size
+        kv_shard_count = (
+            parallel_config.decode_context_parallel_size if self.dcp_sharded else 1
+        )
         return cdiv(max_len, self.block_size * kv_shard_count)
 
 
@@ -568,7 +585,7 @@ class FullAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        if dcp_world_size > 1:
+        if self.dcp_sharded and dcp_world_size > 1:
             max_model_len = cdiv(max_model_len, dcp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
@@ -612,6 +629,8 @@ class FullAttentionSpec(AttentionSpec):
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
+            dcp_sharded=specs[0].dcp_sharded,
+            max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -698,6 +717,8 @@ class MLAAttentionSpec(FullAttentionSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
+            dcp_sharded=specs[0].dcp_sharded,
+            max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -760,6 +781,8 @@ class RSWASpec(FullAttentionSpec):
             head_size_v=base.head_size_v,
             dtype=base.dtype,
             kv_quant_mode=base.kv_quant_mode,
+            dcp_sharded=base.dcp_sharded,
+            max_tp_shards=base.max_tp_shards,
             page_size_padded=base.page_size_padded,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
@@ -850,9 +873,10 @@ class SlidingWindowSpec(AttentionSpec):
         return cdiv(num_tokens, self.block_size) + 1
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
-            "DCP not support sliding window."
-        )
+        assert (
+            not self.dcp_sharded
+            or vllm_config.parallel_config.decode_context_parallel_size == 1
+        ), "DCP not support sliding window."
         max_blocks = self.max_admission_blocks_per_request(
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             max_model_len=vllm_config.model_config.max_model_len,
@@ -950,6 +974,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
+        assert len({spec.dcp_sharded for spec in specs}) == 1
+        assert len({spec.max_tp_shards for spec in specs}) == 1
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -969,6 +995,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
+            dcp_sharded=specs[0].dcp_sharded,
+            max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -1060,12 +1088,7 @@ class MambaSpec(KVCacheSpec):
         return None
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        if vllm_config.cache_config.mamba_cache_mode == "all":
-            max_model_len = vllm_config.model_config.max_model_len
-            return (
-                cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
-            ) * self.page_size_bytes
-        elif vllm_config.cache_config.mamba_cache_mode == "align":
+        if vllm_config.cache_config.mamba_cache_mode == "align":
             return self.page_size_bytes * (
                 2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
             )
@@ -1104,7 +1127,10 @@ def get_mamba_prefill_checkpoint_position(
     drop_eagle_block: bool,
 ) -> int:
     """Return the reusable Mamba checkpoint boundary for a prefill."""
-    checkpoint_position = (num_tokens - 1) // hash_block_size * hash_block_size
+    # Without EAGLE, leave one token to recompute on resend.
+    # EAGLE's block drop already leaves tokens to recompute.
+    proof_limit = num_tokens if drop_eagle_block else num_tokens - 1
+    checkpoint_position = proof_limit // hash_block_size * hash_block_size
     if drop_eagle_block:
         checkpoint_position -= hash_block_size
     return max(checkpoint_position, 0)
@@ -1185,6 +1211,8 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             block_stride_alignment=specs[0].block_stride_alignment,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
+            dcp_sharded=specs[0].dcp_sharded,
+            max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -1216,6 +1244,11 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
 
     kv_cache_specs: dict[str, KVCacheSpec]
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.kv_cache_specs:
+            object.__setattr__(self, "dcp_sharded", self.first_spec.dcp_sharded)
 
     @property
     def prefix_cacheable(self) -> bool:
@@ -1269,6 +1302,8 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         block_sizes = set(spec.block_size for spec in kv_cache_specs.values())
         if len(block_sizes) > 1:
             # Different block sizes, not uniform.
+            return False
+        if len({spec.dcp_sharded for spec in kv_cache_specs.values()}) > 1:
             return False
         first_spec = next(iter(kv_cache_specs.values()))
         return first_spec.is_uniform_with_collection(kv_cache_specs)
@@ -1455,6 +1490,10 @@ class KVCacheConfig:
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
+    hash_block_size: int | None = None
+    """Tokens per prefix-cache block hash, resolved by the engine core."""
+    cache_hit_alignment_tokens: int | None = None
+    """Token granularity of prefix-cache hits, resolved by the engine core."""
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
@@ -1463,6 +1502,9 @@ class KVCacheConfig:
 
     hisparse_shared_host_pool: bool = False
     """Whether local TP ranks share one physical HiSparse host pool."""
+
+    kv_tp_replicas: int = 1
+    """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
