@@ -144,11 +144,11 @@ class MambaHybridModelState(DefaultModelState):
         num_computed_tokens_gpu = async_tensor_h2d(
             num_computed_tokens, dtype=torch.int32, device=self.device
         )
-        block_size = self.cache_config.block_size
-        assert block_size is not None
+        mamba_block_size = self.cache_config.mamba_block_size
+        assert mamba_block_size is not None
         state_indices = torch.div(
             num_computed_tokens_gpu - 1,
-            block_size,
+            mamba_block_size,
             rounding_mode="floor",
         )
         self._mamba_state_idx_gpu.index_copy_(0, req_indices_gpu, state_indices)
