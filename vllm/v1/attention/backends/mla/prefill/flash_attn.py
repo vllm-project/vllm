@@ -395,6 +395,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         # Track whether we're using vllm's FA or upstream (for ROCm)
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
+        self._is_aiter_triton_fa = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            self._is_aiter_triton_fa = on_gfx1250()
 
     def supports_quant_output(self, quant_key: "QuantKey") -> bool:
         device_capability = current_platform.get_device_capability()
@@ -427,6 +432,9 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             kwargs["return_softmax_lse"] = return_softmax_lse
             kwargs["out"] = out
             kwargs["output_scale"] = output_scale
+        elif self._is_aiter_triton_fa:
+            kwargs["return_lse"] = return_softmax_lse
+            assert out is None and output_scale is None
         else:
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
@@ -448,6 +456,8 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         lse = None
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
+        if self._is_aiter_triton_fa and lse is not None:
+            lse = lse.transpose(0, 1).contiguous()
 
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
