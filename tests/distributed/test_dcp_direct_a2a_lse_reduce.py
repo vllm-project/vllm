@@ -396,6 +396,7 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
     import vllm.v1.attention.ops.dcp as dcp_manager
 
     group = MagicMock(world_size=2)
+    group.device_communicator.aiter_ag_comm = None
     gathered_query = torch.empty(1, 4, 8)
     group.all_gather.return_value = gathered_query
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
