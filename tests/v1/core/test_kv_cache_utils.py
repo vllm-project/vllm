@@ -3993,6 +3993,7 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
     block_size = 16
     max_model_len = 512  # needs 512 / 16 = 32 blocks
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     spec = new_kv_cache_spec(block_size=block_size)
 
     # 32 blocks -> only 31 usable after the null block: one short -> reject.
@@ -4038,6 +4039,7 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     block_size = 16
     max_model_len = 512  # needs 512 / 16 = 32 blocks
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     spec = new_kv_cache_spec(block_size=block_size)
 
     # 32 blocks -> only 31 usable after the null block: one short -> reject.

@@ -1047,7 +1047,7 @@ def check_enough_kv_cache_memory(
         # of the specs since grouping may unify them in-place.
         groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
         check_memory = (
-            available_memory - _pool_bytes_per_block(groups)
+            available_memory - _pool_bytes_per_block(vllm_config, groups)
             if groups
             else available_memory
         )
@@ -1158,14 +1158,17 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
-def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _pool_bytes_per_block(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> int:
     """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
     return _get_kv_cache_bytes_per_block(
-        [group for group in kv_cache_groups if not group.host_resident]
+        [group for group in kv_cache_groups if not group.host_resident],
+        vllm_config.cache_config.get_resolved_kv_cache_layout(),
     )
 
 
@@ -1431,10 +1434,24 @@ def _get_per_layer_spec(
     return spec
 
 
+def _get_layer_block_stride(spec: KVCacheSpec) -> int:
+    """A layer-outer block stride: the page padded to its alignment."""
+    return round_up(spec.page_size_bytes, spec.get_block_stride_alignment())
+
+
 def _get_kv_cache_bytes_per_block(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout
 ) -> int:
     """Return the largest cache group's bytes per block."""
+    if not layout.is_block_outermost:
+        # Each layer's block stride is its own padded page.
+        return max(
+            sum(
+                _get_layer_block_stride(_get_per_layer_spec(group, layer_name))
+                for layer_name in group.layer_names
+            )
+            for group in kv_cache_groups
+        )
     bytes_per_block = max(
         sum(
             _get_per_layer_spec(group, layer_name).page_size_bytes
@@ -1526,7 +1543,7 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
+    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
@@ -1556,17 +1573,17 @@ def get_kv_cache_config_from_groups(
 
         byte_offset = 0
         for spec, layer_names in layers_by_spec.items():
+            block_stride = interleaved_block_stride
+            padded_page = _get_layer_block_stride(spec)
+            if block_stride is None and padded_page != spec.page_size_bytes:
+                assert layout.is_block_compact, f"{layout.name} cannot pad pages"
+                block_stride = padded_page
             layer_stride, block_stride, _, _, _ = compute_layout_strides(
                 spec,
                 num_blocks,
                 len(layer_names),
                 layout,
-                fixed_strides=(None, interleaved_block_stride, None, None, None),
-            )
-            offset = (
-                byte_offset
-                * max(layer_stride, spec.page_size_bytes)
-                // spec.page_size_bytes
+                fixed_strides=(None, block_stride, None, None, None),
             )
             kv_cache_tensors.append(
                 KVCacheTensor(
@@ -1574,10 +1591,13 @@ def get_kv_cache_config_from_groups(
                     layers=layer_names,
                     layer_stride=layer_stride,
                     block_stride=block_stride,
-                    offset=offset,
+                    offset=byte_offset,
                 )
             )
-            byte_offset += len(layer_names) * spec.page_size_bytes
+            # Block-outer layers share each block; layer-outer ones own regions.
+            byte_offset += len(layer_names) * (
+                spec.page_size_bytes if layout.is_block_outermost else layer_stride
+            )
 
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -2246,7 +2266,7 @@ def _max_memory_usage_bytes_from_groups(
     if not kv_cache_groups:
         return 0
 
-    bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
+    bytes_per_block = _pool_bytes_per_block(vllm_config, kv_cache_groups)
     total_blocks = 0
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
@@ -2502,7 +2522,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
+            bytes_per_block = _pool_bytes_per_block(vllm_config, groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2515,7 +2535,7 @@ def get_kv_cache_configs(
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _pool_bytes_per_block(groups) if groups else avail_mem
+        avail_mem - _pool_bytes_per_block(vllm_config, groups) if groups else avail_mem
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 
@@ -2559,7 +2579,9 @@ def get_kv_cache_configs(
         # strides and offsets stay consistent with the shrunken allocation.
         groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
-            vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
+            vllm_config,
+            groups,
+            min_num_blocks * _pool_bytes_per_block(vllm_config, groups),
         )
 
     for kv_cache_config in kv_cache_configs:
