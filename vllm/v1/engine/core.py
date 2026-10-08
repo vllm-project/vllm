@@ -1595,6 +1595,10 @@ class EngineCoreProc(EngineCore):
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
+        if not self.scheduler.has_unfinished_requests():
+            # Only connector cleanup or pending KV pushes remain; that is not
+            # stalled generation.
+            self._record_ready_progress()
         self._maybe_publish_ready_progress(outputs)
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():

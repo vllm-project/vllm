@@ -399,6 +399,34 @@ def test_engine_core_progress_sequence():
     assert core._last_health_dummy_batch_at == 0.0
 
 
+@pytest.mark.parametrize("has_unfinished_requests", [True, False])
+def test_engine_core_connector_cleanup_is_not_stalled(has_unfinished_requests: bool):
+    """Zero-token steps count as progress only when no unfinished requests
+    remain, e.g. finished requests awaiting delayed KV connector frees."""
+    core = object.__new__(EngineCoreProc)
+    core.output_queue = queue.Queue()
+    core._ready_progress_seq = 0
+    core._last_ready_published_state = EngineCoreReadyState.BUSY
+    core._last_ready_published_seq = 0
+    core._last_ready_published_at = 0.0
+    core._ready_operation = None
+    core._last_health_dummy_batch_at = 0.0
+    core.engines_running = False
+    core.scheduler = SimpleNamespace(
+        has_requests=Mock(return_value=True),
+        has_unfinished_requests=Mock(return_value=has_unfinished_requests),
+    )
+    core.batch_queue = None
+    core.is_sleeping = Mock(return_value=False)  # type: ignore[method-assign]
+    core.step_fn = Mock(return_value=({}, False))
+    core.post_step = Mock()  # type: ignore[method-assign]
+
+    for _ in range(3):
+        core._process_engine_step()
+
+    assert core._ready_progress_seq == (0 if has_unfinished_requests else 3)
+
+
 def test_engine_core_broadcasts_busy_and_throttles_progress(
     monkeypatch: pytest.MonkeyPatch,
 ):
