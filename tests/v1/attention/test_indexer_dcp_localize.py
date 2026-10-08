@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -14,6 +16,45 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
+
+
+def test_sparse_indexer_uses_finalized_cp_interleave(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+) -> None:
+    parallel_config = default_vllm_config.parallel_config
+    parallel_config.cp_kv_cache_interleave_size = 1
+    parallel_config.decode_context_parallel_size = 2
+    parallel_config.prefill_context_parallel_size = 1
+    default_vllm_config.kernel_config.enable_jit_warmup = False
+    monkeypatch.setattr(
+        sparse_indexer,
+        "get_dcp_group",
+        lambda: SimpleNamespace(rank_in_group=0),
+    )
+    monkeypatch.setattr(
+        sparse_indexer,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={}),
+    )
+    monkeypatch.setattr(sparse_indexer.current_platform, "is_cuda", lambda: False)
+
+    indexer = sparse_indexer.SparseAttnIndexer(
+        k_cache=None,
+        quant_block_size=1,
+        scale_fmt="",
+        topk_tokens=1,
+        head_dim=1,
+        max_model_len=1,
+        max_total_seq_len=1,
+        topk_indices_buffer=torch.empty(0),
+    )
+
+    assert indexer.cp_kv_cache_interleave_size == 1
+
+    parallel_config.cp_kv_cache_interleave_size = 64
+
+    assert indexer.cp_kv_cache_interleave_size == 64
 
 
 def _local_count(length: int, rank: int, world: int, interleave: int) -> int:
