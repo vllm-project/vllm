@@ -234,6 +234,25 @@ def test_non_pinned_cpu_tensor(device):
     assert gpu_view[9, 9] == 198
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only sync check.")
+def test_non_uva_buffer_copies_without_stream_sync():
+    buffer = buffer_utils.NonUvaBuffer(8, torch.int32)
+    buffer.np[:] = np.arange(8)
+
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        prefix = buffer.uva(4)
+        full = buffer.uva()
+    finally:
+        torch.cuda.set_sync_debug_mode(0)
+    # The next step overwrites the host buffer right after the copy is issued.
+    buffer.np[:] = -1
+    torch.accelerator.synchronize()
+
+    assert prefix.tolist() == list(range(4))
+    assert full.tolist() == list(range(8))
+
+
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.skipif(
     not current_platform.is_xpu(), reason="XPU non-contiguous UVA test."
