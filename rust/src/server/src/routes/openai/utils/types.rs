@@ -646,7 +646,6 @@ mod usage_tests {
                     cached_token_count: 0,
                 },
                 reasoning_tokens: 3,
-                timestamps: Default::default(),
             },
             false,
         );
@@ -666,7 +665,6 @@ mod usage_tests {
                     cached_token_count: 0,
                 },
                 reasoning_tokens: 0,
-                timestamps: Default::default(),
             },
             false,
         );

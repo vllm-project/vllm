@@ -408,6 +408,7 @@ pub(super) struct ChatCompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
+    #[serde(serialize_with = "crate::routes::openai::utils::metrics::serialize_stream_metrics")]
     pub metrics: Option<PerRequestMetrics>,
     pub prompt_token_ids: Option<Vec<u32>>,
 }

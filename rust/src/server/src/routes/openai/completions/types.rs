@@ -262,6 +262,7 @@ pub(super) struct CompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
+    #[serde(serialize_with = "crate::routes::openai::utils::metrics::serialize_stream_metrics")]
     pub metrics: Option<PerRequestMetrics>,
 }
 
