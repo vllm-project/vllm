@@ -6,6 +6,7 @@ Run `pytest tests/kernels/quantization/test_triton_scaled_mm.py`.
 """
 
 import importlib
+import json
 
 import pytest
 import torch
@@ -226,13 +227,34 @@ def test_rdna4_triton_fp8_backend_preserves_linear_shape(out_dtype, use_bias):
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm RDNA4")
 @pytest.mark.parametrize("n", [256, 8192])
-def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(monkeypatch, n):
+@pytest.mark.parametrize("tuned", [False, True])
+def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(
+    monkeypatch, tmp_path, n, tuned
+):
     """Prefill compilation must preserve decode tiles and GPU graph replay."""
     from vllm.platforms.rocm import on_rdna4
 
     if not on_rdna4():
         pytest.skip("Requires RDNA4")
     importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
+    monkeypatch.setattr(triton_scaled_mm_module, "_PER_TOKEN_CONFIG_DIR", tmp_path)
+    triton_scaled_mm_module.get_per_token_fp8_configs.cache_clear()
+    tuned_config = {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "num_warps": 4,
+        "num_stages": 1,
+    }
+    if tuned:
+        filename = triton_scaled_mm_module.per_token_fp8_config_filename(
+            n,
+            128,
+            triton_scaled_mm_module.get_device_name_as_file_name(),
+            current_platform.fp8_dtype(),
+            torch.bfloat16,
+        )
+        (tmp_path / filename).write_text(json.dumps({1: tuned_config, 8: tuned_config}))
     set_random_seed(0)
     launches = []
     real_kernel = triton_scaled_mm_module.scaled_mm_kernel
@@ -272,6 +294,8 @@ def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(monkeypatch, n):
             if m <= 128
             else (128, 128, 128)
         )
+        if tuned and m <= 8:
+            expected_tile = (32, 64, 128)
         expected = torch_scaled_mm(a, b, sa, sb, torch.bfloat16)
         actual = compiled(a, sa)
         assert launches[-1] == expected_tile
@@ -285,3 +309,61 @@ def test_rdna4_triton_dynamic_shapes_keep_runtime_tiles(monkeypatch, n):
         graph.replay()
         torch.testing.assert_close(captured, expected, rtol=1e-2, atol=1e-2)
         assert len(launches) == count
+    triton_scaled_mm_module.get_per_token_fp8_configs.cache_clear()
+
+
+def test_per_token_fp8_config_respects_device_dtype_and_measured_m(
+    monkeypatch, tmp_path
+):
+    """Partial decode tuning must not override prefill or other devices/dtypes."""
+    module = triton_scaled_mm_module
+    monkeypatch.setattr(module, "_PER_TOKEN_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(module, "get_device_name_as_file_name", lambda: "test_device")
+    module.get_per_token_fp8_configs.cache_clear()
+    dtype = torch.float8_e4m3fn
+    filename = module.per_token_fp8_config_filename(
+        256, 128, "test_device", dtype, torch.bfloat16
+    )
+    configs = {
+        1: {"BLOCK_SIZE_M": 16},
+        2: {"BLOCK_SIZE_M": 32},
+        8: {"BLOCK_SIZE_M": 64},
+    }
+    (tmp_path / filename).write_text(json.dumps(configs))
+    get = lambda m, out=torch.bfloat16: module.get_per_token_fp8_config(
+        m, 256, 128, dtype, out
+    )
+    assert get(1) == configs[1]
+    assert get(3) == configs[2]
+    assert get(8) == configs[8]
+    assert get(0) is None
+    assert get(16) is None
+    assert get(1, torch.float16) is None
+    monkeypatch.setattr(module, "get_device_name_as_file_name", lambda: "other_device")
+    assert get(1) is None
+    module.get_per_token_fp8_configs.cache_clear()
+
+
+@pytest.mark.parametrize("in_dtype", get_8bit_types())
+def test_scaled_mm_explicit_tiles_without_heuristic(in_dtype):
+    """Manual tuning overrides must work for both shared INT8 and FP8 paths."""
+    set_random_seed(0)
+    a = torch.randint(-4, 4, (3, 128), device=device).to(in_dtype)
+    b = torch.randint(-4, 4, (96, 128), device=device).to(in_dtype).t()
+    sa = torch.rand(3, 1, device=device)
+    sb = torch.rand(96, 1, device=device)
+    actual = triton_scaled_mm(
+        a,
+        b,
+        sa,
+        sb,
+        torch.bfloat16,
+        use_heuristic=False,
+        block_size_m=32,
+        block_size_n=64,
+        block_size_k=64,
+        num_warps=4,
+        num_stages=1,
+    )
+    expected = torch_scaled_mm(a, b, sa, sb, torch.bfloat16)
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)

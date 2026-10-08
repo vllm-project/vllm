@@ -6,6 +6,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
+    get_per_token_fp8_config,
     triton_scaled_mm,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -240,7 +241,27 @@ def _w8a8_triton_per_token_scaled_mm_func(
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
     # Dynamo must not freeze the tile heuristic using a symbolic M's hint.
-    return triton_scaled_mm(qx, weight, x_scale, weight_scale, output_dtype, bias)
+    config = None
+    if qx.stride(1) == 1 and weight.stride(0) == 1:
+        config = get_per_token_fp8_config(
+            qx.size(0), weight.size(1), qx.size(1), qx.dtype, output_dtype
+        )
+    if config is None:
+        return triton_scaled_mm(qx, weight, x_scale, weight_scale, output_dtype, bias)
+    return triton_scaled_mm(
+        qx,
+        weight,
+        x_scale,
+        weight_scale,
+        output_dtype,
+        bias,
+        use_heuristic=False,
+        block_size_m=config["BLOCK_SIZE_M"],
+        block_size_n=config["BLOCK_SIZE_N"],
+        block_size_k=config["BLOCK_SIZE_K"],
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+    )
 
 
 def _w8a8_triton_per_token_scaled_mm_fake(

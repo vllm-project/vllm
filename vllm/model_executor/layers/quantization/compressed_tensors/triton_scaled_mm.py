@@ -2,12 +2,56 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+from functools import lru_cache
+from pathlib import Path
+
 import torch
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton, use_tensor_descriptor
 from vllm.triton_utils.allocation import set_triton_allocator
+from vllm.utils.platform_utils import get_device_name_as_file_name
 
 _TD_ALLOCATOR_DEVICES: set[torch.device] = set()
+logger = init_logger(__name__)
+_PER_TOKEN_CONFIG_DIR = Path(__file__).parents[1] / "utils" / "configs"
+
+
+def per_token_fp8_config_filename(
+    N: int, K: int, device_name: str, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> str:
+    return (
+        f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8_per_token,"
+        f"input_dtype={str(input_dtype).removeprefix('torch.')},"
+        f"out_dtype={str(out_dtype).removeprefix('torch.')}.json"
+    )
+
+
+@lru_cache
+def get_per_token_fp8_configs(
+    N: int, K: int, device_name: str, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> dict[int, dict[str, int]] | None:
+    """Load configs for contiguous activations and transposed FP8 weights."""
+    path = _PER_TOKEN_CONFIG_DIR / per_token_fp8_config_filename(
+        N, K, device_name, input_dtype, out_dtype
+    )
+    if not path.exists():
+        return None
+    logger.info("Using configuration from %s for W8A8 per-token FP8 kernel.", path)
+    return {int(m): config for m, config in json.loads(path.read_text()).items()}
+
+
+def get_per_token_fp8_config(
+    M: int, N: int, K: int, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> dict[str, int] | None:
+    configs = get_per_token_fp8_configs(
+        N, K, get_device_name_as_file_name(), input_dtype, out_dtype
+    )
+    # Do not extend decode-only tuning to unmeasured prefill sizes.
+    if not configs or not min(configs) <= M <= max(configs):
+        return None
+    return configs[min(configs, key=lambda m: abs(m - M))]
 
 
 def is_weak_contiguous(x: torch.Tensor):
@@ -186,6 +230,8 @@ def triton_scaled_mm(
     block_size_k: int = 32,
     use_heuristic=True,
     use_td: bool | None = None,
+    num_warps: int = 4,
+    num_stages: int | None = None,
 ) -> torch.Tensor:
     M, K = input.shape
     N = weight.shape[1]
@@ -225,7 +271,7 @@ def triton_scaled_mm(
         else:
             tile_shape = (128, 128, 128)
 
-    block_size_m, block_size_n, block_size_k = tile_shape
+        block_size_m, block_size_n, block_size_k = tile_shape
 
     block_size_sa = 1 if has_scalar(scale_a) else block_size_m
     block_size_sb = 1 if has_scalar(scale_b) else block_size_n
@@ -253,6 +299,7 @@ def triton_scaled_mm(
 
     # A = input, B = weight, C = result
     # A = M x K, B = K x N, C = M x N
+    launch_options = {} if num_stages is None else {"num_stages": num_stages}
     scaled_mm_kernel[grid](
         input,
         weight,
@@ -277,6 +324,8 @@ def triton_scaled_mm(
         BLOCK_SIZE_SCALE_B=block_size_sb,
         USE_TD=use_td,
         B_T=b_t,
+        num_warps=num_warps,
+        **launch_options,
     )
 
     return result.to(out_dtype)
