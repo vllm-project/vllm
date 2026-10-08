@@ -138,13 +138,11 @@ class KVTransferConfig:
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
 
-    def has_connector(self, connector_name: str, *, match_aliases: bool = True) -> bool:
-        """Check direct or MultiConnector children, optionally matching aliases."""
+    def has_connector(self, connector_name: str) -> bool:
+        """Whether ``connector_name`` is configured, directly or in MultiConnector."""
         nixl_pull_names = ("NixlConnector", "NixlPullConnector")
         connector_names = (
-            nixl_pull_names
-            if match_aliases and connector_name in nixl_pull_names
-            else (connector_name,)
+            nixl_pull_names if connector_name in nixl_pull_names else (connector_name,)
         )
         if self.kv_connector in connector_names:
             return True

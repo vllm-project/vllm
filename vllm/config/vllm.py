@@ -1222,15 +1222,12 @@ class VllmConfig:
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is not None:
             for connector_name in (
-                "NixlConnector",
                 "NixlPullConnector",
                 "NixlPushConnector",
                 "MoRIIOConnector",
                 "MooncakeConnector",
             ):
-                if kv_transfer_config.has_connector(
-                    connector_name, match_aliases=False
-                ):
+                if kv_transfer_config.has_connector(connector_name):
                     raise ValueError(
                         "--enable-return-routed-experts is incompatible with "
                         f"{connector_name}; PD auxiliary output is not supported."
@@ -3473,17 +3470,14 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility for NIXL P/D only when the
-        # interleave size will be resolved to block_size by each worker.
-        nixl_auto_interleave = (
+        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
+        # size is pinned to block_size by each worker.
+        nixl_pd_active = (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlPullConnector")
             and self.parallel_config._allow_auto_resolve_cp_interleave_size
         )
-        if (
-            self.parallel_config.decode_context_parallel_size > 1
-            and not nixl_auto_interleave
-        ):
+        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0

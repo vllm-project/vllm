@@ -343,20 +343,6 @@ def test_nixl_connector_aliases(nixl_kv_transfer_config, connector_name):
     )
 
 
-@pytest.mark.parametrize(
-    "connector_name", ["NixlConnector", "NixlPullConnector", "NixlPushConnector"]
-)
-def test_nixl_connector_exact_names(nixl_kv_transfer_config, connector_name):
-    configured_name = nixl_kv_transfer_config.kv_connector
-    if configured_name == "MultiConnector":
-        configured_name = nixl_kv_transfer_config.kv_connector_extra_config[
-            "connectors"
-        ][0]["kv_connector"]
-    assert nixl_kv_transfer_config.has_connector(
-        connector_name, match_aliases=False
-    ) == (configured_name == connector_name)
-
-
 @pytest.mark.parametrize("explicit_interleave", [None, 1, 8, 3, 32])
 def test_pd_dcp_interleave_size_respects_explicit_settings(
     caplog, disable_log_dedup, nixl_kv_transfer_config, explicit_interleave
