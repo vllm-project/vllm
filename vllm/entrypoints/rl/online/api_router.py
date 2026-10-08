@@ -5,7 +5,7 @@ import json
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from vllm.distributed.weight_transfer.base import (
@@ -14,7 +14,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.serve.dev.rlhf.metrics import weight_operation_metrics
+from vllm.entrypoints.rl.online.metrics import weight_operation_metrics
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 
@@ -280,7 +280,3 @@ async def get_world_size(
     else:
         world_size = parallel_config.world_size
     return JSONResponse(content={"world_size": world_size})
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)
