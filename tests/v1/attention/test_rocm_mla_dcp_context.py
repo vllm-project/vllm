@@ -138,10 +138,18 @@ def test_dcp_prefill_unsupported_formats_use_original_path(monkeypatch, unsuppor
         dcp_context_row_indices=None if unsupported == "no_indices" else [],
     )
     expected = (torch.ones(1), torch.zeros(1))
+
+    def fused_mla_kv_concat(kv_nope, k_pe, use_fp8_prefill):
+        raise AssertionError("The fallback should receive the callback")
+
+    def original_path(*args):
+        assert args[-1] is fused_mla_kv_concat
+        return expected
+
     monkeypatch.setattr(
         MLACommonImpl,
         "_context_parallel_compute_prefill_context",
-        lambda *args: expected,
+        original_path,
     )
     q = torch.empty(1, 1, 192, dtype=torch.bfloat16)
     cache = torch.empty(1, 1536, 576, dtype=torch.uint8)
@@ -156,6 +164,7 @@ def test_dcp_prefill_unsupported_formats_use_original_path(monkeypatch, unsuppor
             metadata,
             torch.ones(1),
             8,
+            fused_mla_kv_concat_fn=fused_mla_kv_concat,
         )
         is expected
     )

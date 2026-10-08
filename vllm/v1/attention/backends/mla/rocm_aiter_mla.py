@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -2021,6 +2022,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         dcp_world_size: int,
+        fused_mla_kv_concat_fn: Callable[
+            [torch.Tensor, torch.Tensor, bool], tuple[torch.Tensor, torch.Tensor]
+        ]
+        | None = None,
     ):
         attn_metadata = cast(AiterMLAMetadata, attn_metadata)
         assert attn_metadata.prefill is not None
@@ -2052,6 +2057,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 attn_metadata,
                 k_scale,
                 dcp_world_size,
+                fused_mla_kv_concat_fn,
             )
         from vllm.platforms import current_platform
 
