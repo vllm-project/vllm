@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from vllm.entrypoints.generate.structured_decisions.question_types import (
+from vllm.entrypoints.openai.decisions.question_types import (
     QUESTION_TYPES,
     Option,
     Question,
