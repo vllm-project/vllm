@@ -161,3 +161,20 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("user asks about </think> tags\nassistant\n<think>", False),
+        ("user asks about </think> tags\nassistant <think>", False),
+        ("assistant\n<think>reasoning</think>", True),
+        ("assistant\n<think>", False),
+        ("no markers at all", False),
+    ],
+)
+def test_is_reasoning_end_uses_latest_marker(text: str, expected: bool):
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser: ReasoningParser = parser_cls(tokenizer)
+    input_ids = tokenizer.encode(text, add_special_tokens=False)
+    assert parser.is_reasoning_end(input_ids) is expected
