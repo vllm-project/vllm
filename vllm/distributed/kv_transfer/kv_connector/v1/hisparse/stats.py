@@ -154,48 +154,52 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
             ),
         }
 
-        residency_buckets = histogram_buckets(
-            "kv_cache_residency",
-            overrides=vllm_config.observability_config.custom_histogram_buckets,
-        )
-        histogram_host_block_lifetime = self._histogram_cls(
-            name="vllm:hisparse_host_block_lifetime_seconds",
-            documentation=(
-                "Histogram of HiSparse host KV block lifetime from allocation to "
-                "eviction. Sampled metrics (controlled by --kv-cache-metrics-sample)."
-            ),
-            buckets=residency_buckets,
-            labelnames=labelnames,
-        )
-        histogram_host_block_idle_before_evict = self._histogram_cls(
-            name="vllm:hisparse_host_block_idle_before_evict_seconds",
-            documentation=(
-                "Histogram of HiSparse host KV block idle time before eviction. "
-                "Sampled metrics (controlled by --kv-cache-metrics-sample)."
-            ),
-            buckets=residency_buckets,
-            labelnames=labelnames,
-        )
-        histogram_host_block_reuse_gap = self._histogram_cls(
-            name="vllm:hisparse_host_block_reuse_gap_seconds",
-            documentation=(
-                "Histogram of time gaps between consecutive HiSparse host KV block "
-                "accesses. Sampled metrics (controlled by --kv-cache-metrics-sample)."
-            ),
-            buckets=residency_buckets,
-            labelnames=labelnames,
-        )
-        self.hisparse_histograms: dict[str, Any] = {
-            "host_block_lifetime_seconds": create_metric_per_engine(
-                histogram_host_block_lifetime, self.per_engine_labelvalues
-            ),
-            "host_block_idle_before_evict_seconds": create_metric_per_engine(
-                histogram_host_block_idle_before_evict, self.per_engine_labelvalues
-            ),
-            "host_block_reuse_gap_seconds": create_metric_per_engine(
-                histogram_host_block_reuse_gap, self.per_engine_labelvalues
-            ),
-        }
+        self.hisparse_histograms: dict[str, Any] = {}
+        if vllm_config.observability_config.kv_cache_metrics:
+            residency_buckets = histogram_buckets(
+                "kv_cache_residency",
+                overrides=vllm_config.observability_config.custom_histogram_buckets,
+            )
+            histogram_host_block_lifetime = self._histogram_cls(
+                name="vllm:hisparse_host_block_lifetime_seconds",
+                documentation=(
+                    "Histogram of HiSparse host KV block lifetime from allocation "
+                    "to eviction. Sampled metrics (controlled by "
+                    "--kv-cache-metrics-sample)."
+                ),
+                buckets=residency_buckets,
+                labelnames=labelnames,
+            )
+            histogram_host_block_idle_before_evict = self._histogram_cls(
+                name="vllm:hisparse_host_block_idle_before_evict_seconds",
+                documentation=(
+                    "Histogram of HiSparse host KV block idle time before eviction. "
+                    "Sampled metrics (controlled by --kv-cache-metrics-sample)."
+                ),
+                buckets=residency_buckets,
+                labelnames=labelnames,
+            )
+            histogram_host_block_reuse_gap = self._histogram_cls(
+                name="vllm:hisparse_host_block_reuse_gap_seconds",
+                documentation=(
+                    "Histogram of time gaps between consecutive HiSparse host KV "
+                    "block accesses. Sampled metrics (controlled by "
+                    "--kv-cache-metrics-sample)."
+                ),
+                buckets=residency_buckets,
+                labelnames=labelnames,
+            )
+            self.hisparse_histograms = {
+                "host_block_lifetime_seconds": create_metric_per_engine(
+                    histogram_host_block_lifetime, self.per_engine_labelvalues
+                ),
+                "host_block_idle_before_evict_seconds": create_metric_per_engine(
+                    histogram_host_block_idle_before_evict, self.per_engine_labelvalues
+                ),
+                "host_block_reuse_gap_seconds": create_metric_per_engine(
+                    histogram_host_block_reuse_gap, self.per_engine_labelvalues
+                ),
+            }
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for name, counter in self.hisparse_counters.items():

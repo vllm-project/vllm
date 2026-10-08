@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
 )
@@ -82,7 +84,8 @@ def test_build_kv_connector_stats_round_trip():
     assert rebuilt.reduce() == stats.reduce()
 
 
-def test_prom_metrics_observe_host_metrics():
+@pytest.mark.parametrize("kv_cache_metrics", [True, False])
+def test_prom_metrics_observe_host_metrics(kv_cache_metrics: bool):
     from types import SimpleNamespace
     from typing import Any
 
@@ -122,7 +125,9 @@ def test_prom_metrics_observe_host_metrics():
     prom = HiSparsePromMetrics(
         vllm_config=SimpleNamespace(
             kv_transfer_config=None,
-            observability_config=SimpleNamespace(custom_histogram_buckets=None),
+            observability_config=SimpleNamespace(
+                kv_cache_metrics=kv_cache_metrics, custom_histogram_buckets=None
+            ),
         ),
         metric_types={Gauge: _NamedFake, Counter: _NamedFake, Histogram: _NamedFake},
         labelnames=["model_name"],
@@ -142,6 +147,9 @@ def test_prom_metrics_observe_host_metrics():
     assert created["vllm:hisparse_host_to_device_bytes"].increments == [32]
     assert created["vllm:hisparse_host_cache_usage_perc"].set_values == [0.75]
     assert created["vllm:hisparse_pending_page_transfers"].set_values == [3]
+    if not kv_cache_metrics:
+        assert not any("host_block" in name for name in created)
+        return
     assert created["vllm:hisparse_host_block_lifetime_seconds"].observed == [5.0, 3.0]
     assert created["vllm:hisparse_host_block_idle_before_evict_seconds"].observed == [
         2.0,

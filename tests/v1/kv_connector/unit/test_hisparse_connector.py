@@ -103,12 +103,7 @@ def test_scheduler_stats_report_host_pool_usage():
 
 
 def test_hisparse_host_residency_reported_as_hisparse_metrics():
-    """Host blocks sample into HiSparse's own residency metrics.
-
-    Host and device pools number blocks independently. Sharing the device
-    collector let a host allocation overwrite the sample of the device block
-    with the same id, and reported host evictions as device ones.
-    """
+    """Host blocks sample into HiSparse's own residency metrics."""
     from tests.v1.core.test_prefix_caching import (
         make_hisparse_kv_cache_config,
         make_kv_cache_manager,
