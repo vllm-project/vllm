@@ -1,11 +1,23 @@
-// Provides torch::Tensor for ops.h (previously included transitively via
-// cache.h, which is no longer included here after cache ops moved to
-// _C_stable_libtorch).
 #include <torch/all.h>
-#include "ops.h"
 #include "core/registration.h"
 #include <torch/library.h>
 #include <torch/version.h>
+
+#include <optional>
+#include <vector>
+
+#ifdef USE_ROCM
+// Defined in custom_quickreduce.cu.
+using fptr_t = int64_t;
+fptr_t init_custom_qr(int64_t rank, int64_t world_size,
+                      std::optional<int64_t> qr_max_size = std::nullopt);
+void qr_destroy(fptr_t _fa);
+torch::Tensor qr_get_handle(fptr_t _fa);
+void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
+void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                   int64_t quant_level, bool cast_bf2half = false);
+int64_t qr_max_size();
+#endif
 
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.

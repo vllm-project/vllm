@@ -57,16 +57,16 @@
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/csrc/stable/device.h>
 
-#include "cuda_compat.h"
+#include "core/cuda_compat.h"
 #include "dispatch_utils.h"
 #include "type_convert.cuh"
 
 #ifndef USE_ROCM
   #include <cuda_fp8.h>
-  #include "../quantization/w8a8/fp8/nvidia/quant_utils.cuh"
+  #include "libtorch_stable/quantization/w8a8/fp8/nvidia/quant_utils.cuh"
 #else
   #include <hip/hip_fp8.h>
-  #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
+  #include "libtorch_stable/quantization/w8a8/fp8/amd/quant_utils.cuh"
 #endif
 #include <cuda_runtime.h>
 #include <type_traits>

@@ -5,11 +5,11 @@
  */
 
 #include "libtorch_stable/quantization/vectorization.cuh"
-#include "quantization/utils.cuh"
+#include "libtorch_stable/quantization/utils.cuh"
 #include "quant_conversions.cuh"
 
 #include "../../cub_helpers.h"
-#include "../../../cuda_compat.h"
+#include "core/cuda_compat.h"
 
 namespace vllm {
 

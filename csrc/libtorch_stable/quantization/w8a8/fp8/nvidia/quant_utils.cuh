@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../../../attention/attention_dtypes.h"
+#include "core/vec_dtypes/vec_dtypes.h"
 #include <torch/headeronly/core/ScalarType.h>
 #include <assert.h>
 #include <float.h>

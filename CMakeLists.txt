@@ -363,8 +363,8 @@ endif()
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_EXT_SRC
-    "csrc/torch_bindings.cpp"
-    "csrc/custom_quickreduce.cu")
+    "csrc/rocm/quickreduce/torch_bindings.cpp"
+    "csrc/rocm/quickreduce/custom_quickreduce.cu")
 
   message(STATUS "Enabling C extension.")
   define_extension_target(
@@ -537,7 +537,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
           OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
         execute_process(
           COMMAND ${CMAKE_COMMAND} -E env
-          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
+          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
             ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
           RESULT_VARIABLE machete_generation_result
           OUTPUT_VARIABLE machete_generation_output

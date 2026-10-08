@@ -55,12 +55,6 @@ struct Utils {
 #endif
 
 #ifndef USE_ROCM
-  #define VLLM_SHFL_SYNC(var, src_lane) __shfl_sync(uint32_t(-1), var, src_lane)
-#else
-  #define VLLM_SHFL_SYNC(var, src_lane) __shfl(var, src_lane)
-#endif
-
-#ifndef USE_ROCM
   #define VLLM_SHFL_DOWN_SYNC(var, lane_delta) \
     __shfl_down_sync(uint32_t(-1), var, lane_delta)
 #else

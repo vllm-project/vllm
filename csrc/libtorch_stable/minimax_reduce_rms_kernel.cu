@@ -27,7 +27,7 @@
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 
-#include "cuda_compat.h"
+#include "core/cuda_compat.h"
 #include "minimax_reduce_rms_kernel.h"
 
 #include <algorithm>

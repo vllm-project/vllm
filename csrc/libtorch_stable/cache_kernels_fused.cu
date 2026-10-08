@@ -1,13 +1,13 @@
 #include "torch_utils.h"
 #include "dispatch_utils.h"
 
-#include "../cuda_compat.h"
+#include "core/cuda_compat.h"
 
-#include "../quantization/w8a8/fp8/common.cuh"
+#include "libtorch_stable/quantization/w8a8/fp8/common.cuh"
 #ifdef USE_ROCM
-  #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
+  #include "libtorch_stable/quantization/w8a8/fp8/amd/quant_utils.cuh"
 #else
-  #include "../quantization/w8a8/fp8/nvidia/quant_utils.cuh"
+  #include "libtorch_stable/quantization/w8a8/fp8/nvidia/quant_utils.cuh"
 #endif
 
 #ifdef USE_ROCM

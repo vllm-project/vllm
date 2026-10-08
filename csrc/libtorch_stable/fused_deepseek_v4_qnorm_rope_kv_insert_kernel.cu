@@ -47,7 +47,7 @@
 #include <torch/csrc/stable/device.h>
 
 #include <cmath>
-#include "cuda_compat.h"
+#include "core/cuda_compat.h"
 #include "dispatch_utils.h"
 #include "type_convert.cuh"
 

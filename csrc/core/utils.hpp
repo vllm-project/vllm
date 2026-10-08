@@ -1,7 +1,8 @@
 #pragma once
 
 #include <climits>
-#include <iostream>
+#include <cstdint>
+#include <cstdlib>
 
 inline constexpr uint32_t next_pow_2(uint32_t const num) {
   if (num <= 1) return num;
@@ -26,3 +27,16 @@ template <typename T>
 inline constexpr T round_to_next_multiple_of(T a, T b) {
   return a % b == 0 ? a : ((a / b) + 1) * b;
 }
+
+namespace vllm {
+
+// Returns true if env VLLM_BATCH_INVARIANT=1
+inline bool vllm_is_batch_invariant() {
+  static bool cached = []() {
+    const char* val = std::getenv("VLLM_BATCH_INVARIANT");
+    return val && std::atoi(val) != 0;
+  }();
+  return cached;
+}
+
+}  // namespace vllm

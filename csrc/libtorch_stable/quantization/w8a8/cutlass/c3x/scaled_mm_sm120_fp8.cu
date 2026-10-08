@@ -1,6 +1,6 @@
 #include "scaled_mm_kernels.hpp"
 #include "scaled_mm_sm120_fp8_dispatch.cuh"
-#include "core/batch_invariant.hpp"
+#include "core/utils.hpp"
 #include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 namespace vllm {

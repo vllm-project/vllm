@@ -10,8 +10,8 @@
 #include "torch_utils.h"
 
 #include "cub_helpers.h"
-#include "../core/batch_invariant.hpp"
-#include "../quantization/w8a8/fp8/common.cuh"
+#include "core/utils.hpp"
+#include "libtorch_stable/quantization/w8a8/fp8/common.cuh"
 #include "type_convert.cuh"
 #include "dispatch_utils.h"
 #include "quantization/vectorization_utils.cuh"

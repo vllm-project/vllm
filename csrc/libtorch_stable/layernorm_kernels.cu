@@ -3,7 +3,7 @@
 #include "torch_utils.h"
 
 #include "cub_helpers.h"
-#include "../core/batch_invariant.hpp"
+#include "core/utils.hpp"
 #include "type_convert.cuh"
 #include "dispatch_utils.h"
 #include "quantization/vectorization_utils.cuh"

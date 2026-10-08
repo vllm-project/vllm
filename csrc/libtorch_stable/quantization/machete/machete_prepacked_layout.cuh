@@ -16,7 +16,7 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 // clang-format on
 
-#include "cutlass_extensions/cute_utils.cuh"
+#include "libtorch_stable/cutlass_extensions/cute_utils.cuh"
 #include "machete_collective_builder.cuh"
 #include "machete_interleaving_utils.cuh"
 

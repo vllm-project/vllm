@@ -1,19 +1,12 @@
 #pragma once
 
-#include "torch_utils.h"
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/util/BFloat16.h>
+#include <torch/headeronly/util/Exception.h>
+#include <torch/headeronly/util/Half.h>
 
-// This header is shared between _C (unstable ABI, used by machete) and
-// _C_stable_libtorch (stable ABI, used by W4A8/sparse). TORCH_TARGET_VERSION
-// is defined only for the stable target, so we switch includes and types
-// accordingly. TorchTensor (not Tensor) avoids ambiguity with cute::Tensor.
-#ifdef TORCH_TARGET_VERSION
-  #include <torch/csrc/stable/tensor.h>
-  #include <torch/headeronly/util/BFloat16.h>
-  #include <torch/headeronly/util/Half.h>
+// TorchTensor (not Tensor) avoids ambiguity with cute::Tensor.
 using TorchTensor = torch::stable::Tensor;
-#else
-using TorchTensor = torch::Tensor;
-#endif
 
 #include "cute/layout.hpp"
 #include "cutlass/layout/matrix.h"
@@ -70,15 +63,15 @@ CUTE_HOST_DEVICE constexpr auto make_shape_from_idx(F&& f) {
 template <typename Stride>
 static inline auto make_cute_layout(TorchTensor const& tensor,
                                     std::string_view name = "tensor") {
-  TORCH_UTILS_CHECK(tensor.dim() <= rank(Stride{}));
+  STD_TORCH_CHECK(tensor.dim() <= rank(Stride{}));
   auto stride = cute::transform_with_idx(Stride{}, [&](auto const& stride_ele,
                                                        auto const& idx) {
     using StrideEle = std::decay_t<decltype(stride_ele)>;
 
     if (idx < tensor.dim()) {
       if constexpr (cute::is_static_v<StrideEle>) {
-        TORCH_UTILS_CHECK(StrideEle::value == tensor.stride(idx), "Expected ",
-                          name, ".stride(", idx, ") to be ", StrideEle::value);
+        STD_TORCH_CHECK(StrideEle::value == tensor.stride(idx), "Expected ",
+                        name, ".stride(", idx, ") to be ", StrideEle::value);
         return StrideEle{};
       } else {
         if (tensor.size(idx) == 1) {

@@ -17,7 +17,7 @@
 
 #include "torch_utils.h"
 #include "ops.h"
-#include "../cuda_utils.h"
+#include "cuda_utils.h"
 
 #include <algorithm>
 #include <cstdint>

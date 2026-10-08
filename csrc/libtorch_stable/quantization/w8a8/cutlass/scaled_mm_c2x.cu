@@ -9,7 +9,7 @@
 #include "scaled_mm_c2x_sm89_fp8_dispatch.cuh"
 #include "scaled_mm_c2x_sm89_int8_dispatch.cuh"
 
-#include "core/batch_invariant.hpp"
+#include "core/utils.hpp"
 #include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c2x.hpp"
 
 using namespace vllm;

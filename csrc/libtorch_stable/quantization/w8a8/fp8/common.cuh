@@ -1,7 +1,7 @@
 #pragma once
 
 #include "libtorch_stable/quantization/vectorization.cuh"
-#include "../../utils.cuh"
+#include "libtorch_stable/quantization/utils.cuh"
 
 #include <cmath>
 
@@ -11,7 +11,7 @@
 // this is only done for _C_stable_libtorch and not for _C, so we use the
 // non stable at::cuda::getCurrentDeviceProperties for _C for now.
 #ifdef TORCH_TARGET_VERSION
-  #include "../../../libtorch_stable/torch_utils.h"
+  #include "libtorch_stable/torch_utils.h"
 #else
   #ifdef USE_ROCM
     #include <ATen/hip/HIPContext.h>
@@ -19,9 +19,9 @@
 #endif
 
 #ifndef USE_ROCM
-  #include "nvidia/quant_utils.cuh"
+  #include "libtorch_stable/quantization/w8a8/fp8/nvidia/quant_utils.cuh"
 #else
-  #include "amd/quant_utils.cuh"
+  #include "libtorch_stable/quantization/w8a8/fp8/amd/quant_utils.cuh"
 #endif
 
 // Determines the preferred FP8 type for the current platform.

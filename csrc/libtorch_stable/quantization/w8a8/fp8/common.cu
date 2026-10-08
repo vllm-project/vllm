@@ -1,5 +1,5 @@
-#include "../../../../quantization/w8a8/fp8/common.cuh"
-#include "../../../../cuda_compat.h"
+#include "common.cuh"
+#include "core/cuda_compat.h"
 #include "../../../dispatch_utils.h"
 #include "../../../cub_helpers.h"
 #include "../../vectorization_utils.cuh"

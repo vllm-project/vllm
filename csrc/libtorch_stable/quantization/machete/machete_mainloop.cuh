@@ -46,7 +46,7 @@
 #include "cutlass/detail/collective.hpp"
 // clang-format on
 
-#include "cutlass_extensions/cute_utils.cuh"
+#include "libtorch_stable/cutlass_extensions/cute_utils.cuh"
 
 namespace machete {
 

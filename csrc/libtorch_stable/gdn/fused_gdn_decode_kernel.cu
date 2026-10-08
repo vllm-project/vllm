@@ -10,7 +10,7 @@
 #include <cuda_runtime.h>
 
 #include "../torch_utils.h"
-#include "../../cuda_compat.h"
+#include "core/cuda_compat.h"
 
 namespace {
 
