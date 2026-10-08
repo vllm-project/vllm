@@ -19,6 +19,8 @@ logger = init_logger(__name__)
 
 _ASM_FP4_SCALE_ROW_MULTIPLE = 32
 _ASM_FP4_SCALE_COL_MULTIPLE = 8
+# Workaround until AITER gemm_a4w4 is correct for this tile at M <= 64.
+# https://github.com/ROCm/aiter/issues/5931
 _ASM_FP4_FORCE_TRITON_SCALE_ROWS = {96}
 
 
