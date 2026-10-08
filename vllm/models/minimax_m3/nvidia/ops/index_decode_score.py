@@ -64,12 +64,21 @@ class IndexDecodeScoreKernel:
         max_decode_query_len: int,
         split_k: int,
         head_dim: int = 128,
+        cp_size: int = 1,
+        cp_rank: int = 0,
     ):
         self.dtype = dtype
         self.num_heads = num_heads
         self.max_decode_query_len = max_decode_query_len
         self.split_k = split_k
         self.head_dim = head_dim
+        # Decode context parallelism (indexer_decode_cp.py): this CTA grid scores
+        # only the KV blocks it owns, block_id = j * cp_size + cp_rank, and
+        # writes block j's score to compact column j. cp_size == 1 traces the
+        # unchanged single-rank kernel (every const_expr branch below).
+        assert 0 <= cp_rank < cp_size
+        self.cp_size = cp_size
+        self.cp_rank = cp_rank
 
     @cute.jit
     def __call__(
@@ -185,8 +194,15 @@ class IndexDecodeScoreKernel:
 
         seqlen = seq_lens[batch_id]
         num_blocks = cute.ceil_div(seqlen, BLOCK_K)
+        CP = self.cp_size
+        CP_RANK = self.cp_rank
+        if cutlass.const_expr(CP == 1):
+            num_iters = num_blocks
+        else:
+            # Blocks j * CP + CP_RANK < num_blocks (numerator is never negative).
+            num_iters = (num_blocks + (CP - 1 - CP_RANK)) // CP
 
-        if split_id < num_blocks:
+        if split_id < num_iters:
             if warp_id == 0:
                 with cute.arch.elect_one():
                     for i in cutlass.range_constexpr(num_stages):
@@ -226,7 +242,11 @@ class IndexDecodeScoreKernel:
                 if tma_stage == 0:
                     tma_parity ^= 1
 
-                for block_id in range(split_id, num_blocks, split_k):
+                for it in range(split_id, num_iters, split_k):
+                    if cutlass.const_expr(CP == 1):  # noqa: SIM108
+                        block_id = it
+                    else:
+                        block_id = it * CP + CP_RANK
                     page_id = block_table[batch_id, block_id]
                     gK_tile = K_tma.tma_tensor[page_id, None, None]
                     k_mbar = tma_full_mbar + tma_stage
@@ -307,7 +327,11 @@ class IndexDecodeScoreKernel:
                     rQ_f16[None, None, None, 0].store(q_lower.load())
                     rQ_f16[None, None, None, 1].store(q_upper.load())
 
-                for block_id in range(split_id, num_blocks, split_k):
+                for it in range(split_id, num_iters, split_k):
+                    if cutlass.const_expr(CP == 1):  # noqa: SIM108
+                        block_id = it
+                    else:
+                        block_id = it * CP + CP_RANK
                     rC.fill(0.0)
 
                     if warp_id == 0:
@@ -400,7 +424,8 @@ class IndexDecodeScoreKernel:
                             )
 
                         t = batch_id * decode_query_len + q_local_pos
-                        score[head_id, t, block_id] = final_score
+                        # Compact column under CP (it == block_id when CP == 1).
+                        score[head_id, t, it] = final_score
 
                     tma_stage = (tma_stage + 1) % self.num_stages
                     if tma_stage == 0:
@@ -414,6 +439,8 @@ class IndexDecodeScoreKernel:
         max_decode_query_len: int,
         split_k: int,
         head_dim: int = 128,
+        cp_size: int = 1,
+        cp_rank: int = 0,
     ):
         bs = cute.sym_int()
         total_tokens = cute.sym_int()
@@ -436,6 +463,8 @@ class IndexDecodeScoreKernel:
             max_decode_query_len,
             split_k,
             head_dim,
+            cp_size,
+            cp_rank,
         )
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
@@ -462,7 +491,16 @@ def minimax_m3_index_decode_score_cutedsl(
     decode_query_len: int,
     max_decode_query_len: int,
     score_out: torch.Tensor,
+    *,
+    cp_size: int = 1,
+    cp_rank: int = 0,
 ) -> torch.Tensor:
+    """Write per-block max scores into ``score_out`` ``[H, T, tiles]``.
+
+    ``cp_size > 1`` (decode context parallelism, ``indexer_decode_cp.py``):
+    score only the blocks ``j * cp_size + cp_rank`` and write block ``j``'s
+    score to column ``j``. The defaults are the single-rank kernel.
+    """
     if idx_q.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
         raise TypeError("CuteDSL index decode score supports BF16 and FP8 E4M3 only")
     total_tokens, num_heads, head_dim = idx_q.shape
@@ -481,6 +519,8 @@ def minimax_m3_index_decode_score_cutedsl(
         max_decode_query_len,
         split_k,
         head_dim,
+        cp_size,
+        cp_rank,
     )
     kernel(idx_q, index_kv_cache, block_table, score, seq_lens)
     return score

@@ -328,6 +328,8 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_MINIMAX_M3_INDEXER_DECODE_CP: bool = False
+    VLLM_MINIMAX_M3_INDEXER_DECODE_CP_MIN_TOKENS: int = 32
 
 
 def get_default_cache_root():
@@ -2246,6 +2248,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each op additionally checks its own shape / dtype constraints and falls
     # back to the eager path when they do not hold.
     "VLLM_ENABLE_HPC_OPS": lambda: bool(int(os.getenv("VLLM_ENABLE_HPC_OPS", "0"))),
+    # MiniMax-M3 MSA indexer (Blackwell), decode-only batches at TP 4 or 8:
+    # if set to 1, split the index-K blocks across the TP ranks instead of
+    # replicating the full-context scoring on every rank. Each rank scores all
+    # index heads over 1/TP of the blocks; the ranks then merge an exact
+    # top-k. Same selection as the default path except at exact score ties
+    # straddling the k-th place (the lower block id wins).
+    "VLLM_MINIMAX_M3_INDEXER_DECODE_CP": lambda: bool(
+        int(os.getenv("VLLM_MINIMAX_M3_INDEXER_DECODE_CP", "0"))
+    ),
+    # Smallest decode token count (requests x (1 + speculative tokens)) that
+    # takes the VLLM_MINIMAX_M3_INDEXER_DECODE_CP path; smaller decode batches
+    # use the default path, where the two extra all-gathers do not pay off.
+    "VLLM_MINIMAX_M3_INDEXER_DECODE_CP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_MINIMAX_M3_INDEXER_DECODE_CP_MIN_TOKENS", "32")
+    ),
     # Whether to skip version suffix when building package
     "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
         int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
