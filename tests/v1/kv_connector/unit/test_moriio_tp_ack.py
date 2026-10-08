@@ -492,3 +492,11 @@ def test_requested_cudagraph_mode_is_never_overridden():
     assert (
         MoRIIOConnector.requires_piecewise_for_cudagraph({"read_mode": False}) is False
     )
+
+
+@pytest.mark.parametrize("mode", [MoRIIOMode.READ, MoRIIOMode.WRITE])
+def test_read_requires_completion_of_draft_kv_writes(mode):
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.mode = mode
+
+    assert connector.requires_full_step_completion is (mode == MoRIIOMode.READ)
