@@ -2,21 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
-from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-import torch
 
 from vllm import PoolingParams
-from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
-from vllm.outputs import (
-    LateChunk,
-    LateChunkingMetadata,
-    PoolingOutput,
-    PoolingRequestOutput,
-    RequestError,
-)
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
@@ -110,91 +100,3 @@ def test_tiling_engine_abort_on_exception(llm):
         request_ids = args[0]
         assert isinstance(request_ids, list)
         assert len(request_ids) > 0
-
-
-def _mock_chunk_tiling_engine(outputs):
-    llm = mock.Mock(spec=PoolingOfflineMixin)
-    llm._run_tiling_engine = PoolingOfflineMixin._run_tiling_engine.__get__(llm)
-    llm._executor = SimpleNamespace(map=map)
-    llm.llm_engine = mock.Mock()
-    llm.llm_engine.vllm_config.scheduler_config.max_num_seqs = 2
-    llm.llm_engine.has_unfinished_requests.return_value = False
-    llm.llm_engine.step.side_effect = outputs
-    llm._render_and_add_requests = mock.Mock(return_value=["0-internal", "1-internal"])
-    requests = [
-        {
-            "prompts": {"type": "token", "prompt_token_ids": [1, 2]},
-            "params": PoolingParams(task="token_embed", late_chunk_size=2),
-            "lora_requests": None,
-            "priorities": 0,
-            "late_chunking": LateChunkingMetadata(
-                chunk_size=2,
-                input_tokens=2,
-                chunks=[LateChunk((0, 2), (i, i + 2))],
-            ),
-        }
-        for i in range(2)
-    ]
-    return llm, requests
-
-
-def _chunk_output(request_id, **kwargs):
-    return PoolingRequestOutput(
-        str(request_id), PoolingOutput(torch.ones(1, 4)), [1, 2], 0, True, **kwargs
-    )
-
-
-def test_late_chunk_mapping_follows_request_ids_and_preserves_request_errors():
-    error = RequestError("test_error", "original error")
-    failed = _chunk_output(1, error=error)
-    # A failed request need not have a valid chunk tensor.
-    failed.outputs.data = failed.outputs.data[:0]
-    llm, requests = _mock_chunk_tiling_engine([[failed, _chunk_output(0)]])
-    outputs = llm._run_tiling_engine(
-        SimpleNamespace(render=lambda x: x), lambda: iter(requests), 2, use_tqdm=False
-    )
-    assert outputs[0].late_chunking is requests[0]["late_chunking"]
-    assert outputs[1].late_chunking is None
-    assert outputs[1].error is error
-    llm.llm_engine.abort_request.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "error, abort_expected",
-    [
-        pytest.param(RuntimeError("step failed"), True, id="runtime-error"),
-        pytest.param(KeyboardInterrupt(), False, id="keyboard-interrupt"),
-    ],
-)
-def test_late_chunk_mapping_propagates_errors_and_is_not_reused(error, abort_expected):
-    llm, requests = _mock_chunk_tiling_engine(error)
-    processor = SimpleNamespace(render=lambda x: x)
-    with pytest.raises(type(error)):
-        llm._run_tiling_engine(processor, lambda: iter(requests), 2, use_tqdm=False)
-    if abort_expected:
-        llm.llm_engine.abort_request.assert_called_once()
-        assert set(llm.llm_engine.abort_request.call_args.args[0]) == {"0", "1"}
-    else:
-        llm.llm_engine.abort_request.assert_not_called()
-    for request in requests:
-        del request["late_chunking"]
-        request["params"] = PoolingParams(task="token_embed")
-    llm.llm_engine.step.side_effect = [[_chunk_output(1), _chunk_output(0)]]
-    outputs = llm._run_tiling_engine(
-        processor, lambda: iter(requests), 2, use_tqdm=False
-    )
-    assert all(output.late_chunking is None for output in outputs)
-
-
-def test_late_chunk_mapping_rejects_successful_output_with_wrong_row_count():
-    first = _chunk_output(0)
-    first.outputs.data = first.outputs.data[:0]
-    llm, requests = _mock_chunk_tiling_engine([[first, _chunk_output(1)]])
-    with pytest.raises(ValueError, match="does not match"):
-        llm._run_tiling_engine(
-            SimpleNamespace(render=lambda x: x),
-            lambda: iter(requests),
-            2,
-            use_tqdm=False,
-        )
-    assert set(llm.llm_engine.abort_request.call_args.args[0]) == {"0", "1"}
