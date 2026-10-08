@@ -16,7 +16,7 @@ import torch
 
 import vllm.v1.hisparse.binding as attn_utils_module
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
@@ -226,6 +226,47 @@ def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
         is None
     )
     assert unsupported([[target, never]], config, 1) == ("_DraftBackend", None)
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [0, 7])
+def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
+    num_speculative_tokens,
+):
+    """Prefill must fall back without disabling adaptive verification graphs."""
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseTRTLLMBackend,
+    )
+
+    backend = FlashInferMLASparseTRTLLMBackend
+    config: Any = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens, parallel_drafting=False
+        ),
+        use_v2_model_runner=True,
+    )
+    spec = MLAAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+    )
+    group = AttentionGroup(backend, ["target"], spec, 0)
+    group.metadata_builders = [object.__new__(backend.get_builder_cls())]
+    groups = [[group]]
+    support = get_attn_cg_support(groups, config)
+    compilation = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+    mode = compilation.resolve_cudagraph_mode_and_sizes(
+        support.min_cg_support,
+        support.min_cg_attn_backend,
+        uniform_decode_query_len=1 + num_speculative_tokens,
+        use_v2_model_runner=True,
+    )
+    assert mode.mixed_mode() != CUDAGraphMode.FULL
+    assert mode.decode_mode() == CUDAGraphMode.FULL
+    assert get_query_lens_mismatch_unsupported_backend(groups) is None
+    unsupported = attn_utils.get_varlen_cudagraph_unsupported_backend
+    assert unsupported(groups, config, 1 + num_speculative_tokens) is None
+    assert unsupported(groups, config, 2 + num_speculative_tokens) == (
+        backend.__name__,
+        1 + num_speculative_tokens,
+    )
 
 
 def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyPatch):

@@ -46,6 +46,7 @@ class BeamSearchOnlineMixin(ABC):
         temperature = params.temperature
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
+        self.engine_client.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -71,6 +72,7 @@ class BeamSearchOnlineMixin(ABC):
             logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
+            watermarking=False,
             detokenize=False,
         )
         scoring_params = split_beam_scoring_params(sampling_params, allowed_token_ids)

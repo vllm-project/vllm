@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 from vllm import RequestOutput, TextPrompt, TokensPrompt
-from vllm.entrypoints.offline_utils import OfflineInferenceMixin
+from vllm.entrypoints.common.offline import OfflineInferenceMixin
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -89,7 +89,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             SamplingParams(
                 allowed_token_ids=request_allowed_token_ids
             )._validate_allowed_token_ids(self.model_config)
-        self.llm_engine.vllm_config._check_watermarking_unsupported(beam_search=True)
+        self.llm_engine.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -127,6 +127,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
+            watermarking=False,
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
@@ -501,6 +502,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 logprobs=base_params.logprobs,
                 max_tokens=1,
                 temperature=base_params.temperature,
+                watermarking=base_params.watermarking,
                 detokenize=False,
                 allowed_token_ids=(
                     allowed_ids

@@ -300,16 +300,20 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return not name.startswith("mtp.") and not any(
+            key in name for key in ["embed_tokens", "lm_head"]
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names(weights):
             for name, weight in weights:
+                if self.is_unused_checkpoint_weight(name):
+                    continue
                 if name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
-                elif any(key in name for key in ["embed_tokens", "lm_head"]):
-                    if "embed_tokens" in name:
-                        name = name.replace("language_model.", "")
-                else:
-                    continue
+                elif "embed_tokens" in name:
+                    name = name.replace("language_model.", "")
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
