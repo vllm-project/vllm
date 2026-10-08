@@ -583,7 +583,6 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "EmbeddingGemma2Model": _HfExamplesInfo(
         "google/embeddinggemma-2",
-        min_transformers_version="5.19.0",
         is_available_online=False,
     ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
