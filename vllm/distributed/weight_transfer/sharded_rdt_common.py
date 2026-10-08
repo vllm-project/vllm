@@ -310,11 +310,12 @@ class RdtRouter:
             keys, consumer_id=self.consumer_id, seq=seq
         )
 
-    def free_group(self, group_idx: int) -> list:
-        """Signal the group done at every producer holding any of its names."""
+    def free_group(self, group_idx: int, sync_idx: int | None = None) -> list:
+        """Signal the group done at every producer holding any of its names,
+        tagged with the sync it belongs to (``None``: untagged)."""
         self._bound()
         return [
-            self._actors[p].free_group.remote(group_idx)
+            self._actors[p].free_group.remote(group_idx, sync_idx)
             for p in self.group_owners(group_idx)
         ]
 
