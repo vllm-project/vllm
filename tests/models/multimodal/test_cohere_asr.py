@@ -22,11 +22,11 @@ class _ReferenceRelPositionMultiHeadAttention(RelPositionMultiHeadAttention):
 
         assert pos_emb is not None
         n_batch_pos = pos_emb.size(0)
-        p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
+        p = self.relative_k_proj(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
         p = p.transpose(1, 2)
 
-        q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
-        q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
+        q_with_bias_u = (q + self.bias_u).transpose(1, 2)
+        q_with_bias_v = (q + self.bias_v).transpose(1, 2)
 
         matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
         matrix_bd = self.rel_shift(matrix_bd)

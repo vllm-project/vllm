@@ -215,6 +215,7 @@ class Qwen2Decoder2Encoder(nn.Module):
 
     def __init__(
         self,
+        sam_encoder: nn.Module,
         decoder_layer: int,
         hidden_dimension: int,
         num_attention_heads: int,
@@ -223,7 +224,8 @@ class Qwen2Decoder2Encoder(nn.Module):
     ):
         super().__init__()
 
-        self.model = CustomQwen2Decoder(
+        self.sam_encoder = sam_encoder
+        self.vision_encoder = CustomQwen2Decoder(
             decoder_layer=decoder_layer,
             hidden_dimension=hidden_dimension,
             num_attention_heads=num_attention_heads,
@@ -231,18 +233,19 @@ class Qwen2Decoder2Encoder(nn.Module):
             intermediate_size=intermediate_size,
             attn_implementation="sdpa",
         )
-        self.query_768 = nn.Embedding(144, hidden_dimension)
-        self.query_1024 = nn.Embedding(256, hidden_dimension)
+        self.query_768_resolution = nn.Embedding(144, hidden_dimension)
+        self.query_1024_resolution = nn.Embedding(256, hidden_dimension)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.sam_encoder(x)
         x = x.flatten(2).transpose(1, 2)
 
         bs, n_query, _ = x.shape
 
         if n_query == 144:
-            param_img = self.query_768.weight
+            param_img = self.query_768_resolution.weight
         elif n_query == 256:
-            param_img = self.query_1024.weight
+            param_img = self.query_1024_resolution.weight
 
         batch_query_imgs = param_img.unsqueeze(0).expand(
             bs, -1, -1
@@ -258,7 +261,7 @@ class Qwen2Decoder2Encoder(nn.Module):
             dim=1,
         )
 
-        y = self.model(x_combined, token_type_ids)[0]
+        y = self.vision_encoder(x_combined, token_type_ids)[0]
 
         y = y[:, n_query:, :]  # causal flow query
 
@@ -266,6 +269,7 @@ class Qwen2Decoder2Encoder(nn.Module):
 
 
 def build_qwen2_decoder_as_encoder(
+    sam_encoder: nn.Module,
     decoder_layer=24,
     hidden_dimension=896,
     num_attention_heads=14,
@@ -273,6 +277,7 @@ def build_qwen2_decoder_as_encoder(
     intermediate_size=4864,
 ):
     decoder_as_encoder = Qwen2Decoder2Encoder(
+        sam_encoder=sam_encoder,
         decoder_layer=decoder_layer,
         hidden_dimension=hidden_dimension,
         num_attention_heads=num_attention_heads,

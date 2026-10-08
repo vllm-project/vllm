@@ -164,18 +164,49 @@ class WeightsMapper:
                 shard_data.shard_id = one_shard_id
                 yield out_name, shard_data
 
+    def map_regex(self, pattern: str) -> str:
+        """Apply the renamings to a regex written against checkpoint names.
+
+        Only renamings between plain names are supported. Their segments must
+        appear whole in `pattern`, except that leading segments shared by the old
+        and new name may instead be covered by a preceding `.*` or `.+`."""
+        literal = re.compile(r"\^?([\w.]|\\\.)+\$?")
+        unescape = lambda s: s.strip("^$").replace("\\.", ".").strip(".")
+        join = lambda segments: r"\\?\.".join(map(re.escape, segments))
+        for renaming in self.orig_to_new_renaming:
+            if len(renaming.source_patterns) != 1 or len(renaming.target_patterns) != 1:
+                continue
+            source, target = renaming.source_patterns[0], renaming.target_patterns[0]
+            if not (literal.fullmatch(source) and literal.fullmatch(target)):
+                continue
+            old, new = unescape(source).split("."), unescape(target).split(".")
+            shared = 0
+            while shared < min(len(old), len(new)) - 1 and old[shared] == new[shared]:
+                shared += 1
+            full = rf"(?<![\w]){join(old)}(?![\w])"
+            pattern = re.sub(full, r"\\.".join(new), pattern)
+            if shared:
+                after_wildcard = rf"(?<=\.[*+]){join(old[shared:])}(?![\w])"
+                pattern = re.sub(after_wildcard, r"\\.".join(new[shared:]), pattern)
+        return pattern
+
+    def _map_target(self, name: str) -> str | None:
+        if name.startswith("re:"):
+            return f"re:{self.map_regex(name[3:])}"
+        return self._map_name(name)
+
     def apply_list(self, values: list[str]) -> list[str]:
         return [
             out_name
             for name in values
-            if (out_name := self._map_name(name)) is not None
+            if (out_name := self._map_target(name)) is not None
         ]
 
     def apply_dict(self, values: dict[str, Any]) -> dict[str, Any]:
         return {
             out_name: value
             for name, value in values.items()
-            if (out_name := self._map_name(name)) is not None
+            if (out_name := self._map_target(name)) is not None
         }
 
     def get_rename_mapper(self) -> "WeightsMapper":
@@ -215,13 +246,12 @@ def get_checkpoint_renaming_mapper(hf_config: "PreTrainedConfig") -> WeightsMapp
     )
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
-    auto_map = getattr(hf_config, "auto_map", None) or {}
-    custom = {r.rsplit(".", 1)[-1] for r in auto_map.values() if isinstance(r, str)}
     archs = hf_config.architectures or []
     model_type = hf_config.model_type
-    # Like Transformers, only apply the legacy renamings to custom models
+    # vLLM runs its own implementation even when the config is custom code, so
+    # only the model type decides which renamings apply
     transforms = get_checkpoint_conversion_mapping("legacy")
-    if model_type not in CONFIG_MAPPING_NAMES or any(a in custom for a in archs):
+    if model_type not in CONFIG_MAPPING_NAMES:
         archs = []
     else:
         mapping = get_checkpoint_conversion_mapping(model_type) or []

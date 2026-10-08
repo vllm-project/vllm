@@ -6,6 +6,7 @@ import typing
 from collections.abc import Callable, Iterable
 from typing import Any
 
+import regex as re
 import torch
 from torch import nn
 
@@ -861,6 +862,21 @@ class Step3p5Model(nn.Module):
                         fallback_loader(param, loaded_weight)
                         loaded_params.add(local_name)
         return loaded_params
+
+
+# Transformers renames Step-3.7 checkpoints but not Step-3.5 ones, which this model
+# and its quantized variants are written for
+STEP3P7_TO_STEP3P5_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        re.compile(r"\.mlp\.experts\.down_proj$"): ".moe.down_proj.weight",
+        re.compile(r"\.mlp\.experts\.down_proj_scale_inv$"): (
+            ".moe.down_proj.weight_scale_inv"
+        ),
+        re.compile(r"\.mlp\.gate\.weight$"): ".moe.gate.weight",
+        re.compile(r"\.mlp\.gate\.e_score_correction_bias$"): ".moe.router_bias",
+        re.compile(r"\.mlp\.shared_experts\."): ".share_expert.",
+    }
+)
 
 
 class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):

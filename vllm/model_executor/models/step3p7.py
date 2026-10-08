@@ -11,7 +11,8 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 from .interfaces import supports_pp
 from .step3_vl import Step3VLForConditionalGeneration
-from .step_vl import PerceptionEncoder
+from .step3p5 import STEP3P7_TO_STEP3P5_MAPPER
+from .step_vl import PERCEPTION_ENCODER_QKV_MAPPER, PerceptionEncoder
 from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
 from .vision import run_dp_sharded_vision_model
 
@@ -19,23 +20,22 @@ logger = init_logger(__name__)
 
 
 class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "model.vision_model.": "vision_model.",
-            "model.vit_large_projector.": "vit_large_projector.",
-            "model.vit_large_projector": "vit_large_projector",
-            "model.language_model.": "language_model.model.",
-            "model.language_model": "language_model.model",
-            "model.": "language_model.model.",
-            "lm_head.": "language_model.lm_head.",
-            "lm_head": "language_model.lm_head",
-        },
-        orig_to_new_substr={
-            ".attn.in_proj_weight": ".attn.qkv_proj.weight",
-            ".attn.in_proj_bias": ".attn.qkv_proj.bias",
-            ".mlp.c_fc": ".mlp.fc1",
-            ".mlp.c_proj": ".mlp.fc2",
-        },
+    hf_to_vllm_mapper = (
+        PERCEPTION_ENCODER_QKV_MAPPER
+        | STEP3P7_TO_STEP3P5_MAPPER
+        | WeightsMapper(
+            orig_to_new_prefix={
+                "model.vision_model": "vision_model",
+                "model.multi_modal_projector": "multi_modal_projector",
+                "model.language_model.": "language_model.model.",
+                "lm_head": "language_model.lm_head",
+                # Quantization ignore lists that Transformers does not rename
+                "model.vit_large_projector": "multi_modal_projector",
+                "vit_large_projector": "multi_modal_projector",
+                "model.embed_tokens": "language_model.model.embed_tokens",
+                "model.norm": "language_model.model.norm",
+            }
+        )
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -56,13 +56,13 @@ class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
-            self.vit_large_projector = ColumnParallelLinear(
+            self.multi_modal_projector = ColumnParallelLinear(
                 config.vision_config.width * 4,
                 config.text_config.hidden_size,
                 bias=config.projector_bias,
                 gather_output=True,
                 quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "vit_large_projector"),
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
                 disable_tp=self.use_data_parallel,
             )
 
@@ -89,5 +89,5 @@ class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
         return self.vision_model(input_tensor)
 
     def _process_image_features(self, image_features: torch.Tensor) -> torch.Tensor:
-        image_features, _ = self.vit_large_projector(image_features)
+        image_features, _ = self.multi_modal_projector(image_features)
         return image_features

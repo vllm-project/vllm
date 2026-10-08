@@ -5,6 +5,7 @@
 from collections.abc import Callable
 from functools import partial
 
+import regex as re
 import torch
 from einops import rearrange, repeat
 from torch import nn
@@ -134,16 +135,6 @@ class PerceptionEncoderRope2D(nn.Module):
         return q, k
 
 
-class PerceptionEncoderLayerScale(nn.Module):
-    def __init__(self, dim, init_values=1e-5, inplace=False):
-        super().__init__()
-        self.inplace = inplace
-        self.gamma = nn.Parameter(init_values * torch.ones(dim))
-
-    def forward(self, x):
-        return x.mul_(self.gamma) if self.inplace else x * self.gamma
-
-
 class PerceptionEncoderMLP(nn.Module):
     def __init__(
         self,
@@ -266,27 +257,21 @@ class PerceptionEncoderVisionBlock(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.attn = PerceptionEncoderVisionAttention(
+        self.self_attn = PerceptionEncoderVisionAttention(
             d_model,
             n_head,
             max_grid_height=max_grid_height,
             max_grid_width=max_grid_width,
             use_cls_token=use_cls_token,
             quant_config=quant_config,
-            prefix=f"{prefix}.attn",
+            prefix=f"{prefix}.self_attn",
         )
-        self.ls_1 = (
-            PerceptionEncoderLayerScale(d_model, ls_init_value)
-            if ls_init_value is not None
-            else nn.Identity()
-        )
-        self.ls_2 = (
-            PerceptionEncoderLayerScale(d_model, ls_init_value)
-            if ls_init_value is not None
-            else nn.Identity()
-        )
-        self.ln_1 = norm_layer(d_model)
-        self.ln_2 = norm_layer(d_model)
+        self.lambda_1 = self.lambda_2 = None
+        if ls_init_value is not None:
+            self.lambda_1 = nn.Parameter(ls_init_value * torch.ones(d_model))
+            self.lambda_2 = nn.Parameter(ls_init_value * torch.ones(d_model))
+        self.layernorm_before = norm_layer(d_model)
+        self.layernorm_after = norm_layer(d_model)
         hidden_dim = int(d_model * mlp_ratio)
         self.mlp = PerceptionEncoderMLP(
             d_model,
@@ -297,53 +282,31 @@ class PerceptionEncoderVisionBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, grid_hw: tuple[int, int]):
-        x = x + self.ls_1(self.attn(self.ln_1(x), grid_hw=grid_hw))
-        x = x + self.ls_2(self.mlp(self.ln_2(x)))
-        return x
+        attn_out = self.self_attn(self.layernorm_before(x), grid_hw=grid_hw)
+        if self.lambda_1 is not None:
+            attn_out = attn_out * self.lambda_1
+        x = x + attn_out
+        mlp_out = self.mlp(self.layernorm_after(x))
+        if self.lambda_2 is not None:
+            mlp_out = mlp_out * self.lambda_2
+        return x + mlp_out
 
 
-class PerceptionEncoderVisionTransformer(nn.Module):
-    def __init__(
-        self,
-        width: int,
-        layers: int,
-        heads: int,
-        max_grid_height: int,
-        max_grid_width: int,
-        mlp_ratio: float = 4.0,
-        ls_init_value: float | None = None,
-        act_layer: Callable = nn.GELU,
-        norm_layer: Callable = nn.LayerNorm,
-        use_cls_token: bool = False,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
+class PerceptionEncoderEmbeddings(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        self.width = width
-        self.layers = layers
-        self.resblocks = nn.ModuleList(
-            [
-                PerceptionEncoderVisionBlock(
-                    d_model=width,
-                    n_head=heads,
-                    max_grid_height=max_grid_height,
-                    max_grid_width=max_grid_width,
-                    mlp_ratio=mlp_ratio,
-                    ls_init_value=ls_init_value,
-                    act_layer=act_layer,
-                    norm_layer=norm_layer,
-                    use_cls_token=use_cls_token,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.resblocks.{i}",
-                )
-                for i in range(layers)
-            ]
+        self.patch_embedding = Conv2dLayer(
+            in_channels=3,
+            out_channels=config.width,
+            kernel_size=config.patch_size,
+            stride=config.patch_size,
+            bias=False,
         )
-
-    def forward(self, x: torch.Tensor, grid_hw: tuple[int, int]):
-        for block in self.resblocks:
-            x = block(x, grid_hw=grid_hw)
-        return x
+        if config.use_abs_posemb:
+            grid_size = config.image_size // config.patch_size
+            self.position_embedding = nn.Embedding(
+                int(config.use_cls_token) + grid_size**2, config.width
+            )
 
 
 class PerceptionEncoder(nn.Module):
@@ -361,7 +324,6 @@ class PerceptionEncoder(nn.Module):
         self.output_dim = config.output_dim or config.width
         self.heads = config.heads
         self.width = config.width
-        self.layers = config.layers
 
         self.use_abs_posemb = config.use_abs_posemb
         self.use_cls_token = config.use_cls_token
@@ -370,36 +332,36 @@ class PerceptionEncoder(nn.Module):
             raise ValueError("use_rope2d must be True")
         self.image_size = config.image_size
 
-        self.conv1 = Conv2dLayer(
-            in_channels=3,
-            out_channels=config.width,
-            kernel_size=config.patch_size,
-            stride=config.patch_size,
-            bias=False,
+        self.embeddings = PerceptionEncoderEmbeddings(config)
+        self.pre_layernorm = (
+            norm_layer(config.width) if config.use_ln_pre else nn.Identity()
         )
-
-        self.ln_pre = norm_layer(config.width) if config.use_ln_pre else nn.Identity()
         self.ln_post = norm_layer(self.width) if config.use_ln_post else nn.Identity()
 
-        self.transformer = PerceptionEncoderVisionTransformer(
-            config.width,
-            config.layers,
-            config.heads,
-            max_grid_height=self.image_size // self.patch_size,
-            max_grid_width=self.image_size // self.patch_size,
-            mlp_ratio=config.mlp_ratio,
-            ls_init_value=config.ls_init_value,
-            act_layer=act_layer,
-            norm_layer=norm_layer,
-            use_cls_token=self.use_cls_token,
-            quant_config=quant_config,
-            prefix=f"{prefix}.transformer",
+        grid_size = self.image_size // self.patch_size
+        self.layers = nn.ModuleList(
+            [
+                PerceptionEncoderVisionBlock(
+                    d_model=config.width,
+                    n_head=config.heads,
+                    max_grid_height=grid_size,
+                    max_grid_width=grid_size,
+                    mlp_ratio=config.mlp_ratio,
+                    ls_init_value=config.ls_init_value,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                    use_cls_token=self.use_cls_token,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{i}",
+                )
+                for i in range(config.layers)
+            ]
         )
 
-        self.vit_downsampler1 = Conv2dLayer(
+        self.downsampler1 = Conv2dLayer(
             config.width, config.width * 2, kernel_size=3, stride=2, padding=1
         )
-        self.vit_downsampler2 = Conv2dLayer(
+        self.downsampler2 = Conv2dLayer(
             config.width * 2, config.width * 4, kernel_size=3, stride=2, padding=1
         )
 
@@ -409,20 +371,13 @@ class PerceptionEncoder(nn.Module):
             )
 
         if self.use_abs_posemb:
-            self.posemb_grid_size = self.image_size // self.patch_size
-            self.positional_embedding = nn.Parameter(
-                (self.width**-0.5)
-                * torch.randn(
-                    int(self.use_cls_token) + self.posemb_grid_size**2,
-                    self.width,
-                )
-            )
+            self.posemb_grid_size = grid_size
 
     def sample_abs_posemb(self, grid_h: int, grid_w: int):
+        pos_embed = self.embeddings.position_embedding.weight
         if self.posemb_grid_size == grid_h and self.posemb_grid_size == grid_w:
-            return self.positional_embedding[None, ...]
+            return pos_embed[None, ...]
 
-        pos_embed = self.positional_embedding
         if self.use_cls_token:
             cls_token_embed, pos_embed = pos_embed[:1], pos_embed[1:]
 
@@ -445,7 +400,7 @@ class PerceptionEncoder(nn.Module):
         batch, _, h, w = x.shape
         grid_h, grid_w = h // self.patch_size, w // self.patch_size
 
-        x = self.conv1(x)
+        x = self.embeddings.patch_embedding(x)
         x = x.permute(0, 2, 3, 1).reshape(batch, -1, self.width)
 
         if self.use_cls_token:
@@ -456,8 +411,9 @@ class PerceptionEncoder(nn.Module):
         if self.use_abs_posemb:
             x = x + self.sample_abs_posemb(grid_h, grid_w)
 
-        x = self.ln_pre(x)
-        x = self.transformer(x, grid_hw=(grid_h, grid_w))
+        x = self.pre_layernorm(x)
+        for layer in self.layers:
+            x = layer(x, grid_hw=(grid_h, grid_w))
         x = self.ln_post(x)
 
         if self.use_cls_token:
@@ -472,24 +428,46 @@ class PerceptionEncoder(nn.Module):
         x = x.transpose(2, 1).contiguous()
         x = x.view(B, C, T, T)
 
-        x = self.vit_downsampler1(x)
-        x = self.vit_downsampler2(x)
+        x = self.downsampler1(x)
+        x = self.downsampler2(x)
 
         B, C, T, T = x.shape
         return x.view(B, -1, T * T).transpose(1, 2)
 
 
+# Transformers splits the fused attention input projection, vLLM keeps it fused
+PERCEPTION_ENCODER_QKV_MAPPER = WeightsMapper(
+    orig_to_new_substr={
+        ".self_attn.in_proj_weight": ".self_attn.qkv_proj.weight",
+        ".self_attn.in_proj_bias": ".self_attn.qkv_proj.bias",
+    }
+)
+
+
 class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
-    hf_to_vllm_mapper = WeightsMapper(
+    # The "step_robotics" model type is not in Transformers, so its checkpoints
+    # are not renamed
+    hf_to_vllm_mapper = PERCEPTION_ENCODER_QKV_MAPPER | WeightsMapper(
         orig_to_new_prefix={
+            "vision_model.conv1.": "vision_model.embeddings.patch_embedding.",
+            "vision_model.positional_embedding": (
+                "vision_model.embeddings.position_embedding.weight"
+            ),
+            "vision_model.ln_pre.": "vision_model.pre_layernorm.",
+            "vision_model.transformer.resblocks.": "vision_model.layers.",
+            "vision_model.vit_downsampler": "vision_model.downsampler",
             "model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
         },
-        orig_to_new_substr={
-            ".attn.in_proj_weight": ".attn.qkv_proj.weight",
-            ".attn.in_proj_bias": ".attn.qkv_proj.bias",
-            ".mlp.c_fc": ".mlp.fc1",
-            ".mlp.c_proj": ".mlp.fc2",
+        orig_to_new_regex={
+            re.compile(r"\.attn\.(in_proj_weight|in_proj_bias|out_proj\.)"): (
+                r".self_attn.\1"
+            ),
+            re.compile(r"\.ls_(\d)\.gamma$"): r".lambda_\1",
+            re.compile(r"\.ln_1\."): ".layernorm_before.",
+            re.compile(r"\.ln_2\."): ".layernorm_after.",
+            re.compile(r"\.mlp\.c_fc\."): ".mlp.fc1.",
+            re.compile(r"\.mlp\.c_proj\."): ".mlp.fc2.",
         },
     )
 

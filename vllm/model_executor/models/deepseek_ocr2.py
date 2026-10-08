@@ -6,6 +6,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
@@ -59,7 +60,6 @@ from ...transformers_utils.processors.deepseek_ocr import count_tiles
 from .deepencoder import ImageEncoderViT
 from .deepencoder2 import build_qwen2_decoder_as_encoder
 from .deepseek_ocr import DeepseekOCRImagePixelInputs
-from .deepseek_vl2 import MlpProjector
 
 # The image token id may be various
 IMAGE_SIZE = 768  # different from deepseek-ocr
@@ -232,16 +232,35 @@ class DeepseekOCR2MultiModalProcessor(
     dummy_inputs=DeepseekOCR2DummyInputsBuilder,
 )
 class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    # The SAM encoder keeps its original names because DeepSeek-OCR shares it
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            # map prefix for language backbone
-            "model.embed_tokens.": "language_model.model.embed_tokens.",
-            "model.layers.": "language_model.model.layers.",
-            "model.norm.": "language_model.model.norm.",
-            "lm_head.": "language_model.lm_head.",
-            # remove "model." prefix for other components
-            "model.": "",
+        orig_to_new_regex={
+            re.compile(rf"^model\.vision_tower\.sam_encoder\.{old}\b"): (
+                f"vision_tower.sam_encoder.{new}"
+            )
+            for old, new in {
+                r"layers\.(\d+)\.layer_norm(\d)": r"blocks.\1.norm\2",
+                "layers": "blocks",
+                r"patch_embed\.projection": "patch_embed.proj",
+                r"neck\.conv1": "neck.0",
+                r"neck\.layer_norm1": "neck.1",
+                r"neck\.conv2": "neck.2",
+                r"neck\.layer_norm2": "neck.3",
+                r"proj\.conv1": "net_2",
+                r"proj\.conv2": "net_3",
+            }.items()
         }
+        | {
+            # CustomQwen2Decoder wraps the Transformers model
+            re.compile(r"^model\.vision_tower\.vision_encoder\."): (
+                "vision_tower.vision_encoder.model."
+            )
+        },
+        orig_to_new_prefix={
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+            "model.": "",
+        },
     )
 
     @classmethod
@@ -268,7 +287,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
 
         with self._mark_tower_model(vllm_config, "image"):
-            self.sam_model = ImageEncoderViT(
+            sam_encoder = ImageEncoderViT(
                 depth=12,
                 embed_dim=768,
                 img_size=1024,
@@ -283,9 +302,11 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
                 out_chans=256,
                 last_conv_output=896,
             )
-            self.qwen2_model = build_qwen2_decoder_as_encoder()
+            self.vision_tower = build_qwen2_decoder_as_encoder(sam_encoder)
 
-            self.projector = MlpProjector(self.projector_config)
+            self.multi_modal_projector = nn.Linear(
+                self.projector_config.input_dim, self.projector_config.n_embed
+            )
             self.tile_tag = config.tile_tag
             self.global_view_pos = config.global_view_pos
 
@@ -293,8 +314,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
             n_embed = self.projector_config.n_embed
             embed_std = 1 / torch.sqrt(torch.tensor(n_embed, dtype=torch.float32))
             if self.tile_tag == "2D":
-                # This is a typo in original implementation
-                self.view_seperator = nn.Parameter(torch.randn(n_embed) * embed_std)
+                self.view_separator = nn.Parameter(torch.randn(n_embed) * embed_std)
             else:
                 raise ValueError(
                     f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
@@ -333,10 +353,9 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         )
 
     def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
-        global_features_1 = self.sam_model(image_tensor)
-        global_features_2 = self.qwen2_model(global_features_1)
+        global_features = self.vision_tower(image_tensor)
 
-        features = self.projector(global_features_2)
+        features = self.multi_modal_projector(global_features)
 
         _, hw, dim = features.shape
 
@@ -346,10 +365,9 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         if torch.sum(patches).item() == 0:
             return None
 
-        local_features = self.sam_model(patches)
-        local_features = self.qwen2_model(local_features)
+        local_features = self.vision_tower(patches)
 
-        features = self.projector(local_features)
+        features = self.multi_modal_projector(local_features)
 
         _, _, dim = features.shape
 
@@ -375,12 +393,12 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
 
             if local_features is not None:
                 combined = torch.cat(
-                    [local_features, global_features, self.view_seperator[None, :]],
+                    [local_features, global_features, self.view_separator[None, :]],
                     dim=0,
                 )
             else:
                 combined = torch.cat(
-                    [global_features, self.view_seperator[None, :]], dim=0
+                    [global_features, self.view_separator[None, :]], dim=0
                 )
 
             images_in_this_batch.append(combined)
@@ -441,6 +459,6 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="projector",
-            tower_model=["sam_model", "qwen2_model"],
+            connector="multi_modal_projector",
+            tower_model="vision_tower",
         )
