@@ -746,9 +746,7 @@ class DiffusionGemmaRequestStates:
         self.constrained: dict[int, tuple[int, ...]] = {}
         self.step_allowed: torch.Tensor | None = None
         self._allowed_cache: dict[tuple[int, ...], torch.Tensor] = {}
-        # CPU mirrors for read-only slots, which never commit: every decode
-        # appearance is one denoise step, so the step before the cap is known
-        # without a sync and its self-conditioning matmul can be skipped.
+        # CPU mirrors for read-only slots, which never commit.
         self.max_steps_np = np.full(max_num_reqs, max_denoising_steps, dtype=np.int32)
         self.denoise_steps_np = np.zeros(max_num_reqs, dtype=np.int32)
         self.read_only_slots: set[int] = set()
