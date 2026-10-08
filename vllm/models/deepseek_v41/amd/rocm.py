@@ -207,6 +207,36 @@ def compute_global_topk_ragged_indices_and_indptr(
     block_size: int,
     is_valid_token: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # On gfx942 with VLLM_ROCM_MONO_DECODE=1, a decode batch of up to 16
+    # rows is packed with one launch instead of 4 (topk_pack.py). Other
+    # batches return None there and take the function below.
+    from vllm.models.deepseek_v41.amd import topk_pack
+
+    fused = topk_pack.pack(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
+    )
+    if fused is not None:
+        return fused
+    return _compute_global_topk_ragged_indices_and_indptr_old(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
+    )
+
+
+def _compute_global_topk_ragged_indices_and_indptr_old(
+    topk_indices: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    is_valid_token: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
     topk = topk_indices.shape[1]
@@ -318,6 +348,22 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBu
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
     ) -> DeepseekV4ROCMAiterSparseSWAMetadata:
+        # On gfx942 with VLLM_ROCM_MONO_DECODE=1, a decode batch gets this
+        # metadata from one launch instead of 8 launches per SWA group
+        # (swa_decode_meta.py). Other batches return None there and take
+        # the build below.
+        from vllm.models.deepseek_v41.amd import swa_decode_meta
+
+        fused = swa_decode_meta.build(
+            self,
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build,
+            replay_start,
+            DeepseekV4ROCMAiterSparseSWAMetadata,
+        )
+        if fused is not None:
+            return fused
         base = super().build(
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
