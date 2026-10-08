@@ -316,6 +316,7 @@ steps:
   timeout_in_minutes: 30
   source_file_dependencies:
   - csrc/libtorch_stable/attention/
+  - csrc/core/vec_dtypes/
   - vllm/v1/attention
     # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
   - vllm/model_executor/layers/attention
@@ -335,6 +336,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - csrc/libtorch_stable/attention/
+      - csrc/core/vec_dtypes/
       - vllm/v1/attention
       - vllm/model_executor/layers/attention
       - tests/kernels/attention
