@@ -3212,6 +3212,8 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
         seq_lens=torch.tensor([5, 8], dtype=torch.int32),
         block_size=4,
         staging_block_capacity=4,
+        request_start=0,
+        tokens=slice(0, 0),
     )
 
     assert (plan.block_table[:, 2] == 0).all()
@@ -3231,7 +3233,12 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32)
     plan = build_hisparse_prefill_staging_plan(
-        block_table, seq_lens, block_size, staging_block_capacity=4
+        block_table,
+        seq_lens,
+        block_size,
+        staging_block_capacity=4,
+        request_start=0,
+        tokens=slice(0, 0),
     )
     # Two resident pages per host block; 0 entries are null (not resident).
     resident_table = torch.tensor(
@@ -3289,7 +3296,12 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows(
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32, device=device)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32, device=device)
     plan = build_hisparse_prefill_staging_plan(
-        block_table, seq_lens, block_size, staging_block_capacity=4
+        block_table,
+        seq_lens,
+        block_size,
+        staging_block_capacity=4,
+        request_start=0,
+        tokens=slice(0, 0),
     )
     resident_table = torch.tensor(
         [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]],
