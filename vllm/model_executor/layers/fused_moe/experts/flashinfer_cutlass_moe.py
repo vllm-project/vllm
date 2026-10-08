@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -29,10 +31,52 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
+    flashinfer_cutlass_fused_moe_workspace_size,
     has_flashinfer_cutlass_fused_moe,
 )
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _get_workspace_size_bytes(
+    max_num_tokens: int,
+    hidden_size: int,
+    intermediate_size: int,
+    global_num_experts: int,
+    topk: int,
+    input_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+    activation: MoEActivation,
+    tp_size: int,
+    tp_rank: int,
+    ep_size: int,
+    ep_rank: int,
+    use_deepseek_fp8_block_scale: bool,
+    use_w4_group_scaling: bool,
+    use_mxfp8_act_scaling: bool,
+    device: torch.device | str,
+) -> int:
+    return flashinfer_cutlass_fused_moe_workspace_size(
+        max_num_tokens=max_num_tokens,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_experts_total=global_num_experts,
+        top_k=topk,
+        x_dtype=input_dtype,
+        weight_dtype=weight_dtype,
+        output_dtype=output_dtype,
+        activation_type=activation_to_flashinfer_type(activation),
+        tp_size=tp_size,
+        tp_rank=tp_rank,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+        use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
+        use_w4_group_scaling=use_w4_group_scaling,
+        use_mxfp8_act_scaling=use_mxfp8_act_scaling,
+        device=device,
+    )
 
 
 def is_valid_flashinfer_cutlass_fused_moe(
@@ -90,6 +134,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self.tp_rank = moe_config.moe_parallel_config.tp_rank
         self.tp_size = moe_config.moe_parallel_config.tp_size
         self.out_dtype = moe_config.in_dtype
+        self.intermediate_size = moe_config.intermediate_size_per_partition
         self.use_dp = moe_config.moe_parallel_config.dp_size > 1
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel
@@ -205,6 +250,63 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def _workspace_size_bytes(
+        self,
+        max_num_tokens: int,
+        hidden_size: int,
+        global_num_experts: int,
+        topk: int,
+        activation: MoEActivation,
+    ) -> int:
+        quant_dtype = self.quant_config.quant_dtype
+        if self.expects_unquantized_inputs or quant_dtype is None:
+            input_dtype = self.out_dtype
+        elif quant_dtype == "nvfp4":
+            input_dtype = torch.uint8
+        elif quant_dtype == "mxfp8":
+            input_dtype = torch.float8_e4m3fn
+        else:
+            assert isinstance(quant_dtype, torch.dtype)
+            input_dtype = quant_dtype
+
+        weight_quant_dtype = self.quant_config.weight_quant_dtype
+        if weight_quant_dtype in ("mxfp4", "nvfp4"):
+            weight_dtype = torch.uint8
+        elif weight_quant_dtype is None:
+            weight_dtype = self.out_dtype
+        else:
+            assert isinstance(weight_quant_dtype, torch.dtype)
+            weight_dtype = weight_quant_dtype
+
+        if weight_quant_dtype == "nvfp4" or (
+            weight_quant_dtype == "mxfp4" and quant_dtype == "mxfp8"
+        ):
+            weight_dtype = torch.long
+
+        use_mxfp8_act_scaling = weight_quant_dtype == "mxfp4" and quant_dtype == "mxfp8"
+        use_w4_group_scaling = (
+            weight_quant_dtype == "mxfp4" and not use_mxfp8_act_scaling
+        )
+        return _get_workspace_size_bytes(
+            max_num_tokens,
+            hidden_size,
+            self.intermediate_size,
+            global_num_experts,
+            topk,
+            input_dtype,
+            weight_dtype,
+            self.out_dtype,
+            activation,
+            self.tp_size,
+            self.tp_rank,
+            self.ep_size,
+            self.ep_rank,
+            self.use_deepseek_fp8_block_scale,
+            use_w4_group_scaling,
+            use_mxfp8_act_scaling,
+            self.device,
+        )
+
     def workspace_shapes(
         self,
         M: int,
@@ -234,7 +336,15 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
           of each tuple must be the number of tokens.
         """
         workspace1 = (M, K)
-        workspace2 = (0,)
+        workspace_bytes = self._workspace_size_bytes(
+            M,
+            K,
+            global_num_experts,
+            topk,
+            activation,
+        )
+        dtype_size = self.out_dtype.itemsize
+        workspace2 = ((workspace_bytes + dtype_size - 1) // dtype_size,)
         # For NVFP4, the output is stored in a packed int8 format,
         # so the actual hidden dim is 2x the size of K here.
         output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
@@ -386,6 +496,9 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
+            workspace_buffer=(
+                workspace2.view(torch.uint8) if workspace2 is not None else None
+            ),
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
