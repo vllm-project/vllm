@@ -66,6 +66,9 @@ class Gemma4Speculator(TargetDependentARSpeculator):
             )
         self._setup_gemma4_kv_sharing(draft_model, target_attn_layer_names)
         self._share_embeddings(draft_model, target_model)
+        self.use_local_argmax_reduction = (
+            self.draft_logits is None and not self.use_acceptance_estimator
+        )
         return draft_model
 
     def _create_draft_vllm_config(self) -> VllmConfig:
