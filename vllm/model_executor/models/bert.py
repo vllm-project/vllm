@@ -371,12 +371,6 @@ class BertModel(nn.Module, SupportsQuant):
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     hf_to_vllm_mapper = WeightsMapper(
-        # Original google-bert checkpoints use the legacy `gamma`/`beta`
-        # LayerNorm names; rename to vLLM's `weight`/`bias`.
-        orig_to_new_substr={
-            "LayerNorm.gamma": "LayerNorm.weight",
-            "LayerNorm.beta": "LayerNorm.bias",
-        },
         orig_to_new_stacked={
             ".self.query": (".self.qkv_proj", "q"),
             ".self.key": (".self.qkv_proj", "k"),
@@ -919,9 +913,6 @@ class BertForMaskedLM(nn.Module):
             # Some checkpoints ship an explicit (tied) decoder bias; we load the
             # canonical ``cls.predictions.bias`` instead, so drop the duplicate.
             "cls.predictions.decoder.bias": None,
-            # Legacy LayerNorm affine names in the MLM head transform.
-            "cls.predictions.transform.LayerNorm.gamma": "mlm_head.layer_norm.weight",
-            "cls.predictions.transform.LayerNorm.beta": "mlm_head.layer_norm.bias",
             "cls.predictions.transform.LayerNorm": "mlm_head.layer_norm",
             "cls.predictions.transform.dense": "mlm_head.dense",
             "cls.predictions.decoder": "mlm_head.decoder",

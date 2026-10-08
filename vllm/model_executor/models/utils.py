@@ -205,30 +205,46 @@ def get_checkpoint_renaming_mapper(hf_config: "PreTrainedConfig") -> WeightsMapp
 
     These map the checkpoint's names to the current Transformers module names. The
     Transformers model is created on the meta device so that each sub-model's
-    renamings are scoped exactly as they are in Transformers."""
+    renamings are scoped exactly as they are in Transformers. If it cannot be
+    created, the unscoped renamings of the `model_type` are used instead."""
     import transformers
     from transformers.conversion_mapping import (
         WeightRenaming,
         get_checkpoint_conversion_mapping,
         get_model_conversion_mapping,
     )
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
     auto_map = getattr(hf_config, "auto_map", None) or {}
     custom = {r.rsplit(".", 1)[-1] for r in auto_map.values() if isinstance(r, str)}
-    archs = [a for a in hf_config.architectures or [] if a not in custom]
-    model_cls = next((c for a in archs if (c := getattr(transformers, a, None))), None)
+    archs = hf_config.architectures or []
+    model_type = hf_config.model_type
     # Like Transformers, only apply the legacy renamings to custom models
     transforms = get_checkpoint_conversion_mapping("legacy")
-    if model_cls is not None:
+    if model_type not in CONFIG_MAPPING_NAMES or any(a in custom for a in archs):
+        archs = []
+    else:
+        mapping = get_checkpoint_conversion_mapping(model_type) or []
+        transforms = mapping + transforms
+    if model_cls := next(
+        (c for a in archs if (c := getattr(transformers, a, None))), None
+    ):
+        # vLLM may replace the config class with one Transformers models can't use
+        config_cls = getattr(transformers, CONFIG_MAPPING_NAMES[model_type])
         try:
+            if type(hf_config) is config_cls:
+                config = copy.deepcopy(hf_config)
+            else:
+                config = config_cls.from_dict(hf_config.to_dict())
             with torch.device("meta"):
-                model = model_cls._from_config(copy.deepcopy(hf_config))
+                model = model_cls._from_config(config)
             transforms = get_model_conversion_mapping(model)
         except Exception as e:
             logger.warning(
-                "Failed to get checkpoint renamings for %s, only the legacy "
-                "renamings will be applied: %s",
+                "Failed to create %s to get its checkpoint renamings, using those "
+                "of model type %r instead: %s",
                 model_cls.__name__,
+                model_type,
                 e,
             )
     # vLLM fuses weights itself, so only the renamings are needed

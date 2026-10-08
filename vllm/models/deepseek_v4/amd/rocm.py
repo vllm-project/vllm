@@ -137,7 +137,7 @@ def apply_pre_quantized_block_scaled_mm(
     The fused q/kv norm kernel writes fp8 qr + per-1x128 scales; this
     drives the linear's block-scaled GEMM directly with them, bypassing
     apply_weights which would re-quantize the fp8 input. Only valid for
-    the wq_b-style column/replicated linears: their output is the local
+    the q_b_proj-style column/replicated linears: their output is the local
     TP shard, so no all-reduce is needed.
     """
     from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
@@ -757,7 +757,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         o = o_padded[:, : self.n_local_heads, :]
 
-        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        # Inverse-RoPE + o_a_proj + o_b_proj output projection (platform-specific).
         return self._o_proj(o, positions)
 
     def _prepare_and_attn(
@@ -925,7 +925,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return ws
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        self._wo_b_scale = _prep(self.o_b_proj)
         if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
             self._prepare_fp8_wo_a()
 
@@ -950,22 +950,22 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             is_fp8,
         )
 
-        weight = getattr(self.wo_a, "weight", None)
-        scale = get_fp8_block_weight_scale(self.wo_a)
+        weight = getattr(self.o_a_proj, "weight", None)
+        scale = get_fp8_block_weight_scale(self.o_a_proj)
         if scale is None:
             # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
             # historical ``_inv`` suffix.
-            scale = getattr(self.wo_a, "weight_scale", None)
+            scale = getattr(self.o_a_proj, "weight_scale", None)
         if weight is None or scale is None:
             logger.warning_once(
-                "DeepSeek V4 FP8 WO_A needs a block-scaled FP8 wo_a weight; "
+                "DeepSeek V4 FP8 WO_A needs a block-scaled FP8 o_a_proj weight; "
                 "the layer exposes no weight/weight scale. Falling back to "
                 "BF16 WO_A."
             )
             return
         if weight.dim() != 2 or scale.dim() != 2 or not is_fp8(weight.dtype):
             logger.warning_once(
-                "DeepSeek V4 FP8 WO_A needs a 2-D FP8 wo_a weight with a 2-D "
+                "DeepSeek V4 FP8 WO_A needs a 2-D FP8 o_a_proj weight with a 2-D "
                 "block scale, got weight %s%s and scale %s. Falling back to "
                 "BF16 WO_A.",
                 weight.dtype,
@@ -997,7 +997,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         e8m0_scale = _wo_a_block_scale_to_e8m0(scale)
         if e8m0_scale is None:
             logger.warning_once(
-                "DeepSeek V4 FP8 WO_A could not losslessly encode the %s wo_a "
+                "DeepSeek V4 FP8 WO_A could not losslessly encode the %s o_a_proj "
                 "block scale as OCP E8M0. Falling back to BF16 WO_A.",
                 scale.dtype,
             )
@@ -1107,7 +1107,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     @functools.cached_property
     def _wq_b_uses_aiter_block_scaled(self) -> bool:
-        """True when both wq_b GEMMs run the aiter block-scaled fp8 kernel.
+        """True when both q_b_proj GEMMs run the aiter block-scaled fp8 kernel.
 
         Cached: the linear kernels and the aiter env gates are fixed once
         the model is built, so this is evaluated at the first forward
@@ -1125,9 +1125,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         if not rocm_aiter_ops.is_linear_fp8_enabled():
             return False
 
-        linears = [self.wq_b]
+        linears = [self.q_b_proj]
         if self.indexer is not None:
-            linears.append(self.indexer.wq_b)
+            linears.append(self.indexer.q_b_proj)
         for linear in linears:
             kernel = getattr(getattr(linear, "quant_method", None), "fp8_linear", None)
             if not isinstance(kernel, Fp8BlockScaledMMLinearKernel):
@@ -1139,11 +1139,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Fuse q/kv RMSNorm + per-1x128 fp8 q quant into one aiter kernel.
 
-        The shared path norms q and kv in one triton kernel and the wq_b
+        The shared path norms q and kv in one triton kernel and the q_b_proj
         linears then re-read the bf16 qr to quantize it. The aiter kernel
         computes both RMSNorms (fp32 accumulate) and the fp8 group quant
         in a single pass, writing fp8 qr + group scales directly; both
-        wq_b GEMMs (attention and indexer) then consume that pair and
+        q_b_proj GEMMs (attention and indexer) then consume that pair and
         skip their own input quant. kv stays bf16: the fused insert
         kernel RoPE/quantizes it itself. Falls back to the shared path
         when the aiter linear path is not active.
@@ -1161,7 +1161,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         return rocm_aiter_ops.fused_qk_rmsnorm_group_quant(
             q=qr,
-            q_weight=self.q_norm.weight.data,
+            q_weight=self.q_a_norm.weight.data,
             q_epsilon=self.eps,
             kv=kv,
             kv_weight=self.kv_norm.weight.data,
@@ -1198,7 +1198,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 dtype=o.dtype,
             ).flatten(1)
         else:
-            # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
+            # ROCm BF16 reference o_a_proj path (inverse RoPE + einsum) + o_b_proj.
             z = rocm_inv_rope_einsum(
                 self.rotary_emb,
                 o,
@@ -1206,13 +1206,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.rope_head_dim,
                 self.n_local_groups,
                 self.o_lora_rank,
-                self.wo_a,
+                self.o_a_proj,
                 inverse_rope=False,
             )
             zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
-            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
-        return self.wo_b(zf)
+            return self._bpre_attn_gemm(
+                self.o_b_proj.weight, self._wo_b_scale, zf, True
+            )
+        return self.o_b_proj(zf)
 
     def forward_mqa(
         self,
@@ -1280,7 +1282,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
             )
-        # The fp8 wo_a path rotates inside inverse_rope_group_quant, so folding
+        # The fp8 o_a_proj path rotates inside inverse_rope_group_quant, so folding
         # the rotation into the decode reduce would apply it twice. Only the
         # BF16 einsum path hands its rotation off to the decode.
         fuse_inv_rope = self._wo_a_fp8_weight is None
@@ -1387,7 +1389,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             swa_ragged_indptr=swa_metadata.decode_swa_ragged_indptr,
             topk_ragged_indices=topk_ragged_indices,
             topk_ragged_indptr=topk_ragged_indptr,
-            attn_sink=self.attn_sink,
+            attn_sink=self.sinks,
             scale=self.scale,
             head_dim=self.head_dim,
             nope_head_dim=self.nope_head_dim,
@@ -1541,7 +1543,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 head_dim=self.head_dim,
                 nope_head_dim=self.nope_head_dim,
                 rope_head_dim=self.rope_head_dim,
-                attn_sink=self.attn_sink,
+                attn_sink=self.sinks,
                 output=output[query_start:query_end],
             )
 
@@ -1626,7 +1628,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.scale,
             swa_indptr,
             swa_indices,
-            attn_sink=self.attn_sink[: q.shape[1]],
+            attn_sink=self.sinks[: q.shape[1]],
             extra_kv_buffer=compressed_k_cache,
             extra_kv_indptr=topk_indptr,
             extra_kv_indices=topk_indices,

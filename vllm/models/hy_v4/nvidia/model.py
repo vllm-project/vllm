@@ -570,7 +570,7 @@ class HYV4Model(nn.Module):
                 if loaded_expert_param_names:
                     loaded_params.update(loaded_expert_param_names)
                     continue
-                if "learnable_sink_param" in name:
+                if name.endswith(".sinks"):
                     if is_pp_missing_parameter(name, self):
                         continue
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
@@ -619,6 +619,11 @@ class HYV4Model(nn.Module):
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            ".attn_hc.": ".hc_attn_layer.hc_pre.hc_",
+            ".ffn_hc.": ".hc_mlp_layer.hc_pre.hc_",
+            ".hc_head.hc_": ".hc_head.hc_head_",
+        },
         orig_to_new_stacked={
             ".q_a_proj": (".fused_qkv_a_proj", 0),
             ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
@@ -627,7 +632,7 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
             ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
             ".indexer.weights_proj.": (".indexer.wk_weights_proj.", 1),
-        }
+        },
     )
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],

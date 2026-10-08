@@ -448,9 +448,6 @@ class HYV3MTP(nn.Module):
 
                     if "mlp.gate.wg." in name:
                         name = name.replace("wg.", "")
-                    # V3 checkpoint: mlp.router.gate -> mlp.gate
-                    if "mlp.router.gate." in name:
-                        name = name.replace("router.gate.", "gate.")
 
                     param = params_dict[name]
                     weight_loader = getattr(

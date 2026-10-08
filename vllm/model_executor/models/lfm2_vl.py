@@ -628,7 +628,7 @@ class Lfm2VLForConditionalGeneration(
         orig_to_new_prefix={
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
-            "model.vision_tower.": "vision_tower.",
+            "model.vision_tower.": "vision_tower.vision_model.",
             "model.multi_modal_projector.": "multi_modal_projector.",
         }
     )

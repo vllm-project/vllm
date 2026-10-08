@@ -19,6 +19,7 @@ Thin multimodal wrapper around the text-only ``DeepseekV4ForCausalLM``:
 
 from collections.abc import Iterable
 
+import regex as re
 import torch
 from torch import nn
 
@@ -58,17 +59,21 @@ def _make_deepseek_v4_vl_weights_mapper(
         src: None if dst is None else f"language_model.{dst}"
         for src, dst in text_mapper.orig_to_new_prefix.items()
     }
+    orig_to_new_prefix["lm_head."] = "language_model.lm_head."
     if not image_enabled:
         orig_to_new_prefix.update({"vision.": None, "aligner.": None, "image_": None})
     return WeightsMapper(
         orig_to_new_renaming=text_mapper.orig_to_new_renaming,
         orig_to_new_prefix=orig_to_new_prefix,
-        orig_to_new_regex=text_mapper.orig_to_new_regex,
-        orig_to_new_stacked=text_mapper.orig_to_new_stacked,
-        orig_to_new_suffix={
-            **text_mapper.orig_to_new_suffix,
-            "head.weight": "language_model.lm_head.weight",
+        orig_to_new_regex={
+            # The vision tower is shared with DeepSeek-V4.1, so it keeps its
+            # names; undo the Transformers text renamings that also match it
+            re.compile(r"^(vision\.blocks\.\d+)\.self_attn\."): r"\1.attn.",
+            re.compile(r"^vision\.kv_norm\."): "vision.norm.",
+            **text_mapper.orig_to_new_regex,
         },
+        orig_to_new_stacked=text_mapper.orig_to_new_stacked,
+        orig_to_new_suffix=text_mapper.orig_to_new_suffix,
         orig_to_new_substr={
             **text_mapper.orig_to_new_substr,
             # Draft models load the checkpoint's MTP weights separately from
@@ -93,9 +98,9 @@ class DeepseekV4ForConditionalGeneration(
     """
 
     packed_modules_mapping = {
-        "gate_up_proj": ["w1", "w3"],
-        "fused_wqa_wkv": ["wq_a", "wkv"],
-        "fused_wkv_wgate": ["wkv", "wgate"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "fused_wqa_wkv": ["q_a_proj", "kv_proj"],
+        "fused_wkv_wgate": ["kv_proj", "gate_proj"],
         # for visual encoder
         "wqkv": ["wqkv"],
         "w1": ["w1"],
@@ -168,9 +173,7 @@ class DeepseekV4ForConditionalGeneration(
         # The outer mapper (see load_weights) fully resolves HF names into
         # this wrapper's namespace before AutoWeightsLoader strips the
         # "language_model." prefix and delegates to the child's load_weights,
-        # so the child's own mapper must be a no-op. Its suffix rules are not
-        # idempotent (e.g. "lm_head.weight".endswith("head.weight") would
-        # re-fire "head.weight" -> "lm_head.weight").
+        # so the child's own mapper must be a no-op.
         text_mapper = self.language_model.hf_to_vllm_mapper
         self.language_model.hf_to_vllm_mapper = WeightsMapper()
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]

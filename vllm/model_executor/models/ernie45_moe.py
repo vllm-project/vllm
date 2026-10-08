@@ -493,10 +493,10 @@ class Ernie4_5_MoeModel(nn.Module):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for name, loaded_weight in weights:
-            # moe_statics.e_score_correction_bias is stored with a leading
-            # singleton dim and under a different module name.
+            # gate.moe_statics.e_score_correction_bias is stored with a leading
+            # singleton dim and under an extra module name.
             if "e_score_correction_bias" in name:
-                name = name.replace("moe_statics", "gate")
+                name = name.replace(".moe_statics.", ".")
                 loaded_weight = loaded_weight.squeeze(0)
             yield name, loaded_weight
 

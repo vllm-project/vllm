@@ -105,8 +105,8 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
         )
 
         # Precomputed contiguous [G, K, N] weight and [G, K/bs, N/bs] scale.
-        wo_a_weight = self.wo_a.bmm_weight
-        wo_a_scale = self.wo_a.bmm_scale
+        wo_a_weight = self.o_a_proj.bmm_weight
+        wo_a_scale = self.o_a_proj.bmm_scale
 
         # TODO: optimize fused_inv_rope_fp8_quant for xpu bmm to
         # eliminate o_scale transpose + contiguous
@@ -119,7 +119,7 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             None,
         )
 
-        return self.wo_b(z.transpose(0, 1).flatten(1))
+        return self.o_b_proj(z.transpose(0, 1).flatten(1))
 
     def forward_mqa(
         self,
@@ -241,7 +241,7 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             topk_lens=topk_lens,
             swa_indices=swa_indices,
             swa_lens=swa_lens,
-            attn_sink=self.attn_sink,
+            attn_sink=self.sinks,
             softmax_scale=self.scale,
             head_dim=self.head_dim,
             nope_head_dim=self.nope_head_dim,

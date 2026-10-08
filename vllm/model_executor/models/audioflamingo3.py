@@ -65,6 +65,7 @@ from .interfaces import (
 )
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -495,6 +496,15 @@ class AudioFlamingo3ForConditionalGeneration(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "language_model.model.",
+            "model.audio_tower.": "audio_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+        }
+    )
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
@@ -677,4 +687,4 @@ class AudioFlamingo3ForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

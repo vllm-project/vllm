@@ -43,7 +43,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .llava import init_vision_tower_for_llava
+from .llava import LLAVA_VISION_TOWER_MAPPER, init_vision_tower_for_llava
 from .module_mapping import MultiModelKeys
 from .siglip import SiglipVisionModel
 from .utils import (
@@ -309,11 +309,9 @@ class LlavaNextVideoForConditionalGeneration(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper = LLAVA_VISION_TOWER_MAPPER | WeightsMapper(
         orig_to_new_prefix={
-            # mapping for new names in checkpoint saved after transformers v4.52
             "model.language_model.": "language_model.model.",
-            "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "model.image_newline": "image_newline",
             "lm_head.": "language_model.lm_head.",

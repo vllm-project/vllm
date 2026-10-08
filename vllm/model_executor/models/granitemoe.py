@@ -303,14 +303,7 @@ class GraniteMoeDecoderLayer(nn.Module):
 @support_torch_compile
 class GraniteMoeModel(nn.Module):
     hf_to_vllm_mapper: WeightsMapper = WeightsMapper(
-        orig_to_new_suffix={
-            # Legacy names to new names
-            "moe.input_linear.weight": "moe.experts.gate_up_proj",
-            "moe.output_linear.weight": "moe.experts.down_proj",
-            ".router.layer.weight": ".gate.weight",
-            # Checkpoint name to vLLM name
-            ".router.weight": ".gate.weight",
-        },
+        orig_to_new_suffix={".router.weight": ".gate.weight"},
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
             ".q_proj": (".qkv_proj", "q"),

@@ -13,6 +13,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    get_checkpoint_renaming_mapper,
 )
 from vllm.platforms import current_platform
 
@@ -239,3 +240,32 @@ def test_weights_mapper_stacks_one_weight_into_several_shards():
     # Each shard needs its own tensor object, but they alias one allocation.
     assert mapped[0][1] is not mapped[1][1]
     assert mapped[0][1].data_ptr() == mapped[1][1].data_ptr() == weight.data_ptr()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("custom_code", [False, True])
+def test_checkpoint_renaming_mapper(custom_code: bool):
+    """Checkpoint names are renamed as Transformers would, except for custom code
+    models, which (like in Transformers) only get the legacy renamings."""
+    from transformers import MixtralConfig
+
+    config = MixtralConfig(
+        architectures=["MixtralForCausalLM"],
+        num_hidden_layers=1,
+        hidden_size=16,
+        intermediate_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_local_experts=2,
+        vocab_size=32,
+    )
+    if custom_code:
+        config.auto_map = {"AutoModelForCausalLM": "modeling.MixtralForCausalLM"}
+    mapper = get_checkpoint_renaming_mapper(config)
+
+    moe = "model.layers.0.block_sparse_moe.gate.weight"
+    expected_moe = moe if custom_code else "model.layers.0.mlp.gate.weight"
+    assert mapper.map_name(moe) == expected_moe
+    assert mapper.map_name(expected_moe) == expected_moe
+    norm = "model.norm.LayerNorm.gamma"
+    assert mapper.map_name(norm) == "model.norm.LayerNorm.weight"

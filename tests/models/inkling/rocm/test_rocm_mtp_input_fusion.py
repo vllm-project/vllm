@@ -96,7 +96,7 @@ def test_embed_rmsnorm(n: int, t: int, ids_dtype: torch.dtype) -> None:
     out = cast(torch.Tensor, embed_rmsnorm(ids, table, None, EPS))
     assert torch.equal(out, ref_emb)
 
-    # Chained first-layer attn_norm (the target text-path forward): one launch
+    # Chained first-layer input_layernorm (the target text-path forward): one launch
     # emits both the residual and layer 0's normed attention input.
     w_chain = (1 + 0.05 * torch.randn(n, device=dev)).to(torch.bfloat16)
     res, attn_in = cast(

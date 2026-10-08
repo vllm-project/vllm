@@ -215,7 +215,7 @@ def test_deepseek_v4_moe_preserves_configured_hash_layers(v41_moe_config):
     config.vocab_size = 32
     moe = DeepseekV4MoE(
         v41_moe_config,
-        prefix="model.layers.0.ffn",
+        prefix="model.layers.0.mlp",
         num_hash_layers=config.num_hash_layers,
     )
     assert moe.gate.tid2eid.shape == (32, 2)
@@ -241,7 +241,7 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(
     ):
         moe = DeepseekV4MoE(
             v41_moe_config,
-            prefix="model.layers.0.ffn",
+            prefix="model.layers.0.mlp",
             num_hash_layers=config.num_hash_layers,
         )
         hidden_states = torch.randn(

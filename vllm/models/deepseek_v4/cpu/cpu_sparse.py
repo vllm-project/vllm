@@ -108,7 +108,7 @@ direct_register_custom_op(
 def _dequant_linear_weight(layer: torch.nn.Module) -> torch.Tensor:
     """Dequantize a linear layer's weight, including FP8 block scales.
 
-    ``_o_proj`` reads ``wo_a.weight`` directly (not via
+    ``_o_proj`` reads ``o_a_proj.weight`` directly (not via
     ``quant_method.apply()``), so the per-block FP8 scale must be applied
     here explicitly.
     """
@@ -294,7 +294,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
 
         Runs after every quantized layer's own
         ``process_weights_after_loading`` (see ``is_deferred_attention_layer``);
-        ``wo_a``'s packing must happen *before* that phase instead, so it's a
+        ``o_a_proj``'s packing must happen *before* that phase instead, so it's a
         separate monkeypatch in ``__init__``.
         """
         self.rotary_emb.cos_sin_cache = self.rotary_emb.cos_sin_cache.to(
@@ -306,12 +306,12 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             self.indexer.compressor.cache_norm_weight_fp32()
 
     def _wrap_wo_a_process_weights_after_loading(self) -> None:
-        """Snapshot and pack ``wo_a``'s weight into a bf16 copy for
+        """Snapshot and pack ``o_a_proj``'s weight into a bf16 copy for
         ``bmm_cpu`` before the FP8 kernel's own
         ``process_weights_after_loading`` VNNI-repacks it in place for
         row-major reads ``_o_proj`` never does."""
-        wo_a = self.wo_a
-        quant_method = wo_a.quant_method
+        o_a_proj = self.o_a_proj
+        quant_method = o_a_proj.quant_method
         orig_pwal = quant_method.process_weights_after_loading
         heads_per_group = self.n_local_heads // self.n_local_groups
         k_dim = heads_per_group * self.head_dim
@@ -363,7 +363,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         if self.compressor is not None:
             # Must go through the module's own forward (not a raw matmul on
             # its weight): the packed-GEMM kernel frees the raw weight after
-            # packing, same as wo_a's.
+            # packing, same as o_a_proj's.
             kv_score = self.compressor.fused_wkv_wgate(hidden_states).to(torch.float32)
 
         indexer_weights: torch.Tensor | None = None
@@ -447,7 +447,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         ``fused_q_kv_rmsnorm``, whose raw ``@triton.jit`` kernel fails to
         link under triton-cpu (``undefined symbol: __truncdfbf2``)."""
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        return self.q_norm(qr), None, self.kv_norm(kv)
+        return self.q_a_norm(qr), None, self.kv_norm(kv)
 
     def _prepare_and_attn(
         self,
@@ -537,7 +537,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         cos_sin_cache = self.rotary_emb.cos_sin_cache
         # Undo the query's own GPT-J RoPE rotation: the attention output is
         # a weighted sum of KV rows at different positions, so R(-pos_q)
-        # recovers the translation-invariant quantity wo_a/wo_b expect.
+        # recovers the translation-invariant quantity o_a_proj/o_b_proj expect.
         o_derot = ops.inverse_gptj_rope_o_proj_cpu(
             o, positions, cos_sin_cache, _ROPE_DIM
         )
@@ -556,7 +556,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             None,
         )
         z = z.transpose(0, 1).to(o.dtype)
-        return self.wo_b(z.flatten(1))
+        return self.o_b_proj(z.flatten(1))
 
     def forward_mqa(
         self,
@@ -644,6 +644,6 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             compressed_cache_2d,
             compressed_slots,
             compressed_block_size,
-            self.attn_sink,
+            self.sinks,
             self.scale,
         )

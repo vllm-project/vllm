@@ -259,7 +259,7 @@ class DeepseekCompressor(nn.Module):
             )
 
         state_dtype = torch.float32
-        self.ape = nn.Parameter(
+        self.position_bias = nn.Parameter(
             torch.empty(
                 (compress_ratio, self.coff * self.head_dim),
                 dtype=state_dtype,
@@ -277,7 +277,7 @@ class DeepseekCompressor(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.fused_wkv_wgate",
         )
-        self.norm = RMSNorm(self.head_dim, self.rms_norm_eps)
+        self.kv_norm = RMSNorm(self.head_dim, self.rms_norm_eps)
 
         self.state_cache = CompressorStateCache(
             state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
@@ -399,7 +399,7 @@ class DeepseekCompressor(nn.Module):
         _SAVE_PARTIAL_STATES_KERNEL(
             kv=kv,
             score=score,
-            ape=self.ape,
+            ape=self.position_bias,
             positions=positions,
             state_cache=state_cache,
             slot_mapping=slot_mapping,
@@ -490,7 +490,7 @@ class DeepseekCompressor(nn.Module):
             compress_ratio=self.compress_ratio,
             overlap=self.overlap,
             use_fp4_cache=self.use_fp4_cache,
-            rms_norm_weight=self.norm.weight,
+            rms_norm_weight=self.kv_norm.weight,
             rms_norm_eps=self.rms_norm_eps,
             quant_block=self._quant_block,
             token_stride=self._token_stride,

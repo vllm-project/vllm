@@ -46,9 +46,10 @@ class InklingShortConv(nn.Module):
         self.stream_idx = stream_idx
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        # Depthwise conv weight; checkpoint stores (dim, 1, W).
-        self.weight = Parameter(torch.empty(dim, 1, kernel_size), requires_grad=False)
-        set_weight_attrs(self.weight, {"weight_loader": self.weight_loader})
+        # Depthwise conv weight (dim, 1, W), applied by the fused kernels.
+        self.conv1d = nn.Conv1d(dim, dim, kernel_size, groups=dim, bias=False)
+        self.conv1d.weight.requires_grad_(False)
+        set_weight_attrs(self.conv1d.weight, {"weight_loader": self.weight_loader})
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor) -> None:
         if loaded_weight.shape[0] != param.shape[0]:
@@ -74,7 +75,7 @@ class InklingShortConv(nn.Module):
         off_s, ws = self.owner.stream_ranges[self.stream_idx]
         block_size = self.owner.block_size
         x = x.contiguous()
-        weight = self.weight.squeeze(1)  # (dim, W)
+        weight = self.conv1d.weight.squeeze(1)  # (dim, W)
 
         return fused_sconv(
             x,

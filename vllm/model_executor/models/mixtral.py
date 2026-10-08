@@ -243,13 +243,13 @@ class MixtralDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.block_sparse_moe = MixtralMoE(
+        self.mlp = MixtralMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.block_sparse_moe",
+            prefix=f"{prefix}.mlp",
             enable_eplb=enable_eplb,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -276,7 +276,7 @@ class MixtralDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.block_sparse_moe(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
@@ -423,11 +423,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
             if isinstance(layer, PPMissingLayer):
                 continue
             assert isinstance(layer, MixtralDecoderLayer)
-            if hasattr(layer, "block_sparse_moe") and isinstance(
-                layer.block_sparse_moe, MixtralMoE
-            ):
-                example_moe = layer.block_sparse_moe
-                self.moe_layers.append(layer.block_sparse_moe.experts)
+            if hasattr(layer, "mlp") and isinstance(layer.mlp, MixtralMoE):
+                example_moe = layer.mlp
+                self.moe_layers.append(layer.mlp.experts)
 
         self.num_moe_layers = len(self.moe_layers)
 
@@ -452,10 +450,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.model.layers:
-            if hasattr(layer, "block_sparse_moe") and isinstance(
-                layer.block_sparse_moe, MixtralMoE
-            ):
-                moe = layer.block_sparse_moe
+            if hasattr(layer, "mlp") and isinstance(layer.mlp, MixtralMoE):
+                moe = layer.mlp
                 moe.n_local_physical_experts = num_local_physical_experts
                 moe.n_physical_experts = num_physical_experts
                 moe.n_redundant_experts = self.num_redundant_experts
