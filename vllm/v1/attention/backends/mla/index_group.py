@@ -233,7 +233,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         cache = self.cache(layer_index)
         num_tokens = logical_topk_indices.shape[0]
         req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
-        if num_tokens > self.physical_topk_indices.shape[0]:
+        if num_tokens > cache.runtime.max_swap_rows:
             # Prefill-sized batches do not fit the decode residency workspace.
             # Non-resident prefills are staged before reaching this path.
             assert cache.all_context_pages_resident

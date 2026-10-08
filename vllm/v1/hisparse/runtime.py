@@ -894,14 +894,17 @@ class HiSparseRuntime:
     def begin_forward(self) -> None:
         self._swap_step = 0
 
+    @property
+    def max_swap_rows(self) -> int:
+        return self.index_group.shared_topk.physical_topk_indices.shape[0]
+
     def _step_rows(self, num_tokens: int) -> slice:
         start = self._swap_step * num_tokens
         stop = start + num_tokens
-        if stop > self.index_group.shared_topk.physical_topk_indices.shape[0]:
+        if stop > self.max_swap_rows:
             raise ValueError(
                 "HiSparse swap rows exceed the configured speculative decode "
-                f"capacity: stop={stop}, capacity="
-                f"{self.index_group.shared_topk.physical_topk_indices.shape[0]}."
+                f"capacity: stop={stop}, capacity={self.max_swap_rows}."
             )
         self._swap_step += 1
         return slice(start, stop)
