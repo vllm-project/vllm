@@ -20,6 +20,7 @@ from vllm.v1.structured_output.backend_outlines import OutlinesGrammar
 
 TOKENIZER = "gpt2"
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
+IMPLICIT_THINK_END = "z"  # accepted in strings, rejected at the object start
 EOS = "<|eos|>"  # resolved to tokenizer.eos_token_id
 JSON_SCHEMA = '{"type": "object"}'
 BACKENDS = ("xgrammar", "guidance")
@@ -45,6 +46,7 @@ class FlowCase:
     prefix: str = ""
     expected_validated: tuple[str, ...] | None = None
     reasoning_ended: bool | None = False
+    engine_reasoner: bool = False
     xfail_guidance: str | None = None
 
 
@@ -59,6 +61,23 @@ class MockReasoner:
 
     def is_reasoning_end_streaming(self, input_ids, delta_ids):
         return self.is_reasoning_end(delta_ids)
+
+
+class MockEngineReasoner(ParserEngineReasoningAdapter):
+    """Ends reasoning implicitly on ``marker``, which is also content."""
+
+    def __init__(self, tokenizer, marker: int):
+        self.marker = marker
+
+    @property
+    def reasoning_end_token_ids(self):
+        return frozenset({self.marker})
+
+    def find_reasoning_end(self, token_ids):
+        ids = list(token_ids)
+        if self.marker in ids:
+            return ReasoningEnd(ids.index(self.marker), True)
+        return ReasoningEnd(len(ids), False)
 
 
 def _single_token(tokenizer, text: str) -> int:
@@ -333,6 +352,28 @@ FLOW_CASES = [
         ),
         id="becomes_active_terminates",
     ),
+    pytest.param(
+        FlowCase(
+            prefix='{"a": "',
+            raw_drafts=(IMPLICIT_THINK_END,),
+            expected_row_pattern="UC",
+            expected_reasoning=True,
+            expect_terminated=False,
+            engine_reasoner=True,
+        ),
+        id="implicit_end_accepted",
+    ),
+    pytest.param(
+        FlowCase(
+            raw_drafts=(" ", IMPLICIT_THINK_END, "{", "}"),
+            expected_validated=(" ",),
+            expected_row_pattern="UUUUU",
+            expected_reasoning=False,
+            expect_terminated=False,
+            engine_reasoner=True,
+        ),
+        id="implicit_end_rejected",
+    ),
 ]
 
 
@@ -346,7 +387,8 @@ def test_real_flow(
     if backend == "guidance" and case.xfail_guidance:
         pytest.xfail(case.xfail_guidance)
 
-    reasoner_kwargs = {"marker": _single_token(tokenizer, THINK_END)}
+    marker = IMPLICIT_THINK_END if case.engine_reasoner else THINK_END
+    reasoner_kwargs = {"marker": _single_token(tokenizer, marker)}
     manager, request = _build_harness(
         tokenizer,
         backend,
@@ -354,6 +396,8 @@ def test_real_flow(
         reasoning_ended=case.reasoning_ended,
         reasoning_parser_kwargs=reasoner_kwargs,
     )
+    if case.engine_reasoner:
+        manager.reasoner_cls = MockEngineReasoner
 
     raw_drafts = _to_token_ids(tokenizer, case.raw_drafts)
     expected_texts = (
@@ -516,88 +560,3 @@ def test_outlines_termination(tokenizer):
     assert grammar.validate_tokens([eos]) == []
     assert grammar.accept_tokens(request.request_id, [one, eos, one])
     assert grammar.is_terminated()
-
-
-class MockEngineReasoner(ParserEngineReasoningAdapter):
-    """Ends reasoning implicitly on `marker`, which is also content."""
-
-    def __init__(self, tokenizer, marker: int):
-        self.marker = marker
-
-    @property
-    def reasoning_end_token_ids(self):
-        return frozenset({self.marker})
-
-    def find_reasoning_end(self, token_ids):
-        ids = list(token_ids)
-        if self.marker in ids:
-            return ReasoningEnd(ids.index(self.marker), True)
-        return ReasoningEnd(len(ids), False)
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize(
-    ("marker", "drafts", "row_pattern"),
-    [
-        pytest.param("{", (" ", "{", "}", EOS), "UUCCU", id="inclusive"),
-        pytest.param("{", ("{", "}"), "UCC", id="inclusive_first"),
-        pytest.param("{", (" ", " ", "{"), "UUUC", id="inclusive_last"),
-        pytest.param("z", (" ", "z", "{", "}"), "UUCCC", id="not_accepted"),
-    ],
-)
-def test_inclusive_reasoning_end_token(
-    tokenizer,
-    backend: StructuredOutputsBackend,
-    marker: str,
-    drafts: tuple[str, ...],
-    row_pattern: str,
-):
-    """An implicit end token ("{", like GLM's `<tool_call>`) is sampled
-    unconstrained but fed to the grammar. One it rejects ("z") is not fed to it."""
-    manager, request = _build_harness(
-        tokenizer,
-        backend,
-        reasoning_ended=False,
-        reasoning_parser_kwargs={"marker": _single_token(tokenizer, marker)},
-    )
-    manager.reasoner_cls = MockEngineReasoner
-    token_ids = _to_token_ids(tokenizer, drafts)
-    _run_real_flow(
-        manager,
-        request,
-        raw_drafts=token_ids,
-        expected_validated=token_ids,
-        expected_row_pattern=row_pattern,
-        expected_reasoning=True,
-        expect_terminated=EOS in drafts,
-    )
-    grammar = request.structured_output_request.grammar  # type: ignore[union-attr]
-    assert grammar is not None and not isinstance(grammar, Exception)
-    assert grammar.validate_tokens([_single_token(tokenizer, "{")]) == []
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize(
-    ("reasoner_cls", "consumed"),
-    [
-        pytest.param(MockEngineReasoner, True, id="no_drafts"),
-        pytest.param(MockReasoner, False, id="non_engine"),
-    ],
-)
-def test_end_token_committed_alone(
-    tokenizer, backend: StructuredOutputsBackend, reasoner_cls, consumed: bool
-):
-    """Only an engine-based reasoner feeds the end token "{" to the grammar."""
-    brace = _single_token(tokenizer, "{")
-    manager, request = _build_harness(
-        tokenizer,
-        backend,
-        reasoning_ended=False,
-        reasoning_parser_kwargs={"marker": brace},
-    )
-    manager.reasoner_cls = reasoner_cls
-    request.append_output_token_ids([brace])
-    assert manager.accept_tokens(request, [brace])
-    grammar = request.structured_output_request.grammar  # type: ignore[union-attr]
-    assert grammar is not None and not isinstance(grammar, Exception)
-    assert (grammar.validate_tokens([brace]) == []) is consumed

@@ -240,7 +240,7 @@ class StructuredOutputManager:
         Returns `len(spec_tokens) + 1` if no token should be constrained after
         accepting all `spec_tokens`.
         This is `constraint_start`; `grammar_start` is one less if reasoning ends
-        implicitly on a content token (e.g. a tool-call start) the grammar accepts.
+        implicitly on a content token (e.g. a tool-call start).
 
         `spec_tokens_committed` is True if spec_tokens is already in
         `request.all_token_ids`.
@@ -279,11 +279,7 @@ class StructuredOutputManager:
             if end is not None:
                 constraint_start = end.offset + 1
                 if end.implicit:
-                    grammar = structured_req.grammar
-                    if TYPE_CHECKING:
-                        assert isinstance(grammar, StructuredOutputGrammar)
-                    if grammar.validate_tokens([spec_tokens[end.offset]]):
-                        return ConstraintBounds(end.offset, constraint_start)
+                    return ConstraintBounds(end.offset, constraint_start)
                 return ConstraintBounds(constraint_start, constraint_start)
 
         # Fallback: the grammar starts after the end token.
@@ -317,10 +313,8 @@ class StructuredOutputManager:
             return spec_tokens
 
         spec_tokens = strip_speculative_padding(spec_tokens)
-        grammar_start, constraint_start = self._get_constraint_bounds(
-            request, spec_tokens
-        )
-        if constraint_start >= len(spec_tokens):
+        grammar_start, _ = self._get_constraint_bounds(request, spec_tokens)
+        if grammar_start >= len(spec_tokens):
             return spec_tokens
 
         structured_req = request.structured_output_request
@@ -477,12 +471,12 @@ class StructuredOutputManager:
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
 
-        grammar_start, constraint_start = self._get_constraint_bounds(
+        grammar_start, _ = self._get_constraint_bounds(
             request, new_token_ids, spec_tokens_committed=True
         )
-        # Early return only when the constraint hasn't started.
+        # Early return only when no reasoning-end token is present.
         # Otherwise, latch structured_req.reasoning_ended.
-        if constraint_start > len(new_token_ids):
+        if grammar_start > len(new_token_ids):
             return True
         structured_req.reasoning_ended = True
         return grammar.accept_tokens(request.request_id, new_token_ids[grammar_start:])
