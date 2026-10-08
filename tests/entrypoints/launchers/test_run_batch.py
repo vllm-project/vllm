@@ -1071,17 +1071,32 @@ def _make_aiohttp_put_session(status: int = 200, body_text: str = ""):
 
 
 @pytest.mark.asyncio
-async def test_upload_data_uploads_once_on_success():
-    """A successful upload must not be retried (regression guard)."""
-    session = _make_aiohttp_put_session(status=200)
-    with patch(
-        "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
-        return_value=session,
+@pytest.mark.parametrize("status", [200, 201, 204])
+@pytest.mark.parametrize("from_file", [False, True])
+async def test_upload_data_uploads_once_on_success(status, from_file, tmp_path):
+    """Successful PUT responses must not retry either upload path."""
+    session = _make_aiohttp_put_session(status=status)
+    data_or_file = "payload"
+    if from_file:
+        path = tmp_path / "output.jsonl"
+        path.write_text(data_or_file, encoding="utf-8")
+        data_or_file = str(path)
+
+    with (
+        patch(
+            "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
+            return_value=session,
+        ),
+        patch(
+            "vllm.entrypoints.launchers.run_batch.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep,
     ):
         await upload_data(
-            "https://example.com/output.jsonl", "payload", from_file=False
+            "https://example.com/output.jsonl", data_or_file, from_file=from_file
         )
     assert session.put.call_count == 1
+    sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio
