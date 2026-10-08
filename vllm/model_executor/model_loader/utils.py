@@ -340,6 +340,7 @@ def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], 
             model_config.runner_type,
             model_config.trust_remote_code,
             model_config.model_impl,
+            model_config.enable_tpsp,
             tuple(getattr(model_config.hf_config, "architectures", None) or []),
         )
     )

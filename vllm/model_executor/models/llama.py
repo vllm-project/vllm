@@ -29,12 +29,14 @@ from itertools import islice
 from typing import TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -56,6 +58,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.worker.tpsp_profile import (
+    SPProfile,
+    TPSPBackend,
+    TPSPProfileSession,
+    TPSPShape,
+    select_sp_config,
+)
 
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
@@ -583,3 +592,202 @@ class LlamaBidirectionalModel(_LlamaBidirectionalModelBase):
     # This class sets the correct attention type and pooling type
     # through LlamaBidirectionalConfig.
     pass
+
+
+class TPSPLlamaDecoderLayer(LlamaDecoderLayer):
+    def _project_and_normalize(
+        self,
+        x,
+        projection,
+        residual,
+        norm,
+        profile: SPProfile,
+        backend: TPSPBackend | None,
+        residual_is_sharded: bool,
+    ):
+        group = get_tp_group()
+        tp_size = group.world_size
+        if profile.tp_size != tp_size or profile.hidden_size != self.hidden_size:
+            raise RuntimeError("TP/SP profile does not match the Llama projection")
+        if (
+            profile.input_width is not None
+            and projection.input_size_per_partition != profile.input_width
+        ):
+            raise RuntimeError("TP/SP projection input width was not profiled")
+        rows = (x.size(0) + tp_size - 1) // tp_size
+        if not residual_is_sharded:
+            if residual.shape != (x.size(0), self.hidden_size):
+                raise RuntimeError("TP/SP full residual has an unexpected shape")
+            start = group.rank_in_group * rows
+            local_residual = torch.zeros(
+                (rows, residual.size(-1)), device=residual.device, dtype=residual.dtype
+            )
+            count = min(rows, max(0, x.size(0) - start))
+            if count:
+                local_residual[:count] = residual[start : start + count]
+        else:
+            if residual.shape != (rows, self.hidden_size):
+                raise RuntimeError("TP/SP residual shard has an unexpected shape")
+            local_residual = residual
+
+        if select_sp_config(profile, x.size(0)):
+            if backend is None or profile.config is None:
+                raise RuntimeError("TP/SP Llama profile has no enabled configuration")
+            if x.dtype != torch.bfloat16 or projection.weight.dtype != torch.bfloat16:
+                raise RuntimeError("TP/SP Llama requires BF16 activations and weights")
+            weight = projection.weight
+            key = (weight.data_ptr(), weight._version)
+            cached = getattr(projection, "_tpsp_transposed_weight", None)
+            if cached is None or cached[0] != key:
+                cached = (key, weight.T.contiguous())
+                projection._tpsp_transposed_weight = cached
+            reduced, _, gathered = backend.fused(
+                x.contiguous(),
+                cached[1],
+                norm.weight,
+                local_residual,
+                norm.variance_epsilon,
+                profile.config,
+            )
+            return gathered, reduced
+
+        full, _ = projection(x)
+        if not residual_is_sharded:
+            full_residual = residual.clone()
+        else:
+            padded = torch.empty(
+                (tp_size * rows, self.hidden_size), device=x.device, dtype=x.dtype
+            )
+            dist.all_gather_into_tensor(
+                padded, local_residual.contiguous(), group=group.device_group
+            )
+            full_residual = padded[: x.size(0)].contiguous()
+        gathered, new_residual = norm(full, full_residual)
+        reduced = torch.zeros((rows, self.hidden_size), device=x.device, dtype=x.dtype)
+        start = group.rank_in_group * rows
+        count = min(rows, max(0, x.size(0) - start))
+        if count:
+            reduced[:count] = new_residual[start : start + count]
+        return gathered, reduced
+
+    def forward_sp(
+        self,
+        positions,
+        hidden_states,
+        residual,
+        next_norm,
+        o_profile: SPProfile,
+        down_profile: SPProfile,
+        backend: TPSPBackend | None,
+        residual_is_sharded: bool,
+    ):
+        attention = self.self_attn
+        qkv, _ = attention.qkv_proj(hidden_states)
+        q, k, v = qkv.split(
+            [attention.q_size, attention.kv_size, attention.kv_size], dim=-1
+        )
+        q, k = attention.rotary_emb(positions, q, k)
+        attn_output = attention.attn(q, k, v)
+        hidden_states, residual = self._project_and_normalize(
+            attn_output,
+            attention.o_proj,
+            residual,
+            self.post_attention_layernorm,
+            o_profile,
+            backend,
+            residual_is_sharded,
+        )
+        mlp = self.mlp
+        hidden_states, _ = mlp.gate_up_proj(hidden_states)
+        hidden_states = mlp.act_fn(hidden_states)
+        return self._project_and_normalize(
+            hidden_states,
+            mlp.down_proj,
+            residual,
+            next_norm,
+            down_profile,
+            backend,
+            True,
+        )
+
+
+class TPSPLlamaModel(LlamaModel):
+    def __init__(self, *, vllm_config, prefix="", layer_type=TPSPLlamaDecoderLayer):
+        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        self.tpsp_profile: TPSPProfileSession | None = None
+
+    def forward(
+        self,
+        input_ids,
+        positions,
+        intermediate_tensors,
+        inputs_embeds=None,
+        **extra_layer_kwargs,
+    ):
+        if get_pp_group().world_size != 1 or intermediate_tensors is not None:
+            raise RuntimeError("TP/SP Llama does not support pipeline parallelism")
+        if extra_layer_kwargs:
+            raise RuntimeError("TP/SP Llama does not support extra layer arguments")
+        if self.tpsp_profile is None or self.tpsp_profile.profiles is None:
+            raise RuntimeError("TP/SP Llama requires worker startup profiling")
+        profiles = self.tpsp_profile.profiles
+        hidden_states = (
+            inputs_embeds
+            if inputs_embeds is not None
+            else self.embed_input_ids(input_ids)
+        )
+        residual = hidden_states
+        hidden_states = self.layers[0].input_layernorm(hidden_states)
+        for idx, layer in enumerate(self.layers):
+            next_norm = (
+                self.layers[idx + 1].input_layernorm
+                if idx + 1 < len(self.layers)
+                else self.norm
+            )
+            hidden_states, residual = layer.forward_sp(
+                positions,
+                hidden_states,
+                residual,
+                next_norm,
+                profiles["o"],
+                profiles["down"],
+                self.tpsp_profile.backend,
+                idx != 0,
+            )
+        return hidden_states
+
+
+class TPSPLlamaForCausalLM(LlamaForCausalLM):
+    def __init__(self, *, vllm_config, prefix="", layer_type=TPSPLlamaDecoderLayer):
+        if vllm_config.quant_config is not None:
+            raise RuntimeError("TP/SP Llama does not support quantized weights")
+        if vllm_config.lora_config is not None:
+            raise RuntimeError("TP/SP Llama does not support LoRA")
+        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        group = get_tp_group()
+        first_layer = self.model.layers[0]
+        hidden_size = self.config.hidden_size
+        o_width = first_layer.self_attn.o_proj.input_size_per_partition
+        o_eps = first_layer.post_attention_layernorm.variance_epsilon
+        down_width = first_layer.mlp.down_proj.input_size_per_partition
+        down_eps = self.model.layers[-1].input_layernorm.variance_epsilon
+        shapes = {
+            "o": TPSPShape(o_width, hidden_size, o_eps, True),
+            "down": TPSPShape(down_width, hidden_size, down_eps, True),
+        }
+        self.tpsp_profile = TPSPProfileSession(
+            shapes, group.world_size, group.device_group.group_name
+        )
+        self.model.tpsp_profile = self.tpsp_profile
+
+    def _init_model(self, vllm_config, prefix="", layer_type=TPSPLlamaDecoderLayer):
+        return TPSPLlamaModel(
+            vllm_config=vllm_config, prefix=prefix, layer_type=layer_type
+        )
+
+    def close_tpsp(self) -> None:
+        self.tpsp_profile.close()
+        for layer in self.model.layers:
+            for projection in (layer.self_attn.o_proj, layer.mlp.down_proj):
+                if hasattr(projection, "_tpsp_transposed_weight"):
+                    del projection._tpsp_transposed_weight
