@@ -46,14 +46,22 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         from vllm.platforms import current_platform
 
         cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype == "auto":
-            if current_platform.is_xpu():
-                cache_config.cache_dtype = "bfloat16"
-            elif current_platform.is_cuda_alike():
-                capability = current_platform.get_device_capability()
-                cache_config.cache_dtype = (
-                    "fp8_e4m3" if capability and capability.major >= 10 else "bfloat16"
-                )
+        if (
+            cache_config.cache_dtype == "auto"
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            cache_config.cache_dtype = "fp8_e4m3"
+            logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
+            # MTP shares the target's KV cache layout; a separate draft model
+            # must not inherit a default it was never validated with.
+            spec_config = vllm_config.speculative_config
+            if (
+                spec_config is not None
+                and spec_config.method != "mtp"
+                and spec_config.kv_cache_dtype is None
+            ):
+                spec_config.kv_cache_dtype = "auto"
 
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
@@ -280,6 +288,31 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 "%s. FA4 not available, forcing TRITON_ATTN backend.",
                 head_dims,
             )
+
+
+class EmbeddingGemma2ModelConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Gemma4Config.verify_and_update_config(vllm_config)
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attn_config = vllm_config.attention_config
+        if attn_config.backend is None:
+            attn_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "EmbeddingGemma2: attention backend not specified; defaulting to "
+                "TRITON_ATTN (validated backend for heterogeneous head dimensions)."
+            )
+        else:
+            logger.info(
+                "EmbeddingGemma2: using attention backend %s", attn_config.backend
+            )
+
+        model_config = vllm_config.model_config
+        if model_config.max_model_len > 8192 and getattr(
+            model_config, "original_max_model_len", None
+        ) in (None, -1):
+            model_config.max_model_len = 8192
 
 
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
@@ -1025,6 +1058,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
+    "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,

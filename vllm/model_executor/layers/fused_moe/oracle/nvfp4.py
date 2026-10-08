@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
 )
@@ -209,6 +210,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
     ]
+    AVAILABLE_BACKENDS = prioritize_humming(AVAILABLE_BACKENDS)
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.B12X,
@@ -332,6 +334,7 @@ def convert_to_nvfp4_moe_kernel_format(
     a2_scale: torch.Tensor | None,
     is_act_and_mul: bool,
     use_a16: bool = False,
+    trtllm_hidden_alignment: int = 256,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -417,6 +420,7 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale_2=w2_scale_2,
             a2_scale=a2_scale,
             is_act_and_mul=is_act_and_mul,
+            trtllm_hidden_alignment=trtllm_hidden_alignment,
         )
     elif nvfp4_backend == NvFp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
