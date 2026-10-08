@@ -11,12 +11,12 @@ from typing import (
     ClassVar,
     Generic,
     Protocol,
+    Self,
     TypeVar,
     runtime_checkable,
 )
 
 import torch
-from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

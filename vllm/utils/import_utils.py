@@ -12,10 +12,9 @@ import os
 import sys
 from functools import cache
 from types import ModuleType
-from typing import Any
+from typing import Any, Never
 
 import regex as re
-from typing_extensions import Never
 
 from vllm.logger import init_logger
 

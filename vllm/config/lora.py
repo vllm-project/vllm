@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from typing_extensions import Self
 
 from vllm import envs
 from vllm.config.utils import config

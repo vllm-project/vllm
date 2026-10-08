@@ -5,13 +5,12 @@ import os
 import socket
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 import regex as re
 import torch
 from pydantic import Field, field_validator, model_validator
 from torch.distributed import ProcessGroup, ReduceOp, Store
-from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig

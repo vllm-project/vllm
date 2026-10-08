@@ -255,7 +255,7 @@ def main() -> int:
         or os.environ.get("VLLM_BUILD_COMMIT")
         or "",
         "cuda": cuda_release(nvcc),
-        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "build_dirs": [],
         "incomplete": False,
         "errors": [],

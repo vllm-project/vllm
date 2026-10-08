@@ -22,13 +22,12 @@ reference's out-of-vocab scheme.
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, assert_never
 
 import numpy as np
 import torch
 from PIL import Image, ImageOps
 from transformers import BatchFeature
-from typing_extensions import assert_never
 
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict

@@ -719,7 +719,7 @@ async def test_dp_pause_barrier_request_deadlock():
         # Drive the staggered barrier.  Old code deadlocks here.
         try:
             await asyncio.wait_for(client.call_utility_async("barrier"), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             for t in mid_barrier_tasks:
                 t.cancel()
             pytest.fail(

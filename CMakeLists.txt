@@ -46,7 +46,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13" "3.14")
+set(PYTHON_SUPPORTED_VERSIONS "3.11" "3.12" "3.13" "3.14")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
@@ -134,40 +134,34 @@ endif()
 #
 # spinloop extension (pure CXX; must stay above the non-CUDA device branch so
 # CPU builds define the target before the early return)
-# This extension requires SABI 3.11 since it relies on Py_buffer support. Loading
-# failure is handled gracefully on vLLM side for lower Python versions.
-# Skip the target entirely on Python < 3.11 so the build doesn't break.
+# This extension requires SABI 3.11 since it relies on Py_buffer support.
 #
-if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
-  set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
-  set(SPINLOOP_COMPILE_FLAGS "")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-    list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
-  endif()
-  define_extension_target(
-    spinloop
-    DESTINATION vllm
-    LANGUAGE CXX
-    SOURCES ${VLLM_SPINLOOP_EXT_SRC}
-    COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
-    USE_SABI 3.11
-    WITH_SOABI)
+set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
+set(SPINLOOP_COMPILE_FLAGS "")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+  list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
 endif()
+define_extension_target(
+  spinloop
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES ${VLLM_SPINLOOP_EXT_SRC}
+  COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
+  USE_SABI 3.11
+  WITH_SOABI)
 
 #
 # fs_io extension (pure CXX; must stay above the non-CUDA device branch
 # so CPU builds define the target before the early return).
 # GIL-releasing filesystem helpers for FileSystemTierManager.
 #
-if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
-  define_extension_target(
-    fs_io_C
-    DESTINATION vllm
-    LANGUAGE CXX
-    SOURCES csrc/fs_io.cpp
-    USE_SABI 3.11
-    WITH_SOABI)
-endif()
+define_extension_target(
+  fs_io_C
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES csrc/fs_io.cpp
+  USE_SABI 3.11
+  WITH_SOABI)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.

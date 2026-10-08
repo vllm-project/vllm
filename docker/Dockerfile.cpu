@@ -13,7 +13,7 @@
 #   vllm-dev: used for development
 #
 # Build arguments:
-#   PYTHON_VERSION=3.13|3.12 (default)|3.11|3.10
+#   PYTHON_VERSION=3.13|3.12 (default)|3.11
 #   VLLM_CPU_X86=false (default)|true (for cross-compilation)
 #   VLLM_CPU_ARM_BF16=false (default)|true (for cross-compilation)
 #
