@@ -550,6 +550,20 @@ class TestRdtRouter:
         assert r.group_owners(0) == [0, 1, 2, 3]
         assert r.group_owners(1) == [0, 1]
 
+    def test_untagged_free_uses_the_legacy_one_argument_call(self):
+        class _LegacyFree:
+            def __init__(self, owner):
+                self.owner = owner
+
+            def remote(self, group_idx):
+                return self.owner, group_idx
+
+        r = _router(2, 1)
+        actors = [SimpleNamespace(free_group=_LegacyFree(owner)) for owner in range(2)]
+        r.bind(actors, [object(), object()], consumer_id=0)
+
+        assert r.free_group(0) == [(0, 0), (1, 0)]
+
     def test_an_unowned_name_raises(self):
         r = RdtRouter(2, 2, [[]], [0], ["w"], [1])
         with pytest.raises(ValueError, match="has no owner"):
