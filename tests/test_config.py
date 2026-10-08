@@ -1150,6 +1150,58 @@ def test_adaptive_verification_requires_full_cudagraphs(graph_mode, should_raise
 
 
 @pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({}, None),
+        ({"enable_eager_tp_all_reduce": False, "tp_size": 1}, None),
+        ({"is_cuda": False}, "not NVIDIA CUDA"),
+        ({"tp_size": 1}, "tensor_parallel_size"),
+        ({"mode": CompilationMode.STOCK_TORCH_COMPILE}, "VLLM_COMPILE"),
+        ({"cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE}, "exactly PIECEWISE"),
+        ({"backend": "eager"}, "Inductor path"),
+        ({"use_inductor_graph_partition": True}, "use_inductor_graph_partition"),
+        ({"VLLM_USE_BREAKABLE_CUDAGRAPH": True}, "VLLM_USE_BREAKABLE_CUDAGRAPH"),
+        ({"VLLM_DISABLE_PYNCCL": True}, "VLLM_DISABLE_PYNCCL"),
+        ({"pass_config": {"fuse_allreduce_rms": True}}, "fuse_allreduce_rms"),
+        ({"pass_config": {"fuse_attn_quant": True}}, "fuse_attn_quant"),
+        ({"pass_config": {"enable_sp": True}}, "enable_sp"),
+        ({"pass_config": {"fuse_gemm_comms": True}}, "fuse_gemm_comms"),
+        ({"splitting_ops": []}, "splitting_ops"),
+    ],
+)
+def test_eager_tp_all_reduce_envelope(monkeypatch, overrides, match):
+    """The eager TP all-reduce split fails closed outside its validated
+    envelope and is a no-op when the flag is off."""
+    overrides = dict(overrides)
+    is_cuda = overrides.pop("is_cuda", True)
+    tp_size = overrides.pop("tp_size", 2)
+    breakable_cudagraph = overrides.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", False)
+    disable_pynccl = overrides.pop("VLLM_DISABLE_PYNCCL", False)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(
+            **{
+                "mode": CompilationMode.VLLM_COMPILE,
+                "cudagraph_mode": CUDAGraphMode.PIECEWISE,
+                "enable_eager_tp_all_reduce": True,
+                **overrides,
+            }
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size),
+    )
+
+    with (
+        patch.object(envs, "VLLM_USE_BREAKABLE_CUDAGRAPH", breakable_cudagraph),
+        patch.object(envs, "VLLM_DISABLE_PYNCCL", disable_pynccl),
+    ):
+        if match is None:
+            VllmConfig._validate_eager_tp_all_reduce(config)
+        else:
+            with pytest.raises(ValueError, match=match):
+                VllmConfig._validate_eager_tp_all_reduce(config)
+
+
+@pytest.mark.parametrize(
     ("model_config", "expected"),
     [
         (
