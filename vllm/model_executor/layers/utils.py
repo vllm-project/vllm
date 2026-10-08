@@ -347,14 +347,22 @@ def rocm_unquantized_gemm_impl(
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         # Note: Only build that view inside the branches that consume it.
-        # N = 13..16 and 20 in one call only for tall weights: with in_proj_ba
-        # (24x5120) at N=16 wvSplitK is 6x slower than rocBLAS on gfx1100,
-        # while at N <= 12 it is 2.6x faster for any M. Otherwise N = 13..24
-        # goes in chunks of <= 12 rows, which re-reads the weight per chunk:
-        # it pays on short weights (in_proj_ba 34 -> 14-22 us) and on the
-        # 62080-row lm_head at N=24 (1.95 -> 1.49 ms), not in between.
+        # N = 13..16 in one call from M = 256 (K >= 1024), and N = 20 for tall
+        # weights: with in_proj_ba (24x5120) at N=16 wvSplitK is 6x slower than
+        # rocBLAS on gfx1100, while at N <= 12 it is 2.6x faster for any M. At
+        # N=16 one call halves the time of chunks from M = 256 (router, shared
+        # expert, HC down 45 -> 36 us), but with K = 320 rocBLAS wins (13 vs
+        # 22 us). Otherwise N = 13..24 goes in chunks of <= 12 rows, which
+        # re-reads the weight per chunk: it pays on short weights (in_proj_ba
+        # 34 -> 14-22 us) and on the 62080-row lm_head at N=24 (1.95 -> 1.49
+        # ms), not in between.
         if (m == 1 and 0 < n <= 5) or (
-            m > 8 and (0 < n <= 12 or (n in (13, 14, 15, 16, 20) and m >= 1024))
+            m > 8
+            and (
+                0 < n <= 12
+                or (12 < n <= 16 and m >= 256 and k >= 1024)
+                or (n == 20 and m >= 1024)
+            )
         ):
             x_view = x.reshape(-1, x.size(-1)).contiguous()
             cu_count = num_compute_units()
