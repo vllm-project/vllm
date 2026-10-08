@@ -89,13 +89,13 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         self._prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
         self._global_hyperparameters: PerLayerParameters | None = None
         self._wrapper_workspace_ptr = 0
+        self._workspace_spec = (
+            (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
+            torch.uint8,
+        )
         # Reserve capacity without retaining a view: a retained view would pin
         # the old buffer when another user grows the shared workspace.
         current_workspace_manager().get_simultaneous(self._workspace_spec)
-
-    @property
-    def _workspace_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
-        return ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8)
 
     def _ensure_chunks(
         self,
@@ -151,7 +151,6 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         (workspace_buffer,) = current_workspace_manager().get_simultaneous(
             self._workspace_spec
         )
-        # The workspace only moves while it can still grow, before it is locked.
         if (
             self._prefill_main is None
             or self._wrapper_workspace_ptr != workspace_buffer.data_ptr()
