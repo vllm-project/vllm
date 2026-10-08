@@ -612,7 +612,7 @@ class Dots3NoteModel(DeepseekV32Model):
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            self.intermediate_tensor_keys, config.hidden_size
         )
         self.aux_hidden_state_layers = tuple[int, ...]()
         self.num_redundant_experts = (

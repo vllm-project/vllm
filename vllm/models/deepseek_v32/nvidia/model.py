@@ -168,6 +168,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
 
 class DeepseekV32Model(torch.nn.Module):
     fall_back_to_pt_during_load = False
+    # Tensors that forward() sends between PP stages.
+    intermediate_tensor_keys = ["hidden_states"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -229,7 +231,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
+            self.intermediate_tensor_keys, config.hidden_size
         )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
