@@ -166,6 +166,29 @@ def _write_minimal_moe_config(model_path: Path, architecture: str) -> None:
     }
     if architecture == "AXK1ForCausalLM":
         config["model_type"] = "axk1"
+    elif architecture == "MiniMaxM3SparseForCausalLM":
+        text_config = {
+            **config,
+            "model_type": "minimax_m3_text",
+            "dense_intermediate_size": 512,
+            "hidden_act": "swigluoai",
+            "num_local_experts": 4,
+            "n_shared_experts": 1,
+            "moe_layer_freq": [1],
+            "sparse_attention_config": None,
+            "quantization_config": {
+                **_QUARK_MXFP4_CONFIG,
+                "layer_quant_config": {
+                    "*block_sparse_moe.experts*": _QUARK_MXFP4_LAYER_CONFIG
+                },
+                "exclude": [r"re:^(?!.*\.block_sparse_moe\.experts(?:\.|$)).*$"],
+            },
+        }
+        config = {
+            "architectures": [architecture],
+            "model_type": "minimax_m3_vl",
+            "text_config": text_config,
+        }
     elif architecture == "Glm4MoeForCausalLM":
         config["model_type"] = "glm4_moe"
     elif architecture == "Glm4MoeLiteForCausalLM":
@@ -398,6 +421,8 @@ def test_online_shared_expert_reload_compatibility(
         assert torch.equal(layer.w13_weight_scale[2, :64], expected_scale)
 
 
+# TODO: Add DeepseekV4ForConditionalGeneration once it uses
+# resolve_layer_fused_shared_expert.
 @pytest.mark.parametrize(
     "architecture",
     [
@@ -410,6 +435,7 @@ def test_online_shared_expert_reload_compatibility(
         "Glm4MoeLiteForCausalLM",
         "Glm5NextForCausalLM",
         "GlmMoeDsaForCausalLM",
+        "MiniMaxM3SparseForCausalLM",
         "Qwen3NextForCausalLM",
         "Qwen3_5MoeForCausalLM",
         "Qwen4ExpForCausalLM",
@@ -511,12 +537,13 @@ def test_online_quantization(
     assert isinstance(routed_experts.quant_method, QuarkOCP_MX_MoEMethod)
     shared_expert_prefix = routed_experts.moe_config.shared_expert_prefix
     assert shared_expert_prefix is not None
-    assert shared_expert_prefix.endswith(f"mlp.{shared_expert_name}")
+    assert shared_expert_prefix.endswith(shared_expert_name)
+    assert routed_experts._fused_shared_expert_quantizer is not None
     expert_map_manager = routed_experts.expert_map_manager
     assert expert_map_manager.num_fused_shared_experts == 1
-    assert expert_map_manager.map_global_to_local(moe.n_routed_experts) == (
-        moe.n_routed_experts
-    )
+    assert expert_map_manager.map_global_to_local(
+        routed_experts.moe_config.num_experts
+    ) == (routed_experts.moe_config.num_experts)
     expected_weight_dtype = {
         Mxfp4MoeBackend.AITER_MXFP4_BF16: torch.float4_e2m1fn_x2,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4: torch.float4_e2m1fn_x2,
@@ -533,10 +560,15 @@ def test_online_quantization(
         "cannot be enabled" in warning
         for warning in logged_warnings
     )
-    assert logged_messages == [
-        "Quantizing 2 layers of types: "
-        f"mlp.{shared_expert_name}.down_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4); "
-        f"mlp.{shared_expert_name}.gate_up_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4)"
-    ]
+    if architecture == "MiniMaxM3SparseForCausalLM":
+        # TODO: Use resolve_layer_fused_shared_expert in MiniMax M3 and remove
+        # this branch once its virtual fused projections are registered.
+        assert logged_messages == ["Quantizing 0 layers of types: "]
+    else:
+        assert logged_messages == [
+            "Quantizing 2 layers of types: "
+            f"mlp.{shared_expert_name}.down_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4); "
+            f"mlp.{shared_expert_name}.gate_up_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4)"
+        ]
