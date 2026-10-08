@@ -34,8 +34,8 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
+from vllm.entrypoints.common.offline import _O, _R, OfflineInferenceMixin
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
-from vllm.entrypoints.launchers.offline import _O, _R, OfflineInferenceMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.rl.offline import RLOfflineMixin
 from vllm.entrypoints.serve.utils.api_utils import log_non_default_args

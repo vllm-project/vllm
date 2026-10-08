@@ -5,7 +5,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.entrypoints.launchers.offline import OfflineInferenceMixin
+from vllm.entrypoints.common.offline import OfflineInferenceMixin
 
 
 class RLOfflineMixin(OfflineInferenceMixin):
