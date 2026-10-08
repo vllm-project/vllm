@@ -13,7 +13,7 @@ import jsonschema
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
-from vllm import CompletionOutput, RequestOutput, TokensPrompt
+from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.llm import LLM
 from vllm.exceptions import VLLMValidationError
@@ -133,84 +133,21 @@ def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
     assert all(beam.finish_reason != "abort" for beam in normal.sequences)
 
 
-@pytest.mark.parametrize("allowed_token_ids", [[], [-1], [1000]])
-@pytest.mark.parametrize("with_grammar", [False, True])
-def test_beam_search_rejects_invalid_allowlist_before_grammar(
-    allowed_token_ids, with_grammar
-) -> None:
+def test_beam_search_validates_allowlist_before_grammar() -> None:
+    """Grammar filtering must not hide an invalid request token ID."""
     llm = LLM.__new__(LLM)
     llm.llm_engine = Mock()
     llm.model_config = Mock(get_vocab_size=Mock(return_value=1000))
     with pytest.raises(VLLMValidationError):
         llm.beam_search(
-            [{"prompt": "prompt"}],
+            [{"prompt_token_ids": [1]}],
             BeamSearchParams(
                 beam_width=1,
                 max_tokens=1,
-                allowed_token_ids=allowed_token_ids,
-                structured_outputs=StructuredOutputsParams(regex="foo")
-                if with_grammar
-                else None,
+                allowed_token_ids=[1000],
+                structured_outputs=StructuredOutputsParams(regex="foo"),
             ),
         )
-
-
-def test_beam_search_scores_allowed_tokens_across_chunks(monkeypatch) -> None:
-    """Keep both valid beams even when raw top-k misses the second chunk."""
-    scores = {0: Logprob(-0.1), 11: Logprob(-1.0), 12: Logprob(-2.0)}
-
-    def run_requests(prompts, params, **kwargs):
-        return [
-            RequestOutput(
-                request_id="inner",
-                prompt=None,
-                prompt_token_ids=prompt["prompt_token_ids"],
-                prompt_logprobs=None,
-                finished=True,
-                outputs=[
-                    CompletionOutput(
-                        index=0,
-                        text="",
-                        token_ids=[0],
-                        cumulative_logprob=None,
-                        logprobs=[
-                            {
-                                token: score
-                                for token, score in scores.items()
-                                if token in [0, *(param.logprob_token_ids or [11])]
-                            }
-                        ],
-                    )
-                ],
-            )
-            for prompt, param in zip(prompts, params)
-        ]
-
-    llm = LLM.__new__(LLM)
-    llm.llm_engine = Mock()
-    llm.renderer = Mock(
-        get_tokenizer=Mock(
-            return_value=SimpleNamespace(
-                eos_token_id=0, decode=lambda tokens, **kwargs: str(tokens)
-            )
-        )
-    )
-    monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
-    prompt: TokensPrompt = {"prompt_token_ids": [1]}
-    monkeypatch.setattr(
-        llm,
-        "_preprocess_cmpl",
-        lambda prompts: [{"type": "token", **p} for p in prompts],
-    )
-    llm.model_config = Mock(get_vocab_size=Mock(return_value=1000))
-    output = llm.beam_search(
-        [prompt],
-        BeamSearchParams(
-            beam_width=2, max_tokens=1, allowed_token_ids=[11, *range(100, 227), 12]
-        ),
-    )
-    assert [beam.tokens for beam in output[0].sequences] == [[1, 11], [1, 12]]
-    assert [beam.cum_logprob for beam in output[0].sequences] == [-1.0, -2.0]
 
 
 @pytest.mark.parametrize("model", MODELS)

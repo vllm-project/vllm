@@ -132,49 +132,51 @@ class _OfflineServing(BeamSearchOfflineMixin):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "allowed_token_ids", [None, [11, 12], [11, *range(100, 227), 12]]
-)
-async def test_beam_search_handles_extra_logprob_candidates(
-    monkeypatch, allowed_token_ids
-) -> None:
-    async def generate(prompt, params, *args, **kwargs):
-        result = await anext(_EngineClient().generate(prompt, params, *args, **kwargs))
-        scores = result.outputs[0].logprobs[0]
-        # Raw top-k may miss a valid beam; exact scoring must cover every chunk.
-        ids = params.logprob_token_ids or [11]
-        result.outputs[0].logprobs = [
-            {token: score for token, score in scores.items() if token in [0, *ids]}
-        ]
-        yield result
-
-    serving = _AsyncServing()
-    monkeypatch.setattr(serving, "engine_client", _EngineClient())
-    monkeypatch.setattr(serving.engine_client, "generate", generate)
+async def test_beam_search_handles_extra_logprob_candidates() -> None:
     prompt: TokensInput = {
         "type": "token",
         "prompt": "prompt",
         "prompt_token_ids": [1],
     }
-    params = BeamSearchParams(
-        beam_width=2,
-        max_tokens=1,
-        allowed_token_ids=allowed_token_ids,
-        watermarking=False,
-    )
+    params = BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
 
     outputs = [
-        output async for output in serving.beam_search(prompt, "request", params)
+        output
+        async for output in _AsyncServing().beam_search(prompt, "request", params)
     ]
 
     assert len(outputs) == 1
-    if allowed_token_ids is None:
-        assert outputs[0].outputs[0].finish_reason == "stop"
-        assert outputs[0].outputs[0].token_ids == []
-        assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-0.1)
-    else:
-        assert [output.token_ids for output in outputs[0].outputs] == [[11], [12]]
-        assert all(output.finish_reason == "length" for output in outputs[0].outputs)
+    assert outputs[0].outputs[0].finish_reason == "stop"
+    assert outputs[0].outputs[0].token_ids == []
+    assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-0.1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed_ids", [[11, 12], [11, *range(100, 227), 12]])
+async def test_beam_search_scores_all_allowed_tokens(monkeypatch, allowed_ids) -> None:
+    """Select both allowed beams even when one falls outside raw top-k."""
+
+    class ScoringClient(_EngineClient):
+        async def generate(self, prompt, params, *args, **kwargs):
+            async for result in super().generate(prompt, params, *args, **kwargs):
+                scores = result.outputs[0].logprobs[0]
+                ids = params.logprob_token_ids or [11]
+                result.outputs[0].logprobs = [
+                    {token: scores[token] for token in [0, *ids] if token in scores}
+                ]
+                yield result
+
+    serving = _AsyncServing()
+    monkeypatch.setattr(serving, "engine_client", ScoringClient())
+    prompt: TokensInput = {"type": "token", "prompt_token_ids": [1]}
+    params = BeamSearchParams(
+        beam_width=2, max_tokens=1, allowed_token_ids=allowed_ids, watermarking=False
+    )
+    outputs = [
+        output async for output in serving.beam_search(prompt, "request", params)
+    ]
+    assert [choice.token_ids for choice in outputs[0].outputs] == [[11], [12]]
+    assert [choice.cumulative_logprob for choice in outputs[0].outputs] == [-1.0, -2.0]
 
 
 @pytest.mark.asyncio
