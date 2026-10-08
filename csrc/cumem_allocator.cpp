@@ -203,12 +203,25 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   }
 #endif
 
-  CUmemAccessDesc accessDesc = {};
-  accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  accessDesc.location.id = device;
-  accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+#if defined(USE_ROCM) && HIP_VERSION >= 70200000
+  // Also map for the host, as PyTorch does for its expandable segments: on
+  // ROCm >= 7.2, Tensor.item() on a large-BAR device dereferences VRAM
+  // directly from the host, which segfaults on a device-only mapping.
+  constexpr int num_desc = 2;
+#else
+  constexpr int num_desc = 1;
+#endif
+  CUmemAccessDesc accessDesc[num_desc] = {};
+  accessDesc[0].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  accessDesc[0].location.id = device;
+  accessDesc[0].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+#if defined(USE_ROCM) && HIP_VERSION >= 70200000
+  accessDesc[1].location.type = hipMemLocationTypeHost;
+  accessDesc[1].location.id = 0;  // ignored
+  accessDesc[1].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+#endif
 
-  CUDA_CHECK(cuMemSetAccess(d_mem, size, &accessDesc, 1));
+  CUDA_CHECK(cuMemSetAccess(d_mem, size, accessDesc, num_desc));
   if (error_code != 0) {
     return;
   }

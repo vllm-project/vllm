@@ -323,7 +323,6 @@ def _attn_kv_scales(model) -> dict[str, list[float]]:
     }
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Segfaults on ROCm.")
 @requires_fp8
 @create_new_process_for_each_test()
 def test_deep_sleep_compressed_tensors_kv_scales(
