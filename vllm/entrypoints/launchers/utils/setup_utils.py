@@ -16,8 +16,8 @@ def to_timeout(deadline: float | None) -> float | None:
     return deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
 
 
-# Catch SIGTERM and SIGINT to allow graceful shutdown.
 def signal_handler(signum, frame):
+    """Catch SIGTERM and SIGINT to allow graceful shutdown."""
     global shutdown_requested
     logger.debug("Received %d signal.", signum)
     if not shutdown_requested:
