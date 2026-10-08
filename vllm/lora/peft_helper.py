@@ -62,14 +62,14 @@ class PEFTHelper:
             error_msg.append("vLLM does not yet support DoRA.")
         if self.lora_bias:
             error_msg.append("vLLM does not support LoRA bias (lora_bias).")
-        if self._init_modifies_base_weights():
+        if not self._init_is_supported():
             error_msg.append(
-                f"init_lora_weights={self.init_lora_weights!r} modifies the base "
-                "model weights when PEFT loads the adapter, which vLLM does not "
-                "do. Convert it to a regular LoRA adapter with PEFT's "
-                "path_initial_model_for_weight_conversion, or set "
-                "init_lora_weights to true if the served base model already "
-                "contains the modified weights."
+                f"vLLM does not support init_lora_weights={self.init_lora_weights!r}."
+                " Inits such as PiSSA, OLoRA, CorDA and LoftQ modify the base model"
+                " weights when PEFT loads the adapter. Convert it to a regular LoRA"
+                " adapter with PEFT's path_initial_model_for_weight_conversion, or"
+                " set init_lora_weights to true if the served base model already"
+                " contains the modified weights."
             )
         if self.alora_invocation_tokens:
             error_msg.append("vLLM does not support Activated LoRA (aLoRA).")
@@ -81,15 +81,17 @@ class PEFTHelper:
             error_msg.append("vLLM does not support QALoRA.")
         return error_msg
 
-    def _init_modifies_base_weights(self) -> bool:
-        # Same checks as PEFT's LoraLayer.update_layer
+    def _init_is_supported(self) -> bool:
+        # These inits only set the initial adapter weights, so a saved adapter
+        # loads in PEFT as a plain LoRA. lora_ga modifies the base weights only
+        # during training, when its gradients are attached.
         init = self.init_lora_weights
-        if not isinstance(init, str):
-            return False
-        return (
-            init.startswith(("pissa", "corda"))
-            or init.lower() == "olora"
-            or init in ("loftq", "lora_ga")
+        return not isinstance(init, str) or init.lower() in (
+            "gaussian",
+            "eva",
+            "orthogonal",
+            "mica",
+            "lora_ga",
         )
 
     def __post_init__(self):
