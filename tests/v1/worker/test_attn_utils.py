@@ -760,6 +760,13 @@ class _TableBuilder:
         return common_attn_metadata.block_table_tensor
 
 
+_VLLM_CONFIG = SimpleNamespace(
+    model_config=SimpleNamespace(max_model_len=8192),
+    scheduler_config=SimpleNamespace(max_num_seqs=4),
+    parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+)
+
+
 def _packed_group(tokens_per_state, row_bytes, supported_sizes):
     spec = MLAAttentionSpec(
         block_size=1024,
@@ -783,8 +790,7 @@ def test_packed_compressed_group_gets_kernel_block_table():
     a bound view in kernel blocks that address the same packed-block rows."""
     row, stride_rows = 132, 5 * 64
     group = _packed_group(4, row, [128, 256])
-    vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=4))
-    group.create_metadata_builders(vllm_config, "cpu", kernel_block_size=1024)
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
     assert group.get_metadata_builder().kv_cache_spec.block_size == 256
 
     backing = torch.arange(3 * stride_rows).repeat_interleave(row)
@@ -801,7 +807,7 @@ def test_split_group_maps_manager_block_table():
     """Groups split in a dense layout keep manager block tables; builders get
     b * blocks_per_kv_block + j against the view allocated in kernel blocks."""
     group = _packed_group(4, 132, [128, 256])
-    group.create_metadata_builders(SimpleNamespace(), "cpu", kernel_block_size=256)
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=256)
     kernel_view = torch.zeros(12, 1, 64, 132)
     bound = map_kv_caches_to_kernel_blocks({"layer.0": kernel_view}, [group])
     assert bound["layer.0"] is kernel_view
@@ -826,7 +832,7 @@ def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
 
 def test_packed_token_cache_cannot_be_split():
     group = _packed_group(1, 1152, [64])
-    group.create_metadata_builders(SimpleNamespace(), "cpu", kernel_block_size=1024)
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
     packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
     with pytest.raises(ValueError, match="cannot be split"):
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])

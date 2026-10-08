@@ -311,14 +311,28 @@ class AttentionGroup:
             )
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
-        if builder_cls.requires_block_table_width:
+        if builder_cls.requires_block_table_width or self.kernel_block_size is not None:
             max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
                 vllm_config, vllm_config.model_config.max_model_len
             )
             width = get_block_table_width(max_num_blocks, self.kv_cache_spec.block_size)
             if kernel_block_size is not None:
                 width *= self.kv_cache_spec.block_size // kernel_block_size
-            builder_kwargs["block_table_width"] = width
+            if builder_cls.requires_block_table_width:
+                builder_kwargs["block_table_width"] = width
+        if self.kernel_block_size is not None:
+            self.kernel_block_table = torch.zeros(
+                num_metadata_builders,
+                vllm_config.scheduler_config.max_num_seqs,
+                width,
+                dtype=torch.int32,
+                device=device,
+            )
+            self.kernel_block_offsets = torch.arange(
+                spec.block_size // self.kernel_block_size,
+                dtype=torch.int32,
+                device=device,
+            )
         self.metadata_builders = [
             builder_cls(
                 kv_cache_spec_builder,
@@ -374,18 +388,9 @@ class AttentionGroup:
     ) -> torch.Tensor:
         if self.kernel_block_size is None:
             return block_table
+        assert self.kernel_block_table is not None
         blocks_per_kv_block = self.kv_cache_spec.block_size // self.kernel_block_size
         rows, cols = block_table.shape
-        if self.kernel_block_table is None:
-            max_rows = block_table.untyped_storage().nbytes() // (
-                block_table.element_size() * block_table.stride(0)
-            )
-            self.kernel_block_table = block_table.new_zeros(
-                len(self.metadata_builders), max_rows, cols * blocks_per_kv_block
-            )
-            self.kernel_block_offsets = torch.arange(
-                blocks_per_kv_block, dtype=block_table.dtype, device=block_table.device
-            )
         out = self.kernel_block_table[ubatch_idx, :rows, : cols * blocks_per_kv_block]
         torch.add(
             self.kernel_block_offsets,
