@@ -84,7 +84,7 @@ from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
-_KIMI_K3_MERGED_FRONT_DECODE_TOKEN_COUNTS = frozenset(
+_KIMI_K3_MERGED_FRONT_TOKEN_COUNTS = frozenset(
     (
         1,
         2,
@@ -110,10 +110,13 @@ _KIMI_K3_MERGED_FRONT_DECODE_TOKEN_COUNTS = frozenset(
         112,
         128,
         192,
+        512,
+        1024,
+        1536,
+        2048,
     )
 )
-_KIMI_K3_MERGED_FRONT_PREFILL_MIN_TOKENS = 256
-_KIMI_K3_MERGED_FRONT_MAX_TOKENS = 2048
+_KIMI_K3_MERGED_FRONT_MAX_TOKENS = max(_KIMI_K3_MERGED_FRONT_TOKEN_COUNTS)
 _KIMI_K3_HIDDEN_SIZE = 7168
 _KIMI_K3_SHARED_GATE_UP_SIZE = 1536
 _KIMI_K3_SHARED_INTERMEDIATE_SIZE = 768
@@ -662,11 +665,9 @@ class KimiMoE(nn.Module):
         )
 
     def _supports_kimi_k3_large_front(self, num_tokens: int) -> bool:
-        return self._kimi_k3_large_front_available and (
-            num_tokens in _KIMI_K3_MERGED_FRONT_DECODE_TOKEN_COUNTS
-            or _KIMI_K3_MERGED_FRONT_PREFILL_MIN_TOKENS
-            <= num_tokens
-            <= _KIMI_K3_MERGED_FRONT_MAX_TOKENS
+        return (
+            self._kimi_k3_large_front_available
+            and num_tokens in _KIMI_K3_MERGED_FRONT_TOKEN_COUNTS
         )
 
     def _project_kimi_k3_large_front(
