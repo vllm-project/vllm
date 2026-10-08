@@ -173,6 +173,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if len(engine_inputs) > 1:
+                    self._set_prompt_transfer_id(sampling_params, i)
 
             request_id_item = f"{request_id}-{i}"
 
@@ -275,6 +277,21 @@ class OpenAIServingCompletion(GenerateBaseServing):
             return fake_stream_generator()
 
         return response
+
+    @staticmethod
+    def _set_prompt_transfer_id(sampling_params: SamplingParams, index: int) -> None:
+        """Give each prompt of a batch its own transfer_id for P/D pairing."""
+        extra_args = sampling_params.extra_args or {}
+        kv_params = extra_args.get("kv_transfer_params")
+        if not kv_params or not kv_params.get("transfer_id"):
+            return
+        sampling_params.extra_args = {
+            **extra_args,
+            "kv_transfer_params": {
+                **kv_params,
+                "transfer_id": f"{kv_params['transfer_id']}-{index}",
+            },
+        }
 
     async def completion_stream_generator(
         self,
