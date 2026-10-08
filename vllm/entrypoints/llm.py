@@ -789,6 +789,7 @@ class LLM(
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides.
 
@@ -800,12 +801,15 @@ class LLM(
                 profiling starts.
             max_iterations: Optional maximum number of worker iterations to profile.
                 Zero means no limit.
+            profiler_kwargs: Optional dictionary of keyword arguments to pass to
+                the underlying profiler.
 
         """
         self.llm_engine.start_profile(
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def stop_profile(self) -> None:
