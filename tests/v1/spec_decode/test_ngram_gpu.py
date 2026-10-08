@@ -329,6 +329,7 @@ def _make_ngram_mtp(min_n: int, max_n: int, k: int):
     speculator.all_matched_events = (torch.cuda.Event(), torch.cuda.Event())
     speculator.round = 0
     speculator.wait_for_lookup = False
+    speculator.draft_logits = None
     return speculator
 
 
@@ -355,3 +356,50 @@ def test_ngram_mtp_uses_lookup_first_and_skips_mtp_decode(
         )
         assert drafts == expected_drafts
     assert fake.draft_steps == expected_steps
+
+
+def test_copied_drafts_stay_exact_under_probabilistic_verification():
+    """One-hot draft logits for copies: accepted with p(token), output ~ p."""
+    from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
+        write_one_hot_draft_logits,
+    )
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        rejection_sample,
+    )
+
+    torch.manual_seed(0)
+    vocab, trials, copied = 16, 200_000, 3
+    target = torch.randn(vocab, device=DEVICE)
+    stale = torch.randn(trials, 1, vocab, device=DEVICE)
+    draft_logits = stale.clone()
+    has_match = torch.arange(trials, device=DEVICE) % 2 == 0
+    idx = torch.arange(trials, dtype=torch.int32, device=DEVICE)
+    drafts = torch.full((trials, 1), copied, dtype=torch.int64, device=DEVICE)
+    write_one_hot_draft_logits(draft_logits, idx, has_match, drafts)
+    assert torch.equal(draft_logits[~has_match], stale[~has_match])
+
+    rows = has_match.nonzero().squeeze(1)
+    n = rows.numel()
+    draft_sampled = torch.zeros(n, 2, dtype=torch.int64, device=DEVICE)
+    draft_sampled[:, 1] = copied
+    sampled, num_sampled = rejection_sample(
+        target.expand(2 * n, -1).contiguous(),
+        draft_logits,
+        draft_sampled.view(-1),
+        torch.arange(n + 1, dtype=torch.int32, device=DEVICE) * 2,
+        torch.arange(2 * n, dtype=torch.int32, device=DEVICE),
+        rows.int(),
+        rows.int().repeat_interleave(2),
+        torch.arange(2, dtype=torch.int32, device=DEVICE).repeat(n),
+        torch.ones(trials, device=DEVICE),
+        torch.arange(trials, dtype=torch.int64, device=DEVICE),
+        1,
+    )
+    p = torch.softmax(target, dim=0)
+    accept_rate = (num_sampled == 2).float().mean().item()
+    sigma = (p[copied].item() * (1 - p[copied].item()) / n) ** 0.5
+    assert abs(accept_rate - p[copied].item()) < 6 * sigma
+    counts = torch.bincount(sampled[:, 0], minlength=vocab).float()
+    expected = p * n
+    chi2 = ((counts - expected) ** 2 / expected).sum().item()
+    assert chi2 < (vocab - 1) + 10 * (2 * (vocab - 1)) ** 0.5

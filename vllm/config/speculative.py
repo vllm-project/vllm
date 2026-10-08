@@ -1853,11 +1853,6 @@ class SpeculativeConfig:
                     "ngram_lookup is only supported with method='mtp' and a "
                     "single-module MTP drafter."
                 )
-            if self.draft_sample_method != "greedy":
-                raise ValueError(
-                    "ngram_lookup requires draft_sample_method='greedy': n-gram "
-                    "drafts have no draft distribution to verify against."
-                )
             if self.enable_adaptive_verification:
                 raise ValueError(
                     "ngram_lookup is incompatible with enable_adaptive_verification."

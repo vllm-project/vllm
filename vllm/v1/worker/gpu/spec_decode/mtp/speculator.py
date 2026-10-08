@@ -11,7 +11,10 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
-from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramLookup
+from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
+    NgramLookup,
+    write_one_hot_draft_logits,
+)
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
@@ -184,4 +187,8 @@ class NgramMTPSpeculator(MTPSpeculator):
         if dummy_run:
             return draft_tokens
         torch.where(has_match[:, None], ngram_drafts, draft_tokens, out=draft_tokens)
+        if self.draft_logits is not None:
+            write_one_hot_draft_logits(
+                self.draft_logits, input_batch.idx_mapping, has_match, ngram_drafts
+            )
         return draft_tokens
