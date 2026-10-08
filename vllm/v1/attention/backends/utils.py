@@ -293,7 +293,7 @@ def resolve_kv_cache_layout(
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
     # Specs without per-layer views lay out their own raw backing tensor.
     kv_cache_specs = tuple(
-        spec for spec in kv_cache_specs or () if spec.has_attention_module
+        spec for spec in kv_cache_specs or () if spec.has_layer_views
     )
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
