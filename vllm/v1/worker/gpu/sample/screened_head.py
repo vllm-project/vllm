@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Greedy logits from an FP8 screen of the lm_head plus exact logits.
+"""Top-k logits from an FP8 screen of the lm_head plus exact logits.
 
 An FP8 copy of the lm_head scores every row j as s_j. Row j's logit as the full
 head computes it before rounding, c_j, satisfies |c_j - s_j| <= ||x|| * err_j:
 Cauchy-Schwarz on W_j - W8_j plus the fp32 accumulation error of both GEMMs.
-With t = max_j (s_j - ||x|| err_j), a row whose upper bound is below
-t - 2 eps |t| sits more than one output ulp below some other row, so it can
-neither win nor tie the full head's argmax. The remaining rows get exact logits
-and every other row -inf, so greedy sampling returns the full head's token
-(up to sub-ulp ties that depend on summation order, as with any GEMM change).
-The screen reads half the bytes of a BF16 head.
+Let t be the k-th largest per-block maximum of s_j - ||x|| err_j: at least k
+rows have c_j >= t. A row whose upper bound is below t - 2 eps |t| sits more
+than one output ulp below each of them, so it can neither enter nor tie the
+full head's top k. The remaining rows get exact logits and every other row
+-inf. Greedy sampling (k = 1) and top-k sampling only read the top k, so they
+return the full head's token for the same seed (up to sub-ulp ties that depend
+on summation order, as with any GEMM change). The screen reads half the bytes
+of a BF16 head.
 """
 
 import numpy as np
@@ -38,7 +40,7 @@ def _screen_kernel(
     scale_ptr,
     err_ptr,
     ub_ptr,
-    t_ptr,
+    block_max_ptr,
     num_tokens,
     vocab_size,
     hidden_size,
@@ -46,7 +48,8 @@ def _screen_kernel(
     BLOCK_V: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
-    rows = tl.program_id(0) * BLOCK_V + tl.arange(0, BLOCK_V)
+    block = tl.program_id(0)
+    rows = block * BLOCK_V + tl.arange(0, BLOCK_V)
     toks = tl.arange(0, BLOCK_N)
     row_mask = rows < vocab_size
     tok_mask = toks < num_tokens
@@ -72,7 +75,11 @@ def _screen_kernel(
     bound = tl.sqrt(sq)[:, None] * tl.load(err_ptr + rows, mask=row_mask, other=0.0)
     mask = tok_mask[:, None] & row_mask[None, :]
     lb = tl.where(mask, s - bound, float("-inf"))
-    tl.atomic_max(t_ptr + toks, tl.max(lb, axis=1), mask=tok_mask)
+    tl.store(
+        block_max_ptr + toks * tl.num_programs(0) + block,
+        tl.max(lb, axis=1),
+        mask=tok_mask,
+    )
     tl.store(
         ub_ptr + toks[:, None].to(tl.int64) * vocab_size + rows[None, :],
         s + bound,
@@ -143,14 +150,15 @@ def _exact_kernel(
         )
 
 
-class ScreenedGreedyHead:
-    """lm_head logits for all-greedy batches, exact on every row that can be
-    the argmax and -inf elsewhere."""
+class ScreenedLMHead:
+    """lm_head logits for batches that only read the top k, exact on every row
+    that can be among them and -inf elsewhere."""
 
     # Tiles and the token cap were measured on GB10 (lm_head 248320 x 2560):
     # the screen beats the BF16 head by 41% at 64 tokens and loses beyond 96,
     # where the GEMM is no longer bandwidth bound.
     MAX_TOKENS = 64
+    MAX_TOP_K = 32
     BLOCK_V = 64
     BLOCK_H = 256
     SELECT_BLOCK = 4096
@@ -177,6 +185,11 @@ class ScreenedGreedyHead:
             self.max_num_tokens, self.vocab_size, device=weight.device
         )
         self.cand = torch.empty_like(self.ub, dtype=torch.int32)
+        self.block_max = torch.empty(
+            self.max_num_tokens,
+            triton.cdiv(self.vocab_size, self.BLOCK_V),
+            device=weight.device,
+        )
         self.refresh()
 
     def refresh(self) -> None:
@@ -210,7 +223,7 @@ class ScreenedGreedyHead:
         sampler: Sampler,
         vocab_size: int,
         max_num_tokens: int,
-    ) -> "ScreenedGreedyHead":
+    ) -> "ScreenedLMHead":
         get_language_model = getattr(model, "get_language_model", None)
         language_model = get_language_model() if get_language_model else model
         lm_head = getattr(language_model, "lm_head", None)
@@ -247,7 +260,7 @@ class ScreenedGreedyHead:
         ):
             reason = "logits that are the plain lm_head projection (no LoRA)"
         if reason is not None:
-            raise ValueError(f"screened_greedy_lm_head requires {reason}.")
+            raise ValueError(f"screened_lm_head requires {reason}.")
         assert lm_head is not None
         weight = lm_head.weight.data
         head = cls(weight, vocab_size, sampler, max_num_tokens)
@@ -257,25 +270,37 @@ class ScreenedGreedyHead:
                 head(torch.randn_like(weight[:num_tokens]))
         return head
 
-    def is_eligible(self, idx_mapping_np: np.ndarray, num_tokens: int) -> bool:
-        """Whether sampling the batch needs nothing but the argmax."""
+    def required_top_k(self, idx_mapping_np: np.ndarray, num_tokens: int) -> int | None:
+        """How many top logits sampling the batch reads (1 when all greedy), or
+        None when it needs more than the screen certifies."""
         sampler = self.sampler
-        temperature = sampler.sampling_states.temperature.np[idx_mapping_np]
-        return (
-            0 < num_tokens <= self.max_num_tokens
-            and bool(np.all(temperature == 0.0))
-            and not np.any(sampler.needs_logits_processing[idx_mapping_np])
-            and sampler.get_logprobs_dims(idx_mapping_np) is None
-        )
+        states = sampler.sampling_states
+        if (
+            not 0 < num_tokens <= self.max_num_tokens
+            or np.any(sampler.uses_logits_processors[idx_mapping_np])
+            or sampler.get_logprobs_dims(idx_mapping_np) is not None
+        ):
+            return None
+        sampled = idx_mapping_np[states.temperature.np[idx_mapping_np] != 0.0]
+        if sampled.size == 0:
+            return 1
+        # Without top-k, top-p reads the whole distribution; min-p is applied
+        # before top-k.
+        top_k = int(states.top_k.np[sampled].max())
+        if top_k > min(self.MAX_TOP_K, self.block_max.shape[1]) or np.any(
+            states.min_p.np[sampled] != 0.0
+        ):
+            return None
+        return top_k
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, top_k: int = 1) -> torch.Tensor:
         num_tokens = x.shape[0]
         vocab_size = self.vocab_size
         assert num_tokens <= self.max_num_tokens
         x = x.contiguous()
         ub = self.ub[:num_tokens]
         cand = self.cand[:num_tokens]
-        t = torch.full((num_tokens,), float("-inf"), device=x.device)
+        block_max = self.block_max[:num_tokens]
         # A single token block, so the FP8 weights are read once.
         block_n = max(16, triton.next_power_of_2(num_tokens))
         _screen_kernel[(triton.cdiv(vocab_size, self.BLOCK_V),)](
@@ -284,7 +309,7 @@ class ScreenedGreedyHead:
             self.scale,
             self.err,
             ub,
-            t,
+            block_max,
             num_tokens,
             vocab_size,
             self.hidden_size,
@@ -292,6 +317,7 @@ class ScreenedGreedyHead:
             BLOCK_V=self.BLOCK_V,
             BLOCK_H=self.BLOCK_H,
         )
+        t = block_max.topk(top_k, dim=-1).values[:, -1].contiguous()
         logits = torch.empty(num_tokens, vocab_size, device=x.device, dtype=x.dtype)
         num_cand = torch.zeros(num_tokens, device=x.device, dtype=torch.int32)
         _select_kernel[(num_tokens, triton.cdiv(vocab_size, self.SELECT_BLOCK))](

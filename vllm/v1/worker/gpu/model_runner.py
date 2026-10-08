@@ -146,7 +146,7 @@ from vllm.v1.worker.gpu.sample.logits_processor import build_custom_logits_proce
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.screened_head import ScreenedGreedyHead
+from vllm.v1.worker.gpu.sample.screened_head import ScreenedLMHead
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
@@ -331,7 +331,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
         self.batch_sharder: BatchSharder | None = None
-        self.screened_head: ScreenedGreedyHead | None = None
+        self.screened_head: ScreenedLMHead | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
@@ -501,8 +501,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
-            if self.model_config.screened_greedy_lm_head:
-                self.screened_head = ScreenedGreedyHead.from_model(
+            if self.model_config.screened_lm_head:
+                self.screened_head = ScreenedLMHead.from_model(
                     self.model,
                     self.sampler,
                     self.vocab_size,
@@ -1609,14 +1609,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            if (
-                self.screened_head is not None
-                and grammar_output is None
-                and self.screened_head.is_eligible(
+            top_k = None
+            if self.screened_head is not None and grammar_output is None:
+                top_k = self.screened_head.required_top_k(
                     input_batch.idx_mapping_np, sample_hidden_states.shape[0]
                 )
-            ):
-                logits = self.screened_head(sample_hidden_states)
+            if top_k is not None:
+                assert self.screened_head is not None
+                logits = self.screened_head(sample_hidden_states, top_k)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
 
