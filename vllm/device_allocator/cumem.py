@@ -430,6 +430,23 @@ class CuMemAllocator:
             if allocation["allocated_size"] == 0 and data and not data.is_asleep:
                 unmap_and_release(self._python_free_callback(allocation["address"]))
 
+    @contextmanager
+    def cudagraph_pool(self) -> Iterator[tuple[int, int]]:
+        """Tag CUDA graph capture allocations and yield the graph pool id."""
+        if "cudagraph" not in self.allocator_and_pools:
+            allocator = get_pluggable_allocator(
+                self.python_malloc_callback, self.python_free_callback
+            )
+            mem_pool = torch.cuda.memory.MemPool(allocator._allocator)
+            self.allocator_and_pools["cudagraph"] = [(mem_pool, allocator)]
+        old_tag = self.current_tag
+        self.current_tag = "cudagraph"
+        try:
+            # capture_begin routes allocations to this pool; no use_mem_pool.
+            yield self.allocator_and_pools["cudagraph"][0][0].id
+        finally:
+            self.current_tag = old_tag
+
     def get_current_usage(self) -> int:
         """Get the total number of bytes allocated in the memory pool."""
         sum_bytes: int = 0

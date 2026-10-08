@@ -441,6 +441,11 @@ ADD ./cmake/ ./cmake/
 # (e.g. tests/tools/test_check_test_tethering.py imports
 # tools.pre_commit.check_test_tethering).
 ADD ./tools/ ./tools/
+# tests/test_zentorch_version_pin.py string-matches the zentorch extra in
+# setup.py against the torch pin in requirements/cpu.txt. The wheel does not
+# ship either file, and this stage does not inherit the vllm-src tree.
+ADD ./setup.py ./setup.py
+ADD ./requirements/cpu.txt ./requirements/cpu.txt
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
