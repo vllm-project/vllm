@@ -169,6 +169,24 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(single_request, raw_request)
+
+            # Mirror the single-chat frontend: resolve `reasoning_ended` and
+            # forward the same `chat_template_kwargs` the engine-side reasoner
+            # uses to rebuild the request-local parser. A divergence here makes
+            # a template-kwargs-driven parser fall back to its default (`thinking`
+            # on) for a request that disabled thinking, so `is_reasoning_end()`
+            # keeps reporting False, the structured-output gate never opens, and
+            # the grammar is silently never applied.
+            chat_template_kwargs = self._effective_chat_template_kwargs(single_request)
+            parser = (
+                self._make_parser(single_request, tokenizer, chat_template_kwargs)
+                if self.parser_cls is not None
+                else None
+            )
+            prompt_token_ids = self._extract_prompt_components(engine_prompt).token_ids
+            reasoning_ended = single_request.resolve_reasoning_ended(
+                parser, prompt_token_ids or []
+            )
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -179,7 +197,14 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
-                    reasoning_ended=None,
+                    reasoning_ended=reasoning_ended,
+                    reasoning_parser_kwargs={
+                        "chat_template_kwargs": self._engine_chat_template_kwargs(
+                            chat_template_kwargs
+                        ),
+                    }
+                    if parser is not None and parser.reasoning_parser is not None
+                    else None,
                 )
             )
 
