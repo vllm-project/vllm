@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     model_serializer,
 )
@@ -25,6 +26,12 @@ logger = init_logger(__name__)
 StopParam: TypeAlias = (
     str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
 )
+
+# `top_logprobs` is nullable in the OpenAI spec; null means the same as omitted.
+TopLogprobsParam: TypeAlias = Annotated[
+    int,
+    BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
+]
 
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
@@ -223,7 +230,11 @@ def validate_structural_tag_response_format(
 
 
 def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
-    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.sampling_params import (
+        SamplingParams,
+        StructuredOutputsParams,
+        check_json_nesting,
+    )
     from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
     if isinstance(payload, str) and not payload:
@@ -232,6 +243,9 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
             parameter=parameter,
         )
 
+    if isinstance(payload, str):
+        # Raised here so the error is not reported as a malformed tag below
+        check_json_nesting(payload, structural_tag=True)
     try:
         validate_xgrammar_grammar(
             SamplingParams(
