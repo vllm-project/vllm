@@ -198,6 +198,15 @@ class MoEMixin(MixtureOfExperts, Base):
             0,
         )
 
+        # Whether the Transformers backend shards the residual stream across TP
+        # ranks (`--enable-sequence-parallel`), unlike `use_sequence_parallel_moe`
+        # which only shards the experts' input. If so, the experts' partial
+        # outputs are reduce-scattered by the sequence parallel region instead
+        shard_residual_stream = (
+            self.parallel_config.enable_sequence_parallel
+            and self.tp_group.world_size > 1
+        )
+
         # Common kwargs
         norm_topk_prob = getattr(text_config, "norm_topk_prob", None)
 
@@ -309,6 +318,7 @@ class MoEMixin(MixtureOfExperts, Base):
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
                         routed_experts_cls=TransformersRoutedExperts,
+                        reduce_results=not shard_residual_stream,
                     )
                     fuser = MoEBlockFuser.match(moe_block, experts_name)
                     # _maybe_apply_routed_scale_to_output edge case. Transformers
@@ -362,6 +372,12 @@ class MoEMixin(MixtureOfExperts, Base):
                         if bias is not None:
                             kwargs["e_score_correction_bias"] = bias
                         fuser.rewrite_forward(moe_block)
+                        # Sequence parallel experts take the sharded residual stream
+                        # as is, instead of chunking and re-gathering the tokens
+                        moe_block.input_is_sequence_parallel = (
+                            shard_residual_stream
+                            and self.parallel_config.use_sequence_parallel_moe
+                        )
                         routed = "gate + experts"
                         if fuser.shared_name:
                             routed += " + shared experts"

@@ -18,7 +18,7 @@
 
 import os
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import regex as re
 import torch
+import torch.nn.functional as F
 import transformers
 from packaging.version import Version
 from torch import nn
@@ -40,6 +41,7 @@ from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -62,6 +64,15 @@ from vllm.model_executor.models.transformers.fusers import AttentionFuser, MLAFu
 from vllm.model_executor.models.transformers.fusers.attention import (
     VLLM_ATTN_IMPL,
     VLLM_MLA_ATTN_IMPL,
+)
+from vllm.model_executor.models.transformers.sequence_parallel import (
+    Region,
+    all_gather,
+    all_gather_output_hook,
+    pad_tokens,
+    shard,
+    shard_input_hook,
+    warn_if_mixing_tokens,
 )
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
@@ -186,6 +197,8 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
+        # Shard the residual stream across TP ranks
+        self._sequence_parallel()
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -533,7 +546,7 @@ class Base(
                     isinstance(module, nn.ModuleList)
                     and len(module) == self.text_config.num_hidden_layers
                 ):
-                    # Populate Eagle3 attrs
+                    # Populate Eagle3 attrs (_layer_names is also for sequence parallel)
                     self._target_class = type(child_module)
                     layer_name = qual_name.removeprefix("model.")
                     self._layer_names[int(child_name)] = layer_name
@@ -715,6 +728,63 @@ class Base(
             os.environ["VLLM_MLA_DISABLE"] = "1"
         return Attention
 
+    def _sequence_parallel(self):
+        """Apply sequence parallelism to this pipeline stage's decoder layers."""
+        self._sequence_parallel_enabled = False
+        if not self.parallel_config.enable_sequence_parallel:
+            return
+        if self.tp_group.world_size <= 1:
+            logger.warning_once("Sequence parallelism has no effect without TP.")
+            return
+
+        layers = [
+            self.model.get_submodule(n) for _, n in sorted(self._layer_names.items())
+        ]
+        layers = [layer for layer in layers if not isinstance(layer, PPMissingLayer)]
+        if not layers:
+            raise NotImplementedError(
+                f"Could not find the decoder layers of {type(self.model).__name__} "
+                "to apply sequence parallelism to."
+            )
+        async_tp = self.parallel_config.enable_async_tp
+        if async_tp and self.vllm_config.lora_config is not None:
+            logger.warning_once("Async TP is disabled because LoRA is enabled.")
+            async_tp = False
+        group_name = self.tp_group.device_group.group_name
+        if async_tp:
+            from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+            enable_symm_mem_for_group(group_name)
+
+        self._sequence_parallel_enabled = True
+        layers[0].register_forward_pre_hook(shard_input_hook, with_kwargs=True)
+        layers[-1].register_forward_hook(all_gather_output_hook, with_kwargs=True)
+
+        # Sequence parallel MoE takes, and returns, this rank's tokens as is
+        def is_region(child: nn.Module) -> bool:
+            return not getattr(
+                child, "input_is_sequence_parallel", False
+            ) and Region.contains_reduction(child)
+
+        # One layer of each class is enough to check
+        for layer in {type(layer): layer for layer in layers}.values():
+            warn_if_mixing_tokens(layer, is_region)
+        regions = [
+            Region(child, async_tp, group_name)
+            for layer in layers
+            for child in layer.children()
+            if is_region(child)
+        ]
+        if async_tp:
+            fused = sum(
+                bool(r.gather_linears) + bool(r.scatter_linear) for r in regions
+            )
+            logger.info(
+                "Async TP fused %d of %d sequence parallel collectives.",
+                fused,
+                2 * len(regions),
+            )
+
     def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
         """If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
@@ -785,20 +855,41 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
-        outputs = self.model(
-            input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            use_cache=False,
-            position_ids=positions,
-            return_dict=False,
-            **self._output_aux_hidden_states_kwargs,
-            **kwargs,
+        # Sequence parallelism needs the tokens to divide evenly across TP ranks
+        num_tokens = positions.shape[-1]
+        if self._sequence_parallel_enabled:
+            tp_size = self.tp_group.world_size
+            if input_ids is not None:
+                input_ids = pad_tokens(input_ids, -1, tp_size)
+            if inputs_embeds is not None:
+                inputs_embeds = pad_tokens(inputs_embeds, -2, tp_size)
+            positions = pad_tokens(positions, -1, tp_size)
+
+        padding_mask = (
+            self._sp_padding_mask(positions.shape[-1])
+            if self._sequence_parallel_enabled
+            else nullcontext()
         )
+        with padding_mask:
+            outputs = self.model(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                use_cache=False,
+                position_ids=positions,
+                return_dict=False,
+                **self._output_aux_hidden_states_kwargs,
+                **kwargs,
+            )
 
         # Remove batch dimension after exiting Transformers model
-        hidden_states = outputs[0][0, ...]
+        hidden_states = outputs[0][0, :num_tokens]
         if self._output_aux_hidden_states_kwargs:
-            aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]
+            # Gather any layer outputs that sequence parallelism left sharded
+            aux_hidden_states = [
+                x[0] if x[0].shape[-2] == positions.shape[-1] else all_gather(x[0])
+                for x in outputs[1:]
+            ]
+            aux_hidden_states = [x[0, :num_tokens] for x in aux_hidden_states]
 
         if not self.pp_group.is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -806,6 +897,25 @@ class Base(
         if self._output_aux_hidden_states_kwargs and len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
+
+    @contextmanager
+    def _sp_padding_mask(self, padded_num_tokens: int):
+        """Match the MoE routers' padding mask to the sequence parallel tokens."""
+        context = get_forward_context() if is_forward_context_available() else None
+        if context is None or context.is_padding is None:
+            yield
+            return
+        is_padding = context.is_padding
+        pad = padded_num_tokens - is_padding.shape[0]
+        sp_is_padding = F.pad(is_padding, (0, pad), value=True)
+        # Only fused MoE routing reads the mask, and it takes sharded tokens
+        if self.parallel_config.use_sequence_parallel_moe:
+            sp_is_padding = shard(sp_is_padding[:, None])[:, 0]
+        context.is_padding = sp_is_padding
+        try:
+            yield
+        finally:
+            context.is_padding = is_padding
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(

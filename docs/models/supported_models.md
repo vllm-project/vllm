@@ -27,10 +27,11 @@ If the Transformers model implementation follows all the steps in [writing a cus
 
 - All the features listed in the [compatibility matrix](../features/README.md#feature-x-feature)
 - Any combination of the following vLLM parallelisation schemes:
-    - Data parallel
-    - Tensor parallel
-    - Expert parallel
-    - Pipeline parallel
+    - Data parallel ([`--data-parallel-size`](../cli/serve.md#-data-parallel-size-dp))
+    - Tensor parallel ([`--tensor-parallel-size`](../cli/serve.md#-tensor-parallel-size-tp))
+    - Expert parallel ([`--enable-expert-parallel`](../cli/serve.md#-enable-expert-parallel-no-enable-expert-parallel-ep))
+    - Pipeline parallel ([`--pipeline-parallel-size`](../cli/serve.md#-pipeline-parallel-size-pp))
+    - Sequence parallel ([`--enable-sequence-parallel`](../cli/serve.md#-enable-sequence-parallel-no-enable-sequence-parallel)), optionally with async TP ([`--enable-async-tp`](../cli/serve.md#-enable-async-tp-no-enable-async-tp))
 
 Checking if the modeling backend is Transformers is as simple as:
 
