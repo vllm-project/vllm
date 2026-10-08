@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 
 def state_text(state: Any) -> str:
-    return state if isinstance(state, str) else json.dumps(state)
+    return state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
 
 
 def parse_questions(
