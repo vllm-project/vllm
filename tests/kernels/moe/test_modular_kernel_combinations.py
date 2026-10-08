@@ -994,22 +994,12 @@ def test_aiter_moe_padding_matrix_mxfp4():
 
 # --- 4c: HIP-graph token padding -- inf/nan garbage rows (topk_ids=-1) ------
 
-# Simulates the runtime's padding-token contract for garbage/padding rows
-# (grouped_topk_router.py: `topk_ids.masked_fill(is_padding, -1)`,
-# `topk_weights.masked_fill(is_padding, 0)`), without needing real HIP-graph
-# capture. Empirically confirmed (see
-# https://github.com/vllm-project/vllm/issues/54966 discussion) that
-# AiterExperts safely isolates these rows under both the default ("opus")
-# and FlyDSL AITER sorting backends: garbage rows' inf/nan hidden_states
-# never leak NaN/Inf into real rows' output. reference_moe_impl's dispatch
-# (`mask = topk_ids == i`, tests/kernels/utils.py) is likewise row-local, so
-# comparing real rows against it is a valid check. AiterExperts's per-tensor
-# a1 quant scale (when applicable) is fixed once in run_modular_kernel()'s
-# FusedMoEQuantConfig construction, from hidden_states_scale computed inside
-# RankTensors.make() *before* garbage rows are injected, so it cannot be
-# inflated by a garbage row's magnitude either -- EXCEPT "fp8_tensor_token",
-# whose a1_scale AITER computes live from the (garbage-injected)
-# hidden_states. See the skip below for why it's excluded from inf modes.
+# AiterExperts isolates garbage rows from real rows under both AITER sorting
+# backends, and reference_moe_impl's dispatch (`mask = topk_ids == i`) is
+# likewise row-local, so comparing real rows against it is valid. Exception:
+# AiterExperts's a1 quant scale is normally fixed before garbage injection
+# (computed in RankTensors.make()), but "fp8_tensor_token" computes it live
+# from the (already-injected) hidden_states -- see the skip below.
 
 # {mode name -> {row index: fill value}}. Covers multiple garbage-row counts
 # and positions, and both inf and nan.
