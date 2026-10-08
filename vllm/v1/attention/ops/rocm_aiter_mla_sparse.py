@@ -53,15 +53,30 @@ def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
 
     if not _ON_GFX942 or not rocm_aiter_ops.is_enabled():
         return None
-    from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
-
-    logger.info_once("Using AITER pa_prefill_sparse for sparse MLA prefill on gfx942")
+    try:
+        from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+    except ImportError:
+        return None
     return pa_prefill_sparse
 
 
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
+# gfx942 gate against the in-tree ragged prefill, not the gfx950 OPUS
+# crossover. MI325, H=16, D=512, bf16: AITER is behind through 256 rows at
+# fanout 128 and ahead from 512 rows at fanouts 128, 512, and 2048.
+_GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES = 512
+
+
+def _can_use_aiter_pa_prefill_sparse(q: torch.Tensor, kv: torch.Tensor) -> bool:
+    """Cheap gate. The AITER import runs only after this passes."""
+    return (
+        _ON_GFX942
+        and q.shape[0] >= _GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES
+        and q.dtype in (torch.bfloat16, torch.float16)
+        and kv.dtype == q.dtype
+    )
 
 
 def _indexer_k_is_c4a_block_flat(compress_ratio: int) -> bool:
@@ -3550,6 +3565,7 @@ def _rocm_sparse_attn_prefill_aiter(
     output: torch.Tensor,
 ) -> None:
     """gfx942 path. One KV pool; the extend sources stay unset."""
+    logger.info_once("Using AITER pa_prefill_sparse for sparse MLA prefill on gfx942")
     indices = _as_int32_contiguous_1d(indices)
     indptr = _as_int32_contiguous_1d(indptr)
     written = pa_prefill_sparse(
@@ -4157,13 +4173,11 @@ def rocm_sparse_attn_prefill(
         ):
             return
 
-    pa_prefill_sparse = _get_aiter_pa_prefill_sparse()
-    if (
-        pa_prefill_sparse is not None
-        and q.shape[0] >= _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES
-        and q.dtype in (torch.bfloat16, torch.float16)
-        and kv.dtype == q.dtype
-    ):
+    if _can_use_aiter_pa_prefill_sparse(q, kv):
+        pa_prefill_sparse = _get_aiter_pa_prefill_sparse()
+    else:
+        pa_prefill_sparse = None
+    if pa_prefill_sparse is not None:
         if ragged_indices is None or ragged_indptr is None:
             assert indices is not None
             indices_2d = indices.reshape(indices.shape[0], -1)
