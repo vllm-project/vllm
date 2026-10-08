@@ -839,7 +839,9 @@ class EngineArgs:
     )
 
     fail_on_environ_validation: bool = False
-    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
+    gdn_prefill_backend: (
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl"] | None
+    ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
     ) = None
@@ -1890,7 +1892,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -2111,7 +2113,7 @@ class EngineArgs:
                 for x in cvd.split(",")
             ]
             for i in int_ids:
-                if i >= len(cvd_ids):
+                if not 0 <= i < len(cvd_ids):
                     raise ValueError(
                         f"--device-ids index {i} is out of range for "
                         f"{current_platform.device_control_env_var}"
