@@ -37,6 +37,7 @@ from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
+from vllm.utils.pinned_memory import empty_pinned
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -239,9 +240,15 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
         # Restore the CPU-resident parameters, ignoring new parameters.
         for name, p in module.named_parameters():
             if name in cpu_params:
-                p.data = torch.empty_like(
-                    p.data, device="cpu", pin_memory=use_pin_memory
-                ).copy_(p.data)
+                if use_pin_memory and p.data.layout == torch.strided:
+                    cpu_data = empty_pinned(
+                        p.data.size(), p.data.dtype, stride=p.data.stride()
+                    )
+                else:
+                    cpu_data = torch.empty_like(
+                        p.data, device="cpu", pin_memory=use_pin_memory
+                    )
+                p.data = cpu_data.copy_(p.data)
 
             # parameter is UVA offloaded, but was replaced with a new device tensor
             # re-offload it to CPU using UVA

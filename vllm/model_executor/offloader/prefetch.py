@@ -21,6 +21,7 @@ import torch.nn as nn
 import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.utils.pinned_memory import empty_pinned
 from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
@@ -623,6 +624,20 @@ class _BaseParamOffloader(ABC):
         pass
 
 
+def _empty_cpu_like(tensor: torch.Tensor, pin_memory: bool) -> torch.Tensor:
+    """CPU storage with ``tensor``'s size and stride, pinned at its exact size."""
+    if pin_memory and tensor.layout == torch.strided:
+        return empty_pinned(tensor.size(), tensor.dtype, stride=tensor.stride())
+    return torch.empty_strided(
+        size=tensor.size(),
+        stride=tensor.stride(),
+        dtype=tensor.dtype,
+        layout=tensor.layout,
+        device="cpu",
+        pin_memory=pin_memory,
+    )
+
+
 class _CpuParamOffloader(_BaseParamOffloader):
     """Offload parameter to pinned CPU memory.
 
@@ -658,14 +673,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         pin_memory = should_pin_memory()
 
         # Create pinned CPU storage and copy current GPU data
-        self._cpu_storage = torch.empty_strided(
-            size=param.data.size(),
-            stride=param.data.stride(),
-            dtype=param.data.dtype,
-            layout=param.data.layout,
-            device="cpu",
-            pin_memory=pin_memory,
-        )
+        self._cpu_storage = _empty_cpu_like(param.data, pin_memory)
         self._cpu_storage.copy_(param.data)
 
         self.offloaded_bytes = (
@@ -693,14 +701,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
 
         if param.data.device.type == "cpu":
             if should_pin_memory() and not param.data.is_pinned():
-                pinned = torch.empty_strided(
-                    size=param.data.size(),
-                    stride=param.data.stride(),
-                    dtype=param.data.dtype,
-                    layout=param.data.layout,
-                    device="cpu",
-                    pin_memory=True,
-                )
+                pinned = _empty_cpu_like(param.data, pin_memory=True)
                 pinned.copy_(param.data)
                 self._cpu_storage = pinned
             else:

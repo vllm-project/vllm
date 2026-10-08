@@ -86,6 +86,14 @@ class CudaRTLibrary:
         ),
         # cudaError_t cudaHostUnregister ( void* ptr )
         Function("cudaHostUnregister", cudaError_t, [ctypes.c_void_p]),
+        # cudaError_t cudaHostAlloc ( void** pHost, size_t size, unsigned int flags )
+        Function(
+            "cudaHostAlloc",
+            cudaError_t,
+            [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_uint],
+        ),
+        # cudaError_t cudaFreeHost ( void* ptr )
+        Function("cudaFreeHost", cudaError_t, [ctypes.c_void_p]),
         # cudaError_t cudaGetLastError ( void )
         Function("cudaGetLastError", cudaError_t, []),
     ]
@@ -104,6 +112,8 @@ class CudaRTLibrary:
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
         "cudaHostRegister": "hipHostRegister",
         "cudaHostUnregister": "hipHostUnregister",
+        "cudaHostAlloc": "hipHostMalloc",
+        "cudaFreeHost": "hipHostFree",
         "cudaGetLastError": "hipGetLastError",
     }
 
@@ -207,6 +217,16 @@ class CudaRTLibrary:
     def cudaHostUnregister(self, ptr: int) -> int:
         """Return the raw error code instead of raising."""
         return self.funcs["cudaHostUnregister"](ctypes.c_void_p(ptr))
+
+    def cudaHostAlloc(self, size: int, flags: int = 0) -> int:
+        """Allocate exactly ``size`` bytes of page-locked host memory."""
+        ptr = ctypes.c_void_p()
+        self.CUDART_CHECK(self.funcs["cudaHostAlloc"](ctypes.byref(ptr), size, flags))
+        assert ptr.value is not None
+        return ptr.value
+
+    def cudaFreeHost(self, ptr: int) -> None:
+        self.CUDART_CHECK(self.funcs["cudaFreeHost"](ctypes.c_void_p(ptr)))
 
     def cudaGetLastError(self) -> int:
         """Return and clear the error pending on this thread."""
