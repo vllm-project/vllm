@@ -35,9 +35,13 @@ class ReferenceAttention(nn.Module):
         q = q.view(-1, self.num_heads, self.head_size).transpose(0, 1)
         k = k.view(-1, self.num_kv_heads, self.head_size).transpose(0, 1)
         v = v.view(-1, self.num_kv_heads, self.head_size).transpose(0, 1)
-        offset = 0 if self.keys is None else self.keys.shape[1]
-        self.keys = k if self.keys is None else torch.cat((self.keys, k), dim=1)
-        self.values = v if self.values is None else torch.cat((self.values, v), dim=1)
+        offset = self.start_pos
+        self.keys = (
+            k if self.keys is None else torch.cat((self.keys[:, :offset], k), dim=1)
+        )
+        self.values = (
+            v if self.values is None else torch.cat((self.values[:, :offset], v), dim=1)
+        )
         key_pos = torch.arange(self.keys.shape[1])
         query_pos = torch.arange(offset, offset + q.shape[1])[:, None]
         mask = key_pos <= query_pos
@@ -86,7 +90,16 @@ def model_factory(monkeypatch):
             hf_config=cfg, head_dtype=None, dtype=torch.float32
         )
         with set_current_vllm_config(vc):
-            return dory.DoryForCausalLM(vllm_config=vc)
+            model = dory.DoryForCausalLM(vllm_config=vc)
+
+        def set_cache_positions(module, args):
+            # Emulate the runner's slot mapping for contiguous request tokens.
+            for cache in module.modules():
+                if isinstance(cache, ReferenceAttention):
+                    cache.start_pos = int(args[1][0])
+
+        model.register_forward_pre_hook(set_cache_positions)
+        return model
 
     with set_current_vllm_config(vc):
         yield build
@@ -119,12 +132,45 @@ def test_chunked_prefill_and_decode_keep_loop_caches_separate(model_factory, num
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-5)
 
 
-def test_loop_count_does_not_duplicate_projection_parameters(model_factory):
+@pytest.mark.parametrize("cache_mode", ["per_loop", "last_loop"])
+def test_loop_count_does_not_duplicate_projection_parameters(model_factory, cache_mode):
     single_loop = model_factory(n_recurrent_loops=1)
-    many_loops = model_factory(n_recurrent_loops=27)
+    many_loops = model_factory(n_recurrent_loops=27, recurrent_kv_cache_mode=cache_mode)
     assert {name: p.shape for name, p in single_loop.named_parameters()} == {
         name: p.shape for name, p in many_loops.named_parameters()
     }
+
+
+@pytest.mark.parametrize("num_loops", [1, 3])
+@torch.inference_mode()
+def test_last_loop_kv_matches_final_loop_history(model_factory, num_loops):
+    """Reuse final-loop history while preserving current-loop KV within a chunk."""
+    shared = model_factory(
+        n_recurrent_loops=num_loops, recurrent_kv_cache_mode="last_loop"
+    )
+    reference = model_factory(n_recurrent_loops=num_loops)
+    torch.manual_seed(0)
+    for param in shared.parameters():
+        param.normal_(std=0.02)
+    reference.load_state_dict(shared.state_dict())
+    assert sum(isinstance(m, ReferenceAttention) for m in shared.modules()) == 4
+    tokens = positions = torch.arange(7)
+    # Include prefill chunks, decode, and history beyond the sliding window.
+    for start, end in ((0, 3), (3, 4), (4, 7)):
+        expected = reference(tokens[start:end], positions[start:end])
+        actual = shared(tokens[start:end], positions[start:end])
+        torch.testing.assert_close(actual, expected)
+        for layer, ref_layer in zip(shared.backbone.layers, reference.backbone.layers):
+            if layer.char == "-":
+                continue
+            cache, final = layer.mixer.attn[0], ref_layer.mixer.attn[-1]
+            assert cache.keys.shape[1] == end
+            torch.testing.assert_close(cache.keys, final.keys)
+            torch.testing.assert_close(cache.values, final.values)
+            # Next step, every reference loop starts from final-loop history.
+            for ref_cache in ref_layer.mixer.attn:
+                ref_cache.keys = final.keys.clone()
+                ref_cache.values = final.values.clone()
 
 
 @pytest.mark.parametrize("reverse", [False, True])

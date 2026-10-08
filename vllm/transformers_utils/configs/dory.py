@@ -45,6 +45,7 @@ class DoryConfig(PreTrainedConfig):
         n_recurrent_layers=None,
         n_output_layers=0,
         n_recurrent_loops=1,
+        recurrent_kv_cache_mode="per_loop",
         initial_state="input_copy",
         input_transform="residual",
         output_transform="replace",
@@ -108,6 +109,9 @@ class DoryConfig(PreTrainedConfig):
         )
         self.n_output_layers = n_output_layers
         self.n_recurrent_loops = n_recurrent_loops
+        # Recurrent attention KV: "per_loop" keeps one cache per loop. "last_loop"
+        # keeps one cache that each loop overwrites.
+        self.recurrent_kv_cache_mode = recurrent_kv_cache_mode
         self.initial_state = initial_state
         self.input_transform = input_transform
         self.output_transform = output_transform
@@ -139,6 +143,8 @@ class DoryConfig(PreTrainedConfig):
             )
         if not isinstance(self.n_recurrent_loops, int) or self.n_recurrent_loops < 1:
             raise ValueError("n_recurrent_loops must be a positive integer")
+        if self.recurrent_kv_cache_mode not in ("per_loop", "last_loop"):
+            raise ValueError("recurrent_kv_cache_mode must be per_loop or last_loop")
         for field, allowed in (
             ("rope_profile_layers", {0, 1, 2}),
             ("no_rope_layers", {0, 1}),

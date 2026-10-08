@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dory: normalized latent recurrence with shared weights and per-loop KV caches."""
+"""Dory: normalized latent recurrent transformer."""
 
 import math
 from collections.abc import Iterable
@@ -114,10 +114,11 @@ class DoryAttention(nn.Module):
             is_neox_style=True,
         )
 
+        self.per_loop_kv = config.recurrent_kv_cache_mode == "per_loop"
         # Match LoopCoder's virtual layer indices for independent loop caches.
         # Projection prefixes keep the physical layer index to share weights.
         self.attn = nn.ModuleList()
-        for loop_idx in range(num_loops):
+        for loop_idx in range(num_loops if self.per_loop_kv else 1):
             unique_layer_idx = loop_idx * config.num_hidden_layers + layer_idx
             unique_prefix = prefix.replace(
                 f".layers.{layer_idx}.", f".layers.{unique_layer_idx}."
@@ -154,7 +155,10 @@ class DoryAttention(nn.Module):
         k = k.view(t, self.num_kv_heads, self.head_dim)
         k = justnorm(k).view(t, self.kv_size)
 
-        out = self.attn[loop_idx](q, k, v)
+        # In last-loop mode every loop writes this step's KV to the same cache,
+        # overwriting the previous loop's. Loop i thus attends to loop-i KV for
+        # this step's tokens and last-loop KV for earlier tokens.
+        out = self.attn[loop_idx if self.per_loop_kv else 0](q, k, v)
 
         # output gate (sigmoid, pre-o_proj), then fngpt justnorm over np*hn
         sg = (self.s_gate.float() * self._s_gate_factor).square()
@@ -271,9 +275,6 @@ class DoryBackbone(nn.Module):
             h = layer(positions, h)
         input_h = h
 
-        # recurrent loops: state=input_copy; residual input transform; ngpt
-        # boundary norms; replace state update per loop. Loop i uses
-        # each recurrent attention layer's separate loop-i KV cache.
         state = input_h
         for i in range(self.num_loops):
             combined = justnorm(state + input_h)
