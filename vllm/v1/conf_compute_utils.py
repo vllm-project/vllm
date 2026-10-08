@@ -82,8 +82,11 @@ def staged_h2d(
     prep = prep_stream(target)
     with torch.cuda.stream(prep):
         staged = src.to(device=target, non_blocking=True)
-    if not src.is_pinned():
-        compute_stream.wait_stream(prep)
+    # Under Confidential Computing ``is_pinned()`` reports False even for
+    # pin_memory=True allocations, so it cannot be used to decide whether the
+    # upload is host-synchronous. Always order the compute stream after the
+    # prep stream; the event wait is negligible and correct in both cases.
+    compute_stream.wait_stream(prep)
     staged.record_stream(compute_stream)
     if out is None:
         return staged
