@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
-from collections.abc import Generator
+import posixpath
+import tempfile
+from collections.abc import Callable, Generator
+from typing import Any
+from urllib.parse import urlsplit
 
 import torch
 from torch import nn
@@ -9,14 +14,73 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
+from vllm.distributed import get_world_group
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
+    filter_safetensors_files_by_weight_name,
     runai_safetensors_weights_iterator,
 )
 from vllm.transformers_utils.repo_utils import resolve_revision
-from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetensors
+from vllm.transformers_utils.runai_utils import (
+    is_runai_obj_uri,
+    list_safetensors,
+    runai_pull_files,
+)
+
+logger = init_logger(__name__)
+
+
+def _filter_remote_weights(
+    files: list[str],
+    source: str,
+    is_unused_weight: Callable[[str], bool],
+) -> list[str]:
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            # Backends may match the full object key, not its basename.
+            index_key = posixpath.join(
+                urlsplit(source).path.strip("/"), SAFE_WEIGHTS_INDEX_NAME
+            )
+            runai_pull_files(
+                source.rstrip("/") + "/",
+                directory,
+                allow_pattern=[index_key, SAFE_WEIGHTS_INDEX_NAME],
+            )
+            with open(os.path.join(directory, SAFE_WEIGHTS_INDEX_NAME)) as index:
+                weight_map = json.load(index)["weight_map"]
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError("Empty or invalid weight map")
+        if any(
+            not isinstance(name, str)
+            or not isinstance(shard, str)
+            or not shard
+            or posixpath.isabs(shard)
+            or posixpath.normpath(shard) != shard
+            or shard in (".", "..")
+            or shard.startswith("../")
+            for name, shard in weight_map.items()
+        ):
+            raise ValueError("Invalid checkpoint index entry")
+    except Exception:
+        # Optional metadata must not make an otherwise loadable model fail.
+        # Model-rule and tensor-read errors remain outside this boundary.
+        logger.warning(
+            "Cannot use checkpoint index for RunAI shard selection; "
+            "keeping the original file list"
+        )
+        return files
+
+    # Keep unknown files, including draft weights omitted from an older index.
+    root = source.rstrip("/") + "/"
+    indexed = {root + shard for shard in weight_map.values()}
+    needed = {
+        root + shard for name, shard in weight_map.items() if not is_unused_weight(name)
+    }
+    kept = [path for path in files if path not in indexed or path in needed]
+    return kept or files
 
 
 class RunaiModelStreamerLoader(BaseModelLoader):
@@ -122,12 +186,39 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return hf_weights_files
 
     def _get_weights_iterator(
-        self, model_or_path: str, revision: str | None
+        self,
+        model_or_path: str,
+        revision: str | None,
+        is_unused_weight: Callable[[str], bool] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
+        selected_files = hf_weights_files
+        if is_unused_weight is not None:
+            if is_runai_obj_uri(model_or_path):
+                selected_files = _filter_remote_weights(
+                    hf_weights_files, model_or_path, is_unused_weight
+                )
+            else:
+                selected_files = filter_safetensors_files_by_weight_name(
+                    hf_weights_files, is_unused_weight
+                )
+        if self._is_distributed and torch.distributed.is_initialized():
+            # RunAI broadcasts across node-local or WORLD groups, not just TP.
+            # A rank that cannot filter safely keeps the group on the full list.
+            group = get_world_group()
+            selections: list[Any] = [None] * group.world_size
+            torch.distributed.all_gather_object(
+                selections, (hf_weights_files, selected_files), group=group.cpu_group
+            )
+            if all(files == hf_weights_files for files, _ in selections):
+                needed = {path for _, selected in selections for path in selected}
+                selected_files = [path for path in hf_weights_files if path in needed]
+            else:
+                # Do not substitute another node's local checkpoint paths.
+                selected_files = hf_weights_files
         return runai_safetensors_weights_iterator(
-            hf_weights_files, self.load_config.use_tqdm_on_load, self._is_distributed
+            selected_files, self.load_config.use_tqdm_on_load, self._is_distributed
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
@@ -142,7 +233,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
-        yield from self._get_weights_iterator(model_weights, model_config.revision)
+        yield from self._get_weights_iterator(
+            model_weights,
+            model_config.revision,
+            getattr(model, "is_unused_checkpoint_weight", None),
+        )
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         """Load weights into a model."""
