@@ -23,6 +23,7 @@ import torch
 
 from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Dims
 from .layer import (
+    EPOCH_WORDS,
     MAX_TOKENS,
     MonoBuild,
     build_mono_ffn,
@@ -126,11 +127,9 @@ class DSV41MonoLayer:
         self.tp, self.rank = tp, rank
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
-        self.scratch = torch.zeros(
-            scratch_bytes(MAX_TOKENS, tp), dtype=torch.uint8, device=dev
-        )
-        # [epoch, -, -, -, a mark per CTA]
-        self.epoch = torch.zeros(4 + 256, dtype=torch.int32, device=dev)
+        self._scratch: dict[int, torch.Tensor] = {}
+        # [epoch, -, -, -, a mark per CTA, the MoE's counters]
+        self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=dev)
         self.q = torch.zeros(
             MAX_TOKENS, self.d.heads, HEAD_DIM, dtype=torch.bfloat16, device=dev
         )
@@ -153,6 +152,23 @@ class DSV41MonoLayer:
             .item()
         )
         self._kernels: dict = {}
+
+    def scratch(self, tokens: int) -> torch.Tensor:
+        """Step width ``tokens``'s scratch: a width's layout has memory of its own
+        (``layer.scratch_layout``). Allocated at the width's first step, which is
+        eager: vLLM runs every graph's batch eagerly before capturing it."""
+        buf = self._scratch.get(tokens)
+        if buf is None:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    f"DSv4.1 mono decode: step width {tokens} first reached inside "
+                    "a CUDA graph capture"
+                )
+            buf = torch.zeros(
+                scratch_bytes(tokens, self.tp), dtype=torch.uint8, device=self.device
+            )
+            self._scratch[tokens] = buf
+        return buf
 
     @staticmethod
     def supports(tokens: int) -> bool:
@@ -275,7 +291,7 @@ class DSV41MonoLayer:
             token_to_req.data_ptr(),
             self.kt.data_ptr(),
             self.klen.data_ptr(),
-            self.scratch.data_ptr(),
+            self.scratch(M).data_ptr(),
             self.epoch.data_ptr(),
             0,
             stream=st,
@@ -322,7 +338,7 @@ class DSV41MonoLayer:
             w.sw2.data_ptr(),
             w.sw2_s.data_ptr(),
             out.data_ptr(),
-            self.scratch.data_ptr(),
+            self.scratch(M).data_ptr(),
             self.peer.local,
             self.peer.addresses.data_ptr(),
             self.rank,
@@ -378,7 +394,7 @@ class DSV41MonoLayer:
             w.sw2.data_ptr(),
             w.sw2_s.data_ptr(),
             out.data_ptr(),
-            self.scratch.data_ptr(),
+            self.scratch(M).data_ptr(),
             self.peer.local,
             self.peer.addresses.data_ptr(),
             self.rank,

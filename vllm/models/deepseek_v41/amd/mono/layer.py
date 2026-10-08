@@ -41,7 +41,11 @@ X_WORDS = HIDDEN // 4
 X_GROUPS = HIDDEN // 32
 SLICES = seam.SLICES  # 160
 COUNTER_WORDS = 2 * 256  # the MoE's ug queue and down counts, a word a slot
-COUNTER_BYTES = COUNTER_WORDS * 4
+COUNTERS = ("ugq", "dq")
+# the epoch buffer, in words: the epoch, a mark a CTA (back.EPOCH_MARKS), then on
+# lines of their own the MoE's counters
+EPOCH_COUNTERS = -(-(mb_back.EPOCH_MARKS + BLOCKS) // 64) * 64
+EPOCH_WORDS = EPOCH_COUNTERS + COUNTER_WORDS
 
 
 @dataclass(frozen=True)
@@ -65,16 +69,15 @@ def _back_key(key: MonoBuild):
 
 
 def scratch_layout(s: int, tp: int) -> dict:
-    """Every region of both launches -> (byte offset, bytes), disjoint: the
-    MoE's counters first (at a fixed offset: their slots outlive a step width),
-    then K1's front and seam, K2's back, the MoE's regions, the normed rows and
-    their flags."""
+    """Every region of step width s's launches -> (byte offset, bytes), disjoint:
+    K1's front and seam, K2's back, the MoE's regions, the normed rows and their
+    flags. Each width has a scratch of its own (``DSV41MonoLayer.scratch``):
+    under another width's layout a mailbox pair's tag word could be plain data,
+    which a poll may take for a current tag. The MoE's counters, whose slots
+    outlive a step width, are in the epoch buffer."""
     d = Dims(tp)
-    out = {
-        "ugq": (0, COUNTER_BYTES // 2),
-        "dq": (COUNTER_BYTES // 2, COUNTER_BYTES // 2),
-    }
-    off = COUNTER_BYTES
+    out: dict = {}
+    off = 0
 
     def place(regions):
         nonlocal off
@@ -88,7 +91,7 @@ def scratch_layout(s: int, tp: int) -> dict:
     place(seam.scratch_layout(s))
     place(back_scratch(s, d, start=0))
     regions = moe.scratch_layout(_moe_key(MonoBuild(s, tp, 1))).items()
-    mr = {n: v for n, v in regions if n not in ("ugq", "dq")}
+    mr = {n: v for n, v in regions if n not in COUNTERS}
     lo = min(o for o, _ in mr.values())
     place({n: (o - lo, n_) for n, (o, n_) in mr.items()})
     place({"normed": (0, s * HIDDEN * 2), "xrdy_moe": (s * HIDDEN * 2 + 256, s * 8)})
@@ -466,7 +469,7 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
     normed = scratch + fx.Int64(layout["normed"][0])
     for region in ("lin", "pmix"):
         ca[region] = sreg(scratch, layout[region][0], region)
-    mlayout = {n: layout[n] for n in moe.scratch_layout(mkey)}
+    mlayout = {n: layout[n] for n in moe.scratch_layout(mkey) if n not in COUNTERS}
     mlayout["xrdy"] = layout["xrdy_moe"]
     margs = moe.moe_args(
         normed,
@@ -487,6 +490,8 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
     )
     cb["x_cm"], cb["x_ready"] = CM_DEV, True
     cb["tag"] = ep & 255
+    for i, region in enumerate(COUNTERS):
+        cb[region] = sreg(a["epoch"], 4 * (EPOCH_COUNTERS + i * moe.TAGS), region)
     for task in range(first_task(bid, 0), SLICES, BLOCKS):
         if const_expr(part is not None):
             seam.stage_push(ca, task, part)
@@ -506,16 +511,8 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
         # the MoE counter slot 128 launch pairs ahead: its last use long
         # done, its next use far off
         slot = (ep + 128) & 255
-        gstore(
-            scratch + fx.Int64(layout["ugq"][0]) + fx.Int64(slot * 4),
-            fx.Int32(0),
-            words=1,
-        )
-        gstore(
-            scratch + fx.Int64(layout["dq"][0]) + fx.Int64(slot * 4),
-            fx.Int32(0),
-            words=1,
-        )
+        for region in COUNTERS:
+            gstore(cb[region].value + fx.Int64(slot * 4), fx.Int32(0), words=1)
 
     mb_back.epoch_end({"bid": bid, "tid": tid}, a["epoch"], ep, reset)
 
