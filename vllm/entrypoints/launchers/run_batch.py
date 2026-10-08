@@ -427,7 +427,7 @@ async def upload_data(
                 if from_file:
                     with open(data_or_file, "rb") as file:
                         async with session.put(output_url, data=file) as response:
-                            if response.status != 200:
+                            if not 200 <= response.status < 300:
                                 error_text = await response.text()
                                 raise Exception(
                                     f"Failed to upload file.\n"
@@ -436,7 +436,7 @@ async def upload_data(
                                 )
                 else:
                     async with session.put(output_url, data=data_or_file) as response:
-                        if response.status != 200:
+                        if not 200 <= response.status < 300:
                             error_text = await response.text()
                             raise Exception(
                                 f"Failed to upload data.\n"

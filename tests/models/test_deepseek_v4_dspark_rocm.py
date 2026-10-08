@@ -15,7 +15,10 @@ def _make_uninitialized_model(confidence_head):
     object.__setattr__(
         model,
         "model",
-        SimpleNamespace(confidence_head=confidence_head),
+        SimpleNamespace(
+            confidence_head=confidence_head,
+            layers=[SimpleNamespace(ffn=SimpleNamespace(use_mega_moe=False))],
+        ),
     )
     return model
 
