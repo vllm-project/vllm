@@ -655,26 +655,18 @@ and clamp-off window formulas produce different outputs on this batch."""
 
 
 @pytest.mark.parametrize(
-    ("capability", "block_size", "kv_dtype", "sink", "reason"),
+    ("kv_dtype", "sink", "reason"),
     [
-        ((8, 0), 16, "nvfp4", False, None),
-        ((8, 0), 16, "float16", False, None),
-        # SM100 serves NVFP4 with trtllm-gen, which cannot run the variant.
-        ((10, 0), 16, "nvfp4", False, "SM100"),
+        ("nvfp4", False, None),
+        ("float16", False, None),
         # The store-time scale search exists only in trtllm-gen.
-        ((8, 0), 16, "nvfp4_4over6", False, "nvfp4_4over6"),
-        ((8, 0), 16, "fp8", False, None),
-        ((10, 0), 16, "fp8_e4m3", False, None),
-        ((8, 0), 16, "fp8_e5m2", False, "fp8_e5m2"),
-        ((8, 0), 16, None, True, "sink"),
-        # trtllm-only page sizes fail at selection, not at the first build().
-        ((8, 0), 128, None, False, "page size 128"),
-        ((8, 0), 64, None, False, None),
+        ("nvfp4_4over6", False, "nvfp4_4over6"),
+        ("fp8", False, None),
+        ("fp8_e5m2", False, "fp8_e5m2"),
+        (None, True, "sink"),
     ],
 )
-def test_flashinfer_mm_prefix_supports_combination(
-    capability, block_size, kv_dtype, sink, reason
-):
+def test_flashinfer_mm_prefix_supports_combination(kv_dtype, sink, reason):
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
@@ -682,12 +674,12 @@ def test_flashinfer_mm_prefix_supports_combination(
         head_size=128,
         dtype=torch.bfloat16,
         kv_cache_dtype=kv_dtype,
-        block_size=block_size,
+        block_size=16,
         use_mla=False,
         has_sink=sink,
         use_sparse=False,
         use_mm_prefix=True,
-        device_capability=DeviceCapability(*capability),
+        device_capability=DeviceCapability(8, 0),
     )
 
     if reason is None:
@@ -729,21 +721,19 @@ def test_flashinfer_mm_prefix_validate_configuration(use_dcp, use_rswa, reason):
 
 
 @pytest.mark.parametrize(
-    ("major", "cache_dtype", "mm_prefix", "wrapper"),
+    ("major", "mm_prefix", "wrapper", "native"),
     [
-        (9, "fp8", True, True),
-        (10, "fp8_e4m3", True, True),
-        (10, "fp8", False, True),
-        (10, "fp8_e4m3", True, False),
+        (9, True, True, True),
+        # SM100 leaves the ranges to the composite and keeps its FP8 query.
+        (10, True, True, False),
+        (9, False, True, False),
+        (9, True, False, False),
     ],
 )
-def test_flashinfer_fp8_query_dtype_and_trtllm_scales(
-    major, cache_dtype, mm_prefix, wrapper
-):
+def test_flashinfer_fp8_query_dtype(major, mm_prefix, wrapper, native):
     """fa2 has no FP8-query path, so the native mm-prefix path keeps a
-    model-dtype query for an FP8 cache, in the builder and the impl alike, and
-    the SM100 TRTLLM calls then drop q_scale; the dequantized prefill KV
-    already carries the K/V scales. Without that path nothing changes."""
+    model-dtype query for an FP8 cache, for prefill and decode alike, and
+    drops q_scale; elsewhere q_scale still applies."""
     import unittest.mock
     from types import SimpleNamespace
 
@@ -752,30 +742,14 @@ def test_flashinfer_fp8_query_dtype_and_trtllm_scales(
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends import flashinfer as fi
 
-    scale, q_s, k_s, v_s = 0.125, 2.0, 3.0, 0.5
-    native = mm_prefix and wrapper
     vllm_config = create_vllm_config(model_name=MODEL)
+    vllm_config.cache_config.cache_dtype = "fp8"
     if mm_prefix:
         _enable_mm_prefix(vllm_config)
     mc = vllm_config.model_config
     builder = SimpleNamespace(
-        vllm_config=vllm_config, model_config=mc, cache_dtype=cache_dtype
+        vllm_config=vllm_config, model_config=mc, cache_dtype="fp8"
     )
-    layer = SimpleNamespace(
-        **{f"_{n}_scale": torch.tensor(s) for n, s in zip("qkv", (q_s, k_s, v_s))},
-        **{f"_{n}_scale_float": s for n, s in zip("qkv", (q_s, k_s, v_s))},
-        _o_scale_float=None,
-    )
-    table, lens = torch.tensor([[0], [1]], dtype=torch.int32), torch.tensor([8])
-    calls: dict[str, Any] = {}
-
-    def capture(name, result=None):
-        def call(*args, **kwargs):
-            calls[name] = kwargs or args
-            return result
-
-        return call
-
     with (
         set_current_vllm_config(vllm_config),
         unittest.mock.patch.object(
@@ -783,58 +757,23 @@ def test_flashinfer_fp8_query_dtype_and_trtllm_scales(
             "get_device_capability",
             return_value=DeviceCapability(major, 0),
         ),
-        unittest.mock.patch.multiple(
-            fi,
-            _mm_prefix_wrapper_cls=lambda: object if wrapper else None,
-            can_use_trtllm_attention=lambda *a, **k: True,
-            force_use_trtllm_attention=lambda: None,
-            _get_trtllm_workspace_buffer=lambda: torch.zeros(8),
-            trtllm_prefill_attn_kvfp8_dequant=capture("dequant", ("kv", table)),
-            trtllm_batch_context_with_kv_cache=capture("prefill"),
-            trtllm_batch_decode_with_kv_cache=capture("decode"),
+        unittest.mock.patch.object(
+            fi, "_mm_prefix_wrapper_cls", lambda: object if wrapper else None
+        ),
+        unittest.mock.patch.object(
+            fi, "can_use_trtllm_attention", lambda *a, **k: False
         ),
     ):
-        q_dtype = fi.FlashInferMetadataBuilder.get_q_data_type(builder, True)
-        assert fi.FlashInferMetadataBuilder.get_q_data_type(builder, False) == q_dtype
-        impl = fi.FlashInferImpl(8, HEAD_SIZE, scale, 2, None, None, cache_dtype)
-        fused = impl.fused_output_quant_supported(fi.kFp8StaticTensorSym)
-        if major == 10:
-            metadata = SimpleNamespace(
-                num_actual_tokens=5,
-                use_cascade=False,
-                kv_cache_layout=KVCacheLayout.LBHNC,
-                num_decodes=1,
-                num_decode_tokens=1,
-                num_prefills=1,
-                num_prefill_tokens=4,
-                q_data_type_prefill=q_dtype,
-                q_data_type_decode=q_dtype,
-                prefill=fi.TRTLLMPrefill(table[1:], lens, lens, lens, 4, 8),
-                decode=fi.FlashInferTrtllmAPIDecode(
-                    fi.FlashInferDecodeKernel.TRTLLM_GEN, table[:1], lens, 8
-                ),
-            )
-            query = torch.zeros(5, 8, HEAD_SIZE, dtype=q_dtype)
-            kv_cache = torch.zeros(2, 2, 16, 2 * HEAD_SIZE, dtype=torch.uint8)
-            impl.forward(layer, query, None, None, kv_cache, metadata, query)
+        prefill = fi.FlashInferMetadataBuilder.get_q_data_type(builder, True)
+        decode = fi.FlashInferMetadataBuilder.get_q_data_type(builder, False)
+        impl = fi.FlashInferImpl(8, HEAD_SIZE, 1.0, 2, None, None, "fp8")
 
-    assert q_dtype == (mc.dtype if native else torch.float8_e4m3fn)
-    assert impl.supports_quant_query_input == fused == (major == 10 and not native)
-    if major == 9:
-        return
-    prefill, decode = calls["prefill"], calls["decode"]
-    assert prefill["query"].dtype == decode["query"].dtype == q_dtype
-    assert decode["kv_cache"][0].dtype == torch.float8_e4m3fn
-    assert decode["bmm2_scale"] == v_s
+    assert prefill == (mc.dtype if native else torch.float8_e4m3fn)
     if native:
-        assert calls["dequant"][2:4] == (layer._k_scale, layer._v_scale)
-        assert prefill["kv_cache"] == "kv"
-        assert (prefill["bmm1_scale"], prefill["bmm2_scale"]) == (scale, 1.0)
-        assert decode["bmm1_scale"] == scale * k_s
-    else:
-        assert "dequant" not in calls
-        assert prefill["bmm1_scale"] == decode["bmm1_scale"] == scale * q_s * k_s
-        assert prefill["bmm2_scale"] == v_s
+        assert decode == mc.dtype
+    assert impl.query_scale(SimpleNamespace(_q_scale_float=2.0)) == (
+        1.0 if native else 2.0
+    )
 
 
 def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto"):
@@ -886,35 +825,33 @@ def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
 def test_flashinfer_mm_prefix_builder_is_fail_closed():
-    """soft-cap and explicitly forced trtllm must die at engine start."""
+    """soft-cap must die at engine start."""
     import unittest.mock
     from functools import partial
 
     from vllm.config import set_current_vllm_config
-    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferMetadataBuilder,
+        _mm_prefix_wrapper_cls,
+    )
 
     vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(SLIDING_WINDOW)
+    if _mm_prefix_wrapper_cls() is None:
+        pytest.skip("FlashInfer mm-prefix wrapper unavailable here")
     layer_names = ["model.layers.0.self_attn.attn"]
 
     mock_params = patch.new
-    with set_current_vllm_config(vllm_config):
-        with (
-            unittest.mock.patch(
-                "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
-                partial(mock_params, soft_cap=30.0),
-            ),
-            pytest.raises(NotImplementedError, match="logits_soft_cap"),
-        ):
-            FlashInferMetadataBuilder(
-                kv_cache_spec, layer_names, vllm_config, torch.device("cuda:0")
-            )
-
-        vllm_config.attention_config.use_trtllm_attention = True
-        with patch, pytest.raises(NotImplementedError, match="trtllm"):
-            FlashInferMetadataBuilder(
-                kv_cache_spec, layer_names, vllm_config, torch.device("cuda:0")
-            )
-        vllm_config.attention_config.use_trtllm_attention = None
+    with (
+        set_current_vllm_config(vllm_config),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            partial(mock_params, soft_cap=30.0),
+        ),
+        pytest.raises(NotImplementedError, match="logits_soft_cap"),
+    ):
+        FlashInferMetadataBuilder(
+            kv_cache_spec, layer_names, vllm_config, torch.device("cuda:0")
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
@@ -1173,48 +1110,6 @@ def test_flashinfer_mm_prefix_short_extend_stays_a_prefill():
     assert md.prefill.mm_prefill_ranges.shape == (1, 2)
     assert md.prefill.mm_prefill_ranges.is_contiguous()
     assert md.prefill.mm_prefill_ranges.tolist() == [[100, 200]]
-
-
-def test_flashinfer_mm_prefix_restricts_kernel_block_sizes(monkeypatch):
-    """Automatic page-size selection must stay off trtllm-only pages.
-
-    On Blackwell GQA the backend normally advertises kernel block sizes up
-    to 1024, which only run on trtllm-gen; an mm-prefix model must keep the
-    fa2-servable [16, 32, 64] so selection never picks a page the mm path
-    dies on. A non-mm model under the same conditions keeps the large pages.
-    """
-    from types import MethodType
-
-    from vllm.config import set_current_vllm_config
-    from vllm.v1.attention.backends import flashinfer as fi
-    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-
-    vllm_config, _, _ = _flashinfer_builder_env(SLIDING_WINDOW)
-    mc = vllm_config.model_config
-    assert mc.is_mm_prefix_lm
-
-    # Blackwell GQA conditions that advertise large pages on non-mm models.
-    monkeypatch.setattr(
-        fi.current_platform,
-        "is_device_capability_family",
-        lambda family: family == 100,
-    )
-    monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda q, kv: True)
-    monkeypatch.setattr(
-        mc, "get_num_attention_heads", MethodType(lambda self, pc: 8, mc)
-    )
-    monkeypatch.setattr(mc, "get_num_kv_heads", MethodType(lambda self, pc: 2, mc))
-
-    with set_current_vllm_config(vllm_config):
-        assert FlashInferBackend.get_supported_kernel_block_sizes() == [16, 32, 64]
-
-        # Same conditions without mm-prefix: large pages stay advertised.
-        mc.__dict__["is_mm_prefix_lm"] = False
-        try:
-            sizes = FlashInferBackend.get_supported_kernel_block_sizes()
-        finally:
-            mc.__dict__.pop("is_mm_prefix_lm", None)
-        assert sizes == [16, 32, 64, 128, 256, 512, 1024]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend imports")

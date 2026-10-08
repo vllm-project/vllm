@@ -851,15 +851,10 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
 @pytest.mark.parametrize("native_mm_prefix", [False, True])
-def test_mm_prefix_priority_without_changing_causal_default(
+def test_mm_prefix_selects_composite_without_changing_causal_default(
     use_mm_prefix, kv_cache_dtype, native_mm_prefix, blackwell_selection
 ):
-    """The image-mask requirement must reach CUDA's automatic backend priority.
-
-    FlashInfer serves an mm-prefix batch in one kernel when its wrapper is
-    available, for a bf16 and an fp8 cache alike, so it is offered before the
-    composite; without the wrapper the priority falls back to the composite.
-    """
+    """The image-mask requirement must reach CUDA's automatic backend priority."""
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
@@ -875,10 +870,7 @@ def test_mm_prefix_priority_without_changing_causal_default(
         backend = get_attn_backend(
             256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
         )
-    if not use_mm_prefix or native_mm_prefix:
-        expected = "FLASHINFER"
-    else:
-        expected = "TRITON_FLASHINFER"
+    expected = "TRITON_FLASHINFER" if use_mm_prefix else "FLASHINFER"
     assert backend.get_name() == expected
 
 

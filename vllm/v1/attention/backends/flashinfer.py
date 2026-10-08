@@ -133,22 +133,19 @@ _MM_PREFIX_KV_CACHE_DTYPES = (
 )
 
 
-def _mm_prefix_keeps_model_dtype_query(
-    vllm_config: VllmConfig | None, cache_dtype: str
-) -> bool:
-    """Whether this FP8 cache is read with a query in the model dtype.
+def _native_mm_prefix(vllm_config: VllmConfig | None) -> bool:
+    """Whether FlashInfer serves this model's mm-prefix ranges itself.
 
-    The mm-prefix wrapper runs on fa2, which has no FP8-query path. The query
-    dtype is fixed per layer rather than per batch, so a model that can take
-    the native mm-prefix path keeps it for prefill and decode alike.
+    Not on SM100: trtllm-gen keeps causal attention there and the
+    TRITON_FLASHINFER composite routes the ranges, so that path is unchanged.
     """
     return (
         vllm_config is not None
         and vllm_config.model_config is not None
         and vllm_config.model_config.is_mm_prefix_lm
-        and cache_dtype.startswith("fp8")
-        and cache_dtype in _MM_PREFIX_KV_CACHE_DTYPES
+        and vllm_config.cache_config.cache_dtype in _MM_PREFIX_KV_CACHE_DTYPES
         and _mm_prefix_wrapper_cls() is not None
+        and not current_platform.is_device_capability_family(100)
     )
 
 
@@ -524,9 +521,6 @@ class FlashInferBackend(AttentionBackend):
                 and num_qo_heads // num_kv_heads > 1
                 and current_platform.is_device_capability_family(100)
                 and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
-                # Page sizes >= 128 only run on trtllm-gen, which cannot
-                # serve fa2 mm-prefix attention.
-                and not mc.is_mm_prefix_lm
             )
         if not use_large_pages:
             return [16, 32, 64]
@@ -565,16 +559,10 @@ class FlashInferBackend(AttentionBackend):
         """mm-prefix runs through FlashInfer's bidirectional-ranges prefill wrapper.
 
         Advertised when the installed FlashInfer provides the wrapper and the KV
-        cache dtype is one the variant reads. FlashInfer builds the JIT module
-        itself when the wrapper is constructed.
+        cache dtype is one the variant reads, except on SM100. FlashInfer builds
+        the JIT module itself when the wrapper is constructed.
         """
-        vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is None or vllm_config.model_config is None:
-            return False
-        return (
-            _mm_prefix_wrapper_cls() is not None
-            and vllm_config.cache_config.cache_dtype in _MM_PREFIX_KV_CACHE_DTYPES
-        )
+        return _native_mm_prefix(get_current_vllm_config_or_none())
 
     @classmethod
     def validate_configuration(
@@ -685,18 +673,8 @@ class FlashInferBackend(AttentionBackend):
         if use_mm_prefix:
             if kv_cache_dtype not in _MM_PREFIX_KV_CACHE_DTYPES:
                 return f"mm_prefix is not supported with a {kv_cache_dtype} KV cache"
-            if kv_cache_dtype == "nvfp4" and device_capability.major == 10:
-                return (
-                    "mm_prefix is not supported with an NVFP4 KV cache on SM100, "
-                    "where trtllm-gen serves it and cannot run the mm-prefix variant"
-                )
             if has_sink:
                 return "mm_prefix is not supported with sinks"
-            if block_size is not None and block_size >= 128:
-                return (
-                    f"mm_prefix requires the fa2 prefill path, but kernel "
-                    f"page size {block_size} only runs on trtllm-gen"
-                )
         return None
 
     @classmethod
@@ -1129,21 +1107,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "earlier GPUs."
             )
 
-        self.is_mm_prefix_lm = bool(
-            self.model_config is not None and self.model_config.is_mm_prefix_lm
-        )
-        if self.is_mm_prefix_lm:
-            if self.logits_soft_cap is not None and self.logits_soft_cap > 0:
-                raise NotImplementedError(
-                    "FlashInfer mm-prefix does not support logits_soft_cap: "
-                    "the JIT mask variant does not implement soft-capping."
-                )
-            if self.attention_config.use_trtllm_attention:
-                raise NotImplementedError(
-                    "FlashInfer mm-prefix requires the fa2 JIT-variant prefill "
-                    "path; it cannot run with explicitly forced trtllm-gen "
-                    "attention."
-                )
+        self.is_mm_prefix_lm = _native_mm_prefix(self.vllm_config)
+        if (
+            self.is_mm_prefix_lm
+            and self.logits_soft_cap is not None
+            and self.logits_soft_cap > 0
+        ):
+            raise NotImplementedError(
+                "FlashInfer mm-prefix does not support logits_soft_cap: "
+                "the JIT mask variant does not implement soft-capping."
+            )
         capability = current_platform.get_device_capability()
         arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
         decode_backend = (
@@ -1205,7 +1178,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if cache_config requests a quantized dtype globally.
         cache_dtype = self.cache_dtype
 
-        if _mm_prefix_keeps_model_dtype_query(self.vllm_config, cache_dtype):
+        # The mm-prefix wrapper runs on fa2, which has no FP8-query path; the
+        # query dtype is fixed per layer, so decode keeps the model dtype too.
+        if cache_dtype.startswith("fp8") and _native_mm_prefix(self.vllm_config):
             return self.model_config.dtype
 
         # On SM90/SM12x, XQA decode requires BF16/FP16-Q even with FP8 KV cache.
@@ -1708,11 +1683,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         prefill_force_trtllm = (
             True if page_size >= 128 else self.attention_config.use_trtllm_attention
         )
-        if use_mm_prefix and page_size >= 128:
-            raise NotImplementedError(
-                "FlashInfer mm-prefix requires the fa2 prefill path, but "
-                f"kernel page size {page_size} only runs on trtllm-gen."
-            )
         prefill_use_trtllm = (
             (not use_mm_prefix)
             and causal
@@ -2308,10 +2278,7 @@ class FlashInferImpl(AttentionImpl):
             num_heads, num_kv_heads, is_prefill=False
         )
         vllm_config = get_current_vllm_config_or_none()
-        # Must agree with the builder's get_q_data_type().
-        self.keeps_model_dtype_query = _mm_prefix_keeps_model_dtype_query(
-            vllm_config, self.kv_cache_dtype
-        )
+        self.native_mm_prefix = _native_mm_prefix(vllm_config)
         # Query pre-quantization needs a single dtype for the whole query tensor.
         # SM90 XQA needs BF16/FP16-Q for decode and FP8 for prefill,
         # so only enable this for SM100 trtllm-gen where both use FP8-Q.
@@ -2321,7 +2288,6 @@ class FlashInferImpl(AttentionImpl):
             and current_platform.is_device_capability_family(100)
             and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
-            and not self.keeps_model_dtype_query
         )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
@@ -2359,13 +2325,11 @@ class FlashInferImpl(AttentionImpl):
             return False
         # XQA does not support FP8/NVFP4 output, so require trtllm-gen
         # (SM100+) here.  Without that we cannot fuse the output quant.
-        # The fusion also needs an FP8 query, which the mm-prefix path lacks.
         return (
             self.supports_xqa_or_trtllm_gen_decode
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
-            and not self.keeps_model_dtype_query
         )
 
     # FlashInfer requires attention sinks to be float32
@@ -2388,12 +2352,12 @@ class FlashInferImpl(AttentionImpl):
             bmm1_scale *= layer._k_scale_float
         return bmm1_scale
 
-    @staticmethod
-    def query_scale(layer: torch.nn.Module, query: torch.Tensor) -> float:
-        """q_scale belongs to an FP8 query; a model-dtype one was never scaled."""
-        if query.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            return layer._q_scale_float
-        return 1.0
+    def query_scale(self, layer: torch.nn.Module) -> float:
+        """q_scale belongs to an FP8 query; the fa2 NVFP4 and native mm-prefix
+        paths keep the query in the model dtype."""
+        if self.nvfp4_fa2 or self.native_mm_prefix:
+            return 1.0
+        return layer._q_scale_float
 
     # SM90 may need FP8-Q for native prefill and BF16/FP16-Q for XQA decode,
     # so quantize only the slice whose target dtype differs.
@@ -2620,7 +2584,7 @@ class FlashInferImpl(AttentionImpl):
                 attn_metadata.q_data_type_prefill,
                 layer._q_scale,
             )
-            prefill_q_scale = self.query_scale(layer, prefill_query)
+            prefill_q_scale = self.query_scale(layer)
 
             if not prefill_use_trtllm:
                 assert isinstance(attn_metadata.prefill, FIPrefill)
@@ -2806,7 +2770,6 @@ class FlashInferImpl(AttentionImpl):
                     out = self._nvfp4_fp8_out[:num_prefill_tokens]
 
                 prefill_kv_block_scales = None
-                bmm1_scale, bmm2_scale = self.bmm1_scale, self.bmm2_scale
                 if self.is_kvcache_nvfp4:
                     # NVFP4 trtllm-gen kernel requires FP8 query.
                     assert attn_metadata.q_data_type_prefill == FP8_DTYPE, (
@@ -2849,9 +2812,6 @@ class FlashInferImpl(AttentionImpl):
                         layer._v_scale,
                         attn_metadata.q_data_type_prefill,
                     )
-                    # The dequant kernel has applied the K/V scales, and the
-                    # query was not quantized.
-                    bmm1_scale, bmm2_scale = self.scale, 1.0
                 else:
                     mock_kv_cache = kv_cache_tuple
                     mock_block_table = block_tables_prefill
@@ -2864,8 +2824,8 @@ class FlashInferImpl(AttentionImpl):
                     seq_lens=seq_lens_prefill,
                     max_q_len=attn_metadata.prefill.max_q_len,
                     max_kv_len=attn_metadata.prefill.max_seq_len,
-                    bmm1_scale=bmm1_scale,
-                    bmm2_scale=bmm2_scale,
+                    bmm1_scale=self.bmm1_scale,
+                    bmm2_scale=self.bmm2_scale,
                     batch_size=attn_metadata.num_prefills,
                     cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
                     cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
@@ -2896,7 +2856,7 @@ class FlashInferImpl(AttentionImpl):
                 attn_metadata.q_data_type_decode,
                 layer._q_scale,
             )
-            decode_q_scale = self.query_scale(layer, decode_query)
+            decode_q_scale = self.query_scale(layer)
 
             if not decode_with_flashinfer_trtllm_api:
                 assert isinstance(attn_metadata.decode, FIDecode)
@@ -3074,11 +3034,6 @@ class FlashInferImpl(AttentionImpl):
                         device=decode_query.device,
                     )
 
-                bmm1_scale = self.bmm1_scale
-                if decode_query.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
-                    # Same rule as XQA: q_scale only for a quantized query.
-                    bmm1_scale = self.get_xqa_bmm1_scale(layer, decode_query.dtype)
-
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=(
@@ -3088,7 +3043,7 @@ class FlashInferImpl(AttentionImpl):
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
                     max_seq_len=attn_metadata.decode.max_seq_len,
-                    bmm1_scale=bmm1_scale,
+                    bmm1_scale=self.bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
                     window_left=self.window_left,
                     sinks=self.sinks,
