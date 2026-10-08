@@ -41,6 +41,7 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 )
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle import w4a8 as w4a8_oracle
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.platforms import current_platform
@@ -133,6 +134,44 @@ def test_nvfp4_clamp_allows_shared_activation_backends(
     selected, _ = nvfp4_oracle.select_nvfp4_moe_backend(
         moe_config, weight_key=None, activation_key=None
     )
+
+    assert selected == expected
+
+
+@pytest.mark.parametrize(
+    ("intermediate_size", "expected"),
+    [
+        (640, w4a8_oracle.W4A8MoeBackend.HUMMING),
+        (768, w4a8_oracle.W4A8MoeBackend.CUTLASS),
+    ],
+)
+def test_w4a8_oracle_skips_cutlass_for_unaligned_shapes(
+    monkeypatch, intermediate_size: int, expected: w4a8_oracle.W4A8MoeBackend
+):
+    """CUTLASS W4A8 needs 256-aligned dims; auto must fall through to Humming."""
+
+    class SupportedExperts:
+        @staticmethod
+        def is_supported_config(*args, **kwargs):
+            return True, None
+
+    monkeypatch.setattr(
+        CutlassExpertsW4A8Fp8, "_supports_current_device", staticmethod(lambda: True)
+    )
+    monkeypatch.setattr(
+        w4a8_oracle,
+        "backend_to_kernel_cls",
+        lambda backend: (
+            [CutlassExpertsW4A8Fp8]
+            if backend == w4a8_oracle.W4A8MoeBackend.CUTLASS
+            else [SupportedExperts]
+        ),
+    )
+    moe_config = make_dummy_moe_config(
+        hidden_dim=2560, intermediate_size=intermediate_size
+    )
+
+    selected, _ = w4a8_oracle.select_w4a8_moe_backend(moe_config)
 
     assert selected == expected
 

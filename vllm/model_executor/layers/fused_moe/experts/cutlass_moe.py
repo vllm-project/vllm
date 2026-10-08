@@ -1312,6 +1312,16 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
                 False,
                 f"kernel does not support {moe_config.in_dtype} input/output dtype",
             )
+        # requirement for CUTLASS reorder_tensor
+        if (
+            moe_config.hidden_dim % 256 != 0
+            or moe_config.intermediate_size_per_partition % 256 != 0
+        ):
+            return (
+                False,
+                "kernel requires hidden size and per-rank intermediate size "
+                "divisible by 256",
+            )
 
         return mk.FusedMoEExperts.is_supported_config(
             cls,
