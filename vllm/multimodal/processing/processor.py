@@ -13,10 +13,11 @@ from typing import (
     NamedTuple,
     Protocol,
     TypeAlias,
+    assert_never,
 )
 
 import torch
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar
 
 from vllm.config import SchedulerConfig
 from vllm.inputs import (

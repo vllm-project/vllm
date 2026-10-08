@@ -789,9 +789,12 @@ class NixlBaseConnectorWorker:
         self.region_names: list[str] = []
         self.region_num_blocks: list[int] = []
         self._mixed_mem_types = False
+        # True on TP ranks that share a HiSparse host pool with TP rank 0 and
+        # leave its NIXL registration and DRAM reads to rank 0.
+        self._skip_dram_xfer = False
         self._desc_is_dram_by_block_size: dict[int, np.ndarray] = {}
         self._desc_pos_by_block_size: dict[int, np.ndarray] = {}
-        self._dram_src_handles_by_block_size: dict[int, int] = {}
+        self._dram_src_handles_by_block_size: dict[int, int | None] = {}
 
         # PP>1 (push mode): this worker holds a contiguous layer slice and
         # transfers into the matching sub-range of a PP=1 remote's regions.
@@ -828,7 +831,7 @@ class NixlBaseConnectorWorker:
         # Populated dynamically during handshake based on remote configuration.
         # Per-source split handles, keyed by (tp_ratio, remote_block_size).
         self.src_xfer_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
-        self._dram_src_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
+        self._dram_src_handles_by_tp_ratio: dict[tuple[int, int], list[int | None]] = {}
         # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
         self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
 
@@ -1818,12 +1821,15 @@ class NixlBaseConnectorWorker:
         self.num_descs = sum(xfer_region_num_blocks)
 
         self._mixed_mem_types = len(set(region_mem_types)) > 1
+        self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (
                 "Mixed-device KV registration is only supported for MLA "
                 "models without Mamba layers."
             )
         for mem_type in sorted(set(region_mem_types)):
+            if mem_type == "DRAM" and self._skip_dram_xfer:
+                continue
             ranges_for_mem_type = [
                 (start, end - start, device_id, "")
                 for (_, cache_mem_type), (
@@ -2191,10 +2197,13 @@ class NixlBaseConnectorWorker:
             blocks_data[desc_is_dram, 2] = 0
             dram_blocks = blocks_data[dram_idx]
             vram_blocks = blocks_data[vram_idx]
-            dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
-            self._dram_src_handles_by_block_size[block_size] = (
-                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", dram_descs)
-            )
+            if self._skip_dram_xfer:
+                self._dram_src_handles_by_block_size[block_size] = None
+            else:
+                dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
+                self._dram_src_handles_by_block_size[block_size] = (
+                    self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", dram_descs)
+                )
             descs = self.nixl_wrapper.get_xfer_descs(vram_blocks, self.nixl_memory_type)
             return (
                 self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs),
@@ -2423,12 +2432,15 @@ class NixlBaseConnectorWorker:
                 if self._mixed_mem_types:
                     handle_data = np.asarray(handle_data, dtype=np.uint64)
                     desc_is_dram = self._desc_is_dram_by_block_size[remote_block_size]
-                    dram_descs = self.nixl_wrapper.get_xfer_descs(
-                        handle_data[desc_is_dram], "DRAM"
-                    )
-                    dram_handle = self.nixl_wrapper.prep_xfer_dlist(
-                        "NIXL_INIT_AGENT", dram_descs
-                    )
+                    if self._skip_dram_xfer:
+                        dram_handle = None
+                    else:
+                        dram_descs = self.nixl_wrapper.get_xfer_descs(
+                            handle_data[desc_is_dram], "DRAM"
+                        )
+                        dram_handle = self.nixl_wrapper.prep_xfer_dlist(
+                            "NIXL_INIT_AGENT", dram_descs
+                        )
                     self._dram_src_handles_by_tp_ratio[split_key].append(dram_handle)
                     handle_data = handle_data[~desc_is_dram]
                 descs = self.nixl_wrapper.get_xfer_descs(
@@ -2887,6 +2899,27 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
+    def _leaves_dram_xfer_to_rank0(self) -> bool:
+        """Whether this rank leaves the DRAM regions' NIXL work to TP rank 0.
+
+        A HiSparse host pool shared by the local TP ranks (one mmap per DP
+        rank) is registered with NIXL and filled by TP rank 0 alone: every
+        rank would otherwise register the same pages on every NIC and READ the
+        same host KV into them. Private pools are unaffected.
+        """
+        if not (
+            self._mixed_mem_types and self.kv_cache_config.hisparse_shared_host_pool
+        ):
+            return False
+        skip = self.tp_rank != 0
+        logger.info(
+            "HiSparse host pool: NIXL DRAM registration and reads on TP rank 0 "
+            "only (tp_rank=%d, skip=%s)",
+            self.tp_rank,
+            skip,
+        )
+        return skip
+
     def _zero_region_blocks(self, block_ids: BlockIds) -> None:
         """Clear clipped physical pages in their owning region only."""
         if not any(block_ids):
@@ -2894,6 +2927,9 @@ class NixlBaseConnectorWorker:
         bases = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
         for region, blocks in enumerate(block_ids):
             if not blocks:
+                continue
+            if self._skip_dram_xfer and self.region_mem_types[region] == "DRAM":
+                # The shared pool is rank 0's to write.
                 continue
             cache = self.device_kv_caches[self.region_names[region]]
             storage = cache.untyped_storage()
@@ -3795,11 +3831,13 @@ class NixlBaseConnectorWorker:
             for handles in self.src_xfer_handles_by_tp_ratio.values():
                 for handle in handles:
                     self.nixl_wrapper.release_dlist_handle(handle)
-            for handles in self._dram_src_handles_by_tp_ratio.values():
-                for handle in handles:
-                    self.nixl_wrapper.release_dlist_handle(handle)
-            for handle in self._dram_src_handles_by_block_size.values():
-                self.nixl_wrapper.release_dlist_handle(handle)
+            for dram_handles in self._dram_src_handles_by_tp_ratio.values():
+                for dram_handle in dram_handles:
+                    if dram_handle is not None:
+                        self.nixl_wrapper.release_dlist_handle(dram_handle)
+            for dram_handle in self._dram_src_handles_by_block_size.values():
+                if dram_handle is not None:
+                    self.nixl_wrapper.release_dlist_handle(dram_handle)
         except Exception:
             logger.exception("NIXL dlist-handle release failed at shutdown.")
         self.src_xfer_handles_by_block_size.clear()
