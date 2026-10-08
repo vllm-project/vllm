@@ -89,7 +89,7 @@ The derenderer builds its tool and reasoning parsers from its own server flags p
 
 A mismatch doesn't fail. The parser just splits `reasoning`, `content` and `tool_calls` differently from what `vllm serve` would return.
 
-`/v1/completions/derender` only detokenizes. It never runs tool or reasoning parsers, the same as `/v1/completions` on `vllm serve`. It only reads `skip_special_tokens` from `completion_request`.
+`/v1/completions/derender` only detokenizes. It never runs tool or reasoning parsers, the same as `/v1/completions` on `vllm serve`. From `completion_request` it reads `skip_special_tokens`, and `logprobs` and `logprob_token_ids` to cut `top_logprobs` the way `/v1/completions` does.
 
 ## Streaming
 

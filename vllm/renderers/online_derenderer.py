@@ -779,7 +779,7 @@ class OnlineDerenderer:
                         top_limit=top_limit,
                     )
                     completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
-                        resolved
+                        resolved, choice.logprobs
                     )
                 choices.append(
                     CompletionResponseChoice(
@@ -871,7 +871,9 @@ class OnlineDerenderer:
                     top_limit=top_limit,
                 )
                 completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
-                    resolved, initial_text_offset=state.logprob_text_offset
+                    resolved,
+                    choice.logprobs,
+                    initial_text_offset=state.logprob_text_offset,
                 )
 
             updated_state = updated_state.model_copy(
@@ -1119,10 +1121,16 @@ def _resolve_logprobs(
 
 def _convert_chat_logprobs_to_completion_logprobs(
     logprobs: ChatCompletionLogProbs,
+    generate_logprobs: GenerateLogProbs,
     initial_text_offset: int = 0,
 ) -> CompletionLogProbs:
     """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
     (parallel flat lists) as required by the /v1/completions response schema.
+
+    ``generate_logprobs`` is what ``logprobs`` was resolved from. A position
+    with no candidates there had no logprobs in the engine output, which
+    /v1/completions reports as ``None``; a position whose candidates were all
+    cut (``logprobs=-1``) is ``{}``, as /v1/completions returns.
 
     ``initial_text_offset`` keeps ``text_offset`` absolute across streaming
     chunks, mirroring the generate streaming path.
@@ -1136,13 +1144,15 @@ def _convert_chat_logprobs_to_completion_logprobs(
     text_offset: list[int] = []
 
     offset = initial_text_offset
-    for entry in logprobs.content:
+    for entry, source in zip(logprobs.content, generate_logprobs.content or ()):
         text_offset.append(offset)
         tokens.append(entry.token)
         token_logprobs.append(entry.logprob)
-        # A dict even when the endpoint's cut keeps nothing (logprobs=-1), as
-        # /v1/completions returns `{}` there; None is only for missing logprobs.
-        top_logprobs_list.append({t.token: t.logprob for t in entry.top_logprobs})
+        top_logprobs_list.append(
+            {t.token: t.logprob for t in entry.top_logprobs}
+            if source.top_logprobs
+            else None
+        )
         offset += len(entry.token)
 
     return CompletionLogProbs(
