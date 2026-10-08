@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    partial_tail_block_ranges,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
@@ -570,7 +571,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return True
 
     def _boundary_snapshot_puts(
-        self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
+        self, req_meta: ReqMeta, mamba_offloads: list[tuple[int, int, int]]
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
         """Puts for committed mamba "align" boundary-state snapshots.
 
@@ -592,7 +593,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         """
         hash_block_size = self.coord.hash_block_size
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
-        for group_id, block_id, boundary in entries:
+        for group_id, block_id, boundary in mamba_offloads:
             if boundary == 0 or block_id == NULL_BLOCK_ID:
                 continue
             hash_idx = boundary // hash_block_size - 1
@@ -611,7 +612,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return puts
 
     def _sub_block_tail_puts(
-        self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
+        self,
+        req_meta: ReqMeta,
+        boundary: int,
+        tail_blocks_by_group: dict[int, tuple[int, range]],
+        mamba_offloads: list[tuple[int, int, int]],
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
         """Puts for the request's sub-block partial tail (its last prompt hash
         boundary), so a later request can hit the sub-block prefix.
@@ -624,46 +629,32 @@ class KVCacheStoreSendingThread(KVTransferThread):
         boundary block by the boundary sub-hash; a mamba "align" group
         contributes only its boundary block, from the core-provided CoW block.
         """
-        boundaries = {boundary for _, _, boundary in entries}
-        if len(boundaries) != 1:
-            raise ValueError(
-                "Sub-block partial-tail offloads for one request must share a boundary"
-            )
-        boundary = boundaries.pop()
         hash_block_size = self.coord.hash_block_size
-        if boundary == 0 or boundary // hash_block_size - 1 >= len(
-            req_meta.block_hashes
-        ):
-            return []
-
-        mamba_offloads = {group_id: block_id for group_id, block_id, _ in entries}
-        saved = self._saved_offset.get(req_meta.req_id, 0)
+        mamba_block_ids = {
+            group_id: block_id for group_id, block_id, _ in mamba_offloads
+        }
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
         for g_idx, db in enumerate(self.token_databases):
-            if not self.group_participates[g_idx]:
+            if not self.group_participates[g_idx] or g_idx not in tail_blocks_by_group:
                 continue
+            group_boundary, block_indices = tail_blocks_by_group[g_idx]
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[g_idx]
             put_step_rank = (self.tp_rank + g_idx) % put_step
-            # Always include the boundary block: its sub-hash key is written
-            # only here, even if normal saves already advanced past it.
-            last_block = cdiv(boundary, db.block_size) - 1
-            for block_idx in range(
-                min(saved // db.block_size, last_block), last_block + 1
-            ):
+            for block_idx in block_indices:
                 if block_idx % put_step != put_step_rank:
                     continue
-                valid_end = min((block_idx + 1) * db.block_size, boundary)
+                valid_end = min((block_idx + 1) * db.block_size, group_boundary)
                 key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
-                if g_idx in mamba_offloads:
+                if g_idx in mamba_block_ids:
                     if valid_end != boundary:
                         # Interior align-mode state positions are null or
                         # stale (the block table is not append-only) and never
                         # valid gap content; only the boundary block is
                         # persisted, from the core-provided hand-off.
                         continue
-                    block_id = mamba_offloads[g_idx]
+                    block_id = mamba_block_ids[g_idx]
                 elif g_idx in self.coord.mamba_group_ids:
                     continue
                 elif block_idx < len(group_blocks):
@@ -703,22 +694,33 @@ class KVCacheStoreSendingThread(KVTransferThread):
             True when no put is needed or every put succeeds, False otherwise.
 
         """
-        offloads = req_meta.boundary_state_offloads
-        if not offloads or not req_meta.block_hashes:
+        mamba_offloads = req_meta.boundary_state_offloads or []
+        if not req_meta.block_hashes:
+            return True
+        partial_tail = partial_tail_block_ranges(
+            self.coord, req_meta, [db.block_size for db in self.token_databases]
+        )
+        if not mamba_offloads and partial_tail is None:
             return True
 
-        snapshots: list[tuple[int, int, int]] = []
-        sub_block: list[tuple[int, int, int]] = []
-        for group_id, block_id, boundary in offloads:
+        mamba_snapshots: list[tuple[int, int, int]] = []
+        mamba_tails: list[tuple[int, int, int]] = []
+        for group_id, block_id, boundary in mamba_offloads:
             entry = (group_id, block_id, boundary)
             if boundary % self.token_databases[group_id].block_size == 0:
-                snapshots.append(entry)
+                mamba_snapshots.append(entry)
             else:
-                sub_block.append(entry)
+                mamba_tails.append(entry)
 
-        puts = self._boundary_snapshot_puts(req_meta, snapshots)
-        if sub_block and self.coord.enable_partial_hash_hits:
-            puts.extend(self._sub_block_tail_puts(req_meta, sub_block))
+        puts = self._boundary_snapshot_puts(req_meta, mamba_snapshots)
+        if partial_tail is not None:
+            boundary, tail_blocks_by_group = partial_tail
+            puts.extend(
+                self._sub_block_tail_puts(
+                    req_meta, boundary, tail_blocks_by_group, mamba_tails
+                )
+            )
+        puts = list({put[0]: put for put in puts}.values())
 
         if not puts:
             return True
@@ -854,9 +856,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # Offload the handed-off mamba boundary states (independent of the
             # normal positional save, which may be skipped this step).
-            if req_meta.boundary_state_offloads is not None and not (
-                self._maybe_offload_boundary_states(req_meta)
-            ):
+            if not self._maybe_offload_boundary_states(req_meta):
                 return
 
             if token_len == 0:
@@ -870,7 +870,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             store_masks = self.coord.store_mask(
                 token_len,
                 save_start,
-                num_prompt_tokens=req_meta.num_prompt_tokens,
+                num_prompt_tokens=req_meta.prefill_end_tokens,
             )
 
             starts: list[int] = []

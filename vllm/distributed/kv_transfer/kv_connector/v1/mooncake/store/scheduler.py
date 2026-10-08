@@ -5,12 +5,14 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Scheduler-side logic for MooncakeStoreConnector."""
 
+from dataclasses import replace
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
-    partial_hash_hits_enabled,
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+    MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     LoadSpec,
@@ -26,7 +28,11 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.kv_cache_utils import (
+    partial_hash_hits_enabled,
+    resolve_dcp_kv_cache_spec,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
@@ -98,6 +104,24 @@ class MooncakeStoreScheduler:
             spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
         ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
+
+        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        spec_config = vllm_config.speculative_config
+        self._store_coord = MooncakeStoreCoordinator(
+            [
+                replace(
+                    group,
+                    kv_cache_spec=resolve_dcp_kv_cache_spec(
+                        group.kv_cache_spec, dcp_size
+                    ),
+                )
+                for group in store_groups
+            ],
+            self._block_size,
+            self._hash_block_size,
+            use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            dcp_world_size=dcp_size,
+        )
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
@@ -273,6 +297,8 @@ class MooncakeStoreScheduler:
                 # producer. Loads are still carried by the same metadata.
                 skip_save=is_consumer,
                 block_hashes=request_real.block_hashes,
+                num_prompt_tokens=request_real.num_prompt_tokens,
+                save_partial_tail=self.enable_partial_hash_hits,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -323,6 +349,8 @@ class MooncakeStoreScheduler:
                         load_spec=load_spec,
                         skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
+                        num_prompt_tokens=request_real.num_prompt_tokens,
+                        save_partial_tail=self.enable_partial_hash_hits,
                     )
                 else:
                     # Decode/chunked request
@@ -364,6 +392,8 @@ class MooncakeStoreScheduler:
                         load_spec=None,
                         skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
+                        num_prompt_tokens=unfinished_req.num_prompt_tokens,
+                        save_partial_tail=self.enable_partial_hash_hits,
                     )
 
                 if req_meta is not None:
@@ -398,6 +428,7 @@ class MooncakeStoreScheduler:
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=unfinished_req.block_hashes,
+                    num_prompt_tokens=unfinished_req.num_prompt_tokens,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -474,17 +505,22 @@ class MooncakeStoreScheduler:
             assert NULL_BLOCK_ID not in block_ids, (
                 "A null block cannot back a boundary-state offload"
             )
-            # Every allocated block is referenced, not just the ones covering
-            # this job's token range: a rank resumes from its own last
-            # successful offset, which lags the scheduler's whenever a save was
-            # skipped or failed, so it may read anywhere below the range.
-            block_ids.extend(
-                block_id
-                for group_id, group in enumerate(req_meta.block_ids)
-                if group_id not in self._boundary_state_group_ids
-                for block_id in group
-                if block_id != NULL_BLOCK_ID
-            )
+            if req_meta.token_len_chunk == 0:
+                # Tail-only save: pin the companion attention proof.
+                block_ids.extend(self._store_coord.tail_attention_block_ids(req_meta))
+            else:
+                # Normal prefix save: pin all attention sources for retries.
+                # Every allocated block is referenced, not just the ones covering
+                # this job's token range: a rank resumes from its own last
+                # successful offset, which lags the scheduler's whenever a save was
+                # skipped or failed, so it may read anywhere below the range.
+                block_ids.extend(
+                    block_id
+                    for group_id, group in enumerate(req_meta.block_ids)
+                    if group_id not in self._boundary_state_group_ids
+                    for block_id in group
+                    if block_id != NULL_BLOCK_ID
+                )
             # An aligned boundary block may also be present in the request's
             # block table. Take and release exactly one reference per block.
             block_ids = list(dict.fromkeys(block_ids))
@@ -525,6 +561,20 @@ class MooncakeStoreScheduler:
                 return False
             pinned_block_ids.append(block_id)
             remapped_offloads.append((store_group_id, block_id, boundary))
+        req_meta = ReqMeta(
+            req_id=request.request_id,
+            token_len_chunk=0,
+            block_ids=tuple(
+                block_ids[group_id].copy() for group_id in self._store_group_ids
+            ),
+            block_hashes=list(request.block_hashes),
+            can_save=True,
+            num_prompt_tokens=request.num_prompt_tokens,
+            prefill_end_tokens=tracker.prefill_end_tokens,
+            boundary_state_offloads=remapped_offloads,
+            completed_token_len=request.num_computed_tokens,
+        )
+        pinned_block_ids.extend(self._store_coord.tail_attention_block_ids(req_meta))
         pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
 
         pool = self._gpu_block_pool
@@ -537,18 +587,8 @@ class MooncakeStoreScheduler:
         self._pinned_saves[store_job_id] = (pinned_block_ids, self._num_workers)
         pool.touch([pool.blocks[block_id] for block_id in pinned_block_ids])
 
-        self._finished_partial_tail_metas[request.request_id] = ReqMeta(
-            req_id=request.request_id,
-            token_len_chunk=0,
-            block_ids=tuple(
-                block_ids[group_id].copy() for group_id in self._store_group_ids
-            ),
-            block_hashes=list(request.block_hashes),
-            can_save=True,
-            num_prompt_tokens=tracker.prefill_end_tokens,
-            store_job_id=store_job_id,
-            boundary_state_offloads=remapped_offloads,
-        )
+        req_meta.store_job_id = store_job_id
+        self._finished_partial_tail_metas[request.request_id] = req_meta
         tracker.has_pending_offload = True
         # The store job owns exact block refs, so request cleanup need not wait.
         return False
@@ -603,8 +643,10 @@ class MooncakeStoreScheduler:
                     block_ids=tracker.allocated_block_ids,
                     block_hashes=req_tuple[0].block_hashes,
                     can_save=True,
-                    num_prompt_tokens=tracker.prefill_end_tokens,
+                    num_prompt_tokens=req_tuple[0].num_prompt_tokens,
+                    prefill_end_tokens=tracker.prefill_end_tokens,
                     boundary_state_offloads=accepted,
+                    completed_token_len=tracker.token_len,
                 )
             )
 
