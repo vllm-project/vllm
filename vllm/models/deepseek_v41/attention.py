@@ -3,6 +3,7 @@
 """DeepseekV4 MLA Attention Layer"""
 
 import math
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cached_property
@@ -1451,9 +1452,12 @@ class DeepseekV4Indexer(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+            fi_autotuner = sys.modules.get("flashinfer.autotuner")
             if (
                 indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
                 and not torch.cuda.is_current_stream_capturing()
+                # FlashInfer autotune runs short dummy contexts; wq_b must still run.
+                and not (fi_autotuner and fi_autotuner.AutoTuner.get().is_tuning_mode)
             ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
