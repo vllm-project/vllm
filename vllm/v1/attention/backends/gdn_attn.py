@@ -14,6 +14,12 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.model_executor.layers.mamba.gdn.prefill_checkpoint import (
+    GDN_SPLIT_CHECKPOINT_ALIGNMENT,
+    ChunkKernelMetadata,
+    GDNPrefillCheckpointSplit,
+    build_gdn_prefill_checkpoint_split,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -97,6 +103,8 @@ class GDNAttentionMetadata:
 
     checkpoint: MambaPrefillCheckpointMetadata | None = None
     flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
+    # Set when checkpoints are exported by splitting prefill rows.
+    checkpoint_split: GDNPrefillCheckpointSplit | None = None
     has_initial_state: torch.Tensor | None = None
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
@@ -166,6 +174,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.gdn_prefill_backend == "flashinfer"
             and checkpoint_alignment is not None
             and checkpoint_alignment % FLASHINFER_GDN_CHECKPOINT_ALIGNMENT == 0
+        )
+        # On Triton/FLA and FlyDSL, whose prefill returns only final states, the
+        # Qwen GDN layer opts in with GDN_SPLIT_CHECKPOINT_ALIGNMENT.
+        self.split_prefill_checkpoints = (
+            self.gdn_prefill_backend in ("triton", "aiter_flydsl")
+            and checkpoint_alignment == GDN_SPLIT_CHECKPOINT_ALIGNMENT
         )
 
         if self.speculative_config:
@@ -309,6 +323,28 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 device=device,
             ),
         )
+
+    def _build_prefill_kernel_metadata(
+        self,
+        cu_seqlens: torch.Tensor,
+        cu_seqlens_cpu: torch.Tensor,
+        device: torch.device,
+    ) -> ChunkKernelMetadata:
+        if self.gdn_prefill_backend == "aiter_flydsl":
+            # AITER carries its own reusable varlen metadata and has no use
+            # for FLA's chunk indices, so it replaces them rather than
+            # extending what _build_chunk_metadata returns.
+            aiter_prefill_metadata = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
+                torch.diff(cu_seqlens_cpu).tolist(), cu_seqlens=cu_seqlens
+            )
+            return None, None, aiter_prefill_metadata
+        if self.gdn_prefill_backend == "flashinfer":
+            # FlashInfer consumes cu_seqlens directly.
+            return None, None, None
+        chunk_indices, chunk_offsets = self._build_chunk_metadata(
+            cu_seqlens, cu_seqlens_cpu, device
+        )
+        return chunk_indices, chunk_offsets, None
 
     def build(  # type: ignore[override]
         self,
@@ -535,26 +571,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
 
-            if self.gdn_prefill_backend == "aiter_flydsl":
-                # AITER carries its own reusable varlen metadata and has no use
-                # for FLA's chunk indices, so it replaces them rather than
-                # extending what _build_chunk_metadata returns.
-                assert prefill_query_start_loc_cpu is not None
-                aiter_prefill_metadata = (
-                    rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
-                        torch.diff(prefill_query_start_loc_cpu).tolist(),
-                        cu_seqlens=prefill_query_start_loc,
-                    )
-                )
-            elif self.gdn_prefill_backend != "flashinfer":
-                # FlashInfer's chunk kernel consumes cu_seqlens directly and
-                # never reads chunk_indices/chunk_offsets, so skip the FLA
-                # metadata (CPU compute + H2D copies) entirely.
-                chunk_indices, chunk_offsets = self._build_chunk_metadata(
+            assert prefill_query_start_loc is not None
+            assert prefill_query_start_loc_cpu is not None
+            chunk_indices, chunk_offsets, aiter_prefill_metadata = (
+                self._build_prefill_kernel_metadata(
                     prefill_query_start_loc,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
                 )
+            )
 
         if num_prefills > 0:
             context_lens_tensor = m.compute_num_computed_tokens()
@@ -599,6 +624,22 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_checkpoints=cu_starts[-1],
                 cu_starts=plan[: len(cu_starts)],
                 rows=plan[len(cu_starts) :],
+            )
+
+        checkpoint_split: GDNPrefillCheckpointSplit | None = None
+        if checkpoint is not None and self.split_prefill_checkpoints:
+            assert spec_sequence_masks is None
+            assert checkpoint.offsets is not None
+            assert non_spec_query_start_loc_cpu is not None
+            device = query_start_loc.device
+            checkpoint_split = build_gdn_prefill_checkpoint_split(
+                non_spec_query_start_loc_cpu.tolist(),
+                checkpoint.offsets,
+                num_decodes,
+                device,
+                lambda cu, cu_cpu: self._build_prefill_kernel_metadata(
+                    cu, cu_cpu, device
+                ),
             )
 
         # Function code counted on either presency non-spec decode or spec decode,
@@ -680,6 +721,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_actual_tokens=m.num_actual_tokens,
             checkpoint=checkpoint,
             flashinfer_checkpoint_plan=flashinfer_checkpoint_plan,
+            checkpoint_split=checkpoint_split,
             has_initial_state=has_initial_state,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
