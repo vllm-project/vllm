@@ -9,7 +9,9 @@ use thiserror::Error;
 use thiserror_ext::Macro;
 use tokio::sync::{Mutex, RwLock};
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::lora::{LoraRequest, LoraRequestError};
+use vllm_engine_core_client::protocol::lora::LoraRequest;
+
+use crate::config::LoraModulePath;
 
 const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
 
@@ -103,12 +105,12 @@ pub(crate) struct LoraManager {
 #[error("engine was not started with LoRA enabled")]
 pub(crate) struct LoraDisabledError;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Macro)]
 pub(crate) enum LoadLoraError {
     #[error(transparent)]
     Disabled(#[from] LoraDisabledError),
-    #[error(transparent)]
-    InvalidRequest(#[from] LoraRequestError),
+    #[error("{message}")]
+    InvalidAdapter { message: String },
     #[error(transparent)]
     PathAccess(#[from] LoraPathAccessError),
     #[error("LoRA adapter `{lora_name}` is already loaded")]
@@ -186,14 +188,49 @@ impl LoraManager {
         &self,
         engine_core_client: &EngineCoreClient,
         base_model_names: &[String],
-        lora_name: String,
-        lora_path: String,
+        mut module: LoraModulePath,
         load_inplace: bool,
-        is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
         let allowed_prefixes = runtime_lora_allowed_path_prefixes();
-        let lora_path = validate_lora_path_access(&lora_path, allowed_prefixes.as_deref())?
-            .unwrap_or(lora_path);
+        if let Some(canonical_path) =
+            validate_lora_path_access(&module.path, allowed_prefixes.as_deref())?
+        {
+            module.path = canonical_path;
+        }
+        self.register(engine_core_client, base_model_names, module, load_inplace).await
+    }
+
+    /// Load an operator-configured adapter (`--lora-modules`). Unlike the
+    /// runtime endpoint, the path is trusted as given: no allowed-prefix
+    /// check applies.
+    pub async fn load_static_lora(
+        &self,
+        engine_core_client: &EngineCoreClient,
+        base_model_names: &[String],
+        module: &LoraModulePath,
+    ) -> Result<LoraRequest, LoadLoraError> {
+        self.register(engine_core_client, base_model_names, module.clone(), false).await
+    }
+
+    async fn register(
+        &self,
+        engine_core_client: &EngineCoreClient,
+        base_model_names: &[String],
+        module: LoraModulePath,
+        load_inplace: bool,
+    ) -> Result<LoraRequest, LoadLoraError> {
+        let LoraModulePath {
+            name: lora_name,
+            path: lora_path,
+            base_model_name,
+            is_3d_lora_weight,
+        } = module;
+        if lora_name.trim().is_empty() {
+            bail_invalid_adapter!("lora_name must not be empty");
+        }
+        if lora_path.trim().is_empty() {
+            bail_invalid_adapter!("lora_path must not be empty");
+        }
         let _guard = self.update_lock.lock().await;
         if base_model_names.iter().any(|name| name == &lora_name) {
             return Err(LoadLoraError::BaseModelName { lora_name });
@@ -206,14 +243,15 @@ impl LoraManager {
 
         let lora_int_id = existing_lora_int_id
             .unwrap_or_else(|| self.id_counter.fetch_add(1, Ordering::Relaxed) + 1);
-        let lora_request = LoraRequest::new(
-            lora_name.clone(),
+        let lora_request = LoraRequest {
+            lora_name: lora_name.clone(),
             lora_int_id,
             lora_path,
+            base_model_name,
+            tensorizer_config_dict: None,
             load_inplace,
             is_3d_lora_weight,
-        )
-        .map_err(LoadLoraError::InvalidRequest)?;
+        };
         drop(requests);
 
         let loaded = engine_core_client.add_lora(&lora_request).await.map_err(|source| {

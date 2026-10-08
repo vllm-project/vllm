@@ -27,13 +27,9 @@ _S = TypeVar("_S", list[int], "torch.Tensor")
 # Prompt keys whose entry i describes token i of the prompt, so they must be
 # reduced with the same slice as the prompt tokens themselves. Anything added
 # here is truncated by `TokenizeParams.apply_post_tokenization`.
-# `_assistant_tokens_mask` is renderer-internal: `HfRenderer.render_messages`
-# stashes it on the prompt so `_process_tokens` can move it onto the engine
-# input.
 _PARALLEL_TO_PROMPT_TOKENS = (
     "prompt_token_offsets",
     "prompt_is_token_ids",
-    "_assistant_tokens_mask",
 )
 
 
@@ -99,9 +95,6 @@ class ChatParams:
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
-    return_assistant_tokens_mask: bool = False
-    """Request a per-token assistant mask from apply_chat_template."""
-
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
 
@@ -136,7 +129,6 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
-            return_assistant_tokens_mask=self.return_assistant_tokens_mask,
             tool_choice=self.tool_choice,
             response_format=self.response_format,
         )
@@ -242,7 +234,7 @@ class TokenizeParams:
             raise VLLMValidationError(
                 f"{self.max_output_tokens_param}={max_output_tokens} "
                 f"cannot be greater than "
-                f"{self.max_total_tokens_param}={max_total_tokens=}. "
+                f"{self.max_total_tokens_param}={max_total_tokens}. "
                 f"Please request fewer output tokens.",
                 parameter=self.max_output_tokens_param,
                 value=max_output_tokens,
@@ -381,6 +373,31 @@ class TokenizeParams:
 
         return text
 
+    def _get_text_truncation_offset(
+        self, tokenizer: TokenizerLike | None, text: str
+    ) -> int:
+        """Return the number of source characters removed from the left.
+
+        ``_text_len_check`` pre-truncates long text before tokenization when
+        an explicit truncation side is requested. Fast-tokenizer offsets are
+        then relative to that shortened string, so callers need this prefix
+        length to map them back to the original prompt.
+        """
+        max_input_tokens = self.max_input_tokens
+        if (
+            max_input_tokens is None
+            or tokenizer is None
+            or self.truncate_prompt_tokens is None
+            or self.truncation_side != "left"
+        ):
+            return 0
+
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        if max_input_chars <= 0:
+            return 0
+
+        return max(len(text) - max_input_chars, 0)
+
     def _text_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply lowercase to prompt text if necessary."""
         return text.lower() if self.do_lower_case else text
@@ -400,8 +417,7 @@ class TokenizeParams:
         tokenizer: TokenizerLike | None,
         prompt: TextPrompt,
     ) -> TextPrompt:
-        """
-        Ensure that the prompt meets the requirements set out by this config.
+        """Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run before tokenization occurs.
@@ -420,9 +436,15 @@ class TokenizeParams:
             return tokens
 
         if tokenizer is None:
-            raise ValueError("Cannot pad tokens when `skip_tokenizer_init=True`")
+            raise VLLMValidationError(
+                "Cannot pad tokens when `skip_tokenizer_init=True`",
+                parameter="pad_prompt_tokens",
+            )
         if not isinstance(tokens, list):
-            raise ValueError("Cannot pad tokens for embedding inputs")
+            raise VLLMValidationError(
+                "Cannot pad tokens for embedding inputs",
+                parameter="pad_prompt_tokens",
+            )
 
         return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
@@ -507,8 +529,7 @@ class TokenizeParams:
         tokenizer: TokenizerLike | None,
         prompt: TokensPrompt | EmbedsPrompt,
     ) -> TokensPrompt | EmbedsPrompt:
-        """
-        Ensure that the prompt meets the requirements set out by this config.
+        """Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run after tokenization occurs.

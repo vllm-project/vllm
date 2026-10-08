@@ -8,6 +8,7 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <utility>  // std::in_range
 
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
@@ -102,6 +103,18 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
   return min(a, b);
 }
 
+// Reads row `row` of packed zero points [M/8, num_groups] uint32.
+//
+// The parameters must be signed and the indexing must use shift/mask: with
+// unsigned parameters and row/8, row%8, the (A_CHUNK=32, UNRL=8)
+// instantiation needs 256 VGPRs and 68 bytes of scratch instead of 239.
+__device__ __forceinline__ uint32_t zp_nibble(const uint32_t* zp_packed,
+                                              const int row, const int group,
+                                              const int num_groups) {
+  const uint32_t w = zp_packed[(row >> 3) * num_groups + group];
+  return (w >> (4 * (row & 7))) & 0xFu;
+}
+
 // W4A16 skinny GEMM kernel: packed int4 weights, fp16/bf16 activations
 // Targets the "sml" case where activations fit in LDS.
 // A_CHUNK: number of K-elements processed per thread per step.
@@ -109,6 +122,7 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
 // GROUP_SIZE: 0 = per-channel scale [M], >0 = per-group scale [M,
 // K/GROUP_SIZE].
 //   Requires GROUP_SIZE % A_CHUNK == 0 when GROUP_SIZE > 0.
+// B_row_stride_bytes is the per-row byte stride of the packed weights.
 #if defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
@@ -116,11 +130,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_int4_hf_sml_(const int K, const int M, const int Bx, const int By,
                           const uint8_t* B_packed,
                           const scalar_t* __restrict__ A, const scalar_t* scale,
-                          const scalar_t* zero_points,
+                          const uint32_t* zero_points,
                           const scalar_t* __restrict__ BIAS, scalar_t* C,
-                          const int _WvPrGrp, const int CuCount) {
+                          const int _WvPrGrp, const int CuCount,
+                          const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  const int K_packed = K / 2;
 
   union bigTypeA {
     scalar_t h[A_CHUNK];
@@ -169,9 +183,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
 
-        const uint8_t* B_ = &B_packed[(m + 0) * K_packed + k_ / 2];
+        const uint8_t* B_ = &B_packed[(m + 0) * B_row_stride_bytes + k_ / 2];
         for (int y = 0; y < YTILE; y++) {
-          const float* src = (const float*)(&B_[y * K_packed]);
+          const float* src = (const float*)(&B_[y * B_row_stride_bytes]);
   #pragma unroll
           for (int i = 0; i < A_CHUNK / 8; i++)
             bigB[y][k2].f[i] = loadnt((float*)&src[i]);
@@ -257,7 +271,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             if constexpr (!std::is_same_v<scalar_t, __hip_bfloat16>) {
               if constexpr (HAS_ZERO_POINTS && GROUP_SIZE > 0) {
                 uint32_t group_idx = k_ / GROUP_SIZE;
-                scalar_t zp = zero_points[(m + y) * num_groups + group_idx];
+                scalar_t zp = __float2s<scalar_t>(static_cast<float>(
+                    zp_nibble(zero_points, m + y, group_idx, num_groups)));
   #pragma unroll
                 for (uint32_t b = 0; b < A_CHUNK; b++) {
                   cvtB.h[b] = cvtB.h[b] - zp;
@@ -280,8 +295,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                 }
                 if constexpr (HAS_ZERO_POINTS) {
                   uint32_t group_idx_zp = k_ / GROUP_SIZE;
-                  float zp_f = __s2float(
-                      zero_points[(m + y) * num_groups + group_idx_zp]);
+                  float zp_f = static_cast<float>(
+                      zp_nibble(zero_points, m + y, group_idx_zp, num_groups));
                   partial -= (128.0f + zp_f) * act_sum;
                 } else {
                   partial -= 136.0f * act_sum;
@@ -331,14 +346,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
-__global__ void wvSplitK_int4_hf_sml_(const int K, const int M, const int Bx,
-                                      const int By, const uint8_t* B_packed,
-                                      const scalar_t* __restrict__ A,
-                                      const scalar_t* scale,
-                                      const scalar_t* zero_points,
-                                      const scalar_t* __restrict__ BIAS,
-                                      scalar_t* C, const int _WvPrGrp,
-                                      const int CuCount) {
+__global__ void wvSplitK_int4_hf_sml_(
+    const int K, const int M, const int Bx, const int By,
+    const uint8_t* B_packed, const scalar_t* __restrict__ A,
+    const scalar_t* scale, const uint32_t* zero_points,
+    const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
+    const int CuCount, const int B_row_stride_bytes) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__GFX1X__)
@@ -352,11 +365,11 @@ template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_int4_hf_(const int K, const int M, const int Bx, const int By,
                       const uint8_t* B_packed, const scalar_t* __restrict__ A,
-                      const scalar_t* scale, const scalar_t* zero_points,
+                      const scalar_t* scale, const uint32_t* zero_points,
                       const scalar_t* __restrict__ BIAS, scalar_t* C,
-                      const int _WvPrGrp, const int CuCount) {
+                      const int _WvPrGrp, const int CuCount,
+                      const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  const int K_packed = K / 2;
 
   union bigTypeA {
     scalar_t h[A_CHUNK];
@@ -417,9 +430,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
 
-        const uint8_t* B_ = &B_packed[(m + 0) * K_packed + k_ / 2];
+        const uint8_t* B_ = &B_packed[(m + 0) * B_row_stride_bytes + k_ / 2];
         for (int y = 0; y < YTILE; y++) {
-          const float* src = (const float*)(&B_[y * K_packed]);
+          const float* src = (const float*)(&B_[y * B_row_stride_bytes]);
   #pragma unroll
           for (int i = 0; i < A_CHUNK / 8; i++)
             bigB[y][k2].f[i] = loadnt((float*)&src[i]);
@@ -508,7 +521,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             if constexpr (!std::is_same_v<scalar_t, __hip_bfloat16>) {
               if constexpr (HAS_ZERO_POINTS && GROUP_SIZE > 0) {
                 uint32_t group_idx = k_ / GROUP_SIZE;
-                scalar_t zp = zero_points[(m + y) * num_groups + group_idx];
+                scalar_t zp = __float2s<scalar_t>(static_cast<float>(
+                    zp_nibble(zero_points, m + y, group_idx, num_groups)));
   #pragma unroll
                 for (uint32_t b = 0; b < A_CHUNK; b++) {
                   cvtB.h[b] = cvtB.h[b] - zp;
@@ -531,8 +545,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                 }
                 if constexpr (HAS_ZERO_POINTS) {
                   uint32_t group_idx_zp = k_ / GROUP_SIZE;
-                  float zp_f = __s2float(
-                      zero_points[(m + y) * num_groups + group_idx_zp]);
+                  float zp_f = static_cast<float>(
+                      zp_nibble(zero_points, m + y, group_idx_zp, num_groups));
                   partial -= (128.0f + zp_f) * act_sum;
                 } else {
                   partial -= 136.0f * act_sum;
@@ -592,14 +606,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
-__global__ void wvSplitK_int4_hf_(const int K, const int M, const int Bx,
-                                  const int By, const uint8_t* B_packed,
-                                  const scalar_t* __restrict__ A,
-                                  const scalar_t* scale,
-                                  const scalar_t* zero_points,
-                                  const scalar_t* __restrict__ BIAS,
-                                  scalar_t* C, const int _WvPrGrp,
-                                  const int CuCount) {
+__global__ void wvSplitK_int4_hf_(
+    const int K, const int M, const int Bx, const int By,
+    const uint8_t* B_packed, const scalar_t* __restrict__ A,
+    const scalar_t* scale, const uint32_t* zero_points,
+    const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
+    const int CuCount, const int B_row_stride_bytes) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__GFX1X__)
@@ -621,7 +633,8 @@ static int mindiv_int4(int N, int div1, int div2) {
 // in_a: packed int4 weights [M, K/2] (int8) or [M, K/8] (int32)
 // in_b: activations [N, K] (fp16/bf16)
 // in_scale: group scales [M, K/group_size] (fp16/bf16)
-// in_zero_points: optional raw zero points [M, K/group_size] (fp16/bf16)
+// in_zero_points: optional raw zero points [M/8, K/group_size] (int32,
+//   8 uint4 per word along dim 0)
 //   If provided, kernel dequants as (nibble - zp_raw) * scale (asymmetric).
 //   If absent, kernel dequants as (nibble - 8) * scale (symmetric uint4b8).
 // group_size: 32, 64, or 128
@@ -643,10 +656,17 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                    ? in_bias->size(0)
                    : 1;
 
-  int64_t expected_weight_bytes = M_in * K_in / 2;
-  int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
+  const int64_t expected_weight_bytes = M_in * K_in / 2;
+  const int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
   TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
               "Weight tensor must contain M*K/2 bytes for int4 packing");
+  const int64_t b_row_stride_bytes = in_a.stride(0) * in_a.element_size();
+  TORCH_CHECK(b_row_stride_bytes >= K_in / 2, "Weight row stride (",
+              b_row_stride_bytes, " bytes) must hold at least K/2=", K_in / 2,
+              " bytes per row");
+  TORCH_CHECK(std::in_range<int>(b_row_stride_bytes), "Weight row stride (",
+              b_row_stride_bytes, " bytes) exceeds int range");
+  const int b_row_stride_bytes_i32 = static_cast<int>(b_row_stride_bytes);
   TORCH_CHECK(
       in_b.dtype() == torch::kFloat16 || in_b.dtype() == torch::kBFloat16,
       "Activation must be float16 or bfloat16");
@@ -664,14 +684,22 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
               "Scale must be [M, K/group_size] = [", M_in, ", ", num_groups,
               "] but got [", in_scale.size(0), ", ", in_scale.size(1), "]");
   if (in_zero_points.has_value()) {
-    TORCH_CHECK(in_zero_points->dtype() == in_b.dtype(),
-                "Zero points dtype must match activation dtype");
+    // The kernel reads the words as uint32, so either signedness is accepted.
+    TORCH_CHECK(in_zero_points->dtype() == at::kInt ||
+                    in_zero_points->dtype() == at::kUInt32,
+                "Zero points must be int32 or uint32 (packed 8x uint4 along "
+                "dim 0), got ",
+                in_zero_points->dtype());
     TORCH_CHECK(in_zero_points->dim() == 2,
-                "Zero points must be 2D [M, K/group_size], got shape ",
+                "Zero points must be 2D [M/8, K/group_size], got shape ",
                 in_zero_points->sizes());
-    TORCH_CHECK(in_zero_points->size(0) == M_in &&
+    TORCH_CHECK(M_in % 8 == 0,
+                "M must be divisible by 8 for packed zero points, got ", M_in);
+    TORCH_CHECK(in_zero_points->is_contiguous(),
+                "Zero points must be contiguous");
+    TORCH_CHECK(in_zero_points->size(0) == M_in / 8 &&
                     in_zero_points->size(1) == num_groups,
-                "Zero points must be [M, K/group_size] = [", M_in, ", ",
+                "Zero points must be [M/8, K/group_size] = [", M_in / 8, ", ",
                 num_groups, "] but got [", in_zero_points->size(0), ", ",
                 in_zero_points->size(1), "]");
   }
@@ -699,12 +727,12 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
       wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS, \
                             _HAS_ZP><<<grid, block, 0, stream>>>(           \
           K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount);                                              \
+          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                      \
     else                                                                    \
       wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS,     \
                         _HAS_ZP><<<grid, block, 0, stream>>>(               \
           K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount);                                              \
+          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                      \
   }
 
 #define WVSPLITK_INT4G(_YTILE, _UNRL, _N, _GS, _HAS_ZP) \
@@ -769,9 +797,9 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
         const fptype* aptr = reinterpret_cast<const fptype*>(in_b.data_ptr());
         const fptype* sptr =
             reinterpret_cast<const fptype*>(in_scale.data_ptr());
-        const fptype* zpptr =
+        const uint32_t* zpptr =
             in_zero_points.has_value()
-                ? reinterpret_cast<const fptype*>(in_zero_points->data_ptr())
+                ? reinterpret_cast<const uint32_t*>(in_zero_points->data_ptr())
                 : nullptr;
         const fptype* biasptr =
             (in_bias.has_value() && in_bias->numel() > 0)
