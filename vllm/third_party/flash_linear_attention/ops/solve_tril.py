@@ -145,9 +145,7 @@ def merge_16x16_to_32x32_inverse_kernel(
     if not USE_TMA:
         p_A_11 = A + o_t[:, None] * (H * BT) + o_i[None, :]
         p_A_22 = A + (o_t[:, None] + 16) * (H * BT) + (o_i[None, :] + 16)
-        b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(
-            tl.float32
-        )
+        b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(tl.float32)
         b_Ai_22 = tl.load(p_A_22, mask=(o_t[:, None] + 16 < T), other=0.0).to(
             tl.float32
         )
@@ -175,9 +173,7 @@ def merge_16x16_to_32x32_inverse_kernel(
 
     if not USE_TMA:
         p_A_21 = A + (o_t[:, None] + 16) * (H * BT) + o_i[None, :]
-        b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(
-            tl.float32
-        )
+        b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
     else:
         b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
 
@@ -267,9 +263,7 @@ def merge_16x16_to_64x64_inverse_kernel(
         p_A_22 = A + (o_t[:, None] + 16) * (H * BT) + (o_i[None, :] + 16)
         p_A_33 = A + (o_t[:, None] + 32) * (H * BT) + (o_i[None, :] + 32)
         p_A_44 = A + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 48)
-        b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(
-            tl.float32
-        )
+        b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(tl.float32)
         b_Ai_22 = tl.load(p_A_22, mask=(o_t[:, None] + 16 < T), other=0.0).to(
             tl.float32
         )
@@ -321,24 +315,12 @@ def merge_16x16_to_64x64_inverse_kernel(
         p_A_41 = A + (o_t[:, None] + 48) * (H * BT) + o_i[None, :]
         p_A_42 = A + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 16)
         p_A_43 = A + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 32)
-        b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(
-            tl.float32
-        )
-        b_A_31 = tl.load(p_A_31, mask=(o_t[:, None] + 32 < T), other=0.0).to(
-            tl.float32
-        )
-        b_A_32 = tl.load(p_A_32, mask=(o_t[:, None] + 32 < T), other=0.0).to(
-            tl.float32
-        )
-        b_A_41 = tl.load(p_A_41, mask=(o_t[:, None] + 48 < T), other=0.0).to(
-            tl.float32
-        )
-        b_A_42 = tl.load(p_A_42, mask=(o_t[:, None] + 48 < T), other=0.0).to(
-            tl.float32
-        )
-        b_A_43 = tl.load(p_A_43, mask=(o_t[:, None] + 48 < T), other=0.0).to(
-            tl.float32
-        )
+        b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
+        b_A_31 = tl.load(p_A_31, mask=(o_t[:, None] + 32 < T), other=0.0).to(tl.float32)
+        b_A_32 = tl.load(p_A_32, mask=(o_t[:, None] + 32 < T), other=0.0).to(tl.float32)
+        b_A_41 = tl.load(p_A_41, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
+        b_A_42 = tl.load(p_A_42, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
+        b_A_43 = tl.load(p_A_43, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
     else:
         b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
         b_A_31 = desc.load([i_t * BT + 32, 0]).to(tl.float32)

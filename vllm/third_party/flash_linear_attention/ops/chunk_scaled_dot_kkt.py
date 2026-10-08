@@ -107,12 +107,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
-    p_A = (
-        A
-        + (bos * H + i_h) * BT
-        + o_t[:, None] * (BT * H)
-        + tl.arange(0, BT)[None, :]
-    )
+    p_A = A + (bos * H + i_h) * BT + o_t[:, None] * (BT * H) + tl.arange(0, BT)[None, :]
     tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None])
 
 

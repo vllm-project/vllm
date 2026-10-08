@@ -177,7 +177,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         if SAVE_NEW_VALUE:
             p_v = v_new + o_t[:, None] * stride_v + o_v[None, :]
-            tl.store(p_v, b_v.to(p_v.dtype.element_ty), mask=m_t[:, None] & m_v[None, :])
+            tl.store(
+                p_v, b_v.to(p_v.dtype.element_ty), mask=m_t[:, None] & m_v[None, :]
+            )
 
         last_idx = min((i_t.to(tl.int64) + 1) * BT, T) - 1
         if USE_G:

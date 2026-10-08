@@ -403,9 +403,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
 
     b_s = tl.load(p_s, mask=m_s, other=0.0).to(tl.float32)
     if HAS_BIAS:
-        b_bias = tl.load(g_bias + i_h * S + o_s, mask=o_s < S, other=0.0).to(
-            tl.float32
-        )
+        b_bias = tl.load(g_bias + i_h * S + o_s, mask=o_s < S, other=0.0).to(tl.float32)
         b_s += b_bias[None, :]
 
     b_a = tl.exp(tl.load(A_log + i_h).to(tl.float32))
