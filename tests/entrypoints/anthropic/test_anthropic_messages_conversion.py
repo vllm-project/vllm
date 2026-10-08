@@ -33,6 +33,8 @@ from vllm.entrypoints.anthropic.protocol import (
 from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     _build_anthropic_usage,
+    _is_json,
+    _to_anthropic_stop_reason,
 )
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -2170,3 +2172,51 @@ class TestWatermarking:
         params = _convert(request).to_sampling_params(16, {})
 
         assert params.watermarking is watermarking
+
+
+# ======================================================================
+# Stop reason & JSON validation helpers
+# ======================================================================
+
+
+class TestStopReasonAndJsonCheck:
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("", True),
+            ("   ", True),
+            ("\n\t ", True),
+            ("{}", True),
+            ('{"key": "value"}', True),
+            ("[1, 2, 3]", True),
+            ('{"unclosed": ', False),
+            ("invalid json", False),
+        ],
+    )
+    def test_is_json(self, text: str, expected: bool):
+        assert _is_json(text) is expected
+
+    def test_to_anthropic_stop_reason_zero_arg_tool_call(self):
+        """Tool calls with empty/whitespace arguments (0-arg functions)
+        should be marked as tool_use, even when a stop_sequence was matched."""
+        # 0-arg tool completed
+        stop_reason, stop_seq = _to_anthropic_stop_reason(
+            finish_reason="stop",
+            stop_reason="</tool_call>",
+            tool_used=True,
+            tool_complete=_is_json(""),
+        )
+        assert stop_reason == "tool_use"
+        assert stop_seq is None
+
+    def test_to_anthropic_stop_reason_incomplete_tool_call(self):
+        """Tool calls cut short by stop_sequence with invalid JSON should
+        report the stop_sequence rather than tool_use."""
+        stop_reason, stop_seq = _to_anthropic_stop_reason(
+            finish_reason="stop",
+            stop_reason="</tool_call>",
+            tool_used=True,
+            tool_complete=_is_json('{"incomplete":'),
+        )
+        assert stop_reason == "stop_sequence"
+        assert stop_seq == "</tool_call>"
