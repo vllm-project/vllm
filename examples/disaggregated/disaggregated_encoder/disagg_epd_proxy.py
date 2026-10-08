@@ -480,6 +480,17 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
     the grid its processor actually produced), so the grid is never re-derived
     here -- a second derivation could disagree with the encoder's.
     """
+    mm_items = extract_mm_items(req_data)
+    # Audio processors may consume placeholders from other modalities too.
+    # Keep the whole request raw if any item cannot be rewritten safely.
+    control_fields = {"mm_hash", "ec_mm_hash", "transfer_id"}
+    raw_audio_request = any(
+        item["type"] in {"audio_url", "input_audio"} for item in mm_items
+    ) and any(
+        not item_meta.get(i, {}).get("mm_hash")
+        or not (item_meta.get(i, {}).keys() - control_fields)
+        for i in range(len(mm_items))
+    )
     rewritten = 0
     transfer_items = []
     idx = 0
@@ -499,6 +510,18 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             item_uuid = meta.pop("mm_hash", None)
             ec_mm_hash = meta.pop("ec_mm_hash", None) or item_uuid
             transfer_id = meta.pop("transfer_id", None)
+            if raw_audio_request:
+                new_content.append(
+                    {
+                        **item,
+                        "uuid": item_uuid or item.get("uuid") or content_uuid(item),
+                    }
+                )
+                if transfer_id is not None:
+                    transfer_items.append(
+                        {"mm_hash": ec_mm_hash, "transfer_id": transfer_id}
+                    )
+                continue
             # Whatever keys the encoder reported are the metadata its model
             # declared as needed to size the placeholder range; the proxy does
             # not need to know their names.
@@ -532,9 +555,10 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
 
-    if not rewritten:
+    if not rewritten and not raw_audio_request:
         return req_data
-    logger.info("Rewrote %d media item(s) as metadata references", rewritten)
+    if rewritten:
+        logger.info("Rewrote %d media item(s) as metadata references", rewritten)
     rewritten_request = {**req_data, "messages": new_messages}
     if transfer_items:
         ec_transfer_params = dict(req_data.get("ec_transfer_params") or {})
@@ -632,7 +656,7 @@ async def fanout_encoder_primer(
         content = []
         for idx in indices:
             item = mm_items[idx]
-            item_uuid = None if NO_REWRITE else content_uuid(item)
+            item_uuid = None if NO_REWRITE else (item.get("uuid") or content_uuid(item))
             if item_uuid is not None:
                 item_uuids[idx] = item_uuid
             item_transfer_ids[idx] = uuid.uuid4().hex
@@ -756,14 +780,13 @@ async def fanout_encoder_primer(
                         raise HTTPException(502, "Encoder metadata cannot be matched")
                 ec_mm_hash, reported = matched
                 metadata = reported.get("metadata") or {}
-                if metadata:
-                    item_meta[idx] = {
-                        **metadata,
-                        "mm_hash": item_uuids.get(idx, ec_mm_hash),
-                        "ec_mm_hash": ec_mm_hash,
-                    }
-                    if idx in item_transfer_ids:
-                        item_meta[idx]["transfer_id"] = item_transfer_ids[idx]
+                item_meta[idx] = {
+                    **metadata,
+                    "mm_hash": item_uuids.get(idx, ec_mm_hash),
+                    "ec_mm_hash": ec_mm_hash,
+                }
+                if idx in item_transfer_ids:
+                    item_meta[idx]["transfer_id"] = item_transfer_ids[idx]
                 # Whatever the encoder reported alongside `metadata` is the
                 # connector's own handle on the published embedding (for NIXL,
                 # peer_host/peer_port/size_bytes). The decoder's connector
