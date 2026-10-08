@@ -845,6 +845,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         quant_config: ModelOptNvFp4Config,
         moe_config: FusedMoEConfig,
     ) -> None:
+        """Configure the NVFP4 backend and its checkpoint-group shard alignment."""
         super().__init__(moe_config)
         self.quant_config = quant_config
         self.intermediate_size_per_partition_alignment = quant_config.group_size
