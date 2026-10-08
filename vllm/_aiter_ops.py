@@ -955,8 +955,11 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
         B.reshape(n // 16, k * 16),
         As,
         Bs,
-        dtype=output_dtype,
-        is_x_scale_tranposed=False,
+        output_dtype,
+        None,  # y
+        None,  # config
+        False,  # skip_reduce
+        False,  # is_x_scale_transposed (misspelled in aiter)
     )
 
 
