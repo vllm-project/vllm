@@ -32,7 +32,7 @@ def mapped_usage(allocator) -> int:
 
 
 def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
-    """Wake discarded allocations with deterministic nonzero contents."""
+    """Wake up with every remapped page filled with nonzero bytes first."""
     original_create_and_map = cumem.create_and_map
 
     def create_and_map_with_poison(handle) -> None:
@@ -359,7 +359,7 @@ def test_runtime_state_survives_sleep(level):
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
-    """Reproduce the level-2 variant for an ordinary tensor in weights."""
+    """Discarded weights-tag memory comes back zeroed, even over stale pages."""
     allocator = get_mem_allocator_instance()
 
     with allocator.use_memory_pool("weights"):
@@ -374,8 +374,8 @@ def test_level2_discards_ordinary_tensor_with_weights_tag():
     torch.accelerator.synchronize()
 
     assert (fake_weight.data_ptr(), ordinary_tensor.data_ptr()) == pointers
-    assert torch.all(fake_weight == 0xA5)
-    assert torch.all(ordinary_tensor == 0xA5)
+    assert torch.all(fake_weight == 0)
+    assert torch.all(ordinary_tensor == 0)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")

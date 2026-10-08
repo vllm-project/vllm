@@ -12,7 +12,6 @@ static const char* PYARGS_PARSE = "KKKK";
   #include <cstdint>
   #include <cerrno>
   #include <climits>
-  #include <unordered_map>
 
 // Default chunk size 256MB for ROCm. Can be overridden at runtime by the
 // environment variable VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE, specified in megabytes
@@ -117,24 +116,6 @@ void ensure_context(unsigned long long device) {
   }
 }
 
-#ifdef USE_ROCM
-// A blocking hipMemset joins the legacy stream and breaks graph capture.
-static hipStream_t get_zero_stream(unsigned long long device) {
-  static std::unordered_map<unsigned long long, hipStream_t> streams;
-  auto it = streams.find(device);
-  if (it != streams.end()) {
-    return it->second;
-  }
-  hipStream_t stream = nullptr;
-  CUDA_CHECK((CUresult)hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
-  if (error_code != 0) {
-    return nullptr;
-  }
-  streams[device] = stream;
-  return stream;
-}
-#endif
-
 void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 #ifndef USE_ROCM
                     CUmemGenericAllocationHandle* p_memHandle) {
@@ -232,38 +213,6 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     return;
   }
 
-#ifdef USE_ROCM
-  // ROCm-only: zero the freshly (re)mapped region.
-  //
-  // On some amdgpu driver versions the physical VRAM backing a buffer is not
-  // scrubbed on release, so the pages handed back here (e.g. on wake_up after a
-  // sleep that discarded a tag) can still contain stale data from a previously
-  // freed allocation -- possibly from another process. Callers of the device
-  // allocator expect newly mapped memory to be well defined; in particular
-  // hybrid Mamba / gated-delta-net (GDN) models keep a persisted conv/recurrent
-  // state cache, and a new sequence that reads an unzeroed slot will propagate
-  // garbage/NaN, collapsing generation to token id 0 (decoded as "!").
-  //
-  // This is scoped to the ROCm path on purpose: the CUDA path is unchanged.
-  // Use CUDA_CHECK so a failure sets the global error_code; the Python caller
-  // (python_create_and_map) only inspects error_code, so returning without
-  // setting it would make a failed memset look successful and still hand back
-  // unzeroed memory.
-  // Zero on a private non-blocking stream so a capturing stream is unaffected.
-  hipStream_t zero_stream = get_zero_stream(device);
-  if (error_code != 0) {
-    return;
-  }
-  CUDA_CHECK((CUresult)hipMemsetAsync(reinterpret_cast<void*>(d_mem), 0, size,
-                                      zero_stream));
-  if (error_code != 0) {
-    return;
-  }
-  CUDA_CHECK((CUresult)hipStreamSynchronize(zero_stream));
-  if (error_code != 0) {
-    return;
-  }
-#endif
   // std::cout << "create_and_map: device=" << device << ", size=" << size << ",
   // d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
 }

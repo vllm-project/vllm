@@ -215,6 +215,16 @@ def _custom_ar_active(worker) -> bool:
     )
 
 
+def _capture_registers_buffers(worker) -> bool:
+    from vllm.distributed.parallel_state import get_tp_group
+
+    comm = get_tp_group().device_communicator
+    ca, aiter = comm.ca_comm, comm.aiter_ar_comm
+    return (ca is not None and ca._capture_registered) or (
+        aiter is not None and aiter.aiter_ca.enable_register_for_capturing
+    )
+
+
 @pytest.mark.parametrize(
     ("mode", "breakable", "tp", "offload"),
     [
@@ -259,8 +269,10 @@ def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
     assert all(graph_bytes) if offload else not any(graph_bytes)
     if not offload:
         return
-    if tp > 1 and not all(llm.collective_rpc(_custom_ar_active)):
-        pytest.skip("Custom allreduce is unavailable on these GPUs")
+    if tp > 1:
+        if not all(llm.collective_rpc(_custom_ar_active)):
+            pytest.skip("Custom allreduce is unavailable on these GPUs")
+        assert not any(llm.collective_rpc(_capture_registers_buffers))
     prompt, params = "How are you?", SamplingParams(temperature=0, max_tokens=10)
     expected = llm.generate(prompt, params)[0].outputs[0].text
     for level in (1, 2):
@@ -295,6 +307,7 @@ def test_sleep_cudagraph_pool_aiter_fused_ar_group_quant(monkeypatch):
     )
     if not all(llm.collective_rpc(_custom_ar_active)):
         pytest.skip("AITER custom allreduce is unavailable on these GPUs")
+    assert not any(llm.collective_rpc(_capture_registers_buffers))
     assert all(llm.collective_rpc(_cudagraph_bytes))
     prompt, params = "How are you?", SamplingParams(temperature=0, max_tokens=10)
     assert llm.generate(prompt, params)[0].outputs[0].text
@@ -471,7 +484,7 @@ def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
 
     monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
 
-    # New requests must overwrite undefined remapped KV bytes before reading them.
+    # Remapped KV memory comes back zeroed even over stale pages.
     llm.wake_up(tags=["kv_cache"])
     actual = llm.generate(prompt, sampling_params)
 
