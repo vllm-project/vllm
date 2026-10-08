@@ -392,8 +392,8 @@ def postprocess_mamba_fused_kernel(
     # Output: num_accepted_tokens update (for src==dst case)
     num_accepted_tokens_out_ptr,
     # Optional: batch_idx -> req_idx mapping (V2 model runner / PP). The
-    # per-request decision arrays are in req-state-slot order; the block table
-    # is in batch order, so HAS_IDX_MAPPING splits the two indexings.
+    # per-request decision arrays and the block tables are both in
+    # req-state-slot order.
     idx_mapping_ptr,
     # Runtime parameter (varies per batch - NOT constexpr to avoid recompilation)
     num_reqs,
@@ -488,10 +488,9 @@ def postprocess_mamba_fused_kernel(
         if conv_width == 0:
             return
 
-    bt_row_idx = batch_idx if HAS_IDX_MAPPING else req_idx
     _copy_mamba_state_block(
         state_idx,
-        bt_row_idx,
+        req_idx,
         src_block_idx,
         dest_block_idx,
         accept_token_bias,
@@ -626,7 +625,7 @@ def precopy_mamba_align_fused_kernel(
     token_bias = tl.load(token_bias_ptr + req_idx)
     _copy_mamba_state_block(
         state_idx,
-        batch_idx,
+        req_idx,
         src_col,
         dst_col,
         token_bias,
@@ -822,8 +821,10 @@ class MambaSpecDecodeGPUContext:
 
     # Per-group block-table base addresses: int64[num_groups]. Populated in
     # initialize_from_forward_context from the persistent per-group block
-    # table tensors (whose data_ptr is stable across steps).
+    # table tensors (whose data_ptr is stable across steps). Rows are request
+    # state slots for the state copies and batch rows for the aligned indices.
     block_table_ptrs: torch.Tensor
+    aligned_index_block_table_ptrs: torch.Tensor
     block_table_stride_req: int = 0
 
     # persistent output for the once-per-step, all-group aligned-index launch.
@@ -920,6 +921,9 @@ class MambaSpecDecodeGPUContext:
             block_table_ptrs=torch.zeros(
                 len(mamba_group_ids), dtype=torch.int64, device=device
             ),
+            aligned_index_block_table_ptrs=torch.zeros(
+                len(mamba_group_ids), dtype=torch.int64, device=device
+            ),
             aligned_state_indices=torch.empty(
                 (
                     len(mamba_group_ids),
@@ -946,6 +950,7 @@ class MambaSpecDecodeGPUContext:
         forward_context: dict[str, Any],
         mamba_state_copy_funcs: MambaStateCopyFuncsByType,
         block_tables: list[torch.Tensor],
+        aligned_index_block_tables: list[torch.Tensor] | None = None,
     ) -> None:
         """Extract and cache memory layout metadata from Mamba state tensors.
 
@@ -977,8 +982,12 @@ class MambaSpecDecodeGPUContext:
             mamba_state_copy_funcs: Mapping from MambaAttentionBackendEnum to
                 copy functions.
             block_tables: per-mamba-group persistent block-table tensors, in
-                the same order as `mamba_group_ids`. Their `data_ptr()` /
-                `stride(0)` are captured once for the kernel to index into.
+                the same order as `mamba_group_ids`, with one row per request
+                state slot. Their `data_ptr()` / `stride(0)` are captured once
+                for the state-copy kernels to index into.
+            aligned_index_block_tables: per-mamba-group persistent tables
+                read by `compute_aligned_state_indices`, with one row per
+                batch row. Defaults to `block_tables`.
 
         """
         if self.is_initialized:
@@ -990,6 +999,7 @@ class MambaSpecDecodeGPUContext:
                 forward_context,
                 mamba_state_copy_funcs,
                 block_tables,
+                aligned_index_block_tables or block_tables,
             )
 
     def _populate_metadata(
@@ -998,6 +1008,7 @@ class MambaSpecDecodeGPUContext:
         forward_context: dict[str, Any],
         mamba_state_copy_funcs: MambaStateCopyFuncsByType,
         block_tables: list[torch.Tensor],
+        aligned_index_block_tables: list[torch.Tensor],
     ) -> None:
         idx = 0
         assert len(block_tables) == self.num_groups, (
@@ -1115,7 +1126,9 @@ class MambaSpecDecodeGPUContext:
                         "FlashInfer ReplaySSM layers require a Mamba cache spec; "
                         f"got {type(spec).__name__}"
                     )
-                replayssm_groups.append((mixers, spec, block_tables[group_local_idx]))
+                replayssm_groups.append(
+                    (mixers, spec, aligned_index_block_tables[group_local_idx])
+                )
 
         assert idx == self.num_states
         if has_replayssm_layer and has_baseline_layer:
@@ -1127,13 +1140,19 @@ class MambaSpecDecodeGPUContext:
         # `block_tables[i]` is the persistent 2D int32 block-table tensor for
         # `mamba_group_ids[i]`; `data_ptr()` / `stride(0)` are stable for the
         # engine's lifetime, so we capture them once here.
-        strides = {bt.stride(0) for bt in block_tables}
+        assert len(block_tables) == len(aligned_index_block_tables) == self.num_groups
+        strides = {bt.stride(0) for bt in (*block_tables, *aligned_index_block_tables)}
         assert len(strides) == 1, (
             f"all mamba block tables must share stride(0), got {strides}"
         )
         self.block_table_stride_req = int(next(iter(strides)))
-        for i, bt in enumerate(block_tables):
+        for i, (bt, aligned_bt) in enumerate(
+            zip(block_tables, aligned_index_block_tables)
+        ):
             self.block_table_ptrs[i] = _reinterpret_u64_as_i64(bt.data_ptr())
+            self.aligned_index_block_table_ptrs[i] = _reinterpret_u64_as_i64(
+                aligned_bt.data_ptr()
+            )
 
         if has_flashinfer_replayssm:
             self.replayssm = ReplaySSMModelContext.create(
@@ -1161,7 +1180,7 @@ class MambaSpecDecodeGPUContext:
         block_rows = 32
         grid = (triton.cdiv(num_reqs, block_rows),)
         get_aligned_state_indices_multi_group_kernel[grid](
-            self.block_table_ptrs,
+            self.aligned_index_block_table_ptrs,
             seq_lens,
             self.aligned_state_indices,
             self.block_table_stride_req,
