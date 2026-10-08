@@ -190,15 +190,14 @@ if [[ -n "${rocm_wheel}" ]]; then
 elif [[ "${is_rocm}" == "1" ]]; then
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 python3 setup.py develop --no-deps
 elif [[ -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
+    # Use the CUDA build the image's own torch was installed with, for both the
+    # new venv's torch and the precompiled wheel variant.
+    cuda_variant="$(python3 -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))')"
     uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" /tmp/python-only-venv
     source /tmp/python-only-venv/bin/activate
-    # The isolated build env gets torch from PyPI, whose CUDA version can differ
-    # from the installed torch, so pin the wheel variant to the installed one.
-    uv pip install --torch-backend=auto "$(grep -E '^torch==' requirements/cuda.txt)"
-    wheel_variant="$(python3 -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))')"
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 \
-        VLLM_PRECOMPILED_WHEEL_VARIANT="${wheel_variant}" \
-        uv pip install -e . --torch-backend=auto
+        VLLM_PRECOMPILED_WHEEL_VARIANT="${cuda_variant}" \
+        uv pip install -e . --torch-backend="${cuda_variant}"
 else
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
 fi
