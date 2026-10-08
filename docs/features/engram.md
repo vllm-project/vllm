@@ -115,13 +115,15 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` only.
+Qwen4Exp PLE tables are ETP-sharded instead; they honor `cpu_offload`,
+`dp_shared_memory` and `shared_host_table_dir` (both below).
 
 ## Sharing host tables across DP replicas
 
 When the tables are CPU-offloaded and DP replicas are co-located on one node,
 `dp_shared_memory` stores **one copy of each TP shard in `/dev/shm`**, shared
-by all co-located replicas through `cudaHostRegister`. Each replica then
+by all co-located replicas through `cudaHostRegister`. This applies to
+DeepSeek V4.1's Engram tables and to Qwen4Exp's PLE table alike. Each replica then
 prefetches only its own tokens — no per-step Engram DP collectives — and host
 memory drops from one table copy per replica to one per node.
 
@@ -135,6 +137,33 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
+
+## Sharing host tables across independent processes (Qwen4Exp)
+
+Data-parallel replicas are not independent: without expert parallelism, every
+MoE layer gathers and reduce-scatters across the DP ranks, which a board whose
+GPUs have no peer path cannot do. `shared_host_table_dir` shares an offloaded
+PLE table between **independent engine processes** on one host instead, with
+no process group: each process maps a file in that directory (a tmpfs such as
+`/dev/shm`), named by model, revision, layer and shape.
+
+```bash
+# one single-card server per GPU, same model and flags
+vllm serve Qwen/Qwen3.8-Flash-Next \
+  --engram-config '{"cpu_offload": true, "shared_host_table_dir": "/dev/shm"}'
+```
+
+The first process to create the file loads the table and marks it ready
+(`<file>.ready`) once its weights are loaded; later processes map the same
+file, skip the load and wait for the mark. Host memory drops from one table per
+process to one per host, and a process that restarts maps the loaded table
+instead of reading it again.
+
+The files outlive the processes by design. Remove them to free the memory, and
+after changing the checkpoint served under the same model name and revision:
+the file name carries the shape, not the contents. Requirements: `cpu_offload`
+enabled and a directory large enough for the table on every process's mount
+namespace (in containers, `--ipc=host` and a `/dev/shm` sized for it).
 
 ## Limitations
 
