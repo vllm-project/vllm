@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, cast
 
 import torch
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class InklingModelConfig(PretrainedConfig):
+class InklingModelConfig(PreTrainedConfig):
     model_type = "inkling_model"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -215,7 +215,7 @@ class InklingModelConfig(PretrainedConfig):
         return TMLConvCacheParams(shape=shape, layers=self.conv_layer_ids, dtype=dtype)
 
 
-class InklingAudioConfig(PretrainedConfig):
+class InklingAudioConfig(PreTrainedConfig):
     model_type = "inkling_audio_model"
 
     def __init__(
@@ -255,7 +255,7 @@ class InklingAudioConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class InklingVisionConfig(PretrainedConfig):
+class InklingVisionConfig(PreTrainedConfig):
     model_type = "inkling_vision_model"
 
     def __init__(
@@ -295,10 +295,10 @@ class InklingVisionConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class InklingMMConfig(PretrainedConfig):
+class InklingMMConfig(PreTrainedConfig):
     model_type = "inkling_mm_model"
     keys_to_ignore_at_inference = ["past_key_values"]
-    sub_configs: ClassVar[dict[str, type[PretrainedConfig]]] = {
+    sub_configs: ClassVar[dict[str, type[PreTrainedConfig]]] = {
         "text_config": InklingModelConfig,
         "audio_config": InklingAudioConfig,
         "vision_config": InklingVisionConfig,

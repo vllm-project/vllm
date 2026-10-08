@@ -657,7 +657,11 @@ class MoERunner(MoERunnerInterface):
         """
         ctx = get_forward_context()
         return (
-            ctx.dp_metadata.sp_local_sizes(self.moe_config.sp_size)
+            ctx.dp_metadata.sp_local_sizes(
+                self.moe_config.sp_size,
+                pcp_size=self.moe_config.pcp_size,
+                use_ep=self.moe_config.use_ep,
+            )
             if ctx.dp_metadata
             else nullcontext()
         )
@@ -716,7 +720,7 @@ class MoERunner(MoERunnerInterface):
             )
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
-        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # `moe_config.hidden_dim`, e.g. after `align_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before
         # shared+routed add / latent up proj if needed.
 

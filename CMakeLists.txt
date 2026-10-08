@@ -460,8 +460,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
      DEFINED CMAKE_CUDA_COMPILER_VERSION AND
      CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
 
-    list(APPEND VLLM_STABLE_EXT_SRC "csrc/libtorch_stable/all_reduce_mhc.cu")
-
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
       cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
         "9.0a;10.0f;10.1f;10.3f;10.7f;11.0f;12.0f;12.1f" "${CUDA_ARCHS}")
@@ -592,9 +590,30 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       endif()
     endif()
 
+    # The fused MiniMax-M3 KV insert quantizes NVFP4 with SM100-family-only
+    # cvt instructions, so its SM10x/11x code is built for the family targets.
+    set(MINIMAX_M3_FUSED_SRC
+      "csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu")
+    list(REMOVE_ITEM VLLM_STABLE_EXT_SRC "${MINIMAX_M3_FUSED_SRC}")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+      cuda_archs_loose_intersection(MINIMAX_M3_FUSED_ARCHS
+        "10.0f;10.7f;11.0f" "${CUDA_ARCHS}")
+    else()
+      cuda_archs_loose_intersection(MINIMAX_M3_FUSED_ARCHS
+        "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+    endif()
+    foreach(_ARCH ${CUDA_ARCHS})
+      if(_ARCH VERSION_LESS 10.0 OR _ARCH VERSION_GREATER_EQUAL 12.0)
+        list(APPEND MINIMAX_M3_FUSED_ARCHS "${_ARCH}")
+      endif()
+    endforeach()
+    set_gencode_flags_for_srcs(
+      SRCS "${MINIMAX_M3_FUSED_SRC}"
+      CUDA_ARCHS "${MINIMAX_M3_FUSED_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${MINIMAX_M3_FUSED_SRC}")
 
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
@@ -775,22 +794,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Not building fp32_router_gemm as no compatible archs found "
                    "(requires SM90+ and CUDA >= 12.0).")
-  endif()
-
-  # Only build AllSpark kernels if we are building for at least some compatible archs.
-  cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
-  if (ALLSPARK_ARCHS)
-    set(ALLSPARK_SRCS
-       "csrc/libtorch_stable/quantization/gptq_allspark/allspark_repack.cu"
-       "csrc/libtorch_stable/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${ALLSPARK_SRCS}"
-      CUDA_ARCHS "${ALLSPARK_ARCHS}")
-    list(APPEND VLLM_STABLE_EXT_SRC "${ALLSPARK_SRCS}")
-    message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
-  else()
-    message(STATUS "Not building AllSpark kernels as no compatible archs found"
-                   " in CUDA target architectures")
   endif()
 
   #
