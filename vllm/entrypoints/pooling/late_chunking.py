@@ -26,10 +26,10 @@ def prepare_late_chunking_input(
         or render_params["lora_requests"] is not None
     ):
         raise VLLMValidationError(
-            "late_chunk_size does not support prefix caching, chunked prefill or LoRA"
+            "Late chunking does not support prefix caching, chunked prefill or LoRA"
         )
     if "prompts" not in render_params:
-        raise VLLMValidationError("late_chunk_size requires plain-text input")
+        raise VLLMValidationError("Late chunking requires plain-text input")
     prompt = cast(EncodeCMPLRenderParams, render_params)["prompts"]
     if (
         not isinstance(prompt, dict)
@@ -37,7 +37,7 @@ def prepare_late_chunking_input(
         or not isinstance(text := prompt.get("prompt"), str)
         or not text
     ):
-        raise VLLMValidationError("late_chunk_size requires nonempty plain-text input")
+        raise VLLMValidationError("Late chunking requires nonempty plain-text input")
     tok_params = render_params["tok_params"]
     if (
         tok_params.pad_prompt_tokens is not None
@@ -45,7 +45,7 @@ def prepare_late_chunking_input(
         or tok_params.do_lower_case
     ):
         raise VLLMValidationError(
-            "late_chunk_size does not support input padding, truncation or "
+            "Late chunking does not support input padding, truncation or "
             "renderer text normalization"
         )
     return text, replace(tok_params, return_token_offsets=True)
