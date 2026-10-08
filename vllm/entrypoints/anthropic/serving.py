@@ -613,6 +613,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
             ec_transfer_params=anthropic_request.ec_transfer_params,
@@ -632,8 +633,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         ``display`` is intentionally ignored: suppressing reasoning would mark
         it ended for structured outputs and drop it from multi-turn history.
         """
-        if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return
         thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
         if thinking is None:
             return
@@ -654,8 +653,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
         """Handle output configuration such as output format and effort."""
-        if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return
         output_config: AnthropicOutputConfig | None = anthropic_request.output_config
         if output_config and output_config.format and output_config.format.json_schema:
             req.response_format = ResponseFormat(
@@ -1237,9 +1234,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
+        if request.thinking is not None and request.thinking.type == "disabled":
+            disabled_thinking_effort = await self._get_disabled_thinking_effort()
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=disabled_thinking_effort,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):

@@ -171,6 +171,42 @@ class AgRsAll2AllManager(All2AllManagerBase):
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states
 
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(shape[0] // dist_group.world_size, dist_group)
+        if sum(sizes) != shape[0] or any(size != sizes[0] for size in sizes):
+            return None
+        device_communicator = dist_group.device_communicator
+        if device_communicator is None:
+            return None
+        return device_communicator.get_symmetric_memory_buffer(
+            "moe_ag_rs_combine", shape, dtype, device
+        )
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(
+            hidden_states.shape[0] // dist_group.world_size,
+            dist_group,
+        )
+        return dist_group.reduce_scatterv_into_output(
+            hidden_states,
+            output,
+            dim=0,
+            sizes=sizes,
+        )
+
     def destroy(self):
         pass
 
@@ -972,6 +1008,11 @@ class MoriAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
+        if get_current_vllm_config().kernel_config.moe_backend == "aiter_mega_moe":
+            # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
+            # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
+            heap_size = os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "8G")
+            logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
         mori.shmem.shmem_torch_process_group_init("mori")
 
     def _make_all2all_kwargs(

@@ -155,6 +155,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/models/test_deepseek_v4_vl_rocm.py
+      - tests/models/test_deepseek_v4_aiter_mega_moe.py
       - vllm/models/deepseek_v4/amd/
       - vllm/models/deepseek_v4/common/
       - vllm/model_executor/layers/fused_moe/
@@ -170,6 +171,7 @@ steps:
       # Common qnorm/RoPE/cache kernels already run in the H100 AMD mirror.
       # Pin the tested BF16 Triton routing and shared-expert path before imports.
       - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
+      - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
 
 # Own job so mHC never shares a process with FlashInfer's import-time
 # ptxas override.
@@ -254,7 +256,9 @@ steps:
         --ignore=kernels/test_fused_qk_norm_rope_gate.py
         --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
         --ignore=kernels/test_top_k_per_row.py
+        --ignore=kernels/test_cpu_fused_sampling.py
         --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
+        --ignore=kernels/test_bf16x3_router_gemm_rocm.py
         --ignore=kernels/test_ll_bf16_gemm.py
         --ignore=kernels/test_shuffle_rows.py
     # BROKEN on main, pending kernel fixes (B200):
@@ -280,6 +284,7 @@ steps:
           kernels/test_apply_repetition_penalties.py
           kernels/test_awq_int4_to_int8.py
           kernels/test_bf16_skinny_gemm.py
+          kernels/test_bf16x3_router_gemm_rocm.py
           kernels/test_cache_kernels.py
           kernels/test_compressor_kv_cache.py
           kernels/test_cp_gather_fp8.py
@@ -499,6 +504,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
+  automatic_shard: true
   timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/mamba/
