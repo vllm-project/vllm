@@ -53,6 +53,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_configs,
     get_request_block_hasher,
     init_none_hash,
+    resolve_cache_hit_alignment_tokens,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
 )
@@ -351,6 +352,19 @@ class EngineCore:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
         vllm_config.validate_block_size()
+
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            scheduler_kv_cache_config, vllm_config
+        )
+        cache_hit_alignment_tokens = resolve_cache_hit_alignment_tokens(
+            scheduler_kv_cache_config,
+            vllm_config,
+            scheduler_block_size,
+            hash_block_size,
+        )
+        for kv_cache_config in kv_cache_configs:
+            kv_cache_config.hash_block_size = hash_block_size
+            kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:

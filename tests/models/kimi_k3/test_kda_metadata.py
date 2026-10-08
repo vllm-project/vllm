@@ -100,6 +100,8 @@ def _make_builder(
     prefix_match_unit: int | None = None,
     use_eagle: bool = False,
     disable_eagle_block_drop: bool = False,
+    cache_hit_alignment_tokens: int | None = None,
+    hash_block_size: int | None = None,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -122,6 +124,11 @@ def _make_builder(
     vllm_config.cache_config.use_replayssm = use_recoverssm
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    hash_block_size = hash_block_size or prefix_match_unit or mamba_block_size
+    vllm_config.cache_config.hash_block_size = hash_block_size
+    vllm_config.cache_config.cache_hit_alignment_tokens = (
+        cache_hit_alignment_tokens or hash_block_size
+    )
     builder = builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=mamba_block_size,
@@ -220,6 +227,8 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         vllm_config=builder_config,
         device=DEVICE,
     )
+    builder_config.cache_config.hash_block_size = BLOCK_SIZE
+    builder_config.cache_config.cache_hit_alignment_tokens = BLOCK_SIZE
 
     # An all-prefill speculative batch used to leave an all-false spec mask
     # alive, then access active_non_spec_mask_cpu before it was initialized.
@@ -287,18 +296,45 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
+@pytest.mark.parametrize(
+    "batch,prefix_match_unit,hit_alignment,expected_offsets,expected_states",
+    [
+        (
+            BatchSpec(seq_lens=[50, 32], query_lens=[50, 16]),
+            None,
+            16,
+            [48, 0],
+            [2, NULL_BLOCK_ID],
+        ),
+        (
+            BatchSpec(seq_lens=[50, 32], query_lens=[50, 16]),
+            16,
+            16,
+            [48, 0],
+            [2, NULL_BLOCK_ID],
+        ),
+        (BatchSpec(seq_lens=[530], query_lens=[530]), None, 128, [512], [32]),
+        (BatchSpec(seq_lens=[530], query_lens=[50]), None, 128, [32], [32]),
+        (BatchSpec(seq_lens=[530], query_lens=[530]), 16, 16, [528], [32]),
+        (BatchSpec(seq_lens=[530], query_lens=[50]), 16, 16, [48], [32]),
+    ],
+)
+def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
+    batch, prefix_match_unit, hit_alignment, expected_offsets, expected_states
+):
     device = torch.device("cuda")
-    batch = BatchSpec(seq_lens=[50, 32], query_lens=[50, 16])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
-    ).replace(is_prefilling=torch.tensor([True, True]))
+    ).replace(is_prefilling=torch.tensor([True] * len(batch.seq_lens)))
     builder = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=0,
         full_cuda_graph=False,
         mamba_cache_mode="align",
         num_prefill_checkpoint_blocks=1,
+        prefix_match_unit=prefix_match_unit,
+        cache_hit_alignment_tokens=hit_alignment,
+        hash_block_size=16,
         device=device,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
@@ -313,26 +349,33 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
     assert actual.checkpoint is not None
     torch.testing.assert_close(
         actual.checkpoint.state_indices,
-        torch.tensor([2, NULL_BLOCK_ID], dtype=torch.int32, device=device),
+        torch.tensor(expected_states, dtype=torch.int32, device=device),
     )
     torch.testing.assert_close(
         actual.checkpoint.checkpoint_offsets,
-        torch.tensor([48, 0], dtype=torch.int32, device=device),
+        torch.tensor(expected_offsets, dtype=torch.int32, device=device),
     )
 
 
 @pytest.mark.parametrize(
-    ("disable_eagle_block_drop", "prefix_match_unit", "expected_offset"),
-    [(False, 16, 80), (True, 16, 96), (False, 8, None)],
+    ("seq_len", "disable_eagle_block_drop", "prefix_match_unit", "expected_offset"),
+    [
+        (100, False, 16, 80),
+        (100, True, 16, 96),
+        (100, False, 8, None),
+        (96, False, 16, 80),
+        (96, True, 16, 80),
+    ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
+    seq_len: int,
     disable_eagle_block_drop: bool,
     prefix_match_unit: int,
     expected_offset: int | None,
 ) -> None:
     device = torch.device("cuda")
-    batch = BatchSpec(seq_lens=[100], query_lens=[100])
+    batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
@@ -390,6 +433,7 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
         full_cuda_graph=False,
         mamba_cache_mode="align",
         num_prefill_checkpoint_blocks=1,
+        prefix_match_unit=16,
         device=device,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)

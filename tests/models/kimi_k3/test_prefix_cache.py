@@ -8,6 +8,7 @@ import random
 from collections.abc import Iterator
 from dataclasses import dataclass
 from math import lcm
+from uuid import uuid4
 
 import pytest
 import requests
@@ -351,6 +352,45 @@ def _format(turns: list[Turn]) -> str:
         for i, t in enumerate(turns)
     ]
     return "\n".join(rows)
+
+
+@pytest.mark.parametrize(
+    "prompt_len",
+    [
+        # Blocks=6144, PMU=128. P=7040 is PMU-aligned but not block-aligned:
+        # ensure lookup reads the cached attention proof at 7040 despite
+        # the final hit limit of 7039, then applies EAGLE's 128-token drop.
+        pytest.param(7040, id="eagle-proof-scan"),
+        # Blocks=6144, PMU=128. P=7296 is an exact PMU multiple:
+        # ensure the Mamba checkpoint is 7168, not 7040 from applying both
+        # the P - 1 cap and EAGLE's 128-token drop.
+        pytest.param(7296, id="eagle-double-cap"),
+    ],
+)
+def test_dspark_exact_resend_reuses_prompt_checkpoint(prompt_len: int) -> None:
+    """Resends reuse the Mamba checkpoint and its companion EAGLE attention proof."""
+    mode = Mode(128, True)
+    salt = str(uuid4())
+    rng = random.Random(0)
+    prompt = [rng.randint(1000, 150000) for _ in range(prompt_len)]
+    deployment = DEPLOYMENTS["plain"]
+    with _serve(deployment, mode) as servers:
+        url = servers[0].url_root
+        cold = _complete(url, prompt, salt, max_tokens=1)
+        resend = _complete(url, prompt, salt, max_tokens=1)
+        recompute = _complete(url, prompt, f"{salt}-recompute", max_tokens=1)
+
+    # EAGLE's dropped hash unit already leaves tokens to recompute on resend.
+    expected = (prompt_len // 128 - 1) * 128
+    actual = _cached(resend)
+    assert _cached(cold) == _cached(recompute) == 0
+    assert actual == expected, f"{prompt_len=}: {actual=}, {expected=}"
+    check_logprobs_close(
+        outputs_0_lst=[_tokens_text_logprobs(recompute)],
+        outputs_1_lst=[_tokens_text_logprobs(resend)],
+        name_0="recompute",
+        name_1="resend",
+    )
 
 
 @pytest.mark.parametrize(
