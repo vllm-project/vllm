@@ -324,6 +324,132 @@ void check_weights(const torch::Tensor& wd, const torch::Tensor& wu) {
                 "qwen4_hc: fp16 contiguous");
 }
 
+// ---------------------------------------------------------------------------
+// up + gate mix for 1 <= M <= 32 tokens (decode with several sequences and
+// speculative tokens), from the down projection dl and the normalized xn:
+//   s   = fp16(silu(dl[:R] / HC)),  g = fp16(s @ Wu^T),
+//   out = fp16(sum_b sigmoid(g_b) * xn_b / HC)
+// One kernel instead of SiLU, a skinny GEMM and the gate mix. Block j owns
+// output channels [16j, 16j + 16): waves b and b + HC multiply the 16 rows
+// b*H + d of Wu by up to 32 tokens with v_wmma_f32_16x16x16_f16, each over
+// half of K (its weights loaded up front), s sits in LDS, and the gate mix
+// sums the two halves of the four streams' tiles through LDS.
+
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
+    defined(__gfx1103__) || !defined(__HIP_DEVICE_COMPILE__)
+  #define QWEN4_HC_WMMA 1
+#endif
+
+constexpr int UM_CH = 16;          // output channels per block
+constexpr int UM_T = 2 * HC * 32;  // two waves per stream, one per K half
+constexpr int UM_KC = R / 16 / 2;  // 10 K chunks of 16 per wave
+constexpr int UM_MMAX = 32;
+constexpr int UM_SLD = R + 8;  // padded LDS row of s
+
+typedef _Float16 um_h16 __attribute__((ext_vector_type(16)));
+typedef _Float16 um_h8 __attribute__((ext_vector_type(8)));
+typedef float um_f8 __attribute__((ext_vector_type(8)));
+
+template <int NT>
+__global__ void __launch_bounds__(UM_T)
+    hc_up_mix_kernel(const _Float16* __restrict__ dl, const int ld_dl,
+                     const _Float16* __restrict__ wu,
+                     const _Float16* __restrict__ xn,
+                     _Float16* __restrict__ out, const int M) {
+#ifdef QWEN4_HC_WMMA
+  __shared__ _Float16 s_lds[NT * 16][UM_SLD];
+  __shared__ float g_lds[2][HC][UM_CH][NT * 16 + 1];
+  const int tid = threadIdx.x, lane = tid & 31;
+  const int wave = __builtin_amdgcn_readfirstlane(tid >> 5);
+  const int b = wave % HC, kh = wave / HC;
+  const int c0 = blockIdx.x * UM_CH;
+  const int r = lane & 15;
+
+  // Lanes l and l + 16 hold the same row of the A operand: lanes 0-15 load
+  // even chunks, 16-31 odd ones, and v_permlanex16 swaps them.
+  const _Float16* wrow = wu + (int64_t)(b * H + c0 + r) * R + kh * UM_KC * 16;
+  const bool hi = lane >= 16;
+  um_h16 a[UM_KC];
+  #pragma unroll
+  for (int c = 0; c < UM_KC; c += 2) {
+    const _Float16* p = wrow + (c + (hi ? 1 : 0)) * 16;
+    const um_h8 lo8 = *reinterpret_cast<const um_h8*>(p);
+    const um_h8 hi8 = *reinterpret_cast<const um_h8*>(p + 8);
+    a[c] = __builtin_shufflevector(lo8, hi8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                                   11, 12, 13, 14, 15);
+  }
+
+  // s = silu(dl / HC) for the M tokens (zeros for the padding rows), 8
+  // halves per load.
+  constexpr int VPR = R / 8;
+  #pragma unroll
+  for (int i = tid; i < NT * 16 * VPR; i += UM_T) {
+    const int m = i / VPR, k = (i - m * VPR) * 8;
+    um_h8 v = {};
+    if (m < M) {
+      const um_h8 x8 =
+          *reinterpret_cast<const um_h8*>(dl + (int64_t)m * ld_dl + k);
+  #pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const float x = (float)x8[j] / HC;
+        v[j] = (_Float16)(x * sigm(x));
+      }
+    }
+    *reinterpret_cast<um_h8*>(&s_lds[m][k]) = v;
+  }
+
+  typedef int um_i8 __attribute__((ext_vector_type(8)));
+  #pragma unroll
+  for (int c = 0; c < UM_KC; c += 2) {
+    const um_i8 mine = __builtin_bit_cast(um_i8, a[c]);
+    um_i8 other;
+  #pragma unroll
+    for (int i = 0; i < 8; ++i)
+      other[i] = __builtin_amdgcn_permlanex16(mine[i], mine[i], 0x76543210,
+                                              0xfedcba98, false, false);
+    const um_h16 o = __builtin_bit_cast(um_h16, other);
+    a[c + 1] = hi ? a[c] : o;
+    a[c] = hi ? o : a[c];
+  }
+  __syncthreads();
+
+  um_f8 acc[NT];
+  #pragma unroll
+  for (int t = 0; t < NT; ++t) acc[t] = (um_f8){};
+  #pragma unroll
+  for (int c = 0; c < UM_KC; ++c) {
+  #pragma unroll
+    for (int t = 0; t < NT; ++t) {
+      const _Float16* p = &s_lds[t * 16 + r][(kh * UM_KC + c) * 16];
+      const um_h8 lo8 = *reinterpret_cast<const um_h8*>(p);
+      const um_h8 hi8 = *reinterpret_cast<const um_h8*>(p + 8);
+      const um_h16 bt = __builtin_shufflevector(
+          lo8, hi8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+      acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[c], bt, acc[t]);
+    }
+  }
+
+  // acc[t][i] of lane l: channel c0 + 2i + (l >> 4), token 16t + (l & 15).
+  #pragma unroll
+  for (int t = 0; t < NT; ++t)
+  #pragma unroll
+    for (int i = 0; i < 8; ++i)
+      g_lds[kh][b][2 * i + (lane >> 4)][t * 16 + r] = acc[t][i];
+  __syncthreads();
+
+  const int ch = tid & (UM_CH - 1);
+  for (int m = tid / UM_CH; m < M; m += UM_T / UM_CH) {
+    const _Float16* xr = xn + (int64_t)m * D + c0 + ch;
+    float v = 0.f;
+  #pragma unroll
+    for (int bb = 0; bb < HC; ++bb)
+      v += sigm((float)(_Float16)(g_lds[0][bb][ch][m] + g_lds[1][bb][ch][m])) *
+           (float)xr[bb * H];
+    out[(int64_t)m * H + c0 + ch] = (_Float16)(v / HC);
+  }
+#endif
+}
+
 }  // namespace
 
 // HyperConnection combine_and_mix (use_combine) for 1 <= M <= 8 decode tokens.
@@ -371,4 +497,37 @@ std::vector<torch::Tensor> qwen4_hc_mix_xn(const torch::Tensor& xn,
   dispatch(M, xn, xn, xn, xn, wd, wu, unused, unused, s, inj_out, out, 0.f,
            at::cuda::getCurrentCUDAStream(), x);
   return {out, inj_out};
+}
+
+// up + gate mix from the down projection dl [M, >= R] (row stride allowed) and
+// xn [M, HC*H], for 1 <= M <= 32. Returns the block input [M, H].
+torch::Tensor qwen4_hc_up_mix(const torch::Tensor& dl, const torch::Tensor& xn,
+                              const torch::Tensor& wu) {
+  const int M = xn.size(0);
+  TORCH_CHECK(M >= 1 && M <= UM_MMAX, "qwen4_hc_up_mix: 1 <= M <= 32");
+  TORCH_CHECK(dl.dim() == 2 && dl.size(0) == M && dl.size(1) >= R &&
+                  dl.stride(1) == 1 && dl.scalar_type() == at::kHalf,
+              "qwen4_hc_up_mix: dl [M, >= R] fp16 with unit column stride");
+  TORCH_CHECK(
+      xn.size(1) == D && xn.is_contiguous() && xn.scalar_type() == at::kHalf,
+      "qwen4_hc_up_mix: xn [M, HC*H] fp16 contiguous");
+  TORCH_CHECK(wu.dim() == 2 && wu.size(0) == D && wu.size(1) == R &&
+                  wu.is_contiguous() && wu.scalar_type() == at::kHalf,
+              "qwen4_hc_up_mix: bad up weight");
+  const at::cuda::OptionalCUDAGuard guard(device_of(xn));
+  auto out = torch::empty({M, H}, xn.options());
+  auto st = at::cuda::getCurrentCUDAStream().stream();
+  const auto* dp = reinterpret_cast<const _Float16*>(dl.data_ptr());
+  const auto* wp = reinterpret_cast<const _Float16*>(wu.data_ptr());
+  const auto* xp = reinterpret_cast<const _Float16*>(xn.data_ptr());
+  auto* op = reinterpret_cast<_Float16*>(out.data_ptr());
+  const int ld = dl.stride(0);
+  TORCH_CHECK(ld % 8 == 0 && dl.data_ptr<at::Half>() != nullptr &&
+                  reinterpret_cast<uintptr_t>(dl.data_ptr()) % 16 == 0,
+              "qwen4_hc_up_mix: dl rows must be 16-byte aligned");
+  if (M <= 16)
+    hc_up_mix_kernel<1><<<H / UM_CH, UM_T, 0, st>>>(dp, ld, wp, xp, op, M);
+  else
+    hc_up_mix_kernel<2><<<H / UM_CH, UM_T, 0, st>>>(dp, ld, wp, xp, op, M);
+  return out;
 }

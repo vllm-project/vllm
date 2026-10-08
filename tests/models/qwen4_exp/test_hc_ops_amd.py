@@ -62,8 +62,8 @@ def _rel_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
 
 
 # 1-2 tokens: fully fused kernel; 3-4: Triton combine+norm then the fused mix;
-# 8: unfused chain.
-@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8])
+# 8-32: combine+norm, down GEMM, then the fused up + gate mix; 40: unfused chain.
+@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8, 16, 17, 24, 32, 40])
 @pytest.mark.parametrize("shared_norm", [False, True])
 def test_hc_combine_and_mix_matches_reference(
     num_tokens: int, shared_norm: bool

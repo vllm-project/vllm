@@ -81,6 +81,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("qwen4_hc_combine_mix", torch::kCUDA, &qwen4_hc_combine_mix);
   rocm_ops.def("qwen4_hc_mix_xn(Tensor xn, Tensor wd, Tensor wu) -> Tensor[]");
   rocm_ops.impl("qwen4_hc_mix_xn", torch::kCUDA, &qwen4_hc_mix_xn);
+  rocm_ops.def("qwen4_hc_up_mix(Tensor dl, Tensor xn, Tensor wu) -> Tensor");
+  rocm_ops.impl("qwen4_hc_up_mix", torch::kCUDA, &qwen4_hc_up_mix);
 
   // fp16 GEMM for 1..32 tokens, every weight byte read once (WMMA).
   rocm_ops.def("skinny_wmma_f16(Tensor x, Tensor w, int split) -> Tensor");

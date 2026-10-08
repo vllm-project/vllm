@@ -406,9 +406,11 @@ def _hc_combine_and_mix(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``GatedResidual.combine_and_mix`` with ``use_combine``, as one op.
 
-    Decode batches of up to four tokens take the fused HIP kernel; everything
-    else runs the unfused chain (combine+RMSNorm, skinny GEMM, SiLU, skinny
-    GEMM, gate mix), which is what the module did before.
+    Decode batches of up to four tokens take the fused HIP kernel; up to 32
+    run combine+RMSNorm, the down GEMM and one kernel for SiLU, the up GEMM
+    and the gate mix; larger batches run the unfused chain (combine+RMSNorm,
+    skinny GEMM, SiLU, skinny GEMM, gate mix), which is what the module did
+    before.
     """
     global _HC_FUSED
     from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
@@ -452,6 +454,17 @@ def _hc_combine_and_mix(
         residual, block_output, injection_logits, norm_weight, eps, hc_count
     )
     down = rocm_unquantized_gemm_impl(xn, down_weight)
+    if (
+        _HC_FUSED
+        and num_tokens <= 32
+        and hasattr(torch.ops._rocm_C, "qwen4_hc_up_mix")
+        and (hc_count, block_output.shape[1], lora_rank) == _HC_FUSED_SHAPE
+        and xn.dtype == torch.float16
+        and up_weight.is_contiguous()
+    ):
+        block_input = torch.ops._rocm_C.qwen4_hc_up_mix(down, xn, up_weight)
+        injection = down[:, lora_rank : lora_rank + hc_count].contiguous()
+        return hidden, block_input, injection
     lora = _hc_silu(down[:, :lora_rank], hc_count)
     gate = rocm_unquantized_gemm_impl(lora, up_weight)
     block_input = _hc_gate_mix(xn, gate, hc_count)
