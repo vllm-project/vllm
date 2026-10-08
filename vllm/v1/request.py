@@ -181,6 +181,8 @@ class Request:
         self.last_sched_seq = 0
 
         self.spec_token_ids: list[int] = []
+        # Trailing spec_token_ids the grammar rejected (sync scheduling).
+        self.num_invalid_spec_tokens = 0
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 
