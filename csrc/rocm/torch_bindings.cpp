@@ -77,12 +77,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // qwen4_exp HyperConnection combine_and_mix for decode (1 <= M <= 8).
   rocm_ops.def(
       "qwen4_hc_combine_mix(Tensor h, Tensor block_out, Tensor inj, "
-      "Tensor norm_w, Tensor wd, Tensor wu, float eps, Tensor! barrier) -> "
-      "Tensor[]");
+      "Tensor norm_w, Tensor wd, Tensor wu, float eps) -> Tensor[]");
   rocm_ops.impl("qwen4_hc_combine_mix", torch::kCUDA, &qwen4_hc_combine_mix);
-  rocm_ops.def(
-      "qwen4_hc_mix_xn(Tensor xn, Tensor wd, Tensor wu, Tensor! barrier) -> "
-      "Tensor[]");
+  rocm_ops.def("qwen4_hc_mix_xn(Tensor xn, Tensor wd, Tensor wu) -> Tensor[]");
   rocm_ops.impl("qwen4_hc_mix_xn", torch::kCUDA, &qwen4_hc_mix_xn);
 #endif
 

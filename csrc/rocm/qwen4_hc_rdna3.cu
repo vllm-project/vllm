@@ -10,19 +10,16 @@
 //   g   = fp16(s @ Wu^T)                 Wu: [HC*H, R]
 //   out = fp16(sum_b sigmoid(g_b) * xn_b / HC)
 //
-// The unfused path is five kernels per call and ~30 us at M=1 on a 7900 XTX (13
-// MB of weights, replicated on every TP rank, 96 calls per decode step). Here:
-//   down: block i owns Wd rows [4i, 4i+4) over the whole K; wave w covers half
-//   a stream, so
-//         the stream RMS is two waves exchanging sums through LDS, and the
-//         cross-wave sum of the dot products is a fixed-order LDS reduction
-//         (deterministic, no split-K partials).
+// The unfused path is five kernels per call and ~30 us at M=1 on a 7900 XTX
+// (13 MB of weights, replicated on every TP rank, 96 calls per decode step).
+// Here:
+//   down: block i owns Wd rows [4i, 4i+4) over the whole K. Wave w covers half
+//         a stream, so the stream RMS is two waves exchanging sums through
+//         LDS, and the cross-wave sum of the dot products is a fixed-order LDS
+//         reduction (deterministic, no split-K partials).
 //   up:   each wave produces DPW outputs d from the HC rows b*H+d of Wu (8
-//   lanes per row) and
-//         applies the gate mix in registers.
-// Both halves run in one persistent kernel when the whole grid is resident, so
-// the Wu reads overlap the down half; otherwise as two kernels. Valid for 1 <=
-// M <= 8 tokens; prefill keeps the unfused path.
+//         lanes per row) and applies the gate mix in registers.
+// Valid for 1 <= M <= 8 tokens; prefill keeps the unfused path.
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -93,14 +90,17 @@ __device__ __forceinline__ float dot8(const half8& a, const half8& b,
 // by token, which keeps register use flat in M. Each block writes h' and xn for
 // the 8-column chunks g with g % NB == i.
 template <int M>
-__device__ __forceinline__ void hc_down_body(
-    const _Float16* __restrict__ h, const _Float16* __restrict__ bo,
-    const _Float16* __restrict__ inj, const _Float16* __restrict__ nw,
-    const int nw_shared, const _Float16* __restrict__ wd,
-    _Float16* __restrict__ out_h, _Float16* __restrict__ out_xn,
-    _Float16* __restrict__ s_out, _Float16* __restrict__ inj_out,
-    const float eps, const int Mr, float* lds,
-    const _Float16* __restrict__ xn_in) {
+__global__ void __launch_bounds__(T1)
+    hc_down_kernel(const _Float16* __restrict__ h,
+                   const _Float16* __restrict__ bo,
+                   const _Float16* __restrict__ inj,
+                   const _Float16* __restrict__ nw, const int nw_shared,
+                   const _Float16* __restrict__ wd,
+                   _Float16* __restrict__ out_h, _Float16* __restrict__ out_xn,
+                   _Float16* __restrict__ s_out, _Float16* __restrict__ inj_out,
+                   const float eps, const int Mr,
+                   const _Float16* __restrict__ xn_in) {
+  __shared__ float lds[(T1 / 32) * M * (1 + RPB)];
   float (*sq)[M] = reinterpret_cast<float (*)[M]>(lds);
   float (*red)[RPB][M] =
       reinterpret_cast<float (*)[RPB][M]>(lds + (T1 / 32) * M);
@@ -221,28 +221,12 @@ __device__ __forceinline__ void hc_down_body(
   }
 }
 
-template <int M>
-__global__ void __launch_bounds__(T1)
-    hc_down_kernel(const _Float16* __restrict__ h,
-                   const _Float16* __restrict__ bo,
-                   const _Float16* __restrict__ inj,
-                   const _Float16* __restrict__ nw, const int nw_shared,
-                   const _Float16* __restrict__ wd,
-                   _Float16* __restrict__ out_h, _Float16* __restrict__ out_xn,
-                   _Float16* __restrict__ s_out, _Float16* __restrict__ inj_out,
-                   const float eps, const int Mr,
-                   const _Float16* __restrict__ xn_in) {
-  __shared__ float lds[(T1 / 32) * M * (1 + RPB)];
-  hc_down_body<M>(h, bo, inj, nw, nw_shared, wd, out_h, out_xn, s_out, inj_out,
-                  eps, Mr, lds, xn_in);
-}
-
 constexpr int T2 = 256;               // threads per block, kernel 2 (8 waves)
 constexpr int DPW = 4;                // outputs d per wave
 constexpr int DPB = DPW * (T2 / 32);  // 32 outputs per block -> 80 blocks
-static_assert(H % DPB == 0 && H / DPB <= NB,
-              "the up half must fit in the persistent grid");
+static_assert(H % DPB == 0);
 
+// Up half: gate = s @ Wu^T and the gate mix, DPB outputs per block.
 template <int M>
 __global__ void __launch_bounds__(T2)
     hc_up_kernel(const _Float16* __restrict__ s,
@@ -299,140 +283,23 @@ __global__ void __launch_bounds__(T2)
   }
 }
 
-// Persistent kernel: each block requests its Wd rows AND its Wu rows up front,
-// so all the weights stream in while the down half runs. A grid barrier (count
-// + generation; the last arrival resets the count, so it is replay-safe in a
-// CUDA graph) separates the halves. It needs all NB blocks resident at once:
-// the host checks occupancy before choosing it.
-template <int M>
-__global__ void __launch_bounds__(T1)
-    hc_one_kernel(const _Float16* __restrict__ h,
-                  const _Float16* __restrict__ bo,
-                  const _Float16* __restrict__ inj,
-                  const _Float16* __restrict__ nw, const int nw_shared,
-                  const _Float16* __restrict__ wd,
-                  const _Float16* __restrict__ wu, _Float16* __restrict__ out_h,
-                  _Float16* __restrict__ out_xn, _Float16* __restrict__ s_out,
-                  _Float16* __restrict__ inj_out, _Float16* __restrict__ out,
-                  int* __restrict__ bar, const float eps, const int Mr,
-                  const _Float16* __restrict__ xn_in) {
-  __shared__ float lds[(T1 / 32) * M * (1 + RPB)];
-  __shared__ __attribute__((aligned(16))) _Float16 ss[M][R];
-  const int t = threadIdx.x, lane = t & 31, wv = t >> 5;
-  const int bstream = lane >> 3, q = lane & 7;
-  const bool up = blockIdx.x < H / DPB;
-  const int d0 = blockIdx.x * DPB + wv * DPW;
-  half8 wu_r[DPW][5];
-  if (up) {
-#pragma unroll
-    for (int p = 0; p < DPW; ++p) {
-      const _Float16* row = wu + (size_t)(bstream * H + d0 + p) * R;
-#pragma unroll
-      for (int u = 0; u < 5; ++u)
-        wu_r[p][u] = *reinterpret_cast<const half8*>(&row[(q + 8 * u) * 8]);
-    }
-  }
-  hc_down_body<M>(h, bo, inj, nw, nw_shared, wd, out_h, out_xn, s_out, inj_out,
-                  eps, Mr, lds, xn_in);
-
-  __syncthreads();
-  if (t == 0) {
-    volatile int* vgen = bar + 1;
-    const int g = *vgen;
-    __threadfence();
-    if (atomicAdd(bar, 1) == gridDim.x - 1) {
-      atomicExch(bar, 0);
-      __threadfence();
-      atomicAdd(bar + 1, 1);
-    } else {
-      while (*vgen == g) __builtin_amdgcn_s_sleep(1);
-    }
-    __threadfence();
-  }
-  __syncthreads();
-  if (!up) return;
-
-  float xnv[DPW][M];
-#pragma unroll
-  for (int p = 0; p < DPW; ++p)
-#pragma unroll
-    for (int m = 0; m < M; ++m)
-      xnv[p][m] =
-          (q == 0 && m < Mr)
-              ? (float)__builtin_nontemporal_load(
-                    &(xn_in ? xn_in : out_xn)[m * D + bstream * H + d0 + p])
-              : 0.f;
-  for (int i = t; i < M * R; i += T1)
-    ss[i / R][i % R] =
-        i < Mr * R ? __builtin_nontemporal_load(&s_out[i]) : (_Float16)0.f;
-  __syncthreads();
-#pragma unroll
-  for (int m = 0; m < M; ++m) {
-    if (m >= Mr) break;
-    half8 sv[5];
-#pragma unroll
-    for (int u = 0; u < 5; ++u)
-      sv[u] = *reinterpret_cast<const half8*>(&ss[m][(q + 8 * u) * 8]);
-#pragma unroll
-    for (int p = 0; p < DPW; ++p) {
-      float a = 0.f;
-#pragma unroll
-      for (int u = 0; u < 5; ++u) a = dot8(wu_r[p][u], sv[u], a);
-      a += xor_lane<4>(a);
-      a += xor_lane<2>(a);
-      a += xor_lane<1>(a);
-      const float g = (float)(_Float16)a;
-      float mix = (q == 0) ? sigm(g) * xnv[p][m] : 0.f;
-      mix += xor_lane<8>(mix);
-      mix += xor_lane<16>(mix);
-      if (lane == 0) out[m * H + d0 + p] = (_Float16)(mix / HC);
-    }
-  }
-}
-
 template <int M>
 void launch(const at::Tensor& h, const at::Tensor& bo, const at::Tensor& inj,
             const at::Tensor& nw, const at::Tensor& wd, const at::Tensor& wu,
             at::Tensor& out_h, at::Tensor& xn, at::Tensor& s,
             at::Tensor& inj_out, at::Tensor& out, float eps, hipStream_t st,
-            int* bar, const _Float16* xn_in = nullptr) {
+            const _Float16* xn_in = nullptr) {
   auto P = [](const at::Tensor& x) {
     return reinterpret_cast<const _Float16*>(x.data_ptr());
   };
   auto W = [](at::Tensor& x) {
     return reinterpret_cast<_Float16*>(x.data_ptr());
   };
-  if (bar) {
-    hc_one_kernel<M><<<NB, T1, 0, st>>>(
-        P(h), P(bo), P(inj), P(nw), nw.numel() == H, P(wd), P(wu), W(out_h),
-        W(xn), W(s), W(inj_out), W(out), bar, eps, (int)h.size(0), xn_in);
-    return;
-  }
   hc_down_kernel<M><<<NB, T1, 0, st>>>(
       P(h), P(bo), P(inj), P(nw), nw.numel() == H, P(wd), W(out_h), W(xn), W(s),
       W(inj_out), eps, (int)h.size(0), xn_in);
   hc_up_kernel<M><<<H / DPB, T2, 0, st>>>(P(s), P(wu), xn_in ? xn_in : P(xn),
                                           W(out), (int)h.size(0));
-}
-
-// Whether every block of the persistent kernel fits at once (the grid barrier
-// needs it).
-bool persistent_fits(int bucket) {
-  static int ok[4] = {-1, -1, -1, -1};
-  if (ok[bucket] < 0) {
-    int per_cu = 0, cus = 0, dev = 0;
-    C10_CUDA_CHECK(hipGetDevice(&dev));
-    C10_CUDA_CHECK(hipDeviceGetAttribute(
-        &cus, hipDeviceAttributeMultiprocessorCount, dev));
-    const void* k = bucket == 0   ? (const void*)hc_one_kernel<1>
-                    : bucket == 1 ? (const void*)hc_one_kernel<2>
-                    : bucket == 2 ? (const void*)hc_one_kernel<4>
-                                  : (const void*)hc_one_kernel<8>;
-    C10_CUDA_CHECK(
-        hipOccupancyMaxActiveBlocksPerMultiprocessor(&per_cu, k, T1, 0));
-    ok[bucket] = per_cu * cus >= NB;
-  }
-  return ok[bucket];
 }
 
 template <typename... Args>
@@ -447,8 +314,6 @@ void dispatch(int M, Args&&... args) {
     launch<8>(args...);
 }
 
-int bucket_of(int M) { return M == 1 ? 0 : M == 2 ? 1 : M <= 4 ? 2 : 3; }
-
 void check_weights(const torch::Tensor& wd, const torch::Tensor& wu) {
   TORCH_CHECK(wd.dim() == 2 && wd.size(1) == D && wd.size(0) >= RO,
               "qwen4_hc: bad down weight");
@@ -462,14 +327,11 @@ void check_weights(const torch::Tensor& wd, const torch::Tensor& wu) {
 }  // namespace
 
 // HyperConnection combine_and_mix (use_combine) for 1 <= M <= 8 decode tokens.
-// Returns (residual h', block input, injection logits). `barrier` is an
-// int32[2] scratch tensor that stays zero between calls; it must not be shared
-// by concurrent streams.
+// Returns (residual h', block input, injection logits).
 std::vector<torch::Tensor> qwen4_hc_combine_mix(
     const torch::Tensor& h, const torch::Tensor& block_out,
     const torch::Tensor& inj, const torch::Tensor& norm_w,
-    const torch::Tensor& wd, const torch::Tensor& wu, double eps,
-    torch::Tensor& barrier) {
+    const torch::Tensor& wd, const torch::Tensor& wu, double eps) {
   const int M = h.size(0);
   TORCH_CHECK(M >= 1 && M <= MMAX, "qwen4_hc_combine_mix: 1 <= M <= 8");
   TORCH_CHECK(h.size(1) == D && block_out.size(1) == H && inj.size(1) == HC);
@@ -478,16 +340,14 @@ std::vector<torch::Tensor> qwen4_hc_combine_mix(
     TORCH_CHECK(x->is_contiguous() && x->scalar_type() == at::kHalf,
                 "qwen4_hc: fp16 contiguous");
   check_weights(wd, wu);
-  TORCH_CHECK(barrier.numel() >= 2 && barrier.scalar_type() == at::kInt);
   const at::cuda::OptionalCUDAGuard guard(device_of(h));
   auto out_h = torch::empty_like(h);
   auto xn = torch::empty_like(h);
   auto s = torch::empty({M, R}, h.options());
   auto inj_out = torch::empty({M, HC}, h.options());
   auto out = torch::empty({M, H}, h.options());
-  int* bar = persistent_fits(bucket_of(M)) ? barrier.data_ptr<int>() : nullptr;
   dispatch(M, h, block_out, inj, norm_w, wd, wu, out_h, xn, s, inj_out, out,
-           (float)eps, at::cuda::getCurrentCUDAStream(), bar, nullptr);
+           (float)eps, at::cuda::getCurrentCUDAStream(), nullptr);
   return {out_h, out, inj_out};
 }
 
@@ -495,23 +355,20 @@ std::vector<torch::Tensor> qwen4_hc_combine_mix(
 // already ran). Returns (block input, injection logits).
 std::vector<torch::Tensor> qwen4_hc_mix_xn(const torch::Tensor& xn,
                                            const torch::Tensor& wd,
-                                           const torch::Tensor& wu,
-                                           torch::Tensor& barrier) {
+                                           const torch::Tensor& wu) {
   const int M = xn.size(0);
   TORCH_CHECK(M >= 1 && M <= MMAX, "qwen4_hc_mix_xn: 1 <= M <= 8");
   TORCH_CHECK(xn.size(1) == D && xn.is_contiguous() &&
               xn.scalar_type() == at::kHalf);
   check_weights(wd, wu);
-  TORCH_CHECK(barrier.numel() >= 2 && barrier.scalar_type() == at::kInt);
   const at::cuda::OptionalCUDAGuard guard(device_of(xn));
   auto s = torch::empty({M, R}, xn.options());
   auto inj_out = torch::empty({M, HC}, xn.options());
   auto out = torch::empty({M, H}, xn.options());
-  int* bar = persistent_fits(bucket_of(M)) ? barrier.data_ptr<int>() : nullptr;
   const auto* x = reinterpret_cast<const _Float16*>(xn.data_ptr());
   // h/block_out/inj/norm_w/out_h/xn are not touched on this path.
   torch::Tensor unused = xn;
   dispatch(M, xn, xn, xn, xn, wd, wu, unused, unused, s, inj_out, out, 0.f,
-           at::cuda::getCurrentCUDAStream(), bar, x);
+           at::cuda::getCurrentCUDAStream(), x);
   return {out, inj_out};
 }
