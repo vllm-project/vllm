@@ -41,8 +41,7 @@ def make_async_engine(core, data_parallel_size: int = 1) -> AsyncLLM:
     core.shutdown = Mock()
     engine.output_handler = None
     engine.check_health = AsyncMock()  # type: ignore[method-assign]
-    engine._idle_health_probe_lock = asyncio.Lock()
-    engine._idle_health_probe_task = None
+    engine._idle_health_probe_tasks = {}
     return engine
 
 
@@ -51,7 +50,7 @@ async def test_check_health_gpu_sleeping_is_not_ready():
     core = SimpleNamespace(
         get_sleeping_engine_ranks=Mock(return_value=[0]),
         get_stalled_engine_ranks=Mock(return_value=[]),
-        all_engines_idle=Mock(return_value=False),
+        get_idle_engine_ranks=Mock(return_value=[]),
         check_health_gpu_async=AsyncMock(),
     )
     engine = make_async_engine(core)
@@ -67,7 +66,7 @@ async def test_check_health_gpu_sleeping_is_not_ready():
 async def test_check_health_gpu_busy_with_progress():
     core = SimpleNamespace(
         get_stalled_engine_ranks=Mock(return_value=[]),
-        all_engines_idle=Mock(return_value=False),
+        get_idle_engine_ranks=Mock(return_value=[]),
         check_health_gpu_async=AsyncMock(),
     )
     engine = make_async_engine(core)
@@ -82,7 +81,7 @@ async def test_check_health_gpu_busy_with_progress():
 async def test_check_health_gpu_busy_stalled(data_parallel_size: int):
     core = SimpleNamespace(
         get_stalled_engine_ranks=Mock(return_value=[1]),
-        all_engines_idle=Mock(return_value=False),
+        get_idle_engine_ranks=Mock(return_value=[]),
         check_health_gpu_async=AsyncMock(),
     )
     engine = make_async_engine(core, data_parallel_size=data_parallel_size)
@@ -102,7 +101,7 @@ async def test_check_health_gpu_reports_reason_and_in_progress():
     }
     core = SimpleNamespace(
         get_stalled_engine_ranks=Mock(return_value=[0]),
-        all_engines_idle=Mock(return_value=False),
+        get_idle_engine_ranks=Mock(return_value=[]),
         check_health_gpu_async=AsyncMock(),
         get_in_progress_operations=Mock(return_value=[operation]),
     )
@@ -123,7 +122,7 @@ async def test_idle_gpu_probe_delegates_cache_to_engine_core(
     monkeypatch.setattr(envs, "VLLM_READY_IDLE_PROBE_CACHE_TTL_S", 10.0)
     core = SimpleNamespace(
         get_stalled_engine_ranks=Mock(return_value=[]),
-        all_engines_idle=Mock(return_value=True),
+        get_idle_engine_ranks=Mock(return_value=[0]),
         check_health_gpu_async=AsyncMock(),
     )
     engine = make_async_engine(core)
@@ -132,14 +131,14 @@ async def test_idle_gpu_probe_delegates_cache_to_engine_core(
     await engine.check_health_gpu()
 
     assert core.check_health_gpu_async.await_count == 2
-    core.check_health_gpu_async.assert_awaited_with(10.0)
+    core.check_health_gpu_async.assert_awaited_with(10.0, 0)
 
 
 @pytest.mark.asyncio
-async def test_check_health_gpu_dp_probes_when_all_idle():
+async def test_check_health_gpu_dp_probes_each_idle_rank():
     core = SimpleNamespace(
         get_stalled_engine_ranks=Mock(return_value=[]),
-        all_engines_idle=Mock(return_value=True),
+        get_idle_engine_ranks=Mock(return_value=[0, 1]),
         check_health_gpu_async=AsyncMock(),
     )
     engine = make_async_engine(core, data_parallel_size=2)
@@ -147,7 +146,32 @@ async def test_check_health_gpu_dp_probes_when_all_idle():
     await engine.check_health_gpu()
 
     core.get_stalled_engine_ranks.assert_called_once()
-    core.check_health_gpu_async.assert_awaited_once()
+    assert core.check_health_gpu_async.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_check_health_gpu_probes_idle_rank_while_another_is_busy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A dense DP rank wedged while IDLE is caught even when another rank is
+    busy and making progress."""
+    monkeypatch.setattr(envs, "VLLM_HEALTH_CHECK_GPU_TIMEOUT", 0.01)
+
+    async def probe(_cache_ttl_s: float, _engine_rank: int):
+        await asyncio.Future()
+
+    core = SimpleNamespace(
+        get_stalled_engine_ranks=Mock(return_value=[]),
+        get_idle_engine_ranks=Mock(return_value=[1]),
+        check_health_gpu_async=AsyncMock(side_effect=probe),
+    )
+    engine = make_async_engine(core, data_parallel_size=2)
+
+    with pytest.raises(EngineUnhealthyError) as exc_info:
+        await engine.check_health_gpu()
+
+    assert exc_info.value.reason == "probe_timeout"
+    assert exc_info.value.details["engine_ranks"] == [1]
 
 
 @pytest.mark.asyncio
@@ -158,13 +182,13 @@ async def test_concurrent_idle_gpu_probes_share_one_task(
     started = asyncio.Event()
     finish = asyncio.Event()
 
-    async def probe(_cache_ttl_s: float):
+    async def probe(_cache_ttl_s: float, _engine_rank: int):
         started.set()
         await finish.wait()
 
     core = SimpleNamespace(
         get_stalled_engine_ranks=Mock(return_value=[]),
-        all_engines_idle=Mock(return_value=True),
+        get_idle_engine_ranks=Mock(return_value=[0]),
         check_health_gpu_async=AsyncMock(side_effect=probe),
     )
     engine = make_async_engine(core)
@@ -184,12 +208,12 @@ async def test_idle_gpu_probe_timeout_is_nonfatal(
 ):
     monkeypatch.setattr(envs, "VLLM_HEALTH_CHECK_GPU_TIMEOUT", 0.01)
 
-    async def probe(_cache_ttl_s: float):
+    async def probe(_cache_ttl_s: float, _engine_rank: int):
         await asyncio.Future()
 
     core = SimpleNamespace(
         get_stalled_engine_ranks=Mock(return_value=[]),
-        all_engines_idle=Mock(return_value=True),
+        get_idle_engine_ranks=Mock(return_value=[0]),
         check_health_gpu_async=AsyncMock(side_effect=probe),
     )
     engine = make_async_engine(core)
@@ -239,7 +263,7 @@ async def test_async_client_tracks_progress_and_recovery():
             ready_state=EngineCoreReadyState.IDLE,
         ),
     )
-    assert client.all_engines_idle()
+    assert client.get_idle_engine_ranks() == [0]
 
     await AsyncMPClient.process_engine_outputs(
         client,
@@ -250,7 +274,7 @@ async def test_async_client_tracks_progress_and_recovery():
         ),
     )
     assert client.get_sleeping_engine_ranks() == [0]
-    assert not client.all_engines_idle()
+    assert client.get_idle_engine_ranks() == []
 
 
 def test_async_client_detects_one_stalled_dp_engine():
@@ -268,35 +292,36 @@ def test_async_client_detects_one_stalled_dp_engine():
     }
 
     assert client.get_stalled_engine_ranks(60) == [1]
-    assert not client.all_engines_idle()
-
-
-def test_async_client_keeps_sleeping_state_when_request_is_queued():
-    client = object.__new__(AsyncMPClient)
-    engine = b"\x00\x00"
-    client._ready_engine_ranks = {engine: 0}
-    client._ready_progress = {
-        0: EngineCoreReadyProgress(state=EngineCoreReadyState.SLEEPING)
-    }
-
-    client._mark_engine_busy(engine)
-
-    assert client.get_sleeping_engine_ranks() == [0]
+    assert client.get_idle_engine_ranks() == []
 
 
 @pytest.mark.asyncio
-async def test_idle_gpu_probe_covers_all_managed_engines():
+async def test_async_client_ignores_untracked_engines():
+    """Engines removed by an elastic EP scale-down are paused on their way
+    out; their SLEEPING broadcast must not make `/ready` sleeping forever."""
     client = object.__new__(AsyncMPClient)
-    client.core_engines = [b"\x00\x00", b"\x01\x00"]
+    client._ready_progress = {0: EngineCoreReadyProgress()}
+
+    await AsyncMPClient.process_engine_outputs(
+        client,
+        EngineCoreOutputs(
+            engine_index=1,
+            ready_progress_seq=0,
+            ready_state=EngineCoreReadyState.SLEEPING,
+        ),
+    )
+
+    assert client.get_sleeping_engine_ranks() == []
+
+
+@pytest.mark.asyncio
+async def test_idle_gpu_probe_targets_engine_rank():
+    client = object.__new__(AsyncMPClient)
     client._call_utility_async = AsyncMock()
 
-    await AsyncMPClient.check_health_gpu_async(client, 10)
+    await AsyncMPClient.check_health_gpu_async(client, 10, 1)
 
-    assert client._call_utility_async.await_count == 2
-    client._call_utility_async.assert_any_await(
-        "check_health_gpu", 10, engine=b"\x00\x00"
-    )
-    client._call_utility_async.assert_any_await(
+    client._call_utility_async.assert_awaited_once_with(
         "check_health_gpu", 10, engine=b"\x01\x00"
     )
 

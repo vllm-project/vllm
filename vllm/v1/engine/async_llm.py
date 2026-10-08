@@ -196,8 +196,7 @@ class AsyncLLM(EngineClient):
             client_index=client_index,
             renderer=renderer,
         )
-        self._idle_health_probe_lock = asyncio.Lock()
-        self._idle_health_probe_task: asyncio.Task[None] | None = None
+        self._idle_health_probe_tasks: dict[int, asyncio.Task[None]] = {}
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
@@ -1134,46 +1133,62 @@ class AsyncLLM(EngineClient):
                 stall_timeout_s=stall_timeout,
             )
 
-        if not self.engine_core.all_engines_idle():
-            return
+        idle_ranks = self.engine_core.get_idle_engine_ranks()
+        if idle_ranks:
+            await self._check_idle_gpu_health(idle_ranks)
 
-        await self._check_idle_gpu_health()
-
-    async def _check_idle_gpu_health(self) -> None:
-        cache_ttl = envs.VLLM_READY_IDLE_PROBE_CACHE_TTL_S
-        async with self._idle_health_probe_lock:
-            task = self._idle_health_probe_task
-            if task is None or task.done():
-                task = asyncio.create_task(
-                    self.engine_core.check_health_gpu_async(cache_ttl)
+    def _idle_gpu_probe_task(self, engine_rank: int) -> asyncio.Task[None]:
+        """Concurrent `/ready` callers share one in-flight probe per engine."""
+        task = self._idle_health_probe_tasks.get(engine_rank)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self.engine_core.check_health_gpu_async(
+                    envs.VLLM_READY_IDLE_PROBE_CACHE_TTL_S, engine_rank
                 )
-                task.add_done_callback(
-                    lambda done: None if done.cancelled() else done.exception()
-                )
-                self._idle_health_probe_task = task
-
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(task), timeout=envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT
             )
-        except EngineDeadError:
-            raise
-        except TimeoutError as exc:
-            timeout = envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT
+            task.add_done_callback(
+                lambda done: None if done.cancelled() else done.exception()
+            )
+            self._idle_health_probe_tasks[engine_rank] = task
+        return task
+
+    async def _check_idle_gpu_health(self, engine_ranks: list[int]) -> None:
+        tasks = {rank: self._idle_gpu_probe_task(rank) for rank in engine_ranks}
+        timeout = envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT
+        # asyncio.wait never cancels the probes, so a caller timing out or
+        # disconnecting leaves them running for the next caller.
+        await asyncio.wait(tasks.values(), timeout=timeout)
+
+        timed_out: list[int] = []
+        failed: dict[int, BaseException] = {}
+        for rank, task in tasks.items():
+            if not task.done():
+                timed_out.append(rank)
+                continue
+            if self._idle_health_probe_tasks.get(rank) is task:
+                del self._idle_health_probe_tasks[rank]
+            exc = asyncio.CancelledError() if task.cancelled() else task.exception()
+            if exc is not None:
+                failed[rank] = exc
+
+        for exc in failed.values():
+            if isinstance(exc, EngineDeadError):
+                raise exc
+        if timed_out:
             raise EngineUnhealthyError(
-                f"Idle GPU health check timed out after {timeout:g}s",
+                f"Idle GPU health check timed out after {timeout:g}s "
+                f"(engine ranks: {timed_out})",
                 reason="probe_timeout",
+                engine_ranks=timed_out,
                 timeout_s=timeout,
-            ) from exc
-        except Exception as exc:
+            )
+        if failed:
             raise EngineUnhealthyError(
-                "Idle GPU health check failed",
+                f"Idle GPU health check failed (engine ranks: {list(failed)})",
                 reason="probe_failed",
-                error=repr(exc),
-            ) from exc
-        finally:
-            if task.done() and self._idle_health_probe_task is task:
-                self._idle_health_probe_task = None
+                engine_ranks=list(failed),
+                error=repr(next(iter(failed.values()))),
+            )
 
     async def start_profile(
         self,

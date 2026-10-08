@@ -236,7 +236,9 @@ class EngineCoreClient(ABC):
     async def execute_dummy_batch_async(self) -> None:
         raise NotImplementedError
 
-    async def check_health_gpu_async(self, cache_ttl_s: float) -> None:
+    async def check_health_gpu_async(
+        self, cache_ttl_s: float, engine_rank: int
+    ) -> None:
         raise NotImplementedError
 
     def get_stalled_engine_ranks(self, timeout_s: float) -> list[int]:
@@ -245,7 +247,7 @@ class EngineCoreClient(ABC):
     def get_sleeping_engine_ranks(self) -> list[int]:
         raise NotImplementedError
 
-    def all_engines_idle(self) -> bool:
+    def get_idle_engine_ranks(self) -> list[int]:
         raise NotImplementedError
 
     def get_in_progress_operations(self) -> list[dict[str, Any]]:
@@ -1172,9 +1174,6 @@ class AsyncMPClient(MPClient):
         self._ready_progress = {
             rank: EngineCoreReadyProgress() for rank in self.engine_ranks_managed
         }
-        self._ready_engine_ranks = dict(
-            zip(self.core_engines, self.engine_ranks_managed)
-        )
 
         # locally-cached engine status
         self._engine_status: dict[int, dict] = {}
@@ -1277,10 +1276,11 @@ class AsyncMPClient(MPClient):
         if outputs.ready_state is None or outputs.ready_progress_seq is None:
             return
 
+        progress = self._ready_progress.get(outputs.engine_index)
+        if progress is None:
+            # E.g. an engine removed by an elastic EP scale-down.
+            return
         now = time.monotonic()
-        progress = self._ready_progress.setdefault(
-            outputs.engine_index, EngineCoreReadyProgress()
-        )
         if outputs.ready_state != progress.state:
             progress.state = outputs.ready_state
             progress.last_progress_at = now
@@ -1309,11 +1309,12 @@ class AsyncMPClient(MPClient):
             if progress.state == EngineCoreReadyState.SLEEPING
         ]
 
-    def all_engines_idle(self) -> bool:
-        return all(
-            progress.state == EngineCoreReadyState.IDLE
-            for progress in self._ready_progress.values()
-        )
+    def get_idle_engine_ranks(self) -> list[int]:
+        return [
+            rank
+            for rank, progress in self._ready_progress.items()
+            if progress.state == EngineCoreReadyState.IDLE
+        ]
 
     def get_in_progress_operations(self) -> list[dict[str, Any]]:
         """Utility calls the EngineCores reported as currently executing."""
@@ -1328,26 +1329,11 @@ class AsyncMPClient(MPClient):
             if progress.operation is not None
         ]
 
-    def _mark_engine_busy(self, engine: EngineIdentity) -> None:
-        rank = self._ready_engine_ranks.setdefault(
-            engine, int.from_bytes(engine, byteorder="little")
-        )
-        progress = self._ready_progress.setdefault(rank, EngineCoreReadyProgress())
-        if progress.state == EngineCoreReadyState.SLEEPING:
-            return
-        if progress.state != EngineCoreReadyState.BUSY:
-            progress.state = EngineCoreReadyState.BUSY
-            progress.last_progress_at = time.monotonic()
-
     def _sync_ready_engines(self) -> None:
         managed_ranks = set(self.engine_ranks_managed)
         self._ready_progress = {
             rank: self._ready_progress.get(rank, EngineCoreReadyProgress())
             for rank in managed_ranks
-        }
-        self._ready_engine_ranks = {
-            engine: int.from_bytes(engine, byteorder="little")
-            for engine in self.core_engines
         }
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -1421,7 +1407,6 @@ class AsyncMPClient(MPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
-        self._mark_engine_busy(self.core_engine)
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
@@ -1485,12 +1470,13 @@ class AsyncMPClient(MPClient):
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
 
-    async def check_health_gpu_async(self, cache_ttl_s: float) -> None:
-        await asyncio.gather(
-            *(
-                self._call_utility_async("check_health_gpu", cache_ttl_s, engine=engine)
-                for engine in self.core_engines
-            )
+    async def check_health_gpu_async(
+        self, cache_ttl_s: float, engine_rank: int
+    ) -> None:
+        await self._call_utility_async(
+            "check_health_gpu",
+            cache_ttl_s,
+            engine=engine_rank.to_bytes(2, "little"),
         )
 
     async def set_weight_version_async(self, weight_version: str) -> None:
@@ -1722,7 +1708,6 @@ class DPAsyncMPClient(AsyncMPClient):
         request.client_index = self.client_index
 
         chosen_engine = self.get_core_engine_for_request(request)
-        self._mark_engine_busy(chosen_engine)
         to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
         if not self.engines_running:
             # Notify coordinator that we're sending a request
