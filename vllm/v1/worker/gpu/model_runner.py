@@ -265,13 +265,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache = EncoderCache()
         self.ec_connector = get_ec_connector(vllm_config, self.encoder_cache)
 
+        self.num_speculative_steps = vllm_config.num_speculative_tokens
+        num_prefill_lookahead = max(1, vllm_config.num_prefill_lookahead_tokens)
+        use_dense_all_token_ids = (
+            self.speculative_config is not None and self.speculative_config.use_ngram()
+        )
+
+        # General request states.
+        self.req_states = RequestState(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            num_speculative_steps=self.num_speculative_steps,
+            vocab_size=self.vocab_size,
+            device=self.device,
+            num_prefill_lookahead=num_prefill_lookahead,
+            use_dense_all_token_ids=use_dense_all_token_ids,
+        )
+
         # Speculative decoding.
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
-        self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
-                self.speculator = init_speculator(self.vllm_config, self.device)
+                self.speculator = init_speculator(
+                    self.vllm_config, self.device, self.req_states
+                )
 
             if self.speculative_config.method in (
                 "eagle3",
@@ -291,20 +310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
 
-        num_prefill_lookahead = max(1, vllm_config.num_prefill_lookahead_tokens)
-
         self.step_timing = StepTimingCollector()
-
-        # General request states.
-        self.req_states = RequestState(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            num_speculative_steps=self.num_speculative_steps,
-            vocab_size=self.vocab_size,
-            device=self.device,
-            num_prefill_lookahead=num_prefill_lookahead,
-        )
         self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -482,7 +488,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             custom = self.model_state.custom_sampler(self.sampler)
 
             if custom:
-                self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
+                self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
                 self.rejection_sampler = RejectionSampler(
@@ -772,6 +778,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -813,7 +820,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "skip_attn must only be True for initial memory profiling."
             )
 
-        # Create a dummy scheduler output. Plain draft-model speculation adds
+        # Create a dummy scheduler output. Standalone AR speculation adds
         # one correction slot per request during prefill. The scheduler
         # accounts for these slots, while dummy runs bypass the scheduler.
         # Adjust the dummy token count only when the expanded draft batch
@@ -909,14 +916,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 mm_inputs = [], all_false
 
-            # Let the target override the hidden state fed to the drafter
-            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
-            # target returns a persistent buffer sized at max_num_batched_tokens;
-            # slice to the active token count that propose() expects.
-            spec_hidden_states = hidden_states
-            if hasattr(self.model, "get_mtp_target_hidden_states"):
-                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+            spec_hidden_states = self._get_drafter_hidden_states(hidden_states)
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
@@ -1012,6 +1012,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
 
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        if self.pooling_runner is not None:
+            self.pooling_runner.release_late_interaction_query_cache(query_keys)
+
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""
@@ -1072,6 +1076,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         lora_capture_hook=create_lora_capture_hook(
                             self.lora_config, self
                         ),
+                    )
+                    self.model_state.capture_inner_cudagraphs(
+                        input_buffers,
+                        self.block_tables,
+                        self.attn_groups,
+                        self.kv_cache_config,
                     )
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
@@ -2053,6 +2063,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
+            num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
         )
 
         if not self.is_last_pp_rank:
@@ -2063,6 +2074,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
             )
         return None
+
+    def _get_drafter_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Hidden states fed to the drafter.
+
+        Targets such as DeepSeek V4 expose the pre-hc_head residual through
+        get_mtp_target_hidden_states(). The buffer is sized at
+        max_num_batched_tokens and only allocated for drafters that consume
+        target hidden states, so None means "use the regular hidden states".
+        """
+        get_target_hidden_states = getattr(
+            self.model, "get_mtp_target_hidden_states", None
+        )
+        if get_target_hidden_states is None:
+            return hidden_states
+        target_hidden_states = get_target_hidden_states()
+        if target_hidden_states is None:
+            return hidden_states
+        return target_hidden_states[: hidden_states.shape[0]]
 
     @torch.inference_mode()
     @step_eplb_after()
@@ -2082,6 +2111,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
+        num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2208,14 +2238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.observe_verification(
                     input_batch.idx_mapping, num_sampled, num_rejected
                 )
-            # Let the target override the hidden state fed to the drafter
-            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
-            # target returns a persistent buffer sized at max_num_batched_tokens;
-            # slice to the active token count that propose() expects.
-            spec_hidden_states = draft_hidden_states
-            if hasattr(self.model, "get_mtp_target_hidden_states"):
-                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
+            spec_hidden_states = self._get_drafter_hidden_states(draft_hidden_states)
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
@@ -2233,9 +2256,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.req_states.next_prefill_tokens,
                     self.sampler.sampling_states.temperature.gpu,
                     self.sampler.sampling_states.seeds.gpu,
+                    num_speculative_tokens=num_spec_tokens,
                     dp_sync=dp_sync,
                     mm_inputs=mm_inputs,
                 )
+            if num_spec_tokens < self.num_speculative_steps:
+                draft_tokens[:, num_spec_tokens:] = -1
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
@@ -2247,7 +2273,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # not have a speculator (i.e. self.speculator is None)
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+                self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
             )
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(
@@ -2392,6 +2418,7 @@ class ExecuteModelState(NamedTuple):
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
+    num_spec_tokens_to_schedule: int
 
 
 class BatchReqState(NamedTuple):

@@ -20,8 +20,10 @@ steps:
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/kernels/moe/test_cpu_quant_fused_moe.py
   - tests/kernels/moe/test_zen_cpu_int8_moe.py
+  - tests/test_zentorch_version_pin.py
   - vllm/model_executor/layers/fused_moe/experts/cpu_moe.py
   - tests/kernels/test_onednn.py
+  - tests/kernels/test_cpu_fused_sampling.py
   - tests/kernels/test_awq_int4_to_int8.py
   - tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
   - tests/kernels/quantization/test_zen_da8w4.py
@@ -45,8 +47,10 @@ steps:
       tests/kernels/moe/test_cpu_fused_moe.py \
       tests/kernels/moe/test_cpu_quant_fused_moe.py \
       tests/kernels/moe/test_zen_cpu_int8_moe.py \
+      tests/test_zentorch_version_pin.py \
       tests/kernels/mamba/test_cpu_short_conv.py \
       tests/kernels/test_onednn.py \
+      tests/kernels/test_cpu_fused_sampling.py \
       tests/kernels/test_awq_int4_to_int8.py \
       tests/kernels/quantization/test_cpu_fp8_scaled_mm.py \
       tests/kernels/quantization/test_zen_da8w4.py \
@@ -85,7 +89,7 @@ steps:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s \
-      tests/v1/worker/test_gpu_autoregressive_speculator.py \
+      tests/v1/worker/test_gpu_target_dependent_ar_speculator.py \
       tests/v1/worker/test_gpu_extract_hidden_states_speculator.py \
       tests/v1/worker/test_gpu_batch_ordering.py \
       tests/v1/worker/test_gpu_rejection_sampler_chunking.py \
