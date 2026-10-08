@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import builtins
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ import soundfile as sf
 from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
+    _load_torchcodec_audio_decoder,
     load_audio,
     load_audio_soundfile,
     load_audio_torchcodec,
@@ -23,6 +25,21 @@ pytestmark = pytest.mark.cpu_test
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 assert ASSETS_DIR.exists()
+
+
+def test_torchcodec_audio_decoder_import_handles_native_library_error(monkeypatch):
+    real_import = builtins.__import__
+
+    def import_with_broken_torchcodec(name, *args, **kwargs):
+        if name == "torchcodec.decoders":
+            raise OSError("libcudart.so.13: cannot open shared object file")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_with_broken_torchcodec)
+    decoder, import_error = _load_torchcodec_audio_decoder()
+
+    assert decoder is None
+    assert isinstance(import_error, OSError)
 
 
 @pytest.fixture
@@ -239,6 +256,25 @@ def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
     must surface as ImportError so `auto` falls back to soundfile → PyAV."""
     ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
     with patch.object(audio_module, "AudioDecoder", None):
+        with pytest.raises(ImportError, match="torchcodec audio backend"):
+            load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
+        audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+
+def test_load_audio_auto_falls_back_when_torchcodec_native_library_fails(
+    dummy_audio_bytes,
+):
+    ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    with (
+        patch.object(audio_module, "AudioDecoder", None),
+        patch.object(
+            audio_module,
+            "_torchcodec_import_exc",
+            OSError("libcudart.so.13: cannot open shared object file"),
+        ),
+    ):
         with pytest.raises(ImportError, match="torchcodec audio backend"):
             load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
         audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")

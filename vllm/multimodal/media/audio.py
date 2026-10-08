@@ -4,6 +4,7 @@ import math
 from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -37,14 +38,18 @@ try:
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
-try:
-    from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError) as exc:
-    # RuntimeError: torchcodec is installed but the system ffmpeg is missing.
-    AudioDecoder = None  # type: ignore[assignment]
-    _torchcodec_import_exc: BaseException | None = exc
-else:
-    _torchcodec_import_exc = None
+
+def _load_torchcodec_audio_decoder() -> tuple[
+    Callable[..., Any] | None, BaseException | None
+]:
+    try:
+        from torchcodec.decoders import AudioDecoder
+    except (ImportError, OSError, RuntimeError) as exc:
+        return None, exc
+    return AudioDecoder, None
+
+
+AudioDecoder, _torchcodec_import_exc = _load_torchcodec_audio_decoder()
 
 
 # Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`,
