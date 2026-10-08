@@ -882,7 +882,11 @@ class RocmPlatform(Platform):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if rocm_aiter_ops.is_mha_enabled() and on_cdna():
+        if (
+            rocm_aiter_ops.is_mha_enabled()
+            and on_cdna()
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
