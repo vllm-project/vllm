@@ -124,9 +124,11 @@ mod tests {
     use expect_test::{Expect, expect};
     use serde_json::json;
     use xgrammar_structural_tag::ToolChoice;
-    use xgrammar_structural_tag::format::{EndBoundary, TagBoundary, TagFormat};
+    use xgrammar_structural_tag::format::{EndBoundary, TagFormat};
 
+    use super::super::CALL_CLOSE;
     use super::*;
+    use crate::output_grammar::test_utils::outline;
     use crate::output_grammar::{GrammarCoverage, ToolStrictLevel};
     use crate::tool::Tool;
 
@@ -161,55 +163,30 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(grammar.coverage, GrammarCoverage::FromTokenZero);
-        expected.assert_eq(&outline(&grammar.format));
+        let mut format = grammar.format;
+        elide_call_bodies(&mut format);
+        expected.assert_eq(&outline(&format));
     }
 
-    /// Render the channel structure of a grammar, abbreviating XTML markers to
-    /// `<name>` / `</name>`, free text to `text`, and call tags to `call(name)`.
-    fn outline(format: &Format) -> String {
+    /// Replace each call body with `..`, so that outlines show the channel
+    /// structure. The `arguments` tests cover call bodies.
+    fn elide_call_bodies(format: &mut Format) {
         match format {
-            Format::Sequence(format) => {
-                format.elements.iter().map(outline).collect::<Vec<_>>().join(" ")
-            }
-            Format::Or(format) => format!(
-                "({})",
-                format.elements.iter().map(outline).collect::<Vec<_>>().join(" | ")
-            ),
-            Format::Optional(format) => format!("[{}]", outline(&format.content)),
-            Format::ConstString(format) => markers(&format.value),
-            Format::AnyText(_) => "text".to_string(),
-            Format::Tag(tag) => tag_outline(tag),
-            Format::TagsWithSeparator(format) => {
-                let calls = format.tags.iter().map(tag_outline).collect::<Vec<_>>();
-                let repeat = match (format.at_least_one, format.stop_after_first) {
-                    (true, true) => "",
-                    (true, false) => "+",
-                    (false, true) => "?",
-                    (false, false) => "*",
-                };
-                format!("({}){repeat}", calls.join(" | "))
-            }
-            format => panic!("unexpected channel format: {format:?}"),
+            Format::Sequence(format) => format.elements.iter_mut().for_each(elide_call_bodies),
+            Format::Or(format) => format.elements.iter_mut().for_each(elide_call_bodies),
+            Format::Optional(format) => elide_call_bodies(&mut format.content),
+            Format::Tag(tag) => elide_tag(tag),
+            Format::TagsWithSeparator(format) => format.tags.iter_mut().for_each(elide_tag),
+            _ => {}
         }
     }
 
-    fn tag_outline(tag: &TagFormat) -> String {
-        let (TagBoundary::Text(begin), EndBoundary::Text(end)) = (&tag.begin, &tag.end) else {
-            panic!("unexpected tag boundaries: {tag:?}");
-        };
-        if let Some(name) = begin.strip_prefix("<|open|>call tool=\"") {
-            return format!("call({})", name.trim_end_matches("\" index=\""));
+    fn elide_tag(tag: &mut TagFormat) {
+        if matches!(&tag.end, EndBoundary::Text(end) if end == CALL_CLOSE) {
+            *tag.content = Format::const_string("..");
+        } else {
+            elide_call_bodies(&mut tag.content);
         }
-        format!(
-            "{}{}{}",
-            markers(begin),
-            outline(&tag.content),
-            markers(end)
-        )
-    }
-
-    fn markers(text: &str) -> String {
-        text.replace(OPEN, "<").replace(CLOSE, "</").replace("<|sep|>", ">")
     }
 
     #[test]
@@ -218,25 +195,54 @@ mod tests {
             KimiK3Mode::Reasoning,
             ToolChoice::auto(),
             true,
-            expect![
-                "text</think> (<response>text</response> [<tools>(call(get_weather) | call(add))+</tools>] | <tools>(call(get_weather) | call(add))+</tools>) [</message>]"
-            ],
+            expect![[r#"
+                sequence
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  or
+                    sequence
+                      tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+                      optional
+                        tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                          tags_with_separator `` at_least_one
+                            tag `<|open|>call tool="get_weather" index="` `..` `<|close|>call<|sep|>`
+                            tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                    tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                      tags_with_separator `` at_least_one
+                        tag `<|open|>call tool="get_weather" index="` `..` `<|close|>call<|sep|>`
+                        tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                  optional `<|close|>message<|sep|>`
+            "#]],
         );
         check(
             KimiK3Mode::Reasoning,
             ToolChoice::required(),
             true,
-            expect![
-                "text</think> [<response>text</response>] <tools>(call(get_weather) | call(add))+</tools> [</message>]"
-            ],
+            expect![[r#"
+                sequence
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  sequence
+                    optional tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+                    tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                      tags_with_separator `` at_least_one
+                        tag `<|open|>call tool="get_weather" index="` `..` `<|close|>call<|sep|>`
+                        tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                  optional `<|close|>message<|sep|>`
+            "#]],
         );
         check(
             KimiK3Mode::Reasoning,
             ToolChoice::function("add"),
             true,
-            expect![
-                "text</think> [<response>text</response>] <tools>(call(add))</tools> [</message>]"
-            ],
+            expect![[r#"
+                sequence
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  sequence
+                    optional tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+                    tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                      tags_with_separator `` at_least_one stop_after_first
+                        tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                  optional `<|close|>message<|sep|>`
+            "#]],
         );
     }
 
@@ -246,21 +252,43 @@ mod tests {
             KimiK3Mode::Response,
             ToolChoice::auto(),
             true,
-            expect![
-                "text</response> [<tools>(call(get_weather) | call(add))+</tools>] [</message>]"
-            ],
+            expect![[r#"
+                sequence
+                  tag `` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+                  optional
+                    tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                      tags_with_separator `` at_least_one
+                        tag `<|open|>call tool="get_weather" index="` `..` `<|close|>call<|sep|>`
+                        tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                  optional `<|close|>message<|sep|>`
+            "#]],
         );
         check(
             KimiK3Mode::Response,
             ToolChoice::required(),
             true,
-            expect!["text</response> <tools>(call(get_weather) | call(add))+</tools> [</message>]"],
+            expect![[r#"
+                sequence
+                  tag `` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+                  tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                    tags_with_separator `` at_least_one
+                      tag `<|open|>call tool="get_weather" index="` `..` `<|close|>call<|sep|>`
+                      tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                  optional `<|close|>message<|sep|>`
+            "#]],
         );
         check(
             KimiK3Mode::Response,
             ToolChoice::function("add"),
             true,
-            expect!["text</response> <tools>(call(add))</tools> [</message>]"],
+            expect![[r#"
+                sequence
+                  tag `` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+                  tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                    tags_with_separator `` at_least_one stop_after_first
+                      tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                  optional `<|close|>message<|sep|>`
+            "#]],
         );
     }
 
@@ -270,9 +298,23 @@ mod tests {
             KimiK3Mode::Idle,
             ToolChoice::auto(),
             true,
-            expect![
-                "[<think>text</think>] (<response>text</response> [<tools>(call(get_weather) | call(add))+</tools>] | <tools>(call(get_weather) | call(add))+</tools>) [</message>]"
-            ],
+            expect![[r#"
+                sequence
+                  optional tag `<|open|>think<|sep|>` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  or
+                    sequence
+                      tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+                      optional
+                        tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                          tags_with_separator `` at_least_one
+                            tag `<|open|>call tool="get_weather" index="` `..` `<|close|>call<|sep|>`
+                            tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                    tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                      tags_with_separator `` at_least_one
+                        tag `<|open|>call tool="get_weather" index="` `..` `<|close|>call<|sep|>`
+                        tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                  optional `<|close|>message<|sep|>`
+            "#]],
         );
     }
 
@@ -282,9 +324,17 @@ mod tests {
             KimiK3Mode::Reasoning,
             ToolChoice::required(),
             false,
-            expect![
-                "text</think> [<response>text</response>] <tools>(call(get_weather) | call(add))</tools> [</message>]"
-            ],
+            expect![[r#"
+                sequence
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  sequence
+                    optional tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+                    tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                      tags_with_separator `` at_least_one stop_after_first
+                        tag `<|open|>call tool="get_weather" index="` `..` `<|close|>call<|sep|>`
+                        tag `<|open|>call tool="add" index="` `..` `<|close|>call<|sep|>`
+                  optional `<|close|>message<|sep|>`
+            "#]],
         );
     }
 
