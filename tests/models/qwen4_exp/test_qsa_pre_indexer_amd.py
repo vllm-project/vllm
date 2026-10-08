@@ -79,7 +79,9 @@ def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> N
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize(
+    "indexer_dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn]
+)
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [
@@ -115,7 +117,9 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     from vllm.model_executor.layers.rotary_embedding import get_rope
 
     if indexer_dtype == torch.float8_e4m3fn:
-        pytest.skip("the AMD QSA indexer cache is bf16-only")
+        pytest.skip("the AMD QSA indexer cache has no fp8 path")
+    # The model dtype; the indexer caches follow it.
+    dtype = indexer_dtype
 
     # The FP8 comparison below is a one-ulp bound on data this test generates,
     # so an unseeded run decides for itself whether it reproduces a rounding
@@ -136,7 +140,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
             head_size=256,
             max_position=32768,
             rope_parameters=rope_params,
-            dtype=torch.bfloat16,
+            dtype=dtype,
         )
 
     token_to_req = torch.cat(
@@ -224,7 +228,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     fused_raw_storage = torch.zeros(
         num_raw_blocks,
         raw_page_elements + 16,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         device=device,
     )
     fused_raw = torch.as_strided(
@@ -237,7 +241,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
         for position in range(history_end - history_len, history_end):
             block = int(raw_block_table[request, 0])
             row = fused_raw[block, position % state_size, 0]
-            row[:D] = torch.randn(D, dtype=torch.bfloat16, device=device)
+            row[:D] = torch.randn(D, dtype=dtype, device=device)
             if cache_rope_positions:
                 row[ROPE_POS_OFFSET:].view(torch.int64).copy_(
                     torch.tensor(
@@ -261,11 +265,9 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     )
     unfused_compressed = fused_compressed.clone()
 
-    projected_qk = torch.randn(
-        num_tokens, (HQ + 1) * D, dtype=torch.bfloat16, device=device
-    )
-    q_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
-    k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
+    projected_qk = torch.randn(num_tokens, (HQ + 1) * D, dtype=dtype, device=device)
+    q_weight = torch.randn(D, dtype=dtype, device=device) * 0.2
+    k_weight = torch.randn(D, dtype=dtype, device=device) * 0.2
 
     fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
     qsa_pre_indexer(
@@ -339,6 +341,12 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     if indexer_dtype == torch.float8_e4m3fn:
         assert_fp8_within_one_ulp(fused_compressed, unfused_compressed)
     else:
+        # fp16 keeps three more mantissa bits than bf16, so a pooled row
+        # rounded through bf16 would not pass at fp16 tolerance.
+        tol = 2e-3 if dtype == torch.float16 else None
         torch.testing.assert_close(
-            fused_compressed, unfused_compressed, rtol=RTOL, atol=ATOL
+            fused_compressed,
+            unfused_compressed,
+            rtol=tol or RTOL,
+            atol=tol or ATOL,
         )
