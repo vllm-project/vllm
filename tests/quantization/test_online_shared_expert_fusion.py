@@ -572,3 +572,66 @@ def test_online_quantization(
             f"mlp.{shared_expert_name}.gate_up_proj: 1 "
             f"(from targets: {target_pattern}, mxfp4)"
         ]
+
+
+def test_online_gate_up_proj_target_disables_fse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dist_init,
+    workspace_init,
+) -> None:
+    """A partial shared-expert target quantizes while disabling FSE."""
+    architecture = "DeepseekForCausalLM"
+    target_pattern = "*shared_experts.gate_up_proj*"
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    _write_minimal_moe_config(tmp_path, architecture)
+
+    logged_messages: list[str] = []
+    logged_warnings: list[str] = []
+
+    def record_info(message: str, *args: object, **_kwargs: object) -> None:
+        if "Quantizing " in message and "of types" in message:
+            logged_messages.append(message % args)
+
+    def record_warning(message: str, *args: object, **_kwargs: object) -> None:
+        logged_warnings.append(message % args)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.base_loader.logger.info", record_info
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.utils.logger.warning", record_warning
+    )
+
+    model, _ = load_model_without_vllm_runner(
+        str(tmp_path),
+        dtype="bfloat16",
+        quantization="quark",
+        model_config_kwargs={
+            "quantization_config": resolve_quantization_config(
+                "quark", {"targets": {target_pattern: "mxfp4"}}
+            )
+        },
+        model_loader_cls=DummyModelLoader,
+    )
+
+    moe = next(
+        module
+        for module in model.modules()
+        if hasattr(module, "is_fused_shared_expert_enabled")
+        and hasattr(module, "shared_experts")
+    )
+    assert not moe.is_fused_shared_expert_enabled
+    assert moe.shared_experts is not None
+    assert logged_messages == [
+        "Quantizing 1 layers of types: "
+        "mlp.shared_experts.gate_up_proj: 1 "
+        f"(from targets: {target_pattern}, mxfp4)"
+    ]
+    assert logged_warnings == [
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but cannot be "
+        "enabled - skipping for this layer: online quantization targets only "
+        "part of the shared expert at model.layers.0.mlp.shared_experts."
+    ]
