@@ -53,6 +53,24 @@ message GenerateRequest {
 
   // Loaded LoRA name; empty selects the base model.
   string lora_name = 15;
+
+  // Apply the engine's configured watermark. Defaults to true when omitted.
+  optional bool watermarking = 16;
+
+  KVHintsEnvelope kv_hints = 17;
+}
+
+message KVHintsEnvelope {
+  string protocol_version = 1;
+  string message_id = 2;
+  repeated KVHintAction actions = 3;
+}
+
+message KVHintAction {
+  string action_id = 1;
+  string action_type = 2;
+  string action_version = 3;
+  google.protobuf.Struct payload = 4;
 }
 
 message RandomSampling {
@@ -84,6 +102,9 @@ message DecodingParameters {
     bool json_object = 10;
     string structural_tag = 11;
   }
+
+  // Token sequences that must not be generated. Each sequence must be nonempty.
+  repeated TokenIds bad_words_token_ids = 12;
 }
 
 message StoppingCriteria {
@@ -157,6 +178,8 @@ message SequenceOutput {
 
   // Only present in final output for this sequence
   optional FinishInfo finish_info = 8;
+  // Only present in final output when sampling-mask capture is enabled.
+  repeated TokenIds sampling_mask = 10;
 }
 
 // Prompt info, returned in the first response
@@ -190,6 +213,7 @@ message FinishInfo {
   google.protobuf.Struct kv_transfer_params = 6;
   //uint64 seed = 7;
   google.protobuf.Struct ec_transfer_params = 8;
+  optional uint32 num_cached_tokens = 9;
 }
 
 // Info for candidate tokens other than the input/sampled
@@ -228,7 +252,20 @@ message MediaItem {
     string url = 2;       // http:// or https://
     string data_uri = 3;  // data:
     bytes raw_bytes = 4;
+    PreprocessedMediaFeatures features = 7;
   }
   string mime_type = 5;
   string uuid = 6;
+}
+
+// Engine-ready multimodal features produced by a version-compatible frontend.
+// `kwargs` is the MessagePack wire representation of one MmKwargsItem.
+message PreprocessedMediaFeatures {
+  // Required inline payload. Cache-only references are not accepted.
+  optional bytes kwargs = 1;
+  string identifier = 2;
+  uint64 offset = 3;
+  uint64 length = 4;
+  optional string mm_hash = 5;
+  repeated bool is_embed = 6;
 }

@@ -2,8 +2,14 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::format::Format;
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
+use crate::output_grammar::{self, OutputGrammarContext};
+
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
+    Result,
+};
 
 /// Reasoning parser for DeepSeek R1 style outputs.
 pub struct DeepSeekR1ReasoningParser {
@@ -11,11 +17,12 @@ pub struct DeepSeekR1ReasoningParser {
 }
 
 impl DeepSeekR1ReasoningParser {
-    /// Create a DeepSeek R1 parser backed by the shared delimited state
-    /// machine.
+    /// Create a DeepSeek R1 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>")?,
+            inner: DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+                .with_after_start("\n")
+                .build()?,
         })
     }
 }
@@ -29,8 +36,15 @@ impl ReasoningParser for DeepSeekR1ReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
-        Ok(())
+        self.inner.initialize(prompt_token_ids)
+    }
+
+    fn wrap_visible_format(
+        &self,
+        _ctx: &OutputGrammarContext<'_>,
+        visible: &Format,
+    ) -> output_grammar::Result<Option<Format>> {
+        Ok(Some(self.inner.wrap_visible_format(visible)))
     }
 
     fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {

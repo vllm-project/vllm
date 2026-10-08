@@ -2,14 +2,18 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::format::Format;
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
+use crate::output_grammar::{self, OutputGrammarContext};
+
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
+    Result,
+};
 
 /// Reasoning parser for the Qwen3/Qwen3.5 family.
 ///
-/// This parser uses standard `<think>...</think>` delimiters and defaults to
-/// waiting for an explicit start token when prompt initialization finds no
-/// reasoning boundary.
+/// This parser uses standard `<think>...</think>` delimiters.
 pub struct Qwen3ReasoningParser {
     inner: DelimitedReasoningParser,
 }
@@ -18,7 +22,11 @@ impl Qwen3ReasoningParser {
     /// Create a Qwen3 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>")?,
+            inner: DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+                .with_after_start("\n")
+                .with_before_end("\n")
+                .with_after_end("\n\n")
+                .build()?,
         })
     }
 }
@@ -32,8 +40,15 @@ impl ReasoningParser for Qwen3ReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
-        Ok(())
+        self.inner.initialize(prompt_token_ids)
+    }
+
+    fn wrap_visible_format(
+        &self,
+        _ctx: &OutputGrammarContext<'_>,
+        visible: &Format,
+    ) -> output_grammar::Result<Option<Format>> {
+        Ok(Some(self.inner.wrap_visible_format(visible)))
     }
 
     fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {

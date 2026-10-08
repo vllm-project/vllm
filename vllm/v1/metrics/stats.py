@@ -8,8 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.logger import init_logger
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
@@ -34,9 +38,10 @@ class BaseCacheStats:
 
 class CachingMetrics:
     """Metrics for caching with a hit rate of the most recent N requests.
+
     Args:
-        interval: The number of the most recent requests to aggregate.
-            Defaults to 1000.
+        max_recent_requests: The number of the most recent requests to aggregate.
+
     """
 
     def __init__(self, max_recent_requests: int = 1000) -> None:
@@ -62,6 +67,7 @@ class CachingMetrics:
 
         Args:
             stats: The prefix cache stats.
+
         """
         # reset_prefix_cache was invoked before the current update.
         # Reset the metrics before aggregating the current stats.
@@ -113,8 +119,7 @@ class CachingMetrics:
 
 @dataclass
 class PrefixCacheStats(BaseCacheStats):
-    """
-    Stores prefix cache hit statistics.
+    """Stores prefix cache hit statistics.
     - `reset`: Whether `reset_prefix_cache` was invoked.
     - `queries`: Refers to the number of tokens that were queried.
     """
@@ -127,25 +132,47 @@ class PrefixCacheStats(BaseCacheStats):
 
     preempted_hits: int = 0
     """The `hits` number for preempted requests."""
+    hits_by_source: dict[CacheHitSource, int] = field(default_factory=dict)
+    """`hits` split by the cache tier that supplied them (connector stats only)."""
 
-    def record(self, num_tokens: int, num_hits: int, preempted: bool) -> None:
+    def record(
+        self,
+        num_tokens: int,
+        num_hits: int,
+        preempted: bool,
+        hits_by_source: dict[CacheHitSource, int] | None = None,
+    ) -> None:
         """Aggregate request information into the stats."""
         if preempted:
             # Previously preempted request
             self.preempted_requests += 1
             self.preempted_queries += num_tokens
             self.preempted_hits += num_hits
-        else:
-            # New request
-            self.requests += 1
-            self.queries += num_tokens
-            self.hits += num_hits
+            return
+        # New request
+        self.requests += 1
+        self.queries += num_tokens
+        self.hits += num_hits
+        if hits_by_source is None:
+            return
+        if sum(hits_by_source.values()) != num_hits:
+            logger.warning_once(
+                "Connector attributed %s for %d cached tokens; reporting them as %s.",
+                str(hits_by_source),
+                num_hits,
+                CacheHitSource.EXTERNAL_UNSPECIFIED.value,
+            )
+            hits_by_source = {CacheHitSource.EXTERNAL_UNSPECIFIED: num_hits}
+        for source, num_source_hits in hits_by_source.items():
+            if num_source_hits:
+                self.hits_by_source[source] = (
+                    self.hits_by_source.get(source, 0) + num_source_hits
+                )
 
 
 @dataclass
 class MultiModalCacheStats(BaseCacheStats):
-    """
-    Stores multi-modal cache hit statistics.
+    """Stores multi-modal cache hit statistics.
     - `reset`: Whether `reset_mm_cache` was invoked.
     - `queries`: Refers to the number of multi-modal data items
       that were queried.
@@ -182,14 +209,27 @@ class SchedulerIterationDetails:
     is_dummy: bool = False
 
 
+KV_FETCH_WAITING_TO_START = "waiting_to_start"
+KV_FETCH_IN_PROGRESS = "in_progress"
+KV_FETCH_COMPLETED_WAITING = "completed_waiting"
+KV_FETCH_STAGES = (
+    KV_FETCH_WAITING_TO_START,
+    KV_FETCH_IN_PROGRESS,
+    KV_FETCH_COMPLETED_WAITING,
+)
+
+
 @dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
     num_running_reqs: int = 0
 
-    num_waiting_reqs: int = 0  # length of the "waiting" request queue
-    num_skipped_waiting_reqs: int = 0  # length of the "skipped waiting" queue
+    num_waiting_reqs: int = 0  # waiting requests not deferred
+    # waiting requests deferred by transient constraints or a blocked status
+    num_skipped_waiting_reqs: int = 0
+
+    num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
@@ -205,6 +245,7 @@ class SchedulerStats:
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
+    ec_connector_stats: dict[str, Any] | None = None
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
