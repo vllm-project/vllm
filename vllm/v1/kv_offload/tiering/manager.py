@@ -412,12 +412,23 @@ class TieringOffloadingManager(OffloadingManager):
     ) -> None:
         transfer_job = job_metadata.transfer_job
 
+        def _maybe_update_load_sources(failed_keys: set[OffloadKey]):
+            load_sources = self._request_load_sources.get(
+                transfer_job.req_context.req_id
+            )
+            if load_sources is not None:
+                source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
+                for key in failed_keys:
+                    if load_sources.get(key) == source:
+                        del load_sources[key]
+
         # Update promoting_keys
         self._promoting_keys.difference_update(transfer_job._keys)
 
         if isinstance(transfer_job, LazyTransferJob) and not transfer_job.lazy_success:
             # promotion failed. lets not doom the request to retry cycle.
             self._promotion_failed_requests.add(transfer_job.req_context.req_id)
+            _maybe_update_load_sources(set(transfer_job._keys))
             return
 
         successful_keys = completed_job.successful_keys
@@ -437,12 +448,7 @@ class TieringOffloadingManager(OffloadingManager):
             successful_keys = ()
             failed_keys = transfer_job.keys
 
-        load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
-        if load_sources is not None:
-            source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
-            for key in failed_keys:
-                if load_sources.get(key) == source:
-                    del load_sources[key]
+        _maybe_update_load_sources(set(failed_keys))
 
         if successful_keys:
             self.primary_tier.complete_write(
@@ -647,11 +653,6 @@ class TieringOffloadingManager(OffloadingManager):
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
-        # TODO(varun) : Verify if this update is thread safe !
-        load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
-        source = self.secondary_tiers[tier_idx].cache_hit_source
-        for promoted_key in primary_write_result.keys_to_store:
-            load_sources[promoted_key] = source
 
         if self.secondary_tiers[tier_idx].supports_lazy_promotion_allocation():
             self._metrics.on_promotion_chunk_count(tier_idx, len(store_spec.chunk_ids))
@@ -685,6 +686,10 @@ class TieringOffloadingManager(OffloadingManager):
 
         if key in self._promoting_keys:
             return True
+
+        # Record load_sources
+        load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
+        load_sources[key] = self.secondary_tiers[tier_idx].cache_hit_source
 
         is_lazy_cpu_alloc = self.secondary_tiers[
             tier_idx
