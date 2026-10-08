@@ -1093,6 +1093,8 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
+    # Stop probes after measuring the duration, so the final probe interval
+    # is not counted toward the main workload's throughput.
     if probe_task is not None:
         probe_stop.set()
         await probe_task
