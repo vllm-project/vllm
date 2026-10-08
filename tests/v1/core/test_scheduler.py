@@ -8753,8 +8753,12 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
         {request.request_id: {1: None}} if use_v2_model_runner else {}
     )
     assert request.mm_features[0].data is handle
-def test_nan_fault_tolerance_aborts_request():
+
+
+def test_nan_fault_tolerance_aborts_request(monkeypatch):
     """NaN fault tolerance aborts requests with NaN logits."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     scheduler = create_scheduler(enable_nan_fault_tolerance=True)
 
     requests = create_requests(num_requests=2)
@@ -8815,8 +8819,10 @@ def test_nan_fault_tolerance_disabled_does_not_abort():
     assert requests[1].num_nans_in_logits == 0
 
 
-def test_nan_fault_tolerance_chunked_prefill():
+def test_nan_fault_tolerance_chunked_prefill(monkeypatch):
     """NaN abort fires during chunked prefill intermediate chunks."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     scheduler = create_scheduler(
         max_num_batched_tokens=15,
         max_num_seqs=15,
