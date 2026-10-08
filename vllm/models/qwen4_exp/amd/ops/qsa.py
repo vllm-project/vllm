@@ -65,6 +65,10 @@ def _qsa_mqa_paged_kernel(
     )
     if tl.program_id(1) == 0:
         tl.store(visible_blocks_ptr + row, visible)
+    # The grid spans the whole page table; top-k reads only the first
+    # `visible` columns of each row, so blocks past them do nothing.
+    if tl.program_id(1) * BLOCK_N >= visible:
+        return
     logical_page = columns // PAGE_SIZE
     page_offset = columns % PAGE_SIZE
     valid = (
