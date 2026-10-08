@@ -30,7 +30,6 @@ from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 
 MODEL = "Qwen/Qwen3.5-0.8B-Base"
-PROMPT_TOKEN_IDS = [42] * 48
 FORCED_TOKEN_ID = 42
 MAX_TOKENS = 8
 
@@ -109,7 +108,12 @@ def _run_abort_cache_recovery(
         ignore_eos=True,
         allowed_token_ids=[FORCED_TOKEN_ID],
     )
-    prompt = TokensPrompt(prompt_token_ids=PROMPT_TOKEN_IDS)
+    # CUDA may increase the block size to fit the GDN state. Include at least
+    # one full block plus a token that must be recomputed on a cache hit.
+    block_size = runner.llm.llm_engine.vllm_config.cache_config.block_size
+    prompt = TokensPrompt(
+        prompt_token_ids=[FORCED_TOKEN_ID] * max(256, block_size + 16)
+    )
 
     corrupted_before = _metric_value(runner, "vllm:corrupted_requests")
 
@@ -164,9 +168,9 @@ def test_nan_abort_cache_recovery(
     with VllmRunner(
         MODEL,
         dtype="bfloat16",
-        max_model_len=128,
+        max_model_len=1024,
         max_num_seqs=2,
-        max_num_batched_tokens=16,
+        max_num_batched_tokens=128,
         num_gpu_blocks_override=32,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
@@ -207,9 +211,9 @@ def test_async_cudagraph_speculative_nan_abort_cache_recovery(
     with VllmRunner(
         MODEL,
         dtype="bfloat16",
-        max_model_len=128,
+        max_model_len=1024,
         max_num_seqs=2,
-        max_num_batched_tokens=16,
+        max_num_batched_tokens=128,
         num_gpu_blocks_override=32,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
