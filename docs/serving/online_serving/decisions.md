@@ -138,3 +138,27 @@ Implementation validation is in progress. CPU tests cover schema, ordered media
 at the renderer boundary, fixed Winnow image formatting and text regressions.
 These tests do not establish real image accuracy or quantized vision support;
 actual model and precision validation must accompany any support claim.
+
+### Image compatibility checks
+
+The image API was exercised on native BF16 Winnow-derived Gemma4 and Qwen3.5
+conditional-generation exports with their frozen original vision weights. Each
+passed five requests covering predicate, choice and score questions, changed
+image content, swapped two-image order, and a repeated image after other inputs.
+Explicit CPU offload was used on a 12GB RTX4070; these are functional checks,
+not resident throughput or visual-quality benchmarks. Qwen used the generic
+chat read strategy, so this does not measure the trained plain decision prompt.
+
+With a compatible vision server already running, reproduce the generated-color
+checks using:
+
+```bash
+.venv/bin/python benchmarks/decision_models/check_images.py --model MODEL --output /tmp/image-check
+```
+
+The benchmark requires correct red/blue classification for its simple fixtures
+and repeated probabilities within 1e-6. It does not establish broad vision
+accuracy or image-specific calibration.
+
+Compact runtime evidence is in
+`benchmarks/decision_models/vision-verification.json`.
