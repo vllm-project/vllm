@@ -453,8 +453,7 @@ class DeepseekV41ModelState(DefaultModelState):
         layers.replay_batch = None
         force_replay_batch = capture_desc is not None or (
             cudagraph_mode == CUDAGraphMode.PIECEWISE
-            and layers.trim_threshold is not None
-            and input_batch.num_tokens_after_padding >= layers.trim_threshold
+            and layers.graph_replays(input_batch.num_tokens_after_padding)
         )
         if cudagraph_mode != CUDAGraphMode.NONE and not force_replay_batch:
             return

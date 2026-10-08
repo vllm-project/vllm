@@ -77,16 +77,19 @@ class DecoderReplayLayers:
     def replays(self) -> bool:
         """Whether this forward runs the replay layers on a replay batch. In a
         PIECEWISE graph that is fixed when the graph is captured, so it follows
-        the graph's size, as the model state's replay batch does at runtime; the
-        batch itself is set only then. Otherwise a replay batch is set or not."""
+        the graph's size (``graph_replays``); the batch itself is set only at
+        runtime. Otherwise a replay batch is set or not."""
         if in_piecewise_cudagraph():
             batch_descriptor = get_forward_context().batch_descriptor
             assert batch_descriptor is not None
-            return (
-                self.trim_threshold is not None
-                and batch_descriptor.num_tokens >= self.trim_threshold
-            )
+            return self.graph_replays(batch_descriptor.num_tokens)
         return self.replay_batch is not None
+
+    def graph_replays(self, num_tokens: int) -> bool:
+        """Whether a PIECEWISE model graph of ``num_tokens`` padded tokens breaks
+        out to the replay batch: the one policy its capture and the model state's
+        runtime replay batch follow."""
+        return self.trim_threshold is not None and num_tokens >= self.trim_threshold
 
     @eager_break_during_capture
     def _run_in_graph_break(

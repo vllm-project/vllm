@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
+from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -59,13 +60,7 @@ def state(monkeypatch):
     cfg.parallel_config.data_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(
-        window=WINDOW,
-        replay_batch=None,
-        metadata_prefixes=set(),
-        first_swa_prefix="swa_first",
-        trim_threshold=None,
-    )
+    layers = DecoderReplayLayers(WINDOW, MagicMock(), set(), "swa_first")
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
 
