@@ -159,17 +159,19 @@ class OnlineDerenderer:
             if has_parser and chat_request is not None
             else {}
         )
+        # Like the coupled chat endpoint, hide per-token metadata when a
+        # parser is configured and reasoning is hidden: decoded logprob
+        # tokens would otherwise leak the reasoning text.
+        hide_metadata = (
+            has_parser
+            and chat_request is not None
+            and not chat_request.include_reasoning
+        )
 
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
 
-            # Like the coupled chat endpoint, hide per-token metadata when a
-            # parser is configured and reasoning is hidden: decoded logprob
-            # tokens would otherwise leak the reasoning text.
-            hide_metadata = has_parser and not getattr(
-                chat_request, "include_reasoning", True
-            )
             resolved_logprobs = (
                 _resolve_logprobs(choice.logprobs, tokenizer)
                 if choice.logprobs is not None and not hide_metadata
@@ -534,7 +536,7 @@ class OnlineDerenderer:
         logprobs are dropped on every chunk, again like the coupled endpoint.
         """
         tokenizer = self.renderer.get_tokenizer()
-        hide_metadata = not getattr(chat_request, "include_reasoning", True)
+        hide_metadata = not chat_request.include_reasoning
 
         parser = parser_cls(
             tokenizer,
