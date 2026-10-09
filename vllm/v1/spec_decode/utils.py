@@ -224,6 +224,13 @@ def eagle_prepare_inputs_padded_kernel(
     q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + req_idx + 1) - 1
 
     index_to_sample = q_last_tok_idx - num_rejected_tokens
+    # The query may carry fewer rows than num_rejected_tokens assumes (e.g.
+    # with PP > 1 the scheduler can schedule only the draft tokens, without
+    # the bonus-token row). Clamp so the index stays within this request's
+    # own rows instead of underflowing into the previous request.
+    index_to_sample = tl.maximum(
+        index_to_sample, tl.load(query_start_loc_gpu_ptr + req_idx)
+    )
     tl.store(token_indices_to_sample_ptr + req_idx, index_to_sample)
     tl.store(num_rejected_tokens_gpu_ptr + req_idx, num_rejected_tokens)
 

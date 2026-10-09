@@ -30,6 +30,11 @@ void eagle_prepare_inputs_padded_kernel_impl(
 
     int32_t q_last_tok_idx = query_loc_ptr[req_idx + 1] - 1;
     int32_t index_to_sample = q_last_tok_idx - num_rejected;
+    // The query may carry fewer rows than num_rejected assumes (e.g. with
+    // PP > 1 the scheduler can schedule only the draft tokens, without the
+    // bonus-token row). Clamp so the index stays within this request's own
+    // rows instead of underflowing into the previous request.
+    index_to_sample = std::max(index_to_sample, query_loc_ptr[req_idx]);
 
     indices_out_ptr[req_idx] = index_to_sample;
     rejected_out_ptr[req_idx] = num_rejected;
