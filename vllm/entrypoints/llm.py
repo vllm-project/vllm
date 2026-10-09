@@ -3,13 +3,12 @@
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import overload
 
 from vllm.config import (
     AttentionConfig,
@@ -34,6 +33,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
+from vllm.entrypoints.common.offline import _O, _R, OfflineInferenceMixin
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.rl.offline import RLOfflineMixin
@@ -53,7 +53,6 @@ from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from ..renderers import ChatParams
-from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
