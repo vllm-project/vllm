@@ -703,6 +703,14 @@ def sparse_attn_indexer(
                 padded_q_scale = pack_seq_triton(
                     q_scale[:num_decode_tokens], decode_lens, pad_value=0
                 )
+            elif not use_deep_gemm:
+                # Pack FP8 storage bytes; SM8x cannot compile FP8 pointer types.
+                padded_q_quant_decode_tokens = pack_seq_triton(
+                    q_quant[:num_decode_tokens].view(torch.uint8),
+                    decode_lens,
+                    pad_value=0,
+                ).view(q_quant.dtype)
+                padded_q_scale = None
             else:
                 padded_q_quant_decode_tokens = pack_seq_triton(
                     q_quant[:num_decode_tokens], decode_lens
@@ -952,10 +960,11 @@ class SparseAttnIndexer(CustomOp):
                 _UNPACK_SEQ_TRITON_KERNEL,
             )
 
-            pack_dtype = torch.uint8 if use_fp4_cache else current_platform.fp8_dtype()
+            pack_bytes = use_fp4_cache or not is_deep_gemm_supported()
+            pack_dtype = torch.uint8 if pack_bytes else current_platform.fp8_dtype()
             _PACK_SEQ_TRITON_KERNEL.register_warmup(
                 dtype=pack_dtype,
-                pad_value=0 if use_fp4_cache else -float("inf"),
+                pad_value=0 if pack_bytes else -float("inf"),
             )
             _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
 
