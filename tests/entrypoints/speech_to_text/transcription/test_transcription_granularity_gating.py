@@ -3,11 +3,11 @@
 """``timestamp_granularities`` decides which machinery a request pays for.
 
 A ``verbose_json`` request that only asks for ``word`` needs none of the
-segment-level work: no segment cutting and no ``<|notimestamps|>`` ->
-``<|0.00|>`` prompt swap (timestamp tokens are what segments are cut on; word
-onsets come from cross-attention DTW). It does need ``logprobs=1``: word
-``probability`` reads the sampled token's logprob, as segment ``avg_logprob``
-does.
+segment-level work: no logprobs (only ``avg_logprob`` reads them), no segment
+cutting, and no ``<|notimestamps|>`` -> ``<|0.00|>`` prompt swap (timestamp
+tokens are what segments are cut on; word onsets come from cross-attention DTW).
+Word ``probability`` is opt-in per request (``include_word_probabilities``) and
+then needs the sampled token's logprob only (``logprobs=0``).
 These tests pin that gating, and pin the regression it is easy to cause: a plain
 ``verbose_json`` request sends ``timestamp_granularities=[]``, not
 ``["segment"]``, so a naive ``"segment" in granularities`` check would silently
@@ -70,6 +70,7 @@ class _FakeServing:
     """
 
     _wants_word_timestamps = SpeechToTextBaseServing._wants_word_timestamps
+    _wants_word_probabilities = SpeechToTextBaseServing._wants_word_probabilities
     _needs_segments = SpeechToTextBaseServing._needs_segments
     _apply_verbose_params = SpeechToTextBaseServing._apply_verbose_params
     _parse_generation_prompt = SpeechToTextBaseServing._parse_generation_prompt
@@ -130,8 +131,8 @@ def _request(granularities: list[str] | None = None, **kwargs) -> TranscriptionR
     return TranscriptionRequest(file=_upload_file(), **kwargs)
 
 
-def _word_only() -> TranscriptionRequest:
-    return _request(response_format="verbose_json", granularities=["word"])
+def _word_only(**kwargs) -> TranscriptionRequest:
+    return _request(response_format="verbose_json", granularities=["word"], **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -201,14 +202,44 @@ def test_non_verbose_formats_need_nothing(response_format):
 # --------------------------------------------------------------------------
 
 
-def test_word_only_request_requests_logprobs_for_word_probability():
-    """Word ``probability`` reads the sampled token's logprob, so a word-only
-    request needs ``logprobs=1`` even though it skips the segment path."""
+def test_word_only_request_does_not_request_logprobs():
     serving = _FakeServing()
     params = SamplingParams()
     serving._apply_verbose_params(_word_only(), params)
-    assert params.logprobs == 1
+    assert params.logprobs is None
     assert params.extra_args == {"word_timestamps": True}
+
+
+def test_word_probabilities_request_the_sampled_token_only():
+    """``logprobs=0`` returns the sampled token's logprob; ``1`` would add a
+    top-k over the vocabulary that word probability never reads."""
+    serving = _FakeServing()
+    params = SamplingParams()
+    serving._apply_verbose_params(_word_only(include_word_probabilities=True), params)
+    assert params.logprobs == 0
+    assert params.extra_args == {"word_timestamps": True}
+
+
+def test_word_probabilities_with_segments_keep_segment_logprobs():
+    serving = _FakeServing()
+    params = SamplingParams()
+    request = _request(
+        response_format="verbose_json",
+        granularities=["word", "segment"],
+        include_word_probabilities=True,
+    )
+    serving._apply_verbose_params(request, params)
+    assert params.logprobs == 1
+
+
+def test_include_word_probabilities_alone_does_nothing():
+    """Without word timestamps there are no words to score."""
+    serving = _FakeServing()
+    params = SamplingParams()
+    request = _request(response_format="json", include_word_probabilities=True)
+    serving._apply_verbose_params(request, params)
+    assert params.logprobs is None
+    assert not (params.extra_args or {}).get("word_timestamps")
 
 
 def test_plain_verbose_json_requests_logprobs():
@@ -536,10 +567,32 @@ def test_word_only_response_carries_word_probability():
     output = _FakeOutput(token_ids=_TOKEN_IDS, logprobs=logprobs, word_align=_ONSETS)
     _, _, words = serving._collect_output_parts(
         output,
-        request=_word_only(),
+        request=_word_only(include_word_probabilities=True),
         segment_class=TranscriptionSegment,
         start_time=0.0,
         need_segments=False,
         want_words=True,
     )
     assert [round(w.probability, 6) for w in words] == [0.8, 0.8]
+
+
+@pytest.mark.parametrize("granularities", [["word"], ["word", "segment"]])
+def test_words_carry_no_probability_unless_asked(granularities):
+    """Logprobs can be present for segments; words still stay unscored, and
+    the field is left out of the response rather than sent as null."""
+    import math
+
+    serving = _FakeServing()
+    logprobs = [{t: _FakeLogprob(math.log(0.8))} for t in _TOKEN_IDS]
+    output = _FakeOutput(token_ids=_TOKEN_IDS, logprobs=logprobs, word_align=_ONSETS)
+    request = _request(response_format="verbose_json", granularities=granularities)
+    _, _, words = serving._collect_output_parts(
+        output,
+        request=request,
+        segment_class=TranscriptionSegment,
+        start_time=0.0,
+        need_segments=False,
+        want_words=True,
+    )
+    assert words and all(w.probability is None for w in words)
+    assert all("probability" not in w.model_dump() for w in words)

@@ -29,6 +29,9 @@ PIECES = [" Un", "believably", ",", " it", "'s", " Nem", "ot", "ron", "!"]
 # _group_words starts a word at each leading-space piece; punctuation pieces
 # have none, so they stay with the word before them.
 WORDS = {"Unbelievably,": [0, 1, 2], "it's": [3, 4], "Nemotron!": [5, 6, 7, 8]}
+# The tokens each word's probability averages: the trailing "," and "!" stay in
+# the text but are left out of the score. "'s" carries letters, so it counts.
+SCORED = {"Unbelievably,": [0, 1], "it's": [3, 4], "Nemotron!": [5, 6, 7]}
 # One distinct probability per text token, so a token counted in the wrong
 # word changes that word's mean.
 TEXT_PROBS = [0.91, 0.42, 0.77, 0.99, 0.63, 0.55, 0.88, 0.30, 0.12]
@@ -81,7 +84,8 @@ def test_word_probability_follows_real_bpe_word_boundaries(tokenizer, decode, fl
 
     assert [w.word for w in words] == list(WORDS)
     expected = [
-        sum(TEXT_PROBS[i] for i in members) / len(members) for members in WORDS.values()
+        sum(TEXT_PROBS[i] for i in members) / len(members)
+        for members in SCORED.values()
     ]
     assert [w.probability for w in words] == pytest.approx(expected, abs=1e-9)
 
@@ -118,6 +122,50 @@ def test_a_token_missing_from_its_position_is_skipped_not_zeroed(tokenizer, deco
             container.append({tid: Logprob(logprob=math.log(p))})
     words = _group(tokenizer, token_ids, onsets, container)
 
-    assert words[0].probability == pytest.approx((TEXT_PROBS[0] + TEXT_PROBS[2]) / 2)
+    # "believably" is missing and "," is punctuation: only " Un" is left.
+    assert words[0].probability == pytest.approx(TEXT_PROBS[0])
     assert words[1].probability is None
-    assert words[2].probability == pytest.approx(sum(TEXT_PROBS[5:9]) / 4)
+    assert words[2].probability == pytest.approx(sum(TEXT_PROBS[5:8]) / 3)
+
+
+@pytest.mark.parametrize(
+    "text, pieces, probs, expected",
+    [
+        # A hesitant ',"' does not drag down a confident word, and the leading
+        # quote is its own token with a space: also left out.
+        (
+            ' "Teeth," he',
+            [' "', "Te", "eth", ',"', " he"],
+            [0.2, 0.999, 0.999, 0.485, 0.9],
+            {'"Teeth,"': 0.999, "he": 0.9},
+        ),
+        # Internal punctuation stays in: "'t" is part of the word.
+        (
+            " I don't know...",
+            [" I", " don", "'t", " know", "..."],
+            [0.9, 0.8, 0.4, 0.7, 0.1],
+            {"I": 0.9, "don't": 0.6, "know...": 0.7},
+        ),
+        # A word that is only punctuation is still scored, on all its tokens.
+        (
+            " (well) -",
+            [" (", "well", ")", " -"],
+            [0.5, 0.9, 0.3, 0.25],
+            {"(well)": 0.9, "-": 0.25},
+        ),
+    ],
+)
+def test_edge_punctuation_is_left_out_of_the_word_probability(
+    tokenizer, text, pieces, probs, expected
+):
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    assert [tokenizer.decode([i]) for i in ids] == pieces
+    # Close the decode as a real one does: a timestamp token, then eot.
+    token_ids = ids + [
+        tokenizer.convert_tokens_to_ids("<|2.00|>"),
+        tokenizer.eos_token_id,
+    ]
+    onsets = [0.0] * PROMPT_POSITIONS + [0.2 * (k + 1) for k in range(len(token_ids))]
+    log_probs = _logprobs(token_ids, probs + [NON_TEXT_PROB, NON_TEXT_PROB], False)
+    words = _group(tokenizer, token_ids, onsets, log_probs)
+    assert {w.word: w.probability for w in words} == pytest.approx(expected)

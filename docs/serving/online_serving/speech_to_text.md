@@ -134,13 +134,33 @@ curl http://localhost:8000/v1/audio/transcriptions \
   -F response_format=verbose_json -F 'timestamp_granularities[]=word'
 ```
 
-Each word carries `start`, `end` and `probability`. `probability` is the mean
-probability of the word's tokens as sampled during decoding, a vLLM extension
-that is not part of the OpenAI schema. faster-whisper averages per word the
-same way but recomputes token probabilities in a separate alignment pass, so
-the values are not identical: mid-sentence words agree closely, while first
-words and words ending in punctuation score lower here. Producing it needs the
-sampled token's logprob, so word requests always run with `logprobs=1`.
+Each word carries `start` and `end`. Add `include_word_probabilities=true` to
+also get `probability`, a vLLM extension that is not part of the OpenAI schema
+(the field is omitted otherwise):
+
+```bash
+curl http://localhost:8000/v1/audio/transcriptions \
+  -F file=@audio.wav -F model=openai/whisper-large-v3-turbo \
+  -F response_format=verbose_json -F 'timestamp_granularities[]=word' \
+  -F include_word_probabilities=true
+```
+
+`probability` is the mean probability of the word's tokens as sampled during
+decoding, over the full vocabulary. Punctuation-only tokens at the start or end
+of a word (the `,` in `teeth,`, an opening quote) stay in the word's text but
+are left out of the mean, so an uncertain comma does not make a confidently
+recognized word look uncertain. Punctuation inside a word, like the apostrophe
+in `don't`, is kept. A word that is only punctuation is scored on all its
+tokens. The punctuation sets are faster-whisper's.
+
+The values are not faster-whisper's: it recomputes token probabilities in a
+separate alignment pass, normalized over text tokens only, while this reads the
+decode's own logprobs. Treat it as a relative confidence signal, not a
+calibrated probability.
+
+It is off by default because it costs latency: the engine has to return the
+sampled token's logprob at every decoding step (`logprobs=0`, the sampled token
+only, with no top-k). WORD_PROBABILITY_COST
 
 Onsets are recovered from the decoder's cross-attention with a dynamic time
 warping pass, the same method used by OpenAI's Whisper and WhisperX. Requests

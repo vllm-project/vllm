@@ -91,6 +91,38 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
+# Punctuation that faster-whisper merges onto the neighbouring word
+# (``prepend_punctuations`` / ``append_punctuations``, transcribe.py v1.2.1).
+# A token made only of these, at the start or end of a word, is left out of the
+# word's ``probability``: the word's text keeps it, but a hesitant comma should
+# not make a confidently recognized word look uncertain.
+_LEADING_PUNCTUATION = frozenset("\"'“¿([{-")
+_TRAILING_PUNCTUATION = frozenset("\"'.。,，!！?？:：”)]}、")
+
+
+def _is_punctuation(piece: str, marks: frozenset[str]) -> bool:
+    text = piece.strip()
+    return bool(text) and all(ch in marks for ch in text)
+
+
+def _word_probability(pieces: list[str], probs: list[float | None]) -> float | None:
+    """Mean probability of a word's tokens, leaving out punctuation-only tokens
+    at its edges (internal ones, like the apostrophe in "don't", stay in).
+
+    A word that is nothing but punctuation keeps the mean over all its tokens,
+    so it still gets a score. Tokens with no known probability are skipped;
+    ``None`` if none is known.
+    """
+    lo, hi = 0, len(pieces)
+    while lo < hi and _is_punctuation(pieces[lo], _LEADING_PUNCTUATION):
+        lo += 1
+    while hi > lo and _is_punctuation(pieces[hi - 1], _TRAILING_PUNCTUATION):
+        hi -= 1
+    core = probs[lo:hi] if hi > lo else probs
+    known = [p for p in core if p is not None]
+    return sum(known) / len(known) if known else None
+
+
 def _token_probability(
     log_probs: "FlatLogprobs | list[dict[int, Logprob]] | None",
     j: int,
@@ -445,6 +477,16 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             and getattr(self.model_cls, "supports_word_timestamp", False)
         )
 
+    def _wants_word_probabilities(self, request: SpeechToTextRequest) -> bool:
+        """Whether word timestamps should also carry ``probability``.
+
+        Opt-in per request (``include_word_probabilities``): reading the sampled
+        token's logprob is not free, so plain word-timestamp requests skip it.
+        """
+        return self._wants_word_timestamps(request) and bool(
+            getattr(request, "include_word_probabilities", False)
+        )
+
     def _needs_segments(self, request: SpeechToTextRequest) -> bool:
         """Whether this response has to carry segment-level detail.
 
@@ -471,11 +513,14 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self, request: SpeechToTextRequest, sampling_params: SamplingParams
     ) -> None:
         """Turn on only the sampling machinery this response format consumes."""
-        if self._needs_segments(request) or self._wants_word_timestamps(request):
-            # Two consumers read the sampled token's logprob: segment
-            # ``avg_logprob`` and word ``probability``. ``logprobs=1`` is the
-            # sampled token only, so this adds no top-k work.
+        if self._needs_segments(request):
+            # Segment ``avg_logprob`` reads the sampled token's logprob.
             sampling_params.logprobs = 1
+        elif self._wants_word_probabilities(request):
+            # Word ``probability`` needs only the sampled token's logprob.
+            # ``logprobs=0`` returns exactly that; ``1`` would also run a top-k
+            # over the vocabulary (``compute_topk_scores``) for nothing.
+            sampling_params.logprobs = 0
 
         if self._wants_word_timestamps(request) and not isinstance(
             sampling_params, BeamSearchParams
@@ -513,20 +558,19 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         per-position onset times computed by the worker's cross-attention DTW.
 
         With ``log_probs``, each word also carries ``probability``: the mean
-        probability of its tokens as sampled. faster-whisper averages per word
-        the same way but recomputes token probabilities in a separate alignment
-        pass, so its numbers differ: measured on large-v3-turbo, mid-sentence
-        words agree within 0.01, while first words and words ending in
-        punctuation score lower here.
+        probability of its tokens as sampled, over the full vocabulary, leaving
+        out punctuation-only tokens at the word's edges (``_word_probability``).
+        Without ``log_probs`` it is ``None``.
         """
         tok = self.tokenizer
         ts_begin = cast(int, tok.convert_tokens_to_ids("<|0.00|>"))
         specials = set(tok.all_special_ids)
         n_prompt = max(len(token_times) - len(token_ids), 0)
-        raw: list[tuple[str, float, float, list[float]]] = []
+        raw: list[tuple[str, float, float, list[str], list[float | None]]] = []
         cur: str = ""
         cur_start: float | None = None
-        cur_probs: list[float] = []
+        cur_pieces: list[str] = []
+        cur_probs: list[float | None] = []
         prev_end: float = 0.0
         for j, tid in enumerate(token_ids):
             pos = n_prompt + j
@@ -539,22 +583,21 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             s, e = float(token_times[pos]), float(token_times[pos + 1])
             if piece.startswith(" ") and cur:
                 assert cur_start is not None
-                raw.append((cur.strip(), cur_start, prev_end, cur_probs))
-                cur, cur_start, cur_probs = "", None, []
+                raw.append((cur.strip(), cur_start, prev_end, cur_pieces, cur_probs))
+                cur, cur_start, cur_pieces, cur_probs = "", None, [], []
             if cur_start is None:
                 cur_start = s
             cur += piece
             prev_end = e
-            p = _token_probability(log_probs, j, tid)
-            if p is not None:
-                cur_probs.append(p)
+            cur_pieces.append(piece)
+            cur_probs.append(_token_probability(log_probs, j, tid))
         if cur:
             assert cur_start is not None
-            raw.append((cur.strip(), cur_start, prev_end, cur_probs))
+            raw.append((cur.strip(), cur_start, prev_end, cur_pieces, cur_probs))
 
         words: list[TranscriptionWord] = []
         last = 0.0
-        for word, s, e, probs in raw:
+        for word, s, e, pieces, probs in raw:
             s = max(s, last)
             e = max(e, s)
             words.append(
@@ -562,7 +605,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     word=word,
                     start=round(start_offset + s, 2),
                     end=round(start_offset + e, 2),
-                    probability=sum(probs) / len(probs) if probs else None,
+                    probability=(
+                        None if log_probs is None else _word_probability(pieces, probs)
+                    ),
                 )
             )
             last = s
@@ -601,12 +646,22 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             text_parts = [self.model_cls.post_process_output(output.text)]
 
         if want_words:
-            words = self._collect_words(output, start_time)
+            words = self._collect_words(
+                output,
+                start_time,
+                with_probability=self._wants_word_probabilities(request),
+            )
 
         return segments, text_parts, words
 
-    def _collect_words(self, output, start_time: float) -> "list[TranscriptionWord]":
+    def _collect_words(
+        self, output, start_time: float, with_probability: bool = False
+    ) -> "list[TranscriptionWord]":
         """Group one output's onsets into words, warning when none come out.
+
+        ``with_probability`` hands the output's logprobs to the grouping. It is
+        decided by the request, not by whether logprobs exist: a request that
+        also asked for segments has them, but did not ask for word scores.
 
         ``words: null`` is indistinguishable from audio that had no speech, so
         the miss is only visible in the log. Outputs holding no word tokens are
@@ -617,7 +672,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             []
             if output.word_align is None
             else self._group_words(
-                output.token_ids, output.word_align, start_time, output.logprobs
+                output.token_ids,
+                output.word_align,
+                start_time,
+                output.logprobs if with_probability else None,
             )
         )
         num_word_tokens = self._count_word_tokens(output.token_ids)
