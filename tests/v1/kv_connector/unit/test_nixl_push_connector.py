@@ -379,6 +379,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._failed_remote_engines = set()
+        w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
@@ -1357,6 +1359,7 @@ class TestPushWriterNegative:
         assert notified == set()
         # Did not register anywhere.
         assert "never-heard-of-you" not in w._recving_transfers
+        assert w.xfer_stats.data["num_notifications_after_expiry"] == [1]
 
     def test_start_load_kv_with_empty_metadata_is_noop(self):
         """Empty metadata must not wake the writer or enqueue anything."""
