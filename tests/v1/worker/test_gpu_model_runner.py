@@ -624,6 +624,70 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
 
 
+def test_set_active_mm_loras_follows_modality_sorted_encoder_order():
+    model = Mock()
+    model.get_mm_lora_token_counts.side_effect = (
+        lambda *, modality, mm_kwargs, num_mm_embeds: (num_mm_embeds, None)
+    )
+    lora_manager = Mock()
+    lora_manager.supports_tower_connector_lora.return_value = True
+
+    encoder_cache = EncoderCache()
+    for req_id, modality, length in [("req-a", "video", 1), ("req-b", "image", 2)]:
+        encoder_cache.mm_features[req_id] = [
+            MultiModalFeatureSpec(
+                data=None,
+                modality=modality,
+                identifier=f"{req_id}-0",
+                mm_position=PlaceholderRange(offset=0, length=length),
+            )
+        ]
+    lora_state = LoraState(max_num_reqs=2)
+    lora_request = LoRARequest("vision-lora", 7, "/tmp/vision-lora")
+    lora_state.add_request("req-a", 0, lora_request)
+    lora_state.add_request("req-b", 1, None)
+
+    set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={"req-a": 0, "req-b": 1},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={"req-a": [0], "req-b": [0]},
+    )
+
+    # The image is encoded before the video, so its tokens come first.
+    _, tower_mapping = lora_manager.set_active_adapters.call_args_list[0].args
+    assert tower_mapping.index_mapping == (0, 0, 7)
+
+
+def test_batch_mm_inputs_from_scheduler_sorts_by_modality():
+    features = {
+        f"req{i}": MultiModalFeatureSpec(
+            data=Mock(),
+            modality=m,
+            identifier=f"hash{i}",
+            mm_position=PlaceholderRange(offset=i, length=1),
+        )
+        for i, m in enumerate(["video", "image", "video"])
+    }
+    runner = SimpleNamespace(
+        requests={r: SimpleNamespace(mm_features=[f]) for r, f in features.items()}
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_encoder_inputs={r: [0] for r in features}
+    )
+
+    mm_hashes, mm_kwargs, mm_lora_refs = GPUModelRunner._batch_mm_inputs_from_scheduler(
+        runner, scheduler_output
+    )
+
+    order = ["req1", "req0", "req2"]
+    assert mm_hashes == [features[r].identifier for r in order]
+    assert mm_kwargs == [(features[r].modality, features[r].data) for r in order]
+    assert mm_lora_refs == [(r, features[r].mm_position) for r in order]
+
+
 def test_update_states_new_request(model_runner, dist_init):
     req_id = "req_0"
 

@@ -2929,7 +2929,14 @@ class GPUModelRunner(
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
                 mm_lora_refs.append((req_id, mm_feature.mm_position))
 
-        return mm_hashes, mm_kwargs, mm_lora_refs
+        # Stable-sort by modality so each modality is encoded in as few batches
+        # as possible. Encoder outputs are cached by mm_hash, so order is free.
+        order = sorted(range(len(mm_kwargs)), key=lambda i: mm_kwargs[i][0])
+        return (
+            [mm_hashes[i] for i in order],
+            [mm_kwargs[i] for i in order],
+            [mm_lora_refs[i] for i in order],
+        )
 
     def _cache_encoder_output(
         self,
@@ -2990,13 +2997,6 @@ class GPUModelRunner(
             and scheduler_output.scheduled_encoder_inputs
         )
 
-        # Batch mm inputs as much as we can: if a request in the batch has
-        # multiple modalities or a different modality than the previous one,
-        # we process it separately to preserve item order.
-        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
-        # in the same batch while still being able to benefit from batching
-        # multimodal inputs. The proper solution should be reordering the
-        # encoder outputs.
         model = cast(SupportsMultiModal, self.model)
 
         if self.lora_config and self.lora_manager.supports_tower_connector_lora():

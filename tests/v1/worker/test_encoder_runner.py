@@ -78,7 +78,7 @@ def test_encoder_graph_unsupported_modality_uses_eager_output():
         "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
         return_value=[("audio", 1, {"audio_values": torch.zeros(2)})],
     ):
-        result = runner.execute_mm_encoder([])
+        result = runner.execute_mm_encoder([("audio", MagicMock())])
     assert len(result) == 1
     assert result[0] is output
     manager.execute.assert_not_called()
@@ -288,6 +288,21 @@ def test_execute_mm_encoder_caches_outputs_without_gathering():
 
     assert cache.encoder_outputs == {"hash0": embedding}
     state.encoder_runner.gather_mm_embeddings.assert_not_called()
+
+
+def test_execute_mm_encoder_sorts_by_modality():
+    """Items are encoded sorted by modality; outputs keep the input order."""
+    mm_kwargs = [("video", 0), ("image", 1), ("video", 2), ("image", 3)]
+    runner = _make_runner([], [])
+    runner.model = MagicMock()
+    runner.model.embed_multimodal.side_effect = lambda x: [torch.full((1, 1), x)]
+    with patch(
+        "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
+        side_effect=lambda items, **_: [(m, 1, {"x": x}) for m, x in items],
+    ) as group:
+        outputs = runner.execute_mm_encoder(mm_kwargs)
+    assert group.call_args.args[0] == [mm_kwargs[i] for i in (1, 3, 0, 2)]
+    assert [int(o) for o in outputs] == [0, 1, 2, 3]
 
 
 def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
