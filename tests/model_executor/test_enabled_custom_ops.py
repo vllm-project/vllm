@@ -200,31 +200,60 @@ def _topk_gating_launch(
         ),
     ],
 )
-@pytest.mark.parametrize("on_gfx950", [True, False])
+@pytest.mark.parametrize("gating_enabled", [True, False])
 def test_topk_softmax_dispatch_aiter_topk_gating(
     monkeypatch: pytest.MonkeyPatch,
     launch: dict,
     num_shared_experts: int,
     scoring_func: str,
     expect_gating: bool,
-    on_gfx950: bool,
+    gating_enabled: bool,
 ):
-    """AITER launches use topk_gating only on gfx950, and only when it supports them.
+    """AITER launches use topk_gating only where it is enabled, and only when it
+    supports them.
 
     Every other AITER launch must reach the legacy topk_softmax, so this is the
     one place the choice is made.
     """
-    monkeypatch.setattr(rocm_aiter_ops, "is_topk_gating_enabled", lambda: on_gfx950)
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_topk_gating_enabled", lambda: gating_enabled
+    )
     topk_func = dispatch_topk_softmax_func(
         True,
         **_topk_gating_launch(**launch),
         num_shared_experts=num_shared_experts,
         shared_expert_scoring_func=scoring_func,
     )
-    if expect_gating and on_gfx950:
+    if expect_gating and gating_enabled:
         assert topk_func == rocm_aiter_ops.topk_gating
     else:
         assert topk_func == rocm_aiter_ops.topk_softmax
+
+
+@pytest.mark.parametrize(
+    "arch, fused_moe_enabled, expected",
+    [
+        pytest.param("gfx942", True, True, id="gfx942"),
+        pytest.param("gfx950", True, True, id="gfx950"),
+        pytest.param("gfx90a", True, False, id="gfx90a"),
+        pytest.param("gfx942", False, False, id="gfx942-aiter-moe-off"),
+        pytest.param("gfx950", False, False, id="gfx950-aiter-moe-off"),
+    ],
+)
+def test_topk_gating_enabled_by_arch(
+    monkeypatch: pytest.MonkeyPatch,
+    arch: str,
+    fused_moe_enabled: bool,
+    expected: bool,
+):
+    """topk_gating is on for gfx942 and gfx950 with AITER MoE enabled, nowhere else."""
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_fused_moe_enabled", lambda: fused_moe_enabled
+    )
+    for name in ("gfx942", "gfx950"):
+        monkeypatch.setattr(f"vllm.platforms.rocm.on_{name}", lambda a=name: a == arch)
+    assert bool(rocm_aiter_ops.is_topk_gating_enabled()) is expected
 
 
 @pytest.mark.parametrize(
