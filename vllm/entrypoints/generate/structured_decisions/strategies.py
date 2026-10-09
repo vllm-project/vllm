@@ -23,7 +23,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 
 from .protocol import ReadPromptRequest
-from .question_types import LABELS, Question, StructuredDecisionError, label_softmax
+from .question_types import (
+    LABELS,
+    QUESTION_TYPES,
+    Question,
+    StructuredDecisionError,
+    label_softmax,
+)
 
 
 @dataclass
@@ -73,17 +79,19 @@ class ReadStrategy(ABC):
 
 
 def reply_label_ids(
-    tokenizer: TokenizerLike, prompt_ids: Sequence[int]
+    tokenizer: TokenizerLike,
+    prompt_ids: Sequence[int],
+    labels: Sequence[str] = LABELS,
 ) -> tuple[list[int], list[int]]:
-    """The prompt's ids after its last added token, and the token each of LABELS
-    adds after them as the first token of the reply. Raises ValueError if a
-    label is not one distinct token there."""
+    """The prompt's ids after its last added token, and the token each of
+    ``labels`` adds after them as the first token of the reply. Raises
+    ValueError if a label is not one distinct token there."""
     added = set(tokenizer.get_added_vocab().values())
     start = max((i + 1 for i, t in enumerate(prompt_ids) if t in added), default=0)
     tail = list(prompt_ids[start:])
     text = tokenizer.decode(tail)
     ids: list[int] = []
-    for label in LABELS:
+    for label in labels:
         extended = tokenizer.encode(text + label, add_special_tokens=False)
         if extended[:-1] != tail or extended[-1] in ids:
             raise ValueError(
@@ -116,9 +124,13 @@ class NextTokenStrategy(ReadStrategy):
         )
         if isinstance(probe, str):
             probe = tokenizer.encode(probe, add_special_tokens=False)
-        # Every prompt ends with the same generation prompt, so the labels'
-        # tokens are the same for every question.
-        self.tail, self.label_ids = reply_label_ids(tokenizer, probe)
+        # Every prompt ends with the same generation prompt, so a label's token
+        # is the same for every question.
+        self.tail, _ = reply_label_ids(tokenizer, probe, ())
+        self.label_ids: dict[str, int] = {}
+        for qtype in QUESTION_TYPES.values():
+            _, ids = reply_label_ids(tokenizer, probe, qtype.label_set)
+            self.label_ids.update(zip(qtype.label_set, ids))
 
     def limits(self) -> DecisionLimits:
         return DecisionLimits(max_questions=64, max_options=len(LABELS))
@@ -173,7 +185,7 @@ class NextTokenStrategy(ReadStrategy):
                     "these chat options end the prompt differently, so the "
                     "labels' tokens are unknown"
                 )
-            slots.append(self.label_ids[: len(q.labels)])
+            slots.append([self.label_ids[label] for label in q.labels])
             engine_inputs.append(engine_input)
 
         label_reads = await next_token_label_reads(
