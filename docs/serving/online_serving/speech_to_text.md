@@ -160,7 +160,24 @@ calibrated probability.
 
 It is off by default because it costs latency: the engine has to return the
 sampled token's logprob at every decoding step (`logprobs=0`, the sampled token
-only, with no top-k). WORD_PROBABILITY_COST
+only, with no top-k). Measured on one NVIDIA T4 (whisper-large-v3-turbo, fp16,
+`--max-num-seqs 16`, greedy), as mean latency with the flag against the same
+request without it, interleaved in paired rounds:
+
+| request | audio | concurrency | without | with | change (95% CI) |
+| --- | --- | --- | --- | --- | --- |
+| `word` | 12 LibriSpeech clips, 4-6 s | 1 | 479 ms | 488 ms | +1.9% (+1.4, +2.5) |
+| `word` | 12 LibriSpeech clips, 4-6 s | 4 | 1525 ms | 1525 ms | +0.1% (-0.2, +0.3) |
+| `word` | one 600 s window | 1 | 6.01 s | 6.04 s | +0.6% (-0.2, +1.3) |
+| `word` | one 600 s window | 4 | 17.40 s | 17.53 s | +0.7% (+0.2, +1.3) |
+| `word`, `segment` | both sets | 1 and 4 | | | -0.1% to +0.1%; every CI spans zero |
+
+Transcribed text was identical with and without the flag. A request that also
+asks for `segment` already computes the sampled-token logprob for
+`avg_logprob`, so adding the flag there costs nothing measurable. The cost is
+setup-dependent: measurements of the earlier always-on `logprobs=1` version on a shared
+H200 showed +13% at concurrency 1 and +8% at concurrency 4, which is the main
+reason it is opt-in.
 
 Onsets are recovered from the decoder's cross-attention with a dynamic time
 warping pass, the same method used by OpenAI's Whisper and WhisperX. Requests
