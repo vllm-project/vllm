@@ -492,6 +492,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sleep_snapshot_preserves_routing_load() {
+        let engine_id = EngineId::from_engine_index(0);
+        let mut registry = RequestRegistry::new(&[connected_engine(engine_id)]);
+        let stats = crate::protocol::stats::SchedulerStats {
+            num_running_reqs: 7,
+            num_waiting_reqs: 3,
+            ..Default::default()
+        };
+        assert!(registry.apply_scheduler_stats(0, &stats));
+        let before = registry.routing_per_engine[&engine_id].routing_score();
+        let snapshot = crate::protocol::stats::SchedulerStats {
+            sleep_state_only: true,
+            ..Default::default()
+        };
+        assert!(registry.apply_scheduler_stats(0, &snapshot));
+        assert_eq!(registry.routing_per_engine[&engine_id].routing_score(), before);
+        assert!(!registry.apply_scheduler_stats(1, &snapshot));
+    }
+
     fn output_with_events(
         request_id: &str,
         events: &[EngineCoreEventType],

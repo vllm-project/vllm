@@ -83,6 +83,7 @@ from vllm.v1.engine.utils import (
     get_physical_gpu_ids_for_local_dp_rank,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.executor.abstract import SLEEP_TAGS
 from vllm.v1.fault_tolerance.engine_core_sentinel import (
     FT_UTILITY_METHOD,
     EngineCoreSentinel,
@@ -1011,9 +1012,17 @@ class EngineCore:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
 
         Returns:
-            Whether all executor memory is resident again (fully awake).
+            Whether scheduling is running and all executor memory is resident.
 
         """
+        if tags is not None and (
+            not tags or not set(tags) <= SLEEP_TAGS | {"scheduling"}
+        ):
+            return (
+                not self.is_scheduler_paused()
+                and self.model_executor.all_resources_resident
+            )
+
         if tags is not None and "scheduling" in tags:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
@@ -1029,7 +1038,7 @@ class EngineCore:
         fully_awake = self.model_executor.all_resources_resident
         if fully_awake:
             self.resume_scheduler()
-        return fully_awake
+        return fully_awake and not self.is_scheduler_paused()
 
     def release_kv_cache_memory(self) -> None:
         """Discard KV cache physical memory. Requires a completed pause

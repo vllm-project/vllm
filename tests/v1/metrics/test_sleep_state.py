@@ -3,13 +3,15 @@
 
 from queue import Queue
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import msgspec
 import pytest
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.core_client import AsyncMPClient
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import PrometheusStatLogger, StatLoggerManager
@@ -24,6 +26,7 @@ class FakeExecutor:
     discard = Executor.discard
     is_sleeping = Executor.is_sleeping
     all_resources_resident = Executor.all_resources_resident
+    _check_sleep_resource_states = Executor._check_sleep_resource_states
 
     def __init__(self):
         self.sleeping_tags = set()
@@ -84,7 +87,8 @@ def test_failed_sleep_then_wake_keeps_scheduler_paused_and_metric_zero():
     with pytest.raises(RuntimeError, match="worker failed"):
         engine.sleep(1)
     assert not executor.all_resources_resident
-    assert engine.wake_up() is False
+    with pytest.raises(RuntimeError, match="unknown.*rebuild"):
+        engine.wake_up()
     engine.resume_scheduler.assert_not_called()
 
     logger, registry = make_logger()
@@ -115,6 +119,130 @@ def test_failed_rpc_is_unknown(operation):
             executor.discard(("kv_cache",))
     affected = "kv_cache" if operation == "discard" else "weights"
     assert executor.sleep_resource_states[affected] == "unknown"
+    expected = {
+        "sleep": {"weights": "unknown", "kv_cache": "unknown"},
+        "wake": {"weights": "unknown", "kv_cache": "released"},
+        "discard": {"weights": "resident", "kv_cache": "unknown"},
+    }
+    assert executor.sleep_resource_states == expected[operation]
+    assert executor.is_sleeping
+    assert executor.sleeping_tags == (
+        {"weights", "kv_cache"} if operation == "wake" else set()
+    )
+    calls = executor.collective_rpc.call_count
+    for retry in (
+        lambda: executor.sleep(1),
+        lambda: executor.wake_up(),
+        lambda: executor.wake_up(["weights"]),
+        lambda: executor.discard(("kv_cache",)),
+    ):
+        with pytest.raises(RuntimeError, match="unknown.*rebuild"):
+            retry()
+    assert executor.collective_rpc.call_count == calls
+    logger, registry = make_logger()
+    logger.record_sleep_snapshot(
+        EngineSleepState(False, **executor.sleep_resource_states), 0
+    )
+    assert registry.get_sample_value("vllm:engine_fully_awake", {"engine": "0"}) == 0
+
+
+@pytest.mark.parametrize("tags", [[], ["invalid"], ["weights", "invalid"]])
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_empty_or_invalid_wake_leaves_scheduler_and_resources_unchanged(tags, level):
+    engine = make_engine()
+    engine.pause_scheduler = Mock(
+        side_effect=lambda **kwargs: engine.scheduler.set_pause_state(
+            PauseState.PAUSED_ALL
+        )
+    )
+    engine.sleep(level)
+    before = engine.get_sleep_state()
+    engine.model_executor.collective_rpc.reset_mock()
+    assert engine.wake_up(tags) is False
+    assert engine.get_sleep_state() == before
+    engine.model_executor.collective_rpc.assert_not_called()
+
+
+def make_engine():
+    engine = object.__new__(EngineCore)
+    engine.model_executor = FakeExecutor()
+    engine.scheduler = SimpleNamespace(pause_state=PauseState.PAUSED_ALL)
+    engine.scheduler.set_pause_state = lambda state: setattr(
+        engine.scheduler, "pause_state", state
+    )
+    return engine
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_full_wake_restores_scheduling_and_resources(level):
+    engine = make_engine()
+    if level:
+        engine.model_executor.sleep(level)
+    assert engine.wake_up(None) is True
+    assert engine.get_sleep_state() == {
+        "scheduler_paused": False,
+        "weights": "resident",
+        "kv_cache": "resident",
+    }
+
+
+def test_partial_wake_resumes_only_after_remaining_kv_cache():
+    engine = make_engine()
+    engine.model_executor.sleep(1)
+    assert engine.wake_up(["weights"]) is False
+    assert engine.is_scheduler_paused()
+    assert engine.wake_up(["scheduling"]) is False
+    assert engine.is_scheduler_paused()
+    assert engine.wake_up(["kv_cache"]) is True
+    assert not engine.is_scheduler_paused()
+
+
+def test_scheduling_tag_resumes_level_zero_pause_without_memory_rpc():
+    engine = make_engine()
+    assert engine.wake_up(["scheduling"]) is True
+    engine.model_executor.collective_rpc.assert_not_called()
+
+
+def test_wake_result_checks_final_scheduler_state():
+    engine = make_engine()
+    engine.resume_scheduler = Mock()
+    assert engine.wake_up(None) is False
+    assert engine.is_scheduler_paused()
+
+
+def test_kv_only_release_preserves_weights_and_final_wake_resumes():
+    engine = make_engine()
+    engine.scheduler.has_requests = lambda: False
+    engine.batch_queue = None
+    engine._reset_caches = Mock()
+    engine.release_kv_cache_memory()
+    assert engine.get_sleep_state() == {
+        "scheduler_paused": True,
+        "weights": "resident",
+        "kv_cache": "released",
+    }
+    assert engine.wake_up(["kv_cache"]) is True
+
+
+@pytest.mark.parametrize("tags", [[], ["invalid"], ["weights", "invalid"]])
+def test_executor_noop_wake_does_not_dispatch_or_change_resources(tags):
+    executor = FakeExecutor()
+    executor.sleep(1)
+    before = executor.sleep_resource_states.copy()
+    executor.collective_rpc.reset_mock()
+    executor.wake_up(tags)
+    assert executor.sleep_resource_states == before
+    assert executor.sleeping_tags == {"weights", "kv_cache"}
+    executor.collective_rpc.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "results, expected", [([True, False], False), ([True, True], True)]
+)
+async def test_dp_wake_requires_every_engine_to_be_awake(results, expected):
+    client = SimpleNamespace(call_utility_all_async=AsyncMock(return_value=results))
+    assert await AsyncMPClient.wake_up_async(client, None) is expected
 
 
 def make_logger():

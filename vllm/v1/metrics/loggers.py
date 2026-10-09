@@ -630,7 +630,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self._sleep_resource_metric = gauge_resource_state
         self._sleep_model_name = model_name
-        self.gauge_sleep_resource_state = {}
+        self.gauge_sleep_resource_state: dict[tuple[str, str], dict[int, Gauge]] = {}
         gauge_fully_awake = self._gauge_cls(
             name="vllm:engine_fully_awake",
             documentation=(
@@ -641,7 +641,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self._fully_awake_metric = gauge_fully_awake
         self._sleep_labelvalues = per_engine_labelvalues
-        self.gauge_fully_awake = {}
+        self.gauge_fully_awake: dict[int, Gauge] = {}
         # Create new state series only after the first confirmed engine snapshot.
 
         gauge_kv_cache_usage = self._gauge_cls(

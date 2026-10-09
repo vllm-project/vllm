@@ -378,7 +378,7 @@ class Executor(ABC):
 
     @property
     def is_sleeping(self) -> bool:
-        return bool(self.sleeping_tags)
+        return not self.all_resources_resident
 
     @property
     def all_resources_resident(self) -> bool:
@@ -388,6 +388,7 @@ class Executor(ABC):
         )
 
     def sleep(self, level: int = 1):
+        self._check_sleep_resource_states()
         if self.sleeping_tags and self.sleeping_tags != SLEEP_TAGS:
             raise RuntimeError(
                 "Cannot sleep while executor resources are partially awake"
@@ -411,6 +412,12 @@ class Executor(ABC):
         )
 
     def wake_up(self, tags: list[str] | None = None):
+        if tags == []:
+            return
+        if tags is not None and not set(tags) <= SLEEP_TAGS:
+            logger.warning("Invalid wake tags: %s", tags)
+            return
+        self._check_sleep_resource_states()
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
@@ -422,7 +429,7 @@ class Executor(ABC):
                     )
                     return
         time_before_wakeup = time.perf_counter()
-        affected_tags = set(tags) if tags else set(self.sleeping_tags)
+        affected_tags = set(tags) if tags is not None else set(self.sleeping_tags)
         try:
             self.collective_rpc("wake_up", kwargs=dict(tags=tags))
         except BaseException:
@@ -437,13 +444,17 @@ class Executor(ABC):
             time_after_wakeup - time_before_wakeup,
             tags if tags is not None else self.sleeping_tags,
         )
-        if tags:
-            for tag in tags:
-                self.sleeping_tags.remove(tag)
-        else:
-            self.sleeping_tags.clear()
+        self.sleeping_tags.difference_update(affected_tags)
+
+    def _check_sleep_resource_states(self) -> None:
+        if "unknown" in self.sleep_resource_states.values():
+            raise RuntimeError(
+                "Executor resource state is unknown after a failed memory RPC; "
+                "rebuild the engine before further sleep, wake or discard operations"
+            )
 
     def discard(self, tags: tuple[str, ...]) -> None:
+        self._check_sleep_resource_states()
         tags_to_discard = set(tags) - self.sleeping_tags
         if not tags_to_discard:
             logger.warning("Tags %s are already sleeping.", tags)
@@ -460,8 +471,7 @@ class Executor(ABC):
                 self.sleep_resource_states[tag] = (
                     "discarded" if tag == "weights" else "released"
                 )
-        finally:
-            self.sleeping_tags |= tags_to_discard
+        self.sleeping_tags |= tags_to_discard
         time_after_discard = time.perf_counter()
         logger.info(
             "It took %.6f seconds to discard tags %s.",

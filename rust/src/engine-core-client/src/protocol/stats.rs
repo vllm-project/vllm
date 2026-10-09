@@ -359,6 +359,25 @@ mod sleep_state_tests {
     use super::{EngineSleepState, SchedulerStats};
 
     #[test]
+    fn fully_awake_requires_running_scheduler_and_resident_resources() {
+        for paused in [false, true] {
+            for weights in ["resident", "offloaded", "discarded", "unknown"] {
+                for kv_cache in ["resident", "released", "unknown"] {
+                    let state = EngineSleepState {
+                        scheduler_paused: paused,
+                        weights: weights.into(),
+                        kv_cache: kv_cache.into(),
+                    };
+                    assert_eq!(
+                        state.fully_awake(),
+                        !paused && weights == "resident" && kv_cache == "resident"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn older_scheduler_stats_have_no_sleep_snapshot() {
         let mut value = serde_json::to_value(SchedulerStats::default()).unwrap();
         value.as_object_mut().unwrap().remove("sleep_state");

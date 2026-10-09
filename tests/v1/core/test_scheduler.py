@@ -1744,7 +1744,7 @@ def test_kv_cache_release_after_keep_pause_preserves_requests():
 
     core = object.__new__(EngineCore)
     core.scheduler = scheduler
-    core.model_executor = Mock(is_sleeping=False)
+    core.model_executor = Mock(all_resources_resident=True)
     core.mm_receiver_cache = None
     core.batch_queue = None
 
@@ -1786,6 +1786,10 @@ def test_kv_cache_release_rejects_nonresident_memory(sleeping_tags):
     core._reset_caches = Mock()
     core.model_executor = object.__new__(UniProcExecutor)
     core.model_executor.sleeping_tags = sleeping_tags.copy()
+    core.model_executor.sleep_resource_states = {
+        "weights": "offloaded" if "weights" in sleeping_tags else "resident",
+        "kv_cache": "released" if "kv_cache" in sleeping_tags else "resident",
+    }
     core.model_executor.collective_rpc = Mock()
 
     with pytest.raises(

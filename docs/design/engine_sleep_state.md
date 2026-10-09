@@ -29,11 +29,22 @@ A failed collective memory RPC may leave workers in different states. Its
 potentially affected resources become `unknown`, rather than claiming a
 successful offload, release, or wake. State changes only after executor operations;
 invalid or redundant wake requests do not invent residency changes. Scheduler
-state is read from the actual scheduler pause state. A wake after a failed sleep
-RPC does not resume scheduling while either resource remains `unknown`; the wake
-API returns `false` and `engine_fully_awake` remains zero. A new sleep request
+state is read from the actual scheduler pause state. After a failed memory RPC,
+executor sleep, wake and discard raise an explicit error while either resource
+is `unknown`, before dispatching another memory RPC. The engine must be rebuilt:
+there is no reliable worker-state reconciliation in this protocol. The original
+`sleeping_tags` remain the last successfully completed allocation operations;
+they cannot certify residency after a failed RPC. `is_sleeping` also accounts for
+unknown resources, and `engine_fully_awake` remains zero. A new sleep request
 while only some resources are awake is rejected until that partial transition
 has a defined executor contract.
+
+`wake_up(None)` restores all sleeping resources. An empty tag list or a list
+containing an invalid tag is a no-op, including for the scheduler. The
+`scheduling` tag explicitly requests scheduler resume without waking memory;
+resume still requires both memory resources to be confirmed resident. Mixed
+valid tags wake the named memory resources and apply the same resume condition.
+The bool result also checks the final scheduler pause state.
 
 | Operation | Scheduler | Weights | KV cache |
 | --- | --- | --- | --- |
