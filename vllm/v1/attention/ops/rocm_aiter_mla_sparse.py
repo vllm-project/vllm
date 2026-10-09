@@ -714,6 +714,14 @@ def paged_mqa_logits_module():
     return None
 
 
+def _per_sequence_context_lens(context_lens: torch.Tensor) -> torch.Tensor:
+    # AITER takes one length per sequence: the last column of a (B, next_n) table.
+    # TODO: remove once AITER accepts (B, next_n) context_lens (ROCm/aiter#6153).
+    if context_lens.dim() == 2 and context_lens.shape[1] > 1:
+        return context_lens[:, -1].contiguous()
+    return context_lens
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -733,8 +741,8 @@ def rocm_fp8_paged_mqa_logits(
         kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
             [num_blocks, block_size, 1, D+4], dtype `torch.uint8`.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
-        context_lens: Tensor of shape [B], dtype int32; effective context length
-            for each batch element.
+        context_lens: Tensor of shape [B] or [B, next_n], dtype int32; effective
+            context length for each batch element, or for each of its Q rows.
         block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
             block indices to physical blocks in the paged cache.
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
@@ -786,7 +794,7 @@ def rocm_fp8_paged_mqa_logits(
                 kv_cache_fp8,
                 weights,
                 out_logits,
-                context_lens,
+                _per_sequence_context_lens(context_lens),
                 block_tables,
                 max_model_len,
                 ChunkK=256,
@@ -808,7 +816,7 @@ def rocm_fp8_paged_mqa_logits(
             kv_cache_fp8,
             weights,
             out_qk,
-            context_lens,
+            _per_sequence_context_lens(context_lens),
             block_tables,
             max_model_len,
             ChunkQ=heads,
@@ -2229,7 +2237,7 @@ def _sparse_attn_prefill_ragged_kernel(
 
 
 @triton.jit
-def _sparse_attn_split_decode_partial_kernel(
+def _sparse_attn_decode_ragged_bf16_partial_kernel(
     q_ptr,
     kv_ptr,
     kv_indices_ptr,
@@ -2251,21 +2259,11 @@ def _sparse_attn_split_decode_partial_kernel(
     head_dim,
     num_kv,
     scale,
-    kv_scale,
-    KV_IS_FP8: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
-    NUM_STAGES: tl.constexpr,
 ):
-    """One KV split of one decode request: an unnormalized (m, l, acc) partial.
-
-    Grid is (requests, splits, head blocks). The unsplit ragged kernel launches
-    one workgroup per request and head block, which leaves most CUs idle at
-    decode batch sizes; splitting each request's selected slots restores
-    occupancy.
-    """
     query_idx = tl.program_id(0)
     split_id = tl.program_id(1)
     pid_h = tl.program_id(2)
@@ -2277,15 +2275,12 @@ def _sparse_attn_split_decode_partial_kernel(
 
     q = tl.load(
         q_ptr
-        + _sparse_query_row_offset(query_idx, q_stride_t)
+        + query_idx * q_stride_t
         + head_offsets[:, None] * q_stride_h
         + dim_offsets[None, :] * q_stride_d,
         mask=head_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
-    # K and V are the same latent row, so the FP8 scale factors out of both
-    # products: once into the QK scale, once into the partial accumulator.
-    qk_scale = scale * kv_scale if KV_IS_FP8 else scale
 
     neg_large = -3.4028234663852886e38
     m_i = tl.full((BLOCK_H,), neg_large, dtype=tl.float32)
@@ -2293,7 +2288,8 @@ def _sparse_attn_split_decode_partial_kernel(
     acc = tl.zeros((BLOCK_H, BLOCK_D), dtype=tl.float32)
 
     kv_start = tl.load(kv_indptr_ptr + query_idx)
-    kv_len = tl.load(kv_indptr_ptr + query_idx + 1) - kv_start
+    kv_end = tl.load(kv_indptr_ptr + query_idx + 1)
+    kv_len = kv_end - kv_start
     chunk = (kv_len + NUM_SPLITS - 1) // NUM_SPLITS
     kv_lo = split_id * chunk
     kv_hi = tl.minimum(kv_lo + chunk, kv_len)
@@ -2304,9 +2300,10 @@ def _sparse_attn_split_decode_partial_kernel(
         mask=kv_lo + k_offsets < kv_hi,
         other=-1,
     )
-    for k_start in tl.range(kv_lo, kv_hi, BLOCK_K, num_stages=NUM_STAGES):
+    for k_start in tl.range(kv_lo, kv_hi, BLOCK_K):
         k_pos = k_start + k_offsets
-        valid = (k_pos < kv_hi) & (slot >= 0) & (slot < num_kv)
+        in_range = k_pos < kv_hi
+        valid = in_range & (slot >= 0) & (slot < num_kv)
         safe_slot = tl.where(valid, slot, 0)
 
         kv = tl.load(
@@ -2316,17 +2313,13 @@ def _sparse_attn_split_decode_partial_kernel(
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
         )
-        if KV_IS_FP8:
-            # BF16 represents every e4m3/e5m2 value exactly, and direct
-            # fp8-to-f32 conversion is unreliable for gfx942's FNUZ encodings.
-            kv = kv.to(tl.bfloat16).to(q.dtype)
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
             kv_indices_ptr + kv_start + next_k_pos, mask=next_k_pos < kv_hi, other=-1
         )
 
-        scores = tl.dot(q, tl.trans(kv)) * qk_scale
+        scores = tl.dot(q, tl.trans(kv)) * scale
         scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
 
         m_block = tl.max(scores, axis=1)
@@ -2334,15 +2327,14 @@ def _sparse_attn_split_decode_partial_kernel(
         alpha = tl.exp(m_i - m_new)
         p = tl.exp(scores - m_new[:, None])
         p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
-        l_i = l_i * alpha + tl.sum(p, axis=1)
+        l_new = l_i * alpha + tl.sum(p, axis=1)
+
         acc = acc * alpha[:, None] + tl.dot(p.to(kv.dtype), kv)
         m_i = m_new
+        l_i = l_new
 
-    if KV_IS_FP8:
-        acc = acc * kv_scale
-
-    # Every launched split stores; an empty split leaves the (neg_large, 0)
-    # sentinel, which the reduce weights to zero.
+    # Every launched slot is written; empty splits store the (neg_large, 0.0)
+    # sentinel the reduce combines to nothing.
     pm_base = query_idx * pm_stride0 + split_id * pm_stride_s + head_offsets
     tl.store(part_m_ptr + pm_base, m_i, mask=head_mask)
     tl.store(part_l_ptr + pm_base, l_i, mask=head_mask)
@@ -3822,36 +3814,38 @@ def _decode_gfx950_num_splits(
     return num_splits
 
 
-# Below this many selected slots per request, one pass beats split + reduce.
-_SPARSE_DECODE_SPLIT_MIN_LEN = 512
-_SPARSE_DECODE_SPLIT_BLOCK_H = 16
-_SPARSE_DECODE_SPLIT_BLOCK_K = 32
+# Empirically single-pass bf16 decode is faster than split-K below this number of
+# selected slots per query, so we do not split.
+_SPARSE_DECODE_BF16_MIN_SPLIT_LEN = 512
+_SPARSE_DECODE_BF16_BLOCK_H = 16
+_SPARSE_DECODE_BF16_BLOCK_K = 32
 
 
-def rocm_sparse_decode_num_splits(
+def rocm_sparse_decode_bf16_num_splits(
     num_queries: int, num_heads: int, sparse_len: int
 ) -> int:
-    """KV splits per request for split-K sparse decode, or 1 for one pass.
+    """Number or kv splits in splitK for the sparse bf16 decode, or 1 for single-pass.
 
     Args:
-        num_queries: Decode requests in the batch.
-        num_heads: Query heads per request.
-        sparse_len: Longest selected KV run any decode request can walk.
+        num_queries: Decode rows in the batch.
+        num_heads: Query heads per row.
+        sparse_len: Longest selected KV run any decode row can walk.
 
     Returns:
-        The split count; 1 means the caller should keep the ragged kernel.
+        The split count, or 1 when the caller should use the single-pass kernel.
 
     """
-    if sparse_len < _SPARSE_DECODE_SPLIT_MIN_LEN:
+    if sparse_len < _SPARSE_DECODE_BF16_MIN_SPLIT_LEN:
         return 1
-    block_k = _SPARSE_DECODE_SPLIT_BLOCK_K
-    heads_blocks = triton.cdiv(num_heads, _SPARSE_DECODE_SPLIT_BLOCK_H)
+    block_k = _SPARSE_DECODE_BF16_BLOCK_K
+    heads_blocks = triton.cdiv(num_heads, _SPARSE_DECODE_BF16_BLOCK_H)
     select = _decode_gfx950_num_splits if _ON_GFX950 else _decode_num_splits
     num_splits = select(num_queries, heads_blocks, sparse_len, 0.0, block_k)
+    # Number of splits cannot exceed the available k tiles
     return max(1, min(num_splits, math.ceil(sparse_len / block_k)))
 
 
-def _rocm_sparse_attn_split_decode_triton(
+def _rocm_sparse_attn_decode_ragged_bf16_triton(
     q: torch.Tensor,
     kv: torch.Tensor,
     indices: torch.Tensor,
@@ -3861,28 +3855,24 @@ def _rocm_sparse_attn_split_decode_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     num_splits: int,
-    kv_scale: float = 1.0,
     out: torch.Tensor | None = None,
-    block_k: int = _SPARSE_DECODE_SPLIT_BLOCK_K,
-    num_stages: int | None = None,
 ) -> torch.Tensor:
-    """Split-K decode over a model-dtype or FP8 ragged KV cache.
+    """Split-K decode over an bf16 ragged KV cache.
+
+    Partitions each query's selected tokens across different workgroups and combines
+    the partials through reduction.
 
     Args:
-        q: Queries, ``[sq, h, d]``, in the model dtype.
-        kv: KV rows, ``[skv, d]``, in the model dtype or an FP8 dtype.
-        indices: Flattened per-request KV slots.
+        q: Queries laid out as ``[sq, h, d]``.
+        kv: Unquantized KV rows laid out as ``[skv, d]``.
+        indices: Flattened per-query KV slots.
         indptr: Segment offsets into ``indices``, ``[sq + 1]``.
         scale: Softmax scale.
         attn_sink: Optional per-head sink logits.
         nope_head_dim: NoPE width of ``d``.
         rope_head_dim: RoPE width of ``d``.
-        num_splits: KV splits per request.
-        kv_scale: Dequantization scale of an FP8 cache; ignored otherwise.
-        out: Optional destination, ``[sq, h, d]``.
-        block_k: KV slots per loop iteration.
-        num_stages: Software pipelining depth of the KV loop; defaults to
-            2 for FP8 KV and 1 otherwise.
+        num_splits: Number of KV splits per query.
+        out: Optional destination with ``d`` trailing elements.
 
     Returns:
         The attention output, ``out`` when provided.
@@ -3910,14 +3900,7 @@ def _rocm_sparse_attn_split_decode_triton(
         head_dim,
         nope_head_dim,
         rope_head_dim,
-        "_rocm_sparse_attn_split_decode_triton",
-    )
-    kv_is_fp8 = kv.dtype in _FP8_DTYPES
-    assert q.dtype not in _FP8_DTYPES, (
-        f"split decode needs model-dtype Q, got {q.dtype}"
-    )
-    assert kv_is_fp8 or kv.dtype == q.dtype, (
-        f"split decode supports {q.dtype} or FP8 KV, got {kv.dtype}"
+        "_rocm_sparse_attn_decode_ragged_bf16_triton",
     )
     if out is None:
         out = torch.empty_like(q)
@@ -3925,12 +3908,9 @@ def _rocm_sparse_attn_split_decode_triton(
         f"expected out trailing dim {head_dim}, got {out.shape[-1]}"
     )
 
-    if num_stages is None:
-        # Measured on MI355X at 64-256 requests: FP8 is 1.8-2.4x faster with a
-        # second stage, bf16 1.3-1.4x slower.
-        num_stages = 2 if kv_is_fp8 else 1
-    block_h = _SPARSE_DECODE_SPLIT_BLOCK_H
+    block_h = _SPARSE_DECODE_BF16_BLOCK_H
     block_d = triton.next_power_of_2(head_dim)
+    block_k = _SPARSE_DECODE_BF16_BLOCK_K
     heads_blocks = triton.cdiv(num_heads, block_h)
     comb_dim = nope_head_dim + rope_head_dim
 
@@ -3944,7 +3924,9 @@ def _rocm_sparse_attn_split_decode_triton(
         device=q.device,
     )
 
-    _sparse_attn_split_decode_partial_kernel[(num_queries, num_splits, heads_blocks)](
+    _sparse_attn_decode_ragged_bf16_partial_kernel[
+        (num_queries, num_splits, heads_blocks)
+    ](
         q,
         kv,
         indices,
@@ -3966,13 +3948,10 @@ def _rocm_sparse_attn_split_decode_triton(
         head_dim,
         kv.shape[0],
         float(scale),
-        float(kv_scale),
-        KV_IS_FP8=kv_is_fp8,
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
         NUM_SPLITS=num_splits,
-        NUM_STAGES=num_stages,
         num_warps=4,
     )
 
@@ -4493,7 +4472,7 @@ def rocm_sparse_attn_prefill(
         )
 
 
-def rocm_sparse_attn_split_decode(
+def rocm_sparse_attn_decode_bf16(
     q: torch.Tensor,
     kv: torch.Tensor,
     scale: float,
@@ -4505,42 +4484,45 @@ def rocm_sparse_attn_split_decode(
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
     num_splits: int,
-    kv_scale: float = 1.0,
 ) -> None:
-    """Split-K sparse attention for decode requests over a bf16 or FP8 cache.
+    """Run split-K sparse attention over decode rows using an unquantized KV cache.
 
     Args:
-        q: Decode queries, ``[sq, h, d]``, in the model dtype.
-        kv: KV cache, ``[skv, 1, d]``, in the model dtype or an FP8 dtype.
+        q: Decode queries laid out as ``[sq, h, d]``.
+        kv: KV cache laid out as ``[skv, 1, d]``.
         scale: Softmax scale.
         head_dim: Post-absorption head width.
         nope_head_dim: NoPE width of ``head_dim``.
         rope_head_dim: RoPE width of ``head_dim``.
         attn_sink: Optional per-head sink logits.
         output: Destination, written in place.
-        ragged_indices: Flattened per-request KV slots.
+        ragged_indices: Flattened per-query KV slots.
         ragged_indptr: Segment offsets into ``ragged_indices``, ``[sq + 1]``.
-        num_splits: KV splits per request, from
-            :func:`rocm_sparse_decode_num_splits`.
-        kv_scale: Dequantization scale of an FP8 cache; ignored otherwise.
+        num_splits: KV splits per query, from
+            :func:`rocm_sparse_decode_bf16_num_splits`.
 
     """
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse decode expects kv=[skv,1,d], got {kv.shape}"
     )
     _validate_sparse_dims(
-        head_dim, nope_head_dim, rope_head_dim, "rocm_sparse_attn_split_decode"
+        head_dim,
+        nope_head_dim,
+        rope_head_dim,
+        "rocm_sparse_attn_decode_bf16",
     )
     num_queries, num_heads = q.shape[0], q.shape[1]
-    direct = output.shape[-1] == head_dim and output.dtype == q.dtype
+    direct = output.shape[-1] == head_dim
     out = (
         output
         if direct
         else torch.empty(
-            (num_queries, num_heads, head_dim), dtype=q.dtype, device=q.device
+            (num_queries, num_heads, head_dim),
+            dtype=output.dtype,
+            device=output.device,
         )
     )
-    _rocm_sparse_attn_split_decode_triton(
+    _rocm_sparse_attn_decode_ragged_bf16_triton(
         q=q,
         kv=kv.squeeze(1),
         indices=ragged_indices,
@@ -4550,11 +4532,10 @@ def rocm_sparse_attn_split_decode(
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         num_splits=num_splits,
-        kv_scale=kv_scale,
         out=out,
     )
     if not direct:
-        output.copy_(out[..., : output.shape[-1]].to(output.dtype))
+        output.copy_(out[..., : output.shape[-1]])
 
 
 def rocm_sparse_attn_decode(
