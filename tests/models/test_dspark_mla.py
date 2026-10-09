@@ -12,13 +12,312 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
+from vllm.models.kimi_k3.common import dspark_mla as common_dspark_mla
 from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
+from vllm.platforms import current_platform
+
+
+def test_nvidia_dspark_binding_uses_multi_head_latent_attention():
+    from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+
+    assert dspark_mla.MultiHeadLatentAttention is MultiHeadLatentAttention
+
+
+def test_default_mla_hooks_return_their_inputs():
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
+    kv = torch.zeros(2, 4)
+    k_pe = torch.zeros(2, 1, 2)
+    slots = torch.zeros(2, dtype=torch.int64)
+    q = torch.zeros(2, 2, 4)
+    ql = torch.zeros(2, 2, 4)
+    q_pe = torch.zeros(2, 2, 2)
+    layer = SimpleNamespace(
+        kv_cache_dtype="auto",
+        impl=SimpleNamespace(supports_quant_query_input=False),
+    )
+
+    out_kv, out_k_pe, out_slots = MLAAttention._prepare_kv_cache_update(
+        layer, kv, k_pe, slots, None
+    )
+    assert out_kv is kv
+    assert out_k_pe is k_pe
+    assert out_slots is slots
+
+    out_q, out_mha_k_pe = MLAAttention._prepare_mha_inputs(layer, q, k_pe)
+    assert out_q is q
+    assert out_mha_k_pe is k_pe
+
+    formed = MLAAttention._form_decode_q(layer, ql, q_pe, kv, k_pe, kv, None, 2)
+    assert formed[0] is ql
+    assert formed[1] is q_pe
+
+
+def test_kv_cache_layer_defaults_to_the_attention_module():
+    attn = SimpleNamespace(layer_name="model.layers.0.self_attn", mla_attn=object())
+    assert K3DSparkModel.kv_cache_layer(SimpleNamespace(), attn) is attn
+
+    class NestedCacheOwner(K3DSparkModel):
+        def kv_cache_layer(self, attn):
+            return attn.mla_attn
+
+    assert NestedCacheOwner.kv_cache_layer(SimpleNamespace(), attn) is attn.mla_attn
+
+
+def test_wrapper_uses_mla_attn_cls():
+    from vllm.model_executor.layers.mla import (
+        MLAModules,
+        MultiHeadLatentAttentionWrapper,
+    )
+
+    class DummyAttn(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.prefix = kwargs["prefix"]
+
+    class Sub(MultiHeadLatentAttentionWrapper):
+        mla_attn_cls = DummyAttn
+
+    modules = MLAModules(
+        kv_a_layernorm=nn.Identity(),
+        kv_b_proj=nn.Identity(),
+        rotary_emb=None,
+        o_proj=nn.Identity(),
+        fused_qkv_a_proj=None,
+        kv_a_proj_with_mqa=nn.Identity(),
+        q_a_layernorm=None,
+        q_b_proj=None,
+        q_proj=nn.Identity(),
+        indexer=None,
+        is_sparse=False,
+        topk_indices_buffer=None,
+    )
+    wrapper = Sub(
+        hidden_size=8,
+        num_heads=2,
+        scale=1.0,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=2,
+        v_head_dim=4,
+        q_lora_rank=None,
+        kv_lora_rank=4,
+        mla_modules=modules,
+        prefix="model.layers.0.self_attn",
+    )
+    assert isinstance(wrapper.mla_attn, DummyAttn)
+    assert wrapper.mla_attn.prefix == "model.layers.0.self_attn.attn"
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
-    assert ModelRegistry._try_load_model_cls("K3DSparkModel") is K3DSparkForCausalLM
+    from vllm.models.kimi_k3 import K3DSparkForCausalLM as registered
+
+    assert ModelRegistry._try_load_model_cls("K3DSparkModel") is registered
     assert not issubclass(K3DSparkModel, TorchCompileWithNoGuardsWrapper)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="Kimi-K3 DSpark MLA wrapper is the ROCm draft path",
+)
+def _bind_mla_wrapper_call(args, kwargs):
+    import inspect
+
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+
+    signature = inspect.signature(MultiHeadLatentAttentionWrapper.__init__)
+    return signature.bind(None, *args, **kwargs).arguments
+
+
+def test_k3_dspark_decoder_uses_mla_wrapper(monkeypatch: pytest.MonkeyPatch):
+    from vllm.models.kimi_k3.amd import dspark_mla as amd_dspark_mla
+
+    captured: dict = {}
+
+    class DummyLinear(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.reduce_results = True
+
+    class DummyRope(nn.Module):
+        pass
+
+    class DummyWrapper(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            bound = _bind_mla_wrapper_call(args, kwargs)
+            self.o_proj = DummyLinear()
+            self.rotary_emb = DummyRope()
+            self.mla_attn = SimpleNamespace(
+                layer_name=f"{bound['prefix']}.attn",
+                non_causal_multi_token_decode=kwargs["non_causal_multi_token_decode"],
+            )
+
+    monkeypatch.setattr(common_dspark_mla, "get_draft_quant_config", lambda _: None)
+    monkeypatch.setattr(common_dspark_mla, "RMSNorm", DummyLinear)
+    monkeypatch.setattr(
+        amd_dspark_mla, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(amd_dspark_mla, "MergedColumnParallelLinear", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "ColumnParallelLinear", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "RowParallelLinear", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "RMSNorm", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "KimiMLP", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "get_rope", lambda *args, **kwargs: DummyRope())
+    monkeypatch.setattr(
+        amd_dspark_mla, "KimiK3MultiHeadLatentAttentionWrapper", DummyWrapper
+    )
+
+    config = SimpleNamespace(
+        hidden_size=8,
+        num_attention_heads=2,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=2,
+        v_head_dim=4,
+        q_lora_rank=16,
+        kv_lora_rank=8,
+        rms_norm_eps=1e-6,
+        intermediate_size=16,
+        hidden_act="silu",
+        max_position_embeddings=128,
+        rope_parameters={"rope_type": "default"},
+    )
+    vllm_config = SimpleNamespace(cache_config=None)
+    layer = amd_dspark_mla.K3DSparkDecoderLayer(
+        vllm_config=vllm_config,
+        config=config,
+        layer_idx=0,
+        start_layer_id=61,
+        prefix="model",
+    )
+
+    bound = _bind_mla_wrapper_call(captured["args"], captured["kwargs"])
+    assert isinstance(layer.self_attn, DummyWrapper)
+    assert layer.self_attn.o_proj.reduce_results is False
+    assert captured["kwargs"]["non_causal_multi_token_decode"] is True
+    assert bound["prefix"] == "model.layers.61.self_attn"
+    assert bound["mla_modules"].rotary_emb is not None
+    assert layer.self_attn.mla_attn.layer_name == "model.layers.61.self_attn.attn"
+
+
+def test_amd_kv_cache_layer_returns_inner_mla_attn():
+    from vllm.models.kimi_k3.amd.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
+
+    inner = SimpleNamespace(layer_name="model.layers.3.self_attn.attn")
+    attn = SimpleNamespace(mla_attn=inner)
+    assert K3DSparkModel.kv_cache_layer(SimpleNamespace(), attn) is inner
+
+    owner = SimpleNamespace(
+        model=SimpleNamespace(
+            layers=[SimpleNamespace(self_attn=attn)],
+            kv_cache_layer=lambda module: K3DSparkModel.kv_cache_layer(
+                SimpleNamespace(), module
+            ),
+        )
+    )
+    assert K3DSparkForCausalLM.get_draft_kv_cache_layer_names(owner) == [
+        "model.layers.3.self_attn.attn"
+    ]
+
+
+def _yarn_cast_wrapper():
+    """Wrapper whose RoPE returns fp32, matching HIP YaRN."""
+    from vllm.model_executor.layers.mla import MLAModules
+    from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
+
+    class RecordingAttn(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.kv_cache_dtype = "auto"
+            self.impl = SimpleNamespace(dcp_world_size=1)
+            self.use_pcp = False
+            self.hisparse_cache = None
+            self.q_pad_num_heads = None
+            self.is_aiter_triton_fp4_bmm_enabled = False
+            self.is_aiter_triton_fp8_bmm_enabled = False
+            self.W_UK_T = None
+            self.layer_name = kwargs.get("prefix", "attn")
+            self.seen_k_pe = None
+            self.seen_q = None
+
+        def forward(self, q, kv_c_normed, k_pe, output_shape=None, **kwargs):
+            del kv_c_normed, kwargs
+            self.seen_q = q
+            self.seen_k_pe = k_pe
+            return torch.zeros(output_shape, dtype=q.dtype)
+
+    class Fp32Rope(nn.Module):
+        def forward(self, positions, q_pe, k_pe):
+            del positions
+            return q_pe.to(torch.float32), torch.ones_like(k_pe, dtype=torch.float32)
+
+    class Proj(nn.Module):
+        def __init__(self, width: int):
+            super().__init__()
+            self.width = width
+
+        def forward(self, x):
+            return torch.zeros(x.shape[0], self.width, dtype=torch.bfloat16), None
+
+    class Identity(nn.Module):
+        def forward(self, x):
+            return x
+
+    class CastWrapper(KimiK3MultiHeadLatentAttentionWrapper):
+        mla_attn_cls = RecordingAttn
+
+    modules = MLAModules(
+        kv_a_layernorm=Identity(),
+        kv_b_proj=Identity(),
+        rotary_emb=Fp32Rope(),
+        o_proj=Proj(8),
+        fused_qkv_a_proj=None,
+        kv_a_proj_with_mqa=Proj(6),
+        q_a_layernorm=None,
+        q_b_proj=None,
+        q_proj=Proj(12),
+        indexer=None,
+        is_sparse=False,
+        topk_indices_buffer=None,
+    )
+    return CastWrapper(
+        hidden_size=8,
+        num_heads=2,
+        scale=1.0,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=2,
+        v_head_dim=4,
+        q_lora_rank=None,
+        kv_lora_rank=4,
+        mla_modules=modules,
+        prefix="model.layers.0.self_attn",
+    )
+
+
+def test_hip_yarn_k_pe_is_cast_back_to_kv_dtype():
+    wrapper = _yarn_cast_wrapper()
+    hidden = torch.zeros(2, 8, dtype=torch.bfloat16)
+    positions = torch.zeros(2, dtype=torch.int64)
+    wrapper(positions, hidden)
+    assert wrapper.mla_attn.seen_q.dtype == torch.bfloat16
+    assert wrapper.mla_attn.seen_k_pe.dtype == torch.bfloat16
+
+
+def test_fused_decode_not_taken_when_rotary_emb_is_set():
+    wrapper = _yarn_cast_wrapper()
+    wrapper._fused_qk_prep = True
+
+    def fail_if_called(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("identity RoPE fusion must not run after YaRN")
+
+    wrapper._fused_decode = fail_if_called
+    hidden = torch.zeros(2, 8, dtype=torch.bfloat16)
+    positions = torch.zeros(2, dtype=torch.int64)
+    wrapper(positions, hidden)
+    assert wrapper.mla_attn.seen_k_pe is not None
 
 
 @pytest.mark.parametrize(
@@ -121,12 +420,14 @@ def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
         context_kv_proj_calls.append((args, kwargs))
         return DummyModule()
 
-    monkeypatch.setattr(dspark_mla, "get_draft_quant_config", lambda _: None)
-    monkeypatch.setattr(dspark_mla, "ReplicatedLinear", DummyModule)
-    monkeypatch.setattr(dspark_mla, "MergedColumnParallelLinear", make_context_kv_proj)
-    monkeypatch.setattr(dspark_mla, "RMSNorm", DummyModule)
-    monkeypatch.setattr(dspark_mla, "K3DSparkDecoderLayer", DummyModule)
-    monkeypatch.setattr(dspark_mla, "DSparkMarkovHead", make_markov_head)
+    monkeypatch.setattr(common_dspark_mla, "get_draft_quant_config", lambda _: None)
+    monkeypatch.setattr(common_dspark_mla, "ReplicatedLinear", DummyModule)
+    monkeypatch.setattr(
+        common_dspark_mla, "MergedColumnParallelLinear", make_context_kv_proj
+    )
+    monkeypatch.setattr(common_dspark_mla, "RMSNorm", DummyModule)
+    monkeypatch.setattr(K3DSparkModel, "decoder_layer_cls", DummyModule)
+    monkeypatch.setattr(common_dspark_mla, "DSparkMarkovHead", make_markov_head)
 
     config = SimpleNamespace(
         target_hidden_size=16,
