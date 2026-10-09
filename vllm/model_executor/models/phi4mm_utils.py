@@ -1642,7 +1642,7 @@ class MultiHeadedAttention(nn.Module):
             NOTE: this will NOT be used in ONNX decoding due to a lack of
             support.  In that case, we use the original attention
             implementation, which shows no regression.
-            default: False.
+            default: True.
         n_value: int, optional
             if set to values other than -1, use a different dimension for
             value. With the default value (i.e. -1), it is backward compatible.
@@ -1666,7 +1666,7 @@ class MultiHeadedAttention(nn.Module):
         attention_inner_dim: int = -1,
         glu_type: str = "swish",
         bias_in_glu: bool = True,
-        use_pt_scaled_dot_product_attention: bool = False,
+        use_pt_scaled_dot_product_attention: bool = True,
         n_value: int = -1,
         group_size: int = 1,
     ) -> None:
@@ -1690,7 +1690,6 @@ class MultiHeadedAttention(nn.Module):
         self.linear_v = nn.Linear(n_value, attention_inner_dim // group_size)
         self.linear_out = nn.Linear(attention_inner_dim // group_size, n_value)
 
-        self.attn = torch.jit.Attribute(None, Tensor | None)
         self.dropout = nn.Dropout(p=dropout_rate)
         self.dropout_rate = dropout_rate
         self.use_pt_scaled_dot_product_attention = use_pt_scaled_dot_product_attention
@@ -1798,8 +1797,6 @@ class MultiHeadedAttention(nn.Module):
                 scores = scores + relative_attention_bias
 
             attn = masked_softmax(scores, mask)  # (batch, head, time1, time2)
-
-            self.attn = attn
 
             p_attn = self.dropout(attn)
             x = torch.matmul(p_attn.to(v.dtype), v)  # (batch, head, time1, d_k)
