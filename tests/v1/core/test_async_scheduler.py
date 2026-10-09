@@ -13,7 +13,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
-from .utils import create_requests, create_scheduler, mock_kv
+from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
 
@@ -766,3 +766,48 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
     else:
         assert handoff.is_finished()
         assert handoff.num_output_tokens == 1
+
+
+def test_resumable_request_handoff():
+    """New streaming input resumes with the correct context and stale results
+    are ignored.
+    """
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+    )
+    engine = PipelinedEngine(scheduler, queue_size=3)
+    engine._next_token = EOS_TOKEN_ID
+
+    old_prompt_len = 10
+    continuation_len = 12
+    request_id = "resumable-race"
+
+    request = create_requests(
+        1, num_tokens=old_prompt_len, max_tokens=4, req_ids=[request_id]
+    )[0]
+    request.resumable = True
+    continuation = create_requests(
+        1, num_tokens=continuation_len, max_tokens=4, req_ids=[request_id]
+    )[0]
+    continuation.resumable = True
+
+    scheduler.add_request(request)
+
+    for _ in range(3):
+        assert engine._schedule()
+
+    engine._process_oldest_step()
+    scheduler.add_request(continuation)
+    assert engine._schedule()
+    new_step, _ = engine.queue[0]
+    assert new_step.scheduled_new_reqs[0].num_computed_tokens == old_prompt_len
+
+    all_token_ids_before_stale = list(request.all_token_ids)
+    for _ in range(2):
+        engine._process_oldest_step()
+    assert list(request.output_token_ids) == []
+    assert list(request.all_token_ids) == all_token_ids_before_stale
+
+    engine._process_oldest_step()
+    assert len(request.output_token_ids) == 1

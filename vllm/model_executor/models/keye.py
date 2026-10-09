@@ -208,8 +208,8 @@ class KeyeVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
-        self.cache_position_embedding = dict()
-        self.cache_position_count = dict()
+        self.cache_position_embedding: dict[tuple[int, int], torch.Tensor] = {}
+        self.cache_position_count: dict[tuple[int, int], int] = {}
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
         self.packing_position_embedding = nn.Embedding(32768, self.embed_dim)
 
@@ -264,7 +264,7 @@ class KeyeVisionEmbeddings(nn.Module):
         if len(self.cache_position_embedding) >= max_cache:
             min_hit_grid = min(
                 self.cache_position_count,
-                key=self.cache_position_count.get,
+                key=self.cache_position_count.__getitem__,
             )
             self.cache_position_count.pop(min_hit_grid)
             self.cache_position_embedding.pop(min_hit_grid)
@@ -278,8 +278,7 @@ class KeyeVisionEmbeddings(nn.Module):
         self,
         pixel_values: torch.FloatTensor,
         position_ids: torch.Tensor | None = None,
-        image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
-        | None = None,
+        image_grid_thw: list[tuple[int, int, int]] | None = None,
         interpolate_pos_encoding=False,
     ) -> torch.Tensor:
         if pixel_values.dim() == 4:
@@ -408,7 +407,7 @@ class KeyeSiglipAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         output_attentions: bool | None = False,
-        cu_seqlens: list[torch.Tensor] | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         rope_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
@@ -417,6 +416,8 @@ class KeyeSiglipAttention(nn.Module):
             dim=-1,
         )
 
+        if cu_seqlens is None:
+            raise ValueError("cu_seqlens cannot be None.")
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         if rope_emb is None:
@@ -432,8 +433,6 @@ class KeyeSiglipAttention(nn.Module):
                 self.head_dim,
             )
         else:
-            if cu_seqlens is None:
-                raise ValueError("cu_seqlens cannot be None when rope_emb is not None.")
             cos, sin = rope_emb
             q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
             k = k.view(
@@ -511,7 +510,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor,
         output_attentions: bool | None = False,
-        cu_seqlens: list[torch.Tensor] | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         rope_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.FloatTensor]:
         residual = hidden_states
@@ -576,13 +575,12 @@ class KeyeSiglipEncoder(nn.Module):
         attention_mask: torch.Tensor | None = None,
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
-        cu_seqlens: list[torch.Tensor] | None = None,
-        image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
-        | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        image_grid_thw: list[tuple[int, int, int]] | None = None,
         height_position_ids: torch.Tensor | None = None,
         width_position_ids: torch.Tensor | None = None,
         use_rope: bool | None = False,
-        window_size: bool | None = -1,
+        window_size: int = -1,
         vision_or_text: str = "vision",
     ) -> BaseModelOutput:
         device = inputs_embeds.device
@@ -662,14 +660,13 @@ class KeyeSiglipVisionTransformer(nn.Module):
         position_ids: torch.Tensor | None = None,
         height_position_ids: torch.Tensor | None = None,
         width_position_ids: torch.Tensor | None = None,
-        cu_seqlens: list[torch.Tensor] | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         vision_return_embed_list: bool | None = False,
-        image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
-        | None = None,
+        image_grid_thw: list[tuple[int, int, int]] | None = None,
         return_pooler_output: bool | None = True,
         use_rope: bool | None = False,
-        window_size: bool | None = -1,
+        window_size: int = -1,
     ) -> BaseModelOutputWithPooling:
         hidden_states = self.embeddings(
             pixel_values,
@@ -757,12 +754,11 @@ class KeyeSiglipVisionModel(nn.Module):
         interpolate_pos_encoding: bool = False,
         position_ids: torch.Tensor | None = None,
         vision_return_embed_list: bool | None = False,
-        image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
-        | None = None,
-        cu_seqlens: list[torch.Tensor] | None = None,
+        image_grid_thw: list[tuple[int, int, int]] | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         return_pooler_output: bool | None = True,
         use_rope: bool | None = False,
-        window_size: bool | None = -1,
+        window_size: int = -1,
     ) -> BaseModelOutputWithPooling:
         return self.vision_model(
             pixel_values=pixel_values,
@@ -1337,7 +1333,7 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
     def _process_video_embeds(
         self,
         video_type: Literal["video_embeds", "pixel_values_videos"],
-        video_grid_thw: list[torch.Tensor],
+        video_grid_thw: torch.Tensor,
         pixel_values_videos: torch.Tensor | None = None,
     ) -> torch.Tensor | list[torch.Tensor]:
         siglip_position_ids = list()
@@ -1361,6 +1357,7 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
                 "Video embeddings are not supported for this processing path."
             )
         else:
+            assert pixel_values_videos is not None
             pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
             # These are host-built; concat straight into pinned buffers so
             # the H2D copies stay non-blocking.
@@ -1535,12 +1532,11 @@ class KeyeForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
-            return KeyeImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
-            )
+        return KeyeImageEmbeddingInputs(
+            type="image_embeds",
+            image_embeds=image_embeds,
+            image_grid_thw=image_grid_thw,
+        )
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
@@ -1559,12 +1555,11 @@ class KeyeForConditionalGeneration(
                 video_grid_thw=video_grid_thw,
             )
 
-        if video_embeds is not None:
-            return KeyeVideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
-            )
+        return KeyeVideoEmbeddingInputs(
+            type="video_embeds",
+            video_embeds=video_embeds,
+            video_grid_thw=video_grid_thw,
+        )
 
     def _process_video_input(
         self, video_input: KeyeVideoInputs

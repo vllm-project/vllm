@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::io;
+use std::os::fd::IntoRawFd;
+use std::os::unix::net::UnixListener;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -366,6 +368,7 @@ where
         engine_id,
         default_ready_response(),
         backend,
+        None,
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
@@ -387,6 +390,7 @@ async fn setup_grpc_service_with_engine_script<F>(
     engine_id: impl Into<EngineId>,
     ready: EngineCoreReadyResponse,
     backend: Arc<dyn ChatTextBackend>,
+    engine_shutdown: Option<tokio_util::sync::CancellationToken>,
     script: F,
 ) -> (
     InferenceServer<InferenceServiceImpl>,
@@ -425,7 +429,7 @@ where
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
             .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
-        ControlServer::new(ControlServiceImpl::new(state)),
+        ControlServer::new(ControlServiceImpl::new(state).with_engine_shutdown(engine_shutdown)),
         engine_health,
         engine_task,
     )
@@ -688,6 +692,7 @@ async fn unary_generate_returns_collected_text() {
         pb::finish_info::FinishReason::Stop as i32
     );
     assert_eq!(finish.num_output_tokens, 3);
+    assert_eq!(finish.num_cached_tokens, Some(0));
 
     let prompt = response.prompt_info.expect("prompt_info present");
     assert_eq!(prompt.num_prompt_tokens, 5); // "hello" = 5 bytes
@@ -1361,22 +1366,24 @@ async fn unary_generate_invalid_sampling_params_returns_invalid_argument() {
     )
     .await;
 
-    let status = client
-        .generate(pb::GenerateRequest {
-            request_id: "test-invalid-sampling".to_string(),
-            model: "test-model".to_string(),
-            prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
-            sampling: Some(pb::RandomSampling {
-                top_p: 2.0,
+    for top_p in [0.0, 2.0] {
+        let status = client
+            .generate(pb::GenerateRequest {
+                request_id: "test-invalid-sampling".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+                sampling: Some(pb::RandomSampling {
+                    top_p: Some(top_p),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
-        .expect_err("should fail when top_p is out of range");
+            })
+            .await
+            .expect_err("should fail when top_p is out of range");
 
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert!(status.message().contains("top_p"));
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("top_p"));
+    }
 
     server_task.abort();
 }
@@ -1436,6 +1443,7 @@ async fn streaming_generate_yields_incremental_responses() {
         .find_map(|r| r.outputs.as_ref())
         .expect("at least one output");
     let finish = last_output.finish_info.as_ref().expect("finish_info on last output");
+    assert_eq!(finish.num_cached_tokens, Some(0));
     assert_eq!(
         finish.finish_reason,
         pb::finish_info::FinishReason::Stop as i32
@@ -1513,8 +1521,8 @@ async fn unary_generate_with_sampling_params() {
             prompt: Some(pb::generate_request::Prompt::Text("test".to_string())),
             temperature: Some(0.7),
             sampling: Some(pb::RandomSampling {
-                top_k: 50,
-                top_p: 0.9,
+                top_k: Some(50),
+                top_p: Some(0.9),
                 seed: Some(42),
                 ..Default::default()
             }),
@@ -1920,6 +1928,7 @@ async fn control_reports_server_and_model_info() {
             b"engine-grpc-info".to_vec(),
             ready,
             Arc::new(FakeTextBackend),
+            None,
             |_, _| boxed_test_future(async {}),
         )
         .await;
@@ -1987,6 +1996,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
             b"engine-grpc-lora".to_vec(),
             ready,
             Arc::new(FakeTextBackend),
+            None,
             |dealer, push| {
                 boxed_test_future(async move {
                     reply_utility_bool(dealer, push, "add_lora", true).await;
@@ -2111,6 +2121,7 @@ async fn control_list_loras_requires_lora_enabled_engine() {
             b"engine-grpc-lora-disabled".to_vec(),
             default_ready_response(),
             Arc::new(FakeTextBackend),
+            None,
             |_, _| boxed_test_future(async move {}),
         )
         .await;
@@ -2143,6 +2154,7 @@ async fn control_forwards_weight_update_without_pause_guard() {
             b"engine-grpc-rl".to_vec(),
             ready,
             Arc::new(FakeTextBackend),
+            None,
             |dealer, push| {
                 boxed_test_future(async move {
                     let frames = recv_engine_message(dealer).await;
@@ -2222,10 +2234,14 @@ async fn control_aggregates_multi_engine_capacity() {
         ready_1.world_size = 12;
         ready_1.data_parallel_rank = start_rank + 1;
 
+        let listener_fd = |address: &str| {
+            let path = address.strip_prefix("ipc://").expect("IPC test endpoint");
+            UnixListener::bind(path).expect("bind inherited test listener").into_raw_fd()
+        };
         let client_config = EngineCoreClientConfig {
             transport_mode: TransportMode::Bootstrapped {
-                input_address: input_address.clone(),
-                output_address: output_address.clone(),
+                input_listener_fd: listener_fd(&input_address),
+                output_listener_fd: listener_fd(&output_address),
                 engine_start_index: start_rank,
                 engine_count: 2,
                 data_parallel_size: global_size,
@@ -2234,6 +2250,7 @@ async fn control_aggregates_multi_engine_capacity() {
             coordinator_mode: None,
             model_name: "test-model".to_string(),
             client_index: 0,
+            engine_stats_enabled: true,
         };
         let client_task = tokio::spawn(EngineCoreClient::connect(client_config));
         let mut engine_sockets = Vec::new();
@@ -2391,9 +2408,9 @@ async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn grpc_health_watch_closes_on_graceful_shutdown() {
+async fn grpc_shutdown_requires_managed_engine() {
     let (inference_service, control_service, engine_health, _engine_task) = setup_grpc_service(
-        b"engine-grpc-health-shutdown",
+        b"engine-grpc-external-shutdown",
         default_stream_output_specs(),
     )
     .await;
@@ -2405,6 +2422,47 @@ async fn grpc_health_watch_closes_on_graceful_shutdown() {
         shutdown.clone(),
     )
     .await;
+    let mut control_client = ControlClient::new(channel.clone());
+
+    let status = control_client
+        .shutdown(pb::ShutdownRequest {})
+        .await
+        .expect_err("external engine shutdown must be rejected");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert!(!shutdown.is_cancelled());
+
+    let health = HealthClient::new(channel)
+        .check(HealthCheckRequest {
+            service: "vllm.Inference".to_string(),
+        })
+        .await
+        .expect("server remains healthy after rejected shutdown")
+        .into_inner();
+    assert_eq!(health.status, HealthServingStatus::Serving as i32);
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_shutdown_closes_health_watch_and_server() {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-health-shutdown",
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            Some(shutdown.clone()),
+            |_, _| boxed_test_future(async {}),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        shutdown.child_token(),
+    )
+    .await;
+    let mut control_client = ControlClient::new(channel.clone());
     let mut health_client = HealthClient::new(channel);
     let mut stream = health_client
         .watch(HealthCheckRequest {
@@ -2425,7 +2483,14 @@ async fn grpc_health_watch_closes_on_graceful_shutdown() {
         "unexpected initial health status for vllm.Inference"
     );
 
-    shutdown.cancel();
+    control_client
+        .shutdown(pb::ShutdownRequest {})
+        .await
+        .expect("accept managed engine shutdown");
+    assert!(
+        shutdown.is_cancelled(),
+        "engine owner must receive shutdown"
+    );
 
     let update = tokio::time::timeout(Duration::from_secs(2), stream.message())
         .await
