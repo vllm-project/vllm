@@ -139,4 +139,73 @@ torch::Tensor combine_sampled_and_draft_tokens_cpu(
   return logits_indices;
 }
 
+void post_update_cpu(const torch::Tensor& idx_mapping,
+                     torch::Tensor& num_computed_tokens,
+                     torch::Tensor& last_sampled_tokens,
+                     const c10::optional<torch::Tensor>& output_bin_counts,
+                     const torch::Tensor& sampled_tokens,
+                     const torch::Tensor& num_sampled,
+                     const torch::Tensor& num_rejected,
+                     const c10::optional<torch::Tensor>& query_start_loc,
+                     torch::Tensor& all_token_ids, torch::Tensor& total_len) {
+  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  int32_t* num_computed_tokens_ptr = num_computed_tokens.data_ptr<int32_t>();
+  int64_t* last_sampled_tokens_ptr = last_sampled_tokens.data_ptr<int64_t>();
+  int32_t* output_bin_counts_ptr =
+      output_bin_counts ? output_bin_counts->data_ptr<int32_t>() : nullptr;
+  const int64_t* sampled_tokens_ptr = sampled_tokens.data_ptr<int64_t>();
+  const int32_t* num_sampled_ptr = num_sampled.data_ptr<int32_t>();
+  const int32_t* num_rejected_ptr = num_rejected.data_ptr<int32_t>();
+  const int32_t* query_start_loc_ptr =
+      query_start_loc ? query_start_loc->data_ptr<int32_t>() : nullptr;
+  int32_t* all_token_ids_ptr = all_token_ids.data_ptr<int32_t>();
+  int32_t* total_len_ptr = total_len.data_ptr<int32_t>();
+
+  const int64_t num_reqs = idx_mapping.size(0);
+  const int64_t last_sampled_tokens_stride = last_sampled_tokens.stride(0);
+  const int64_t output_bin_counts_stride =
+      output_bin_counts ? output_bin_counts->stride(0) : 0;
+  const int64_t sampled_tokens_stride = sampled_tokens.stride(0);
+  const int64_t all_token_ids_stride = all_token_ids.stride(0);
+
+  for (int64_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
+    const int32_t req_state_idx = idx_mapping_ptr[req_idx];
+    if (req_state_idx < 0) {
+      continue;
+    }
+
+    const int32_t request_total_len = total_len_ptr[req_state_idx];
+    const int32_t request_num_sampled = num_sampled_ptr[req_idx];
+    const int64_t* request_sampled_tokens =
+        sampled_tokens_ptr + req_idx * sampled_tokens_stride;
+    int32_t* request_all_token_ids =
+        all_token_ids_ptr + req_state_idx * all_token_ids_stride;
+
+    if (request_num_sampled > 0) {
+      last_sampled_tokens_ptr[req_state_idx * last_sampled_tokens_stride] =
+          request_sampled_tokens[request_num_sampled - 1];
+      total_len_ptr[req_state_idx] = request_total_len + request_num_sampled;
+    }
+
+    for (int32_t i = 0; i < request_num_sampled; ++i) {
+      const int64_t token_id = request_sampled_tokens[i];
+      request_all_token_ids[request_total_len + i] =
+          static_cast<int32_t>(token_id);
+      if (output_bin_counts_ptr != nullptr) {
+        ++output_bin_counts_ptr[req_state_idx * output_bin_counts_stride +
+                                token_id];
+      }
+    }
+
+    const int32_t query_len =
+        query_start_loc_ptr == nullptr
+            ? 0
+            : query_start_loc_ptr[req_idx + 1] - query_start_loc_ptr[req_idx];
+    const int32_t computed_delta = query_len - num_rejected_ptr[req_idx];
+    if (computed_delta != 0) {
+      num_computed_tokens_ptr[req_state_idx] += computed_delta;
+    }
+  }
+}
+
 }  // namespace cpu_utils

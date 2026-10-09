@@ -6,6 +6,7 @@ import torch
 from vllm.v1.worker.cpu.input_batch import (
     combine_sampled_and_draft_tokens,
     get_num_sampled_and_rejected,
+    post_update,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
@@ -142,3 +143,69 @@ def test_get_num_sampled_and_rejected_cpu() -> None:
 
     assert torch.equal(actual_sampled, torch.tensor([1, 0, 2, 1]))
     assert torch.equal(actual_rejected, torch.tensor([0, 0, 1, 1]))
+
+
+def test_post_update_cpu() -> None:
+    idx_mapping = torch.tensor([3, -1, 1, 4], dtype=torch.int32)
+    num_computed_tokens = torch.tensor([10, 20, 30, 40, 50], dtype=torch.int32)
+    last_sampled_storage = torch.full((5, 2), -1, dtype=torch.int64)
+    last_sampled_tokens = last_sampled_storage[:, 1:]
+    output_bin_counts_storage = torch.zeros((5, 10), dtype=torch.int32)
+    output_bin_counts = output_bin_counts_storage[:, 1:9]
+    sampled_tokens_storage = torch.full((4, 5), -1, dtype=torch.int64)
+    sampled_tokens = sampled_tokens_storage[:, 1:4]
+    sampled_tokens.copy_(torch.tensor([[2, 2, 5], [7, 6, 5], [4, 1, 0], [6, 3, 0]]))
+    num_sampled = torch.tensor([3, 1, 0, 2], dtype=torch.int32)
+    num_rejected = torch.tensor([1, 0, 2, 1], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 4, 5, 8, 10], dtype=torch.int32)
+    all_token_ids_storage = torch.full((5, 10), -1, dtype=torch.int32)
+    all_token_ids = all_token_ids_storage[:, 1:9]
+    total_len = torch.tensor([1, 3, 1, 2, 4], dtype=torch.int32)
+
+    post_update(
+        idx_mapping,
+        num_computed_tokens,
+        last_sampled_tokens,
+        output_bin_counts,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc,
+        all_token_ids,
+        total_len,
+    )
+
+    assert num_computed_tokens.tolist() == [10, 21, 30, 43, 51]
+    assert last_sampled_tokens.squeeze(1).tolist() == [-1, -1, -1, 5, 3]
+    assert total_len.tolist() == [1, 3, 1, 5, 6]
+    assert all_token_ids[3].tolist() == [-1, -1, 2, 2, 5, -1, -1, -1]
+    assert all_token_ids[4].tolist() == [-1, -1, -1, -1, 6, 3, -1, -1]
+    assert torch.all(all_token_ids[[0, 1, 2]] == -1)
+    assert output_bin_counts[3].tolist() == [0, 0, 2, 0, 0, 1, 0, 0]
+    assert output_bin_counts[4].tolist() == [0, 0, 0, 1, 0, 0, 1, 0]
+    assert torch.all(output_bin_counts[[0, 1, 2]] == 0)
+
+
+def test_post_update_cpu_without_optional_inputs() -> None:
+    num_computed_tokens = torch.tensor([8, 13], dtype=torch.int32)
+    last_sampled_tokens = torch.tensor([[70], [80]], dtype=torch.int64)
+    all_token_ids = torch.full((2, 6), -1, dtype=torch.int32)
+    total_len = torch.tensor([2, 3], dtype=torch.int32)
+
+    post_update(
+        idx_mapping=torch.tensor([1], dtype=torch.int32),
+        num_computed_tokens=num_computed_tokens,
+        last_sampled_tokens=last_sampled_tokens,
+        output_bin_counts=None,
+        sampled_tokens=torch.tensor([[4, 5]], dtype=torch.int64),
+        num_sampled=torch.tensor([1], dtype=torch.int32),
+        num_rejected=torch.tensor([2], dtype=torch.int32),
+        query_start_loc=None,
+        all_token_ids=all_token_ids,
+        total_len=total_len,
+    )
+
+    assert num_computed_tokens.tolist() == [8, 11]
+    assert last_sampled_tokens.squeeze(1).tolist() == [70, 4]
+    assert total_len.tolist() == [2, 4]
+    assert all_token_ids[1].tolist() == [-1, -1, -1, 4, -1, -1]
