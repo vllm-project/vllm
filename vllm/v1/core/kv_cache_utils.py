@@ -2787,52 +2787,6 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
-def get_cpu_offload_num_blocks(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> int:
-    """Chunks the CPU offload tier can hold for one worker's KV layout."""
-    # Imported here because the offloading config module imports this one.
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-        build_offloading_config,
-        get_offloading_group_ids,
-    )
-    from vllm.v1.kv_offload.cpu.spec import cpu_offload_layout
-
-    # A stage owning no offloadable group contributes no capacity of its own.
-    if not get_offloading_group_ids(kv_cache_config):
-        return 0
-    config = build_offloading_config(vllm_config, kv_cache_config)
-    return cpu_offload_layout(config).num_chunks
-
-
-def _uses_cpu_offloading_spec(vllm_config: VllmConfig) -> bool:
-    kv_transfer_config = vllm_config.kv_transfer_config
-    if (
-        kv_transfer_config is None
-        or kv_transfer_config.kv_connector != "OffloadingConnector"
-    ):
-        return False
-
-    spec_name = kv_transfer_config.kv_connector_extra_config.get(
-        "spec_name", "CPUOffloadingSpec"
-    )
-    return spec_name == "CPUOffloadingSpec"
-
-
-def _unify_cpu_offload_num_blocks(
-    vllm_config: VllmConfig, kv_cache_configs: list[KVCacheConfig]
-) -> None:
-    if not _uses_cpu_offloading_spec(vllm_config):
-        return
-
-    min_num_cpu_blocks = min(
-        get_cpu_offload_num_blocks(vllm_config, kv_cache_config)
-        for kv_cache_config in kv_cache_configs
-    )
-    for kv_cache_config in kv_cache_configs:
-        kv_cache_config.num_cpu_blocks = min_num_cpu_blocks
-
-
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2856,8 +2810,10 @@ def get_kv_cache_configs(
        different PP stages are similar.)
     5. Change the num_blocks of each worker to the smallest among all workers
        and shrink tensor sizes proportionally to avoid allocating unused memory.
-    6. If native CPU offloading is enabled, set the CPU offload num_blocks to
-       the smallest value supported by any worker.
+
+    Native CPU offloading unifies its own chunk count across workers in the
+    offloading subsystem (see
+    ``offloading.config.unify_cpu_offload_num_chunks``).
 
     Args:
         vllm_config: The global VllmConfig
@@ -2988,8 +2944,6 @@ def get_kv_cache_configs(
             vllm_config.parallel_config.tensor_parallel_size,
             vllm_config.parallel_config.decode_context_parallel_size,
         )
-
-    _unify_cpu_offload_num_blocks(vllm_config, kv_cache_configs)
 
     return kv_cache_configs
 
