@@ -2124,6 +2124,31 @@ def _get_packed_kv_cache_groups(
     if not layout.is_block_outermost or len(page_sizes) <= 1:
         return None
 
+    primary_block_size = max(
+        (
+            spec.block_size
+            for spec in kv_cache_spec.values()
+            if isinstance(spec, FullAttentionSpec)
+        ),
+        default=0,
+    )
+    # Each SWA manager block occupies a whole packed block. Kernel page
+    # splitting is selected later, independently of this physical size.
+    kv_cache_spec = {
+        name: replace(spec, block_size=primary_block_size)
+        if (
+            type(spec) is SlidingWindowSpec
+            and spec.page_size_padded is None
+            and spec.block_size < primary_block_size
+            and primary_block_size % spec.block_size == 0
+        )
+        else spec
+        for name, spec in kv_cache_spec.items()
+    }
+    page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
+    if len(page_sizes) <= 1:
+        return None
+
     buckets: list[dict[str, KVCacheSpec]] = []
     for name, spec in kv_cache_spec.items():
         for bucket in buckets:
