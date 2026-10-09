@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
-DeepSeek-V4.1-Flash at TP2 on CDNA4, served with ``VLLM_ROCM_MONO_DECODE`` on
+DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, served with ``VLLM_ROCM_MONO_DECODE`` on
 and off on the same random weights: every decoder layer's outputs at every
 decode step must match. Unlike ``test_dsv41_mono_numerics.py``, which
 checks the kernels against vLLM's ops one stage at a time, this runs
@@ -100,9 +100,25 @@ class RandomWeightLoader(DummyModelLoader):
     E8M0 scales zero, and both paths would agree on zeros)."""
 
     def load_weights(self, model, model_config) -> None:
+        from vllm.distributed import get_tensor_model_parallel_world_size
+
         super().load_weights(model, model_config)
         for name, t in model.state_dict().items():
             _fill(name, t)
+        # the routed experts' intermediate past this rank's share is the
+        # loader's zero padding (576 -> 640 at TP4): the kernels skip it
+        inter = model_config.hf_text_config.moe_intermediate_size
+        inter //= get_tensor_model_parallel_world_size()
+        for m in model.modules():
+            w13, w2 = getattr(m, "w13_weight", None), getattr(m, "w2_weight", None)
+            if w13 is None or w2 is None or w13.device.type == "meta":
+                continue
+            padded = w13.shape[1] // 2
+            if padded > inter:
+                w13, w2 = w13.data.view(torch.uint8), w2.data.view(torch.uint8)
+                for half in (0, padded):
+                    w13[:, half + inter : half + padded] = 0
+                w2[..., inter // 2 :] = 0
 
 
 class MonoProbe:
@@ -203,7 +219,7 @@ class MonoProbe:
         }
 
 
-def _decode(vllm_runner, monkeypatch, mono: bool, prompts, path: str):
+def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
     """Greedy decode of ``prompts`` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
     for the decode tokens of decode-only steps, and vLLM's routing margins,
@@ -216,7 +232,7 @@ def _decode(vllm_runner, monkeypatch, mono: bool, prompts, path: str):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
     with vllm_runner(
         MODEL,
-        tensor_parallel_size=2,
+        tensor_parallel_size=tp,
         load_format=LOAD_FORMAT,
         hf_overrides=TRUNCATED,
         worker_extension_cls=f"{__name__}.MonoProbe",
@@ -248,18 +264,21 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
-def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path):
-    if torch.accelerator.device_count() < 2:
-        pytest.skip("needs two GPUs (TP2)")
+@pytest.mark.parametrize("tp", [2, 4])
+def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     g = torch.Generator().manual_seed(0)
     # contexts past both ratios' 512 compressed entries, so top-k selects
     lens = torch.randperm(1700, generator=g)[:8].add(300).tolist()  # distinct
     prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
-    on, probe_on = _decode(vllm_runner, monkeypatch, True, prompts, f"{tmp_path}/on")
+    on, probe_on = _decode(
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on"
+    )
     off, probe_off = _decode(
-        vllm_runner, monkeypatch, False, prompts, f"{tmp_path}/off"
+        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off"
     )
 
     # both layer kinds took the mono path on every rank, at every decode step
@@ -287,11 +306,11 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path):
     # later layer takes the previous one's slightly different output, which
     # random weights amplify (2-4% by layer 4): 8%. A token whose top-6 routing
     # is a near-tie on vLLM's path (6th / 7th score within 5e-3: a 0.4% input
-    # difference moves scores near 0.8 by about 3e-3) may pick another expert,
-    # so that layer's FFN output is exempt for it; the residual stream keeps
-    # such a flip's share (0.3% seen, 1.7% after a flip): 3%. A layer the
-    # kernels no longer follow is off by far more, on every token.
-    for rank in range(2):
+    # difference moves scores near 0.8 by about 3e-3) may pick another expert;
+    # once it has, its residual stream differs and the later layers are exempt
+    # for it. The residual stream: 3% (0.3% seen). A layer the kernels no
+    # longer follow is off by far more, on every token.
+    for rank in range(tp):
         got, _ = torch.load(f"{tmp_path}/on.rank{rank}")
         want, gaps = torch.load(f"{tmp_path}/off.rank{rank}")
         keys: list[tuple[int, int]] = sorted(
@@ -300,13 +319,17 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path):
         assert len(keys) >= len(prompts), keys
         # the bound that sees a 3% error: a request's first decode token
         assert any(p == n for n, p in keys), keys
+        flipped: set = set()
         for i in sorted(WHOLE + FFN):
-            ties = {k for k in keys if gaps[(i, *k)] < 5e-3}
-            assert len(ties) <= len(keys) // 2, (rank, i, sorted(ties))
             for k in keys:
+                if k in flipped:
+                    continue
                 (x, res), (x_ref, res_ref) = got[(i, *k)], want[(i, *k)]
                 err = _rel(res, res_ref)
                 assert err < 0.03, (rank, i, k, "residual", err)
                 bound = (0.015 if k[1] == k[0] else 0.03) if i == 0 else 0.08
                 err = _rel(x, x_ref)
-                assert k in ties or err < bound, (rank, i, k, "x", err)
+                if err >= bound:
+                    assert gaps[(i, *k)] < 5e-3, (rank, i, k, "x", err)
+                    flipped.add(k)
+        assert len(flipped) <= len(keys) // 4, (rank, sorted(flipped))
