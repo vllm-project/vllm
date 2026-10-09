@@ -7,6 +7,8 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
@@ -21,17 +23,35 @@ class XpuCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        global_ranks: list[int] | None = None,
+        global_world_size: int | None = None,
+        tcp_store_group: StatelessProcessGroup | None = None,
         use_all2all: bool = False,
     ):
         super().__init__(
-            cpu_group, device, device_group, unique_name, use_all2all=use_all2all
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            global_ranks=global_ranks,
+            global_world_size=global_world_size,
+            use_all2all=use_all2all,
+        )
+        config = get_current_vllm_config_or_none()
+        self._mp_elastic_ep_group = (
+            tcp_store_group is not None
+            and config is not None
+            and config.parallel_config.data_parallel_backend == "mp"
+            and config.parallel_config.enable_elastic_ep
         )
         self.ca_comm: None = None
         if self.use_all2all:
             if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
 
-                self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+                self.all2all_manager = AgRsAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
                 logger.info("Using AgRs manager on XPU device.")
 
             else:  # type: ignore[has-type]
@@ -43,8 +63,23 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 )
                 from .all2all import AgRsAll2AllManager
 
-                self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+                self.all2all_manager = AgRsAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
                 logger.info("Using AgRs manager on XPU device.")
+
+    def batch_isend_irecv(self, p2p_ops: list[dist.P2POp]):
+        if not self._mp_elastic_ep_group:
+            return super().batch_isend_irecv(p2p_ops)
+        for op in p2p_ops:
+            peer = (
+                {"group_dst": op.group_peer}
+                if op.op is dist.isend
+                else {"group_src": op.group_peer}
+            )
+            request = op.op(op.tensor, group=self.device_group, **peer)
+            assert request is not None
+            request.wait()
 
     def _fixed_rank_sum(self, input_: torch.Tensor) -> torch.Tensor:
         flat_input = input_.reshape(-1)
@@ -236,8 +271,12 @@ class XpuCommunicator(DeviceCommunicatorBase):
             output_tensor = None
         return output_tensor
 
-    def broadcast(self, input_: torch.Tensor, src: int = 0) -> None:
-        dist.broadcast(input_, src=src, group=self.device_group)
+    def broadcast(self, input_: torch.Tensor, src: int = 0) -> torch.Tensor:
+        if self._mp_elastic_ep_group:
+            dist.broadcast(input_, group_src=src, group=self.device_group)
+        else:
+            dist.broadcast(input_, src=src, group=self.device_group)
+        return input_
 
     def dispatch_router_logits(
         self,

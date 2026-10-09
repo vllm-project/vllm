@@ -7,7 +7,9 @@ from typing import Any, Optional
 import torch
 from torch.distributed import Backend, ProcessGroup, Store
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.xpu_communicator import XpuCommunicator
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     TensorMetadata,
@@ -190,8 +192,13 @@ class StatelessGroupCoordinator(GroupCoordinator):
             device_comm_cls = resolve_obj_by_qualname(
                 current_platform.get_device_communicator_cls()
             )
-            assert device_comm_cls == CudaCommunicator
-            self.device_communicator = CudaCommunicator(
+            assert device_comm_cls in (CudaCommunicator, XpuCommunicator)
+            if device_comm_cls == XpuCommunicator:
+                config = get_current_vllm_config_or_none()
+                assert config is not None
+                assert config.parallel_config.data_parallel_backend == "mp"
+                assert config.parallel_config.enable_elastic_ep
+            self.device_communicator = device_comm_cls(
                 cpu_group=self.cpu_group,
                 device=self.device,
                 device_group=self.device_group,
@@ -225,7 +232,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         if self.world_size == 1:
             return input_
 
-        if self.device_communicator and input_.is_cuda:
+        if self.device_communicator and input_.device.type in ("cuda", "xpu"):
             return self.device_communicator.broadcast(input_, src)
         else:
             return self.tcp_store_group.broadcast(input_, src)
@@ -290,7 +297,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         for tensor in tensor_list:
             if tensor.numel() == 0:
                 continue
-            if self.device_communicator and tensor.is_cuda:
+            if self.device_communicator and tensor.device.type in ("cuda", "xpu"):
                 tensor.copy_(self.device_communicator.broadcast(tensor, src))
             else:
                 tensor.copy_(self.tcp_store_group.broadcast(tensor, src))
@@ -327,7 +334,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         for tensor in tensor_list:
             if tensor.numel() == 0:
                 continue
-            if self.device_communicator and tensor.is_cuda:
+            if self.device_communicator and tensor.device.type in ("cuda", "xpu"):
                 self.device_communicator.send(tensor, dst)
             else:
                 self.tcp_store_group.send(tensor, dst)
@@ -353,7 +360,10 @@ class StatelessGroupCoordinator(GroupCoordinator):
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
                 if tensor.numel() > 0:
-                    if self.device_communicator and tensor.is_cuda:
+                    if self.device_communicator and tensor.device.type in (
+                        "cuda",
+                        "xpu",
+                    ):
                         tensor = self.device_communicator.recv(
                             tensor.size(), tensor.dtype, src
                         )

@@ -16,6 +16,7 @@ from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
 from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.engine.utils import (
     CoreEngine,
     CoreEngineLaunch,
@@ -128,6 +129,7 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
                 parallel_config=SimpleNamespace(
                     data_parallel_size=local_engine_count,
                     assigned_physical_gpu_ids=None,
+                    enable_elastic_ep=False,
                     use_ray=False,
                 ),
             ),
@@ -187,6 +189,180 @@ def test_engine_core_process_shutdown_timeout(
 
     assert manager.manager_stopped.is_set()
     assert shutdown_calls == [(manager.processes, process_timeout)]
+
+
+def test_elastic_mp_coord_store_port_is_set_before_process_start(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parallel_config = SimpleNamespace(
+        data_parallel_size=2,
+        data_parallel_backend="mp",
+        assigned_physical_gpu_ids=None,
+        enable_elastic_ep=True,
+        data_parallel_master_ip="127.0.0.1",
+        _coord_store_port=0,
+        use_ray=False,
+    )
+    config = SimpleNamespace(shutdown_timeout=0, parallel_config=parallel_config)
+    store = SimpleNamespace(port=45678)
+    started_ports = []
+
+    def create_store(host, port, **kwargs):
+        assert (host, port, kwargs["is_master"]) == ("127.0.0.1", 0, True)
+        return store
+
+    monkeypatch.setattr("vllm.distributed.utils.create_tcp_store", create_store)
+    monkeypatch.setattr(
+        engine_utils,
+        "get_mp_context",
+        lambda: SimpleNamespace(
+            Process=lambda **kwargs: SimpleNamespace(
+                name=kwargs["name"],
+                exitcode=None,
+                start=lambda: started_ports.append(parallel_config._coord_store_port),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        engine_utils,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True, is_xpu=lambda: True),
+    )
+    monkeypatch.setattr(engine_utils, "shutdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        engine_utils.numa_utils,
+        "configure_subprocess",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    manager = CoreEngineProcManager(
+        local_engine_count=1,
+        start_index=0,
+        local_start_index=0,
+        vllm_config=config,
+        local_client=True,
+        handshake_address="unused",
+        executor_class=multiproc_executor.MultiprocExecutor,
+        log_stats=False,
+    )
+    manager._finalizer.detach()
+    assert manager._coord_store is store
+    assert started_ports == [store.port]
+
+
+def test_elastic_mp_monitor_ignores_removed_process(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    manager = object.__new__(CoreEngineProcManager)
+    manager._mp_elastic_ep = True
+    manager.manager_stopped = Event()
+    original = SimpleNamespace(name="EngineCore_DP0", sentinel=10)
+    removed = SimpleNamespace(name="EngineCore_DP1", sentinel=11)
+    manager._active_processes = {0: original, 1: removed}
+    manager.failed_proc_name = None
+    shutdown_calls = []
+
+    def shutdown():
+        shutdown_calls.append(manager.failed_proc_name)
+        manager.manager_stopped.set()
+
+    def wait(sentinels, timeout):
+        if removed.sentinel in sentinels:
+            manager.scale_down_elastic_ep(2, 1)
+            return [removed.sentinel]
+        return [original.sentinel]
+
+    monkeypatch.setattr(manager, "shutdown", shutdown)
+    monkeypatch.setattr(connection, "wait", wait)
+
+    manager.monitor_engine_liveness()
+
+    assert shutdown_calls == ["EngineCore_DP0"]
+
+
+@pytest.mark.parametrize("exitcode", [0, 1])
+def test_ordinary_mp_monitor_preserves_exit_handling(
+    monkeypatch: pytest.MonkeyPatch, exitcode: int
+):
+    manager = object.__new__(CoreEngineProcManager)
+    manager._mp_elastic_ep = False
+    manager.manager_stopped = Event()
+    manager.processes = [
+        SimpleNamespace(name="EngineCore_DP0", sentinel=10, exitcode=exitcode)
+    ]
+    manager.failed_proc_name = None
+    shutdown_calls = []
+    monkeypatch.setattr(connection, "wait", lambda sentinels, timeout: [10])
+    monkeypatch.setattr(
+        manager, "shutdown", lambda: shutdown_calls.append(manager.failed_proc_name)
+    )
+
+    manager.monitor_engine_liveness()
+
+    assert shutdown_calls == ["EngineCore_DP0" if exitcode else None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "elastic", "xpu", "allowed"),
+    [
+        ("mp", True, True, True),
+        ("mp", True, False, False),
+        ("mp", False, True, False),
+        ("ray", True, False, True),
+    ],
+)
+async def test_elastic_ep_scaling_backend_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    elastic: bool,
+    xpu: bool,
+    allowed: bool,
+):
+    client = object.__new__(DPLBAsyncMPClient)
+    client._prepared_elastic_ep = None
+    client.core_engines = [object()]
+    client.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_backend=backend,
+            enable_elastic_ep=elastic,
+            elastic_ep_max_dp_size=4,
+        )
+    )
+    monkeypatch.setattr(platforms.current_platform, "is_xpu", lambda: xpu)
+    if allowed:
+        with pytest.raises(ValueError, match="Cannot scale"):
+            await client.prepare_elastic_ep(5)
+    else:
+        with pytest.raises(AssertionError, match="Only ray and XPU mp"):
+            await client.prepare_elastic_ep(5)
+
+
+@pytest.mark.parametrize(
+    ("local_count", "new_size", "error"),
+    [
+        (1, 4, "all DP ranks on one node"),
+        (2, 5, "Not enough local devices"),
+    ],
+)
+def test_elastic_mp_scale_up_rejects_unsupported_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    local_count: int,
+    new_size: int,
+    error: str,
+):
+    manager = object.__new__(CoreEngineProcManager)
+    manager._addresses = EngineZmqAddresses(inputs=[], outputs=[])
+    parallel_config = SimpleNamespace(
+        data_parallel_size=2, data_parallel_size_local=local_count, world_size=1
+    )
+    config = SimpleNamespace(parallel_config=parallel_config)
+    monkeypatch.setattr(
+        engine_utils, "current_platform", SimpleNamespace(device_count=lambda: 4)
+    )
+
+    with pytest.raises(ValueError, match=error):
+        manager.scale_up_elastic_ep(config, new_size, 0)
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -10,6 +12,7 @@ import torch.distributed
 import vllm.distributed.eplb.eplb_communicator as eplb_comm
 import vllm.utils.gpu_sync_debug as gsd
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.device_communicators.xpu_communicator import XpuCommunicator
 from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
     has_nixl,
@@ -23,9 +26,125 @@ from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
 )
+from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
+
+
+@pytest.mark.parametrize(
+    ("backend", "elastic"), [("mp", True), ("mp", False), ("ray", True)]
+)
+def test_stateless_xccl_eplb_communicator(monkeypatch, backend, elastic):
+    monkeypatch.setattr(eplb_comm, "is_local_first_rank", lambda: False)
+    monkeypatch.setattr(eplb_comm.current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(
+        eplb_comm,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_backend=backend, enable_elastic_ep=elastic
+            )
+        ),
+    )
+    coordinator = StatelessGroupCoordinator.__new__(StatelessGroupCoordinator)
+    coordinator.cpu_group = object()
+    coordinator.device_group = object()
+    weight = torch.zeros(1)
+
+    if backend != "mp" or not elastic:
+        with pytest.raises(ValueError, match="Elastic EP requires"):
+            create_eplb_communicator(coordinator, "torch_xccl", [[weight]], [weight])
+        return
+
+    communicator = create_eplb_communicator(
+        coordinator, "torch_xccl", [[weight]], [weight]
+    )
+
+    assert isinstance(communicator, eplb_comm.TorchDistGlooStagedEplbCommunicator)
+    assert communicator._cpu_group is coordinator.cpu_group
+    assert communicator._stateless
+
+
+def test_stateless_gloo_eplb_transfers_without_registered_group(monkeypatch):
+    group = object()
+    communicator = eplb_comm.TorchDistGlooStagedEplbCommunicator(
+        group, stream=SimpleNamespace(synchronize=lambda: None), stateless=True
+    )
+    communicator.add_send([torch.ones(1)], dst_rank=3, expert_id=0)
+    communicator.add_recv([torch.empty(1)], src_rank=2, expert_id=0)
+    captured = []
+
+    def transfer(tensor, **kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(wait=lambda: None)
+
+    def receive(tensor, **kwargs):
+        return transfer(tensor, **kwargs)
+
+    monkeypatch.setattr(eplb_comm, "P2POp", lambda *args: pytest.fail("P2POp"))
+    monkeypatch.setattr(eplb_comm, "device_stream", lambda _: nullcontext())
+    monkeypatch.setattr(eplb_comm, "gpu_sync_allowed", nullcontext)
+    monkeypatch.setattr(torch.distributed, "isend", transfer)
+    monkeypatch.setattr(torch.distributed, "irecv", receive)
+    communicator.execute()
+
+    assert captured == [
+        {"group": group, "group_dst": 3},
+        {"group": group, "group_src": 2},
+    ]
+
+
+def test_xpu_stateless_batch_isend_irecv(monkeypatch):
+    communicator = XpuCommunicator.__new__(XpuCommunicator)
+    communicator.device_group = object()
+    communicator._mp_elastic_ep_group = True
+    tensor = torch.ones(2)
+    waited = []
+
+    class Request:
+        def wait(self):
+            waited.append(True)
+
+    def isend(data, *, group, group_dst):
+        assert data is tensor
+        assert group is communicator.device_group
+        assert group_dst == 2
+        return Request()
+
+    def irecv(data, *, group, group_src):
+        assert data is tensor
+        assert group is communicator.device_group
+        assert group_src == 0
+        return Request()
+
+    monkeypatch.setattr(torch.distributed, "isend", isend)
+    monkeypatch.setattr(torch.distributed, "irecv", irecv)
+    operation = object.__new__(torch.distributed.P2POp)
+    operation.op = isend
+    operation.tensor = tensor
+    operation.group_peer = 2
+    receive = object.__new__(torch.distributed.P2POp)
+    receive.op = irecv
+    receive.tensor = tensor
+    receive.group_peer = 0
+    communicator.batch_isend_irecv([operation, receive])
+    assert waited == [True, True]
+
+
+def test_xpu_stateless_broadcast(monkeypatch):
+    communicator = XpuCommunicator.__new__(XpuCommunicator)
+    communicator.device_group = object()
+    communicator._mp_elastic_ep_group = True
+    tensor = torch.ones(2)
+
+    def broadcast(data, *, group_src, group):
+        assert data is tensor
+        assert group is communicator.device_group
+        assert group_src == 0
+
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+    assert communicator.broadcast(tensor, src=0) is tensor
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
