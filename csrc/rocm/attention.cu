@@ -23,7 +23,7 @@
 
 #include <algorithm>
 #include "core/vec_dtypes/dtype_fp8.cuh"
-#include "libtorch_stable/quantization/w8a8/fp8/amd/quant_utils.cuh"
+#include "quantization/w8a8/fp8/amd/quant_utils.cuh"
 
 // ROCm 6.2 compatibility: map OCP fp8 types to FNUZ variants if OCP is absent
 #if !defined(HIP_FP8_TYPE_OCP)

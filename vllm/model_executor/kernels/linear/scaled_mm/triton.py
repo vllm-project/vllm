@@ -102,7 +102,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # azp_adj is the AZP adjustment term, used to account for weights.
         # It does not depend on scales or azp, so it is the same for
         # static and dynamic quantization.
-        # See csrc/libtorch_stable/quantization/w8a8/cutlass/Epilogues.md for the math.
+        # See csrc/quantization/w8a8/cutlass/Epilogues.md for the math.
         if not self.config.input_symmetric:
             weight = getattr(layer, w_q_name)
             # weight is already transposed to [K, N], sum over K (dim=0)

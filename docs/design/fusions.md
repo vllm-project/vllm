@@ -204,7 +204,7 @@ Supported hardware: CUDA (sm80+) only, tested only on sm90 and sm100.
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/qk_norm_rope_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/qk_norm_rope_fusion.py)
-- CUDA kernel: [`csrc/libtorch_stable/ops.h`](https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/ops.h) (`fused_qk_norm_rope`)
+- CUDA kernel: [`csrc/ops.h`](https://github.com/vllm-project/vllm/blob/main/csrc/ops.h) (`fused_qk_norm_rope`)
 
 ### RMSNorm + Quantization (`fuse_norm_quant`)
 
@@ -232,7 +232,7 @@ Supported quantization scheme/hardware combinations:
 
 - Pass: [`vllm/compilation/passes/fusion/rms_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rms_quant_fusion.py)
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
-- CUDA/HIP kernels: [`csrc/libtorch_stable/layernorm_quant_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/layernorm_quant_kernels.cu)
+- CUDA/HIP kernels: [`csrc/layernorm_quant_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_quant_kernels.cu)
 
 ### SiLU+Mul + Quantization (`fuse_act_quant`)
 
@@ -257,8 +257,8 @@ Supported quantization scheme/hardware combinations:
 
 - Pass: [`vllm/compilation/passes/fusion/act_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/act_quant_fusion.py)
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
-- CUDA/HIP kernels: [`csrc/libtorch_stable/quantization/`](https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/quantization/)
-- Fused SiLU+Mul+BlockQuant kernel: [`csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu)
+- CUDA/HIP kernels: [`csrc/quantization/`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/)
+- Fused SiLU+Mul+BlockQuant kernel: [`csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu)
 
 ### RMSNorm + Padding (`fuse_act_padding`)
 

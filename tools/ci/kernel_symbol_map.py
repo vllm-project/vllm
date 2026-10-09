@@ -32,12 +32,12 @@ Output (gzipped JSON):
       "errors": [],                 # [{"object", "source", "error"}, ...]
       "objects": [
         {
-          "source": "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu",
+          "source": "csrc/fused_qknorm_rope_kernel.cu",
           "target": "_C",
           "object": "CMakeFiles/_C.dir/csrc/.../fused_qknorm_rope_kernel.cu.o",
           "device": true,
           "symbols": ["_Z21fusedQKNormRopeKernelI...", ...],
-          "deps": ["csrc/libtorch_stable/fused_qknorm_rope_kernel.cu",
+          "deps": ["csrc/fused_qknorm_rope_kernel.cu",
                    "csrc/core/cuda_compat.h", ...]
           # "error": "..."          # present when cuobjdump failed on it
         },

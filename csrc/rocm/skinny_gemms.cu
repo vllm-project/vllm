@@ -14,7 +14,7 @@
 
 #include "core/cuda_compat.h"
 #include "dispatch_utils.h"
-#include "libtorch_stable/quantization/w8a8/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 #include "core/utils.hpp"
 
 // Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.

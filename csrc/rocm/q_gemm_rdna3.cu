@@ -3,7 +3,7 @@
 //
 // W4A16 GPTQ kernel for RDNA3 (gfx1100 / RX 7900 XTX class), templated on the
 // activation dtype (half or __hip_bfloat16). Adapted from exllamav2's 4-bit
-// kernel (csrc/libtorch_stable/quantization/gptq/q_gemm.cu) with the following
+// kernel (csrc/quantization/gptq/q_gemm.cu) with the following
 // changes:
 //
 //   1. Deterministic split-K epilogue. K is split across gridDim.z blocks;
