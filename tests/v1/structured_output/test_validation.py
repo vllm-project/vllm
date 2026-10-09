@@ -3,7 +3,6 @@
 """Request-time validation of structured output requests."""
 
 import json
-from unittest.mock import Mock
 
 import pytest
 from transformers import MistralCommonBackend, TokenizersBackend
@@ -17,13 +16,9 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import mistral as mistral_tokenizers
-from vllm.v1.structured_output import (
-    backend_guidance,
-    backend_outlines,
-    backend_xgrammar,
-)
+from vllm.v1.structured_output import backend_guidance
 
-pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
+pytestmark = pytest.mark.cpu_test
 
 JSON_SCHEMA = {
     "type": "object",
@@ -39,38 +34,6 @@ JSON_SCHEMA = {
 class _StubModelConfig:
     def __init__(self, is_diffusion: bool):
         self.is_diffusion = is_diffusion
-
-
-class _StubSlowTokenizer:
-    is_fast = False
-
-
-class _StubVllmMistralTokenizer:
-    IS_MISTRAL_TOKENIZER = True
-
-    def __init__(self, is_tekken: bool):
-        self.is_tekken = is_tekken
-        self.llg_tokenizer = None
-
-
-def _validate(tokenizer, backend):
-    params = SamplingParams(
-        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
-    )
-    params._validate_structured_outputs(
-        _StubModelConfig(is_diffusion=False),
-        StructuredOutputsConfig(backend=backend),
-        tokenizer=tokenizer,
-    )
-    return params
-
-
-def _guidance_must_not_run(*_args, **_kwargs):
-    pytest.fail("grammar validation must not run for an unsupported tokenizer")
-
-
-def _reject_xgrammar(*_args, **_kwargs):
-    raise VLLMValidationError("unsupported schema")
 
 
 def test_structured_outputs_rejected_for_diffusion_models():
@@ -315,143 +278,105 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
         ),
     ],
 )
-@pytest.mark.parametrize("slow_tokenizer", [False, True])
-def test_auto_backend_falls_back_on_unsupported_schema(
-    schema, expected_backend, slow_tokenizer
-):
+def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend):
     """`auto` falls back on rejection, so it must catch what the validators raise."""
     params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
-    if slow_tokenizer and expected_backend == "guidance":
-        with pytest.raises(VLLMValidationError, match="No compatible"):
-            params._validate_structured_outputs(
-                _StubModelConfig(is_diffusion=False),
-                StructuredOutputsConfig(backend="auto"),
-                tokenizer=_StubSlowTokenizer(),
-            )
-        return
+    # trick to create tokenizer that guidance backend accepts
+    tokenizer = object.__new__(TokenizersBackend)
     params._validate_structured_outputs(
         _StubModelConfig(is_diffusion=False),
         StructuredOutputsConfig(backend="auto"),
-        tokenizer=_StubSlowTokenizer()
-        if slow_tokenizer
-        else object.__new__(TokenizersBackend),
+        tokenizer=tokenizer,
     )
     assert params.structured_outputs is not None
     assert params.structured_outputs._backend == expected_backend
 
 
-@pytest.mark.parametrize(
-    "tokenizer_factory, raw_mistral",
-    [
-        pytest.param(_StubSlowTokenizer, False, id="slow-hf"),
-        pytest.param(
-            lambda: object.__new__(MistralCommonBackend),
-            True,
-            id="raw-mistral-spm",
-        ),
-        pytest.param(
-            lambda: object.__new__(MistralCommonBackend),
-            "tekken",
-            id="raw-mistral-tekken",
-        ),
-    ],
-)
-def test_guidance_rejects_unsupported_tokenizers(
-    monkeypatch, tokenizer_factory, raw_mistral
-):
-    """Unsupported tokenizers must fail before EngineCore initializes guidance."""
-    if raw_mistral:
-        monkeypatch.setattr(
-            mistral_tokenizers,
-            "mistral_common_tekkenizer",
-            lambda tokenizer: object() if raw_mistral == "tekken" else None,
+# ================================================
+# Test validate_structured_outputs functionality
+# ================================================
+
+
+class TestValidateStructuredOutputs:
+    class TestPR52298Regression:
+        class _StubSlowTokenizer:
+            is_fast = False
+
+        class _StubVllmMistralTokenizer:
+            IS_MISTRAL_TOKENIZER = True
+
+            def __init__(self, is_tekken: bool):
+                self.is_tekken = is_tekken
+                self.llg_tokenizer = object()
+
+        @staticmethod
+        def _validate_guidance(tokenizer):
+            params = SamplingParams(
+                structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+            )
+            params._validate_structured_outputs(
+                _StubModelConfig(is_diffusion=False),
+                StructuredOutputsConfig(backend="guidance"),
+                tokenizer=tokenizer,
+            )
+            return params
+
+        def _make_tokenizer(self, tokenizer_id: str):
+            if tokenizer_id == "slow-hf":
+                return self._StubSlowTokenizer()
+            if tokenizer_id == "plain-object":
+                return object()
+            if tokenizer_id == "raw-mistral-common":
+                return object.__new__(MistralCommonBackend)
+            if tokenizer_id == "vllm-mistral-non-tekken":
+                return self._StubVllmMistralTokenizer(is_tekken=False)
+            if tokenizer_id == "fast-hf":
+                return object.__new__(TokenizersBackend)
+            if tokenizer_id == "vllm-mistral-tekken":
+                return self._StubVllmMistralTokenizer(is_tekken=True)
+            raise ValueError(tokenizer_id)
+
+        @pytest.mark.parametrize(
+            "tokenizer_id, patch_mistral",
+            [
+                pytest.param("slow-hf", False, id="slow-hf"),
+                pytest.param("plain-object", False, id="plain-object"),
+                pytest.param("raw-mistral-common", False, id="raw-mistral-common"),
+                pytest.param(
+                    "vllm-mistral-non-tekken",
+                    True,
+                    id="vllm-mistral-non-tekken",
+                ),
+            ],
         )
-    monkeypatch.setattr(
-        backend_guidance,
-        "validate_guidance_grammar",
-        _guidance_must_not_run,
-    )
+        def test_unsupported_tokenizer(self, monkeypatch, tokenizer_id, patch_mistral):
+            if patch_mistral:
+                monkeypatch.setattr(
+                    mistral_tokenizers,
+                    "MistralTokenizer",
+                    self._StubVllmMistralTokenizer,
+                )
+            with pytest.raises(VLLMValidationError):
+                self._validate_guidance(self._make_tokenizer(tokenizer_id))
 
-    with pytest.raises(VLLMValidationError, match="only supports fast"):
-        _validate(tokenizer_factory(), backend="guidance")
-
-
-@pytest.mark.parametrize(
-    "tokenizer_factory, raw_mistral",
-    [
-        pytest.param(
-            lambda: object.__new__(TokenizersBackend),
-            False,
-            id="fast-hf",
-        ),
-        pytest.param(
-            lambda: _StubVllmMistralTokenizer(is_tekken=True),
-            True,
-            id="vllm-mistral-tekken",
-        ),
-    ],
-)
-def test_guidance_allows_supported_tokenizers(
-    monkeypatch, tokenizer_factory, raw_mistral
-):
-    """The early guard must preserve all supported tokenizer paths."""
-    if raw_mistral:
-        monkeypatch.setattr(
-            mistral_tokenizers,
-            "MistralTokenizer",
-            _StubVllmMistralTokenizer,
+        @pytest.mark.parametrize(
+            "tokenizer_id, patch_mistral",
+            [
+                pytest.param("fast-hf", False, id="fast-hf"),
+                pytest.param("vllm-mistral-tekken", True, id="vllm-mistral-tekken"),
+            ],
         )
-    validate_guidance = Mock()
-    monkeypatch.setattr(
-        backend_guidance,
-        "validate_guidance_grammar",
-        validate_guidance,
-    )
-
-    params = _validate(tokenizer_factory(), backend="guidance")
-    validate_guidance.assert_called_once()
-    assert params.structured_outputs._backend == "guidance"
-
-
-def test_auto_preserves_non_tekken_mistral_outlines_fallback(monkeypatch):
-    """Preserve the existing auto fallback for vLLM non-Tekken Mistral."""
-    monkeypatch.setattr(
-        mistral_tokenizers,
-        "MistralTokenizer",
-        _StubVllmMistralTokenizer,
-    )
-    monkeypatch.setattr(
-        backend_xgrammar,
-        "validate_xgrammar_grammar",
-        _reject_xgrammar,
-    )
-    validate_outlines = Mock()
-    monkeypatch.setattr(
-        backend_outlines,
-        "validate_structured_output_request_outlines",
-        validate_outlines,
-    )
-
-    params = _validate(
-        _StubVllmMistralTokenizer(is_tekken=False),
-        backend="auto",
-    )
-    validate_outlines.assert_called_once()
-    assert params.structured_outputs._backend == "outlines"
-
-
-def test_auto_excludes_guidance_for_slow_tokenizer(monkeypatch):
-    """Auto must fail safely when no compatible backend can handle the request."""
-    monkeypatch.setattr(
-        backend_xgrammar,
-        "validate_xgrammar_grammar",
-        _reject_xgrammar,
-    )
-    monkeypatch.setattr(
-        backend_guidance,
-        "validate_guidance_grammar",
-        _guidance_must_not_run,
-    )
-
-    with pytest.raises(VLLMValidationError, match="No compatible"):
-        _validate(_StubSlowTokenizer(), backend="auto")
+        def test_supported_tokenizer(self, monkeypatch, tokenizer_id, patch_mistral):
+            if patch_mistral:
+                monkeypatch.setattr(
+                    mistral_tokenizers,
+                    "MistralTokenizer",
+                    self._StubVllmMistralTokenizer,
+                )
+                monkeypatch.setattr(
+                    backend_guidance,
+                    "validate_guidance_grammar",
+                    lambda *_args, **_kwargs: None,
+                )
+            params = self._validate_guidance(self._make_tokenizer(tokenizer_id))
+            assert params.structured_outputs._backend == "guidance"

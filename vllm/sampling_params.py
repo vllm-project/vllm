@@ -1317,8 +1317,8 @@ class SamplingParams(
             )
 
         from vllm.v1.structured_output.backend_guidance import (
+            GuidanceBackend,
             has_guidance_unsupported_json_features,
-            is_guidance_tokenizer_supported,
             validate_guidance_grammar,
         )
         from vllm.v1.structured_output.backend_lm_format_enforcer import (
@@ -1341,7 +1341,7 @@ class SamplingParams(
                     "Mistral model, the ['xgrammar', 'outlines'] "
                     "backends or tokenizer_mode='hf' instead."
                 )
-            if not is_guidance_tokenizer_supported(tokenizer):
+            if not GuidanceBackend.is_tokenizer_supported(tokenizer):
                 raise VLLMValidationError(
                     "The 'guidance' structured output backend only supports fast "
                     "Hugging Face tokenizers and Tekken-based Mistral tokenizers. "
@@ -1422,7 +1422,7 @@ class SamplingParams(
                     self.structured_outputs._backend = "outlines"
                 else:
                     # Fall back to guidance by default.
-                    if not is_guidance_tokenizer_supported(tokenizer):
+                    if not GuidanceBackend.is_tokenizer_supported(tokenizer):
                         raise VLLMValidationError(
                             "No compatible structured output backend was found for "
                             "this request. XGrammar rejected the constraint, and "
