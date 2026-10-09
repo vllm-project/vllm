@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -349,6 +350,35 @@ def get_current_attn_backends(
                 use_mla=vllm_config.model_config.use_mla,
             )
         ]
+
+
+def get_current_attn_backends_and_specs(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    fallback: list[type[AttentionBackend]],
+) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
+    """Distinct (backend, spec) pairs of the transfer layers, else ``fallback``.
+
+    Compressed caches are skipped: their kernel pages never split transferred
+    blocks.
+    """
+    pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
+    layer_type = cast(type[Any], AttentionLayerBase)
+    for group in kv_cache_config.transfer_groups:
+        specs = getattr(group.kv_cache_spec, "kv_cache_specs", {})
+        layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
+        for name, layer in layers.items():
+            spec = specs.get(name, group.kv_cache_spec)
+            if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
+                layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+                assert layout.is_block_outermost, "Compressed caches must be packed"
+                continue
+            if not isinstance(spec, AttentionSpec):
+                spec = None
+            pairs[layer.get_attn_backend(), spec] = None
+    if not pairs:
+        return fallback, [None] * len(fallback)
+    return [backend for backend, _ in pairs], [spec for _, spec in pairs]
 
 
 def get_current_attn_backend(
