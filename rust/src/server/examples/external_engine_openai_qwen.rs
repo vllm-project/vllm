@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -81,6 +82,7 @@ async fn main() -> Result<()> {
         lora_modules: Vec::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
+        stream_interval: NonZeroU32::MIN,
         api_server_options: ApiServerOptions::default(),
         cors: CorsConfig::default(),
         tls: None,

@@ -12,6 +12,7 @@ mod unsupported;
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -268,6 +269,13 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
+    /// The interval (or buffer size) for streaming in terms of token length.
+    /// A smaller value (1) makes streaming smoother by sending each token
+    /// immediately, while a larger value (e.g., 10) reduces host overhead and
+    /// may increase throughput by batching multiple tokens before sending.
+    #[arg(long, default_value_t = NonZeroU32::MIN)]
+    #[serde(default = "default_stream_interval")]
+    pub stream_interval: NonZeroU32,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -547,6 +555,7 @@ impl SharedRuntimeArgs {
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
+            stream_interval: self.stream_interval,
             api_server_options,
             cors,
             tls,
@@ -609,6 +618,7 @@ impl SharedRuntimeArgs {
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
+            stream_interval: self.stream_interval,
             api_server_options,
             cors,
             tls,
@@ -644,6 +654,10 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_stream_interval() -> NonZeroU32 {
+    NonZeroU32::MIN
 }
 
 fn default_cors_wildcard() -> JsonStringList {
