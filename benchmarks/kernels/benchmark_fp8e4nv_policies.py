@@ -45,7 +45,6 @@ def _bench(
     CONSTRAINTS: tl.constexpr,
     HANDLE_NAN: tl.constexpr,
     FLUSH_UNDERFLOW: tl.constexpr,
-    FLUSH_NEGATIVE_ZERO: tl.constexpr,
     ITERS: tl.constexpr,
 ):
     """Measure conversion chains so load/store bandwidth cannot hide their cost."""
@@ -67,9 +66,7 @@ def _bench(
             if MODE == 0:
                 y = convert_to_fp8e4m3(x, HANDLE_NAN, True)
             else:
-                y = ptx_to(
-                    x, HANDLE_NAN, True, FLUSH_UNDERFLOW, FLUSH_NEGATIVE_ZERO, PACK
-                )
+                y = ptx_to(x, HANDLE_NAN, True, FLUSH_UNDERFLOW, PACK)
         else:
             if MODE == 0:
                 y = convert_from_fp8e4m3(x, dtype, HANDLE_NAN, True)
@@ -80,7 +77,6 @@ def _bench(
                     HANDLE_NAN,
                     True,
                     FLUSH_UNDERFLOW,
-                    FLUSH_NEGATIVE_ZERO,
                     PACK,
                 )
         # A dependent finite input for the next iteration prevents conversion CSE.
@@ -100,7 +96,6 @@ def main():
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--handle-nan", action="store_true")
     parser.add_argument("--flush-underflow", action="store_true")
-    parser.add_argument("--flush-negative-zero", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -130,7 +125,6 @@ def main():
                     pack,
                     args.handle_nan,
                     args.flush_underflow,
-                    args.flush_negative_zero,
                 )
                 constraints = (
                     ("=h,h" if pack == 1 else "=r,r" if pack == 2 else "=r,r,r")
@@ -138,7 +132,7 @@ def main():
                     else ("=h,r" if pack == 1 else "=r,r" if pack == 2 else "=r,=r,r")
                 )
                 modes = [1, 2]
-                if not (args.flush_underflow or args.flush_negative_zero):
+                if not args.flush_underflow:
                     modes.insert(0, 0)
                 for iters in args.iterations:
                     calls, compiled, outputs = {}, {}, {}
@@ -173,7 +167,6 @@ def main():
                                 constraints,
                                 args.handle_nan,
                                 args.flush_underflow,
-                                args.flush_negative_zero,
                                 iters,
                                 num_warps=4,
                                 extern_libs=FP8E4NV_EXTERN_LIBS,
@@ -212,7 +205,6 @@ def main():
                         },
                         "handle_nan": args.handle_nan,
                         "flush_underflow": args.flush_underflow,
-                        "flush_negative_zero": args.flush_negative_zero,
                     }
                     rows.append(row)
                     (args.output / "measurements.json").write_text(
