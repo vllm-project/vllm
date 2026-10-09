@@ -6,12 +6,9 @@ from collections.abc import Sequence
 from typing import NamedTuple, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
-    BoundaryPut,
-    ReqMeta,
     chunk_hashes_for_block_size,
 )
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -28,7 +25,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
-    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
@@ -123,20 +119,6 @@ class MooncakeStoreCoordinator:
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
-
-    def add_partial_tail_puts(self, req_meta: ReqMeta) -> None:
-        """Add this job's non-Mamba partial-tail blocks to its boundary puts.
-
-        Runs once per store job on the scheduler, which pins every boundary
-        put's block; the worker puts exactly those blocks.
-        """
-        puts = partial_tail_non_mamba_puts(
-            self,
-            req_meta,
-            [group.kv_cache_spec.block_size for group in self.kv_cache_groups],
-        )
-        if puts:
-            req_meta.boundary_puts = [*puts, *(req_meta.boundary_puts or [])]
 
     def align_lookup_length(self, length: int) -> int:
         alignment = (
@@ -482,72 +464,3 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
-
-
-def partial_tail_non_mamba_puts(
-    coord: MooncakeStoreCoordinator,
-    req_meta: ReqMeta,
-    block_sizes: Sequence[int],
-) -> list[BoundaryPut]:
-    """Locate the non-Mamba blocks a partial-tail save publishes.
-
-    A later request resumes at the prompt's Mamba checkpoint (``boundary``) only
-    if both pieces of KV are stored:
-
-    - Mamba groups: the state at ``boundary``, handed off by the core as a
-      boundary put of its own, so Mamba groups are not listed here.
-    - Other groups: the KV from the last LCM-aligned normal save up to
-      ``boundary`` plus the group's EAGLE proof margin (``proof_end``). Each
-      block is keyed by the hash at its end, clipped to ``proof_end``.
-
-    Groups whose proof is not computed yet are omitted. For example, with LCM
-    16, blocks of 4 tokens, and a checkpoint at 44, the full-attention blocks
-    are 8-10, keyed at 36, 40 and 44.
-
-    ``block_sizes`` are the per-group block sizes, indexed like
-    ``req_meta.block_ids``.
-    """
-    mamba_tails = [
-        put.num_tokens
-        for put in req_meta.boundary_puts or []
-        if put.group_id in coord.mamba_group_ids
-        and put.num_tokens % block_sizes[put.group_id]
-    ]
-    # The tail is due on the save that first covers the prompt, or when Mamba
-    # hands off its checkpoint state.
-    if not mamba_tails and not req_meta.publish_partial_tail:
-        return []
-    prompt_tokens = req_meta.num_prompt_tokens or 0
-    completed = req_meta.completed_token_len
-    if not coord.enable_partial_hash_hits or not req_meta.block_hashes:
-        return []
-    hash_block_size = coord.hash_block_size
-    boundary = get_mamba_prefill_checkpoint_position(
-        prompt_tokens, hash_block_size, bool(coord.eagle_proof_margin_by_group)
-    )
-    assert all(position == boundary for position in mamba_tails), (
-        "Mamba tail offloads must match the prompt checkpoint boundary"
-    )
-    num_hashes = len(req_meta.block_hashes)
-    if boundary == 0 or boundary // hash_block_size > num_hashes:
-        return []
-    if completed is None:
-        completed = boundary
-    start = boundary // coord.lcm_block_size * coord.lcm_block_size
-    puts: list[BoundaryPut] = []
-    for group_id, block_size in enumerate(block_sizes):
-        if group_id in coord.mamba_group_ids:
-            continue
-        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
-        if proof_end > completed or proof_end // hash_block_size > num_hashes:
-            continue
-        group_blocks = req_meta.block_ids[group_id]
-        for block_idx in range(start // block_size, cdiv(proof_end, block_size)):
-            if block_idx >= len(group_blocks):
-                break
-            block_id = group_blocks[block_idx]
-            if block_id == NULL_BLOCK_ID:
-                continue
-            num_tokens = min((block_idx + 1) * block_size, proof_end)
-            puts.append(BoundaryPut(group_id, block_id, num_tokens))
-    return puts

@@ -16,7 +16,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     MooncakeStoreCoordinator,
-    partial_tail_non_mamba_puts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BoundaryPut,
@@ -24,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     KeyMetadata,
     LoadSpec,
     ReqMeta,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+    partial_tail_non_mamba_puts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     KVCacheStoreRecvingThread,

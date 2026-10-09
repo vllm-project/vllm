@@ -5,6 +5,7 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Scheduler-side logic for MooncakeStoreConnector."""
 
+from collections.abc import Sequence
 from dataclasses import replace
 
 from vllm.config import VllmConfig
@@ -26,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
     LookupKeyClient,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -35,7 +37,11 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    MambaSpec,
+    get_mamba_prefill_checkpoint_position,
+)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -54,6 +60,75 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
         return request.prefill_token_ids
     assert request.prompt_token_ids is not None
     return request.prompt_token_ids
+
+
+def partial_tail_non_mamba_puts(
+    coord: MooncakeStoreCoordinator,
+    req_meta: ReqMeta,
+    block_sizes: Sequence[int],
+) -> list[BoundaryPut]:
+    """Locate the non-Mamba blocks a partial-tail save publishes.
+
+    A later request resumes at the prompt's Mamba checkpoint (``boundary``) only
+    if both pieces of KV are stored:
+
+    - Mamba groups: the state at ``boundary``, handed off by the core as a
+      boundary put of its own, so Mamba groups are not listed here.
+    - Other groups: the KV from the last LCM-aligned normal save up to
+      ``boundary`` plus the group's EAGLE proof margin (``proof_end``). Each
+      block is keyed by the hash at its end, clipped to ``proof_end``.
+
+    Groups whose proof is not computed yet are omitted. For example, with LCM
+    16, blocks of 4 tokens, and a checkpoint at 44, the full-attention blocks
+    are 8-10, keyed at 36, 40 and 44.
+
+    ``block_sizes`` are the per-group block sizes, indexed like
+    ``req_meta.block_ids``.
+    """
+    mamba_tails = [
+        put.num_tokens
+        for put in req_meta.boundary_puts or []
+        if put.group_id in coord.mamba_group_ids
+        and put.num_tokens % block_sizes[put.group_id]
+    ]
+    # The tail is due on the save that first covers the prompt, or when Mamba
+    # hands off its checkpoint state.
+    if not mamba_tails and not req_meta.publish_partial_tail:
+        return []
+    prompt_tokens = req_meta.num_prompt_tokens or 0
+    completed = req_meta.completed_token_len
+    if not coord.enable_partial_hash_hits or not req_meta.block_hashes:
+        return []
+    hash_block_size = coord.hash_block_size
+    boundary = get_mamba_prefill_checkpoint_position(
+        prompt_tokens, hash_block_size, bool(coord.eagle_proof_margin_by_group)
+    )
+    assert all(position == boundary for position in mamba_tails), (
+        "Mamba tail offloads must match the prompt checkpoint boundary"
+    )
+    num_hashes = len(req_meta.block_hashes)
+    if boundary == 0 or boundary // hash_block_size > num_hashes:
+        return []
+    if completed is None:
+        completed = boundary
+    start = boundary // coord.lcm_block_size * coord.lcm_block_size
+    puts: list[BoundaryPut] = []
+    for group_id, block_size in enumerate(block_sizes):
+        if group_id in coord.mamba_group_ids:
+            continue
+        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
+        if proof_end > completed or proof_end // hash_block_size > num_hashes:
+            continue
+        group_blocks = req_meta.block_ids[group_id]
+        for block_idx in range(start // block_size, cdiv(proof_end, block_size)):
+            if block_idx >= len(group_blocks):
+                break
+            block_id = group_blocks[block_idx]
+            if block_id == NULL_BLOCK_ID:
+                continue
+            num_tokens = min((block_idx + 1) * block_size, proof_end)
+            puts.append(BoundaryPut(group_id, block_id, num_tokens))
+    return puts
 
 
 class MooncakeStoreScheduler:
@@ -479,6 +554,21 @@ class MooncakeStoreScheduler:
                 block_ids[group_id] for group_id in self._store_group_ids
             )
 
+    def _add_partial_tail_puts(self, req_meta: ReqMeta) -> None:
+        """Add this job's non-Mamba partial-tail blocks to its boundary puts.
+
+        Runs once per store job, before the job's blocks are pinned; the worker
+        puts exactly the pinned blocks.
+        """
+        coord = self._store_coord
+        puts = partial_tail_non_mamba_puts(
+            coord,
+            req_meta,
+            [group.kv_cache_spec.block_size for group in coord.kv_cache_groups],
+        )
+        if puts:
+            req_meta.boundary_puts = [*puts, *(req_meta.boundary_puts or [])]
+
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
         """Take a GPU block reference for every store job this step emits.
 
@@ -496,7 +586,7 @@ class MooncakeStoreScheduler:
             if req_meta.store_job_id is not None:
                 assert req_meta.store_job_id in self._pinned_saves
                 continue
-            self._store_coord.add_partial_tail_puts(req_meta)
+            self._add_partial_tail_puts(req_meta)
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
             block_ids = [put.block_id for put in req_meta.boundary_puts or []]
@@ -567,7 +657,7 @@ class MooncakeStoreScheduler:
             boundary_puts=mamba_puts,
             completed_token_len=request.num_computed_tokens,
         )
-        self._store_coord.add_partial_tail_puts(req_meta)
+        self._add_partial_tail_puts(req_meta)
         assert req_meta.boundary_puts is not None
         pinned_block_ids = list(
             dict.fromkeys(put.block_id for put in req_meta.boundary_puts)
