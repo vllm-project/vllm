@@ -404,14 +404,14 @@ mod tests {
                         timestamp: 9.0,
                     },
                 ]),
-                prefill_stats: Some(PrefillStats {
+                prefill_stats: Some(Box::new(PrefillStats {
                     num_prompt_tokens: 64,
                     num_computed_tokens: 60,
                     num_cached_tokens: 4,
                     num_local_cached_tokens: 4,
                     num_external_cached_tokens: 0,
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             },
         );

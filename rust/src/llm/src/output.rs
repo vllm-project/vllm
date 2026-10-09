@@ -152,7 +152,7 @@ pub struct GenerateOutput {
     pub request_id: String,
     /// One-time prompt metadata emitted only on the first output for this
     /// request.
-    pub prompt_info: Option<GeneratePromptInfo>,
+    pub prompt_info: Option<Box<GeneratePromptInfo>>,
     /// Newly produced token IDs for this step.
     pub token_ids: Vec<u32>,
     /// Sample logprobs for the generated positions in this step.
@@ -162,14 +162,14 @@ pub struct GenerateOutput {
     /// Number of prompt tokens served from cache, when reported by prefill stats.
     pub cached_token_count: usize,
     /// Connector-specific KV transfer parameters for disaggregated serving.
-    pub kv_transfer_params: Option<serde_json::Value>,
+    pub kv_transfer_params: Option<Box<serde_json::Value>>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
-    pub ec_transfer_params: Option<serde_json::Value>,
+    pub ec_transfer_params: Option<Box<serde_json::Value>>,
     /// Sampling support sets aligned one-to-one with `token_ids`.
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
-    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
 }
 
 impl GenerateOutput {
@@ -207,10 +207,12 @@ impl GenerateOutput {
     ) -> Self {
         Self {
             request_id: String::new(),
-            prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
-                prompt_token_ids: ids,
-                prompt_logprobs: None,
-                prompt_token_id_logprobs: None,
+            prompt_info: prompt_token_ids.map(|ids| {
+                Box::new(GeneratePromptInfo {
+                    prompt_token_ids: ids,
+                    prompt_logprobs: None,
+                    prompt_token_id_logprobs: None,
+                })
             }),
             token_ids,
             logprobs: None,
@@ -231,7 +233,7 @@ impl GenerateOutput {
 ///   with `finish_reason = Abort` before the stream ends.
 /// - For errors or unexpected engine-side closes, the stream terminates with an error.
 pub struct GenerateOutputStream {
-    pending_prompt_info: Option<GeneratePromptInfo>,
+    pending_prompt_info: Option<Box<GeneratePromptInfo>>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
     /// Removes this request's external→internal tracking edge on drop. Held for
@@ -249,11 +251,11 @@ impl GenerateOutputStream {
         request_guard: RequestGuard,
     ) -> Self {
         Self {
-            pending_prompt_info: Some(GeneratePromptInfo {
+            pending_prompt_info: Some(Box::new(GeneratePromptInfo {
                 prompt_token_ids,
                 prompt_logprobs: None,
                 prompt_token_id_logprobs: None,
-            }),
+            })),
             raw_stream,
             request_metrics,
             _request_guard: request_guard,
@@ -291,7 +293,7 @@ impl Stream for GenerateOutputStream {
         if let Some(info) = &mut self.pending_prompt_info
             && info.prompt_token_id_logprobs.is_none()
         {
-            info.prompt_token_id_logprobs = raw.prompt_token_id_logprobs;
+            info.prompt_token_id_logprobs = raw.prompt_token_id_logprobs.map(|logprobs| *logprobs);
         }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
@@ -432,9 +434,9 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         output_token_count: collected.token_ids.len(),
                         cached_token_count,
                     };
-                    collected.kv_transfer_params = output.kv_transfer_params;
-                    collected.ec_transfer_params = output.ec_transfer_params;
-                    collected.spec_decode_metrics = output.spec_decode_metrics;
+                    collected.kv_transfer_params = output.kv_transfer_params.map(|value| *value);
+                    collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
+                    collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {

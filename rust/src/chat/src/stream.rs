@@ -95,8 +95,8 @@ impl ChatEventStream {
                         token_ids,
                         usage,
                         finish_reason,
-                        kv_transfer_params,
-                        ec_transfer_params,
+                        kv_transfer_params: kv_transfer_params.map(|value| *value),
+                        ec_transfer_params: ec_transfer_params.map(|value| *value),
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
