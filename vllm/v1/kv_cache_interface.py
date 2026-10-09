@@ -24,6 +24,8 @@ from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
+    from transformers import PretrainedConfig
+
     from vllm.config import VllmConfig
     from vllm.v1.attention.backend import MultipleOf
 
@@ -439,6 +441,22 @@ def create_kv_cache_views(
             cache_logical = cache_logical.view(dtype)
         views.append(cache_logical)
     return views
+
+
+def get_sparse_topk_buffer_width(hf_config: PretrainedConfig) -> int:
+    """Width of the per-token top-k indices buffer a sparse-MLA model allocates.
+
+    A kpool config (glm5next) reserves the incomplete pool tail and tiles
+    top-k in 128 columns; other sparse-MLA models keep the buffer exactly
+    ``index_topk`` wide. HiSparse sizes its hot region from this width, so
+    the scheduler and the model must agree on it.
+    """
+    topk = hf_config.index_topk
+    assert topk is not None
+    kpool = getattr(hf_config, "index_kpool", None)
+    if kpool is None:
+        return topk
+    return round_up(topk + (kpool - 1 if kpool > 1 else 0), 128)
 
 
 @dataclass(frozen=True, kw_only=True)
