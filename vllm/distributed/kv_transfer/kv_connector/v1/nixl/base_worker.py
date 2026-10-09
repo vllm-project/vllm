@@ -1111,9 +1111,10 @@ class NixlBaseConnectorWorker:
                     got_metadata_time - start_time,
                 )
 
-                self._check_hidden_state_handoff_compat(
-                    handshake_payload.hidden_state_handoff
-                )
+                if self.enforce_compat_hash:
+                    self._check_hidden_state_handoff_compat(
+                        handshake_payload.hidden_state_handoff
+                    )
                 # Check compatibility hash BEFORE decoding agent metadata
                 assert self.compat_hash is not None
                 if (

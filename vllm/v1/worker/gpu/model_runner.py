@@ -822,6 +822,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        skip_drafter: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -901,6 +902,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Non-last PP ranks don't produce output for sampling.
         if not self.is_last_pp_rank:
+            return None, None
+        if skip_drafter:
+            # The forward only; the caller takes over self.execute_model_state.
             return None, None
 
         assert self.execute_model_state is not None
@@ -2102,8 +2106,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Every scheduled row samples from a P/D hidden-state record: run no
         forward pass, only the KV connector and the sampling step."""
         self.kv_connector.pre_forward(scheduler_output)
+        dp_sync = None
+        if self.dp_size > 1:
+            # Dummy run DP sync serves this step's drafting.
+            self._dummy_run(
+                self.decode_query_len, uniform_decode=True, skip_drafter=True
+            )
+            # The dummy forward left its state, with its DP sync; replaced below.
+            assert self.execute_model_state is not None
+            dp_sync = self.execute_model_state.dp_sync
+
         self.kv_connector.finish_forward()
         self.execute_model_state = ExecuteModelState(
+            dp_sync=dp_sync,
             finished_req_ids=scheduler_output.finished_req_ids,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
