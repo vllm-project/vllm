@@ -9,11 +9,11 @@ use std::sync::{Arc, Once};
 
 use futures::StreamExt as _;
 use tracing::info;
-use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 use xgrammar_structural_tag::ToolChoice;
+use xgrammar_structural_tag::format::Format;
 
 use self::unified::unified_event_stream;
 use super::structural_tag::answer_format;
@@ -50,6 +50,10 @@ struct GrammarInputs {
     tools: Vec<ChatTool>,
     tool_choice: ToolChoice,
     tool_strict_level: ToolStrictLevel,
+    /// The request's structured-output constraint, normalized for composition
+    /// into the output grammar. The original stays on the request until an
+    /// output grammar replaces it.
+    answer: Option<Format>,
 }
 
 impl DefaultChatOutputProcessor {
@@ -139,6 +143,7 @@ impl DefaultChatOutputProcessor {
                 tools: request.tools().to_vec(),
                 tool_choice: request.tool_choice().into(),
                 tool_strict_level,
+                answer: request.sampling_params.structured_outputs.as_ref().and_then(answer_format),
             }),
         })
     }
@@ -250,21 +255,17 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
         })
     }
 
-    fn build_output_grammar(
-        &self,
-        structured_outputs: Option<&StructuredOutputsParams>,
-    ) -> Result<Option<BuiltOutputGrammar>> {
+    fn build_output_grammar(&self) -> Result<Option<BuiltOutputGrammar>> {
         let Some(inputs) = &self.grammar_inputs else {
             return Ok(None);
         };
-        let answer = structured_outputs.and_then(answer_format);
         self.parser
             .build_output_grammar(&OutputGrammarContext {
                 tools: &inputs.tools,
                 tool_choice: &inputs.tool_choice,
                 tool_strict_level: inputs.tool_strict_level,
                 parallel_tool_calls: self.parallel_tool_calls,
-                answer: answer.as_ref(),
+                answer: inputs.answer.as_ref(),
             })
             .map_err(|error| Error::OutputGrammar {
                 error: Box::new(error),
@@ -336,7 +337,7 @@ mod tests {
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
-            processor.build_output_grammar(None).unwrap()
+            processor.build_output_grammar().unwrap()
         };
 
         assert!(build(ToolStrictLevel::Auto, None, ChatToolChoice::Auto).is_none());
@@ -357,29 +358,36 @@ mod tests {
             strict: None,
             defer_loading: None,
         }];
-        let mut request = ChatRequest {
-            tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)
-                .unwrap(),
-            ..ChatRequest::for_test()
-        };
-        let mut processor = DefaultChatOutputProcessor::new(
-            &mut request,
-            "other-model",
-            tokenizer(),
-            &ParserSelection::Explicit("qwen3_coder".to_string()),
-            &ParserSelection::None,
-            ToolStrictLevel::Auto,
-        )
-        .unwrap();
-        processor.initialize(&[]).unwrap();
         let schema = serde_json::json!({"type": "object"});
-        let structured_outputs = StructuredOutputsParams::json(schema.clone());
+        let build = |structured_outputs| {
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(
+                    &[],
+                    tools.clone(),
+                    Some(ChatToolChoice::Auto),
+                    true,
+                )
+                .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            request.sampling_params.structured_outputs = structured_outputs;
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                &ParserSelection::Explicit("qwen3_coder".to_string()),
+                &ParserSelection::None,
+                ToolStrictLevel::Auto,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            processor.build_output_grammar().unwrap()
+        };
 
         // Non-strict `auto` alone needs no grammar; with an answer constraint
         // the grammar holds the answer or a call.
-        assert!(processor.build_output_grammar(None).unwrap().is_none());
-        let built = processor.build_output_grammar(Some(&structured_outputs)).unwrap();
-        let built = built.unwrap();
+        assert!(build(None).is_none());
+        let built = build(Some(StructuredOutputsParams::json(schema.clone()))).unwrap();
         let Format::Or(branches) = built.format else {
             panic!("expected the calls or the answer, got {:?}", built.format);
         };
@@ -416,7 +424,7 @@ mod tests {
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
-            let built = processor.build_output_grammar(None).unwrap().unwrap();
+            let built = processor.build_output_grammar().unwrap().unwrap();
             let tag =
                 serde_json::to_value(xgrammar_structural_tag::StructuralTag::new(built.format))
                     .unwrap();

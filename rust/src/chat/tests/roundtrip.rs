@@ -943,8 +943,7 @@ async fn parse_completion(
         },
     )?;
     processor.initialize(&prompt_token_ids)?;
-    let output_grammar =
-        processor.build_output_grammar(base_request.sampling_params.structured_outputs.as_ref())?;
+    let output_grammar = processor.build_output_grammar()?;
 
     let decoded = decoded_completion_stream(
         tokenizer.as_ref(),
