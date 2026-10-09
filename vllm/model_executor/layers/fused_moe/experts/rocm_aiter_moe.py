@@ -396,6 +396,27 @@ def rocm_aiter_fused_experts(
 
                 gate_mode = GateMode.SEPARATED.value
                 q_dtype_a = dtypes.fp4x2
+            elif (
+                activation
+                in (
+                    MoEActivation.SWIGLUOAI,
+                    MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+                )
+                and quant_config.w1_bias is None
+            ):
+                # TODO: remove once https://github.com/ROCm/aiter/pull/6022 is
+                # merged and AITER is bumped. AITER's interleaved path runs SiLU
+                # instead of SwiGLU when there is no bias.
+                gate_mode = GateMode.SEPARATED.value
+                if rocm_aiter_ops.fused_moe_supports_quant_dtype_a():
+                    from aiter import dtypes
+
+                    q_dtype_a = dtypes.bf16
+                # TODO: remove once https://github.com/ROCm/aiter/pull/6086 is
+                # merged and AITER is bumped. AITER applies k_pad_zeros to every
+                # split-K partition, which skips real data; the zero-padded
+                # columns are computed instead.
+                hidden_pad = 0
             else:
                 gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:

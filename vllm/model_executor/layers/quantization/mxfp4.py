@@ -616,6 +616,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             hidden_size,
             intermediate_size_per_partition,
             activation=self.moe.activation,
+            has_bias=self.moe.has_bias,
         )
 
     @staticmethod
