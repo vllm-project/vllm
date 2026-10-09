@@ -11,13 +11,15 @@ logits (task="generate").
 import asyncio
 import math
 import time
-from collections.abc import AsyncGenerator, Mapping
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from fastapi import Request
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
+from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
@@ -28,7 +30,6 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
@@ -37,7 +38,6 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
-from vllm.utils.async_utils import merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -60,6 +60,7 @@ class GenerativeScoringRequest(OpenAIBaseModel):
             the full vocab for those ids (False).
         item_first: If True, prepend items to query. Otherwise append items to query.
         add_special_tokens: Whether to add special tokens when tokenizing.
+        cache_salt: Optional salt for prefix caching.
 
     """
 
@@ -92,6 +93,17 @@ class GenerativeScoringRequest(OpenAIBaseModel):
         default=True,
         description="Whether to add special tokens when tokenizing.",
     )
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
     priority: int = Field(
         default=0,
         ge=-(2**63),
@@ -104,6 +116,13 @@ class GenerativeScoringRequest(OpenAIBaseModel):
         default_factory=random_uuid,
         description="The request_id related to this request.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            validate_cache_salt(data.get("cache_salt"))
+        return data
 
 
 class GenerativeScoringItemResult(OpenAIBaseModel):
@@ -261,6 +280,7 @@ class ServingGenerativeScoring(BaseServing):
             logprobs=len(request.label_token_ids),
             logprob_token_ids=request.label_token_ids,
             n=1,
+            watermarking=False,
         )
 
         # Get trace headers
@@ -270,37 +290,28 @@ class ServingGenerativeScoring(BaseServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
-        # Schedule requests for all inputs
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
         for i, engine_input in enumerate(engine_inputs):
-            request_id_item = f"{request_id}-{i}"
-
             self._log_inputs(
-                request_id_item,
+                f"{request_id}-{i}",
                 engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
 
-            generator = self.engine_client.generate(
-                engine_input,
-                sampling_params,
-                request_id_item,
+        try:
+            reads = await next_token_label_reads(
+                self.engine_client,
+                engine_inputs,
+                [sampling_params] * len(engine_inputs),
+                request_id,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=request.priority,
             )
-            generators.append(generator)
-
-        # Collect results
-        result_generator = merge_async_iterators(*generators)
-        results: list[RequestOutput | None] = [None] * len(engine_inputs)
-
-        try:
-            async for i, res in result_generator:
-                results[i] = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except ValueError as e:
+            return self.create_error_response(e)
         except Exception as e:
             logger.exception("Error during generation")
             return self.create_error_response(e)
@@ -310,45 +321,8 @@ class ServingGenerativeScoring(BaseServing):
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
-        for i, result in enumerate(results):
-            if result is None:
-                return self.create_error_response(
-                    f"Failed to generate result for item {i}"
-                )
-
-            # Check for errors
-            if result.outputs and result.outputs[0].finish_reason == "error":
-                return self.create_error_response(f"Generation error for item {i}")
-
-            # Get logprobs from the generated token
-            if not result.outputs or len(result.outputs) == 0:
-                return self.create_error_response(f"No output generated for item {i}")
-
-            output = result.outputs[0]
-            if output.logprobs is None or len(output.logprobs) == 0:
-                return self.create_error_response(
-                    f"No logprobs available for item {i}. "
-                    "This might indicate an issue with logprobs configuration."
-                )
-
-            # The logprobs dict maps token_id -> Logprob object
-            # For logprobs=-1, this contains all vocab tokens
-            logprobs_dict = output.logprobs[0]
-
-            # Extract logprobs for label tokens
-            label_logprobs: dict[int, float] = {}
-            missing_tokens = []
-            for token_id in request.label_token_ids:
-                if token_id in logprobs_dict:
-                    label_logprobs[token_id] = logprobs_dict[token_id].logprob
-                else:
-                    missing_tokens.append(token_id)
-
-            if missing_tokens:
-                return self.create_error_response(
-                    f"Token IDs {missing_tokens} not found in logprobs for item {i}. "
-                    "This might indicate the tokens are outside the model's vocabulary."
-                )
+        for i, read in enumerate(reads):
+            label_logprobs = dict(zip(request.label_token_ids, read.logprobs))
 
             # Compute probabilities based on apply_softmax setting
             token_probs = self._compute_probabilities(
@@ -369,7 +343,7 @@ class ServingGenerativeScoring(BaseServing):
 
             # Update token counts
             total_prompt_tokens += prompt_token_counts[i]
-            total_completion_tokens += len(output.token_ids)
+            total_completion_tokens += len(read.result.outputs[0].token_ids)
 
         # Build response
         model_name = self.models.model_name(lora_request)
@@ -441,7 +415,9 @@ class ServingGenerativeScoring(BaseServing):
             if len(prompt_token_ids) > max_prompt_len:
                 prompt_token_ids = prompt_token_ids[:max_prompt_len]
 
-            engine_inputs.append(tokens_input(prompt_token_ids))
+            engine_inputs.append(
+                tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
+            )
             prompt_token_counts.append(len(prompt_token_ids))
 
         return engine_inputs, prompt_token_counts

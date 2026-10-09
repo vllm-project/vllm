@@ -2,15 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DecoderReplayLayers runs the replay layers on the forward's replay batch."""
 
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
+from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.forward_context import (
+    BatchDescriptor,
     ForwardContext,
     get_forward_context,
     override_forward_context,
 )
-from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
+from vllm.models.deepseek_v41.decoder_replay_layers import (
+    DecoderReplayLayers,
+    ReplayBatch,
+)
+from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
+    DecoderReplayCudaGraphManager,
+)
+from vllm.v1.worker.gpu import cudagraph_utils
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -32,9 +43,9 @@ def _context(metadata):
 
 
 def _set_replay_batch(layers, rows, metadata):
-    layers.rows = torch.tensor(rows, device=DEVICE)
-    layers.forward_context = ForwardContext(
-        no_compile_layers={}, attn_metadata=metadata, slot_mapping={}
+    layers.replay_batch = ReplayBatch(
+        torch.tensor(rows, device=DEVICE),
+        ForwardContext(no_compile_layers={}, attn_metadata=metadata, slot_mapping={}),
     )
 
 
@@ -56,10 +67,8 @@ def _states(num_tokens: int):
     )
 
 
-def test_run_gathers_states_and_realigns_shared_indexer_buffers():
-    topk = torch.arange(NUM_TOKENS * 4, device=DEVICE).view(NUM_TOKENS, 4).int()
-    candidates = torch.arange(NUM_TOKENS * 3, device=DEVICE).view(NUM_TOKENS, 3).int()
-    topk_before, candidates_before = topk.clone(), candidates.clone()
+def test_run_gathers_states():
+    """Every row's KV is written first; the layers then run on the replay rows."""
     seen = {}
 
     def run_layers(hidden_states, positions, input_ids, pre_mix, post, res, residual):
@@ -69,7 +78,8 @@ def test_run_gathers_states_and_realigns_shared_indexer_buffers():
         seen["is_padding"] = replay_context.is_padding
         return residual, pre_mix
 
-    layers = DecoderReplayLayers(WINDOW, run_layers, [topk, candidates])
+    write_batch_kv = MagicMock()
+    layers = DecoderReplayLayers(WINDOW, run_layers, write_batch_kv, set(), "swa")
     states = _states(NUM_TOKENS)
     hidden, residual = states[0], states[-1]
     full, sub = object(), object()
@@ -79,11 +89,10 @@ def test_run_gathers_states_and_realigns_shared_indexer_buffers():
         outputs = layers(*states)
         assert get_forward_context() is context
 
+    write_batch_kv.assert_called_once_with(*states)
     rows = torch.tensor(REPLAY_ROWS, device=DEVICE)
     assert torch.equal(seen["hidden_states"], hidden[rows])
     assert seen["attn_metadata"] is sub and seen["is_padding"] is None
-    assert torch.equal(topk[: len(REPLAY_ROWS)], topk_before[rows])
-    assert torch.equal(candidates[: len(REPLAY_ROWS)], candidates_before[rows])
     assert len(outputs) == 2 and outputs[0].shape == residual.shape
     assert torch.equal(outputs[0][rows], residual[rows])
     assert outputs[0][1:173].abs().sum() == 0
@@ -96,9 +105,77 @@ def test_no_replay_batch_runs_the_whole_batch():
         seen["attn_metadata"] = get_forward_context().attn_metadata
         return (hidden_states,)
 
-    layers = DecoderReplayLayers(WINDOW, run_layers, [])
+    write_batch_kv = MagicMock()
+    layers = DecoderReplayLayers(WINDOW, run_layers, write_batch_kv, set(), "swa")
     states = _states(NUM_TOKENS)
     full = object()
     with override_forward_context(_context(full)):
         (output,) = layers(*states)
     assert output is states[0] and seen["attn_metadata"] is full
+    write_batch_kv.assert_not_called()
+
+
+def _graph_context(num_tokens):
+    return ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        batch_descriptor=BatchDescriptor(num_tokens=num_tokens),
+    )
+
+
+def test_piecewise_graphs_break_out_by_size():
+    """A PIECEWISE graph's KV write and break are fixed at capture, when no replay
+    batch is set, so both follow the graph's size rather than the replay batch."""
+    write_batch_kv = MagicMock()
+    layers = DecoderReplayLayers(
+        WINDOW, lambda *states: ("whole",), write_batch_kv, set(), "swa"
+    )
+    layers._run_in_graph_break = lambda *states: ("break",)  # type: ignore[method-assign]
+    states = _states(NUM_TOKENS)
+    with override_forward_context(_graph_context(1024)):
+        assert layers(*states) == ("whole",)  # no threshold: no break
+        layers.trim_threshold = 768
+        assert layers(*states) == ("break",)
+    _set_replay_batch(layers, REPLAY_ROWS, object())
+    with override_forward_context(_graph_context(576)):
+        assert not layers.uses_replay_batch()  # a replay batch alone does not break out
+    write_batch_kv.assert_called_once_with(*states)
+
+
+def test_replay_graph_matches_eager(monkeypatch):
+    """The replay graph of the next captured size pads and runs the rows."""
+    monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
+    capture = torch.cuda.stream(torch.cuda.Stream())
+    monkeypatch.setattr(cudagraph_utils, "graph_capture", lambda device: capture)
+    compilation = CompilationConfig(decoder_replay_cudagraph_capture_sizes=[4])
+    cfg = MagicMock(compilation_config=compilation, speculative_config=None)
+    # Mocking it true would capture into the cuMem pool, which breaks on ROCm.
+    cfg.use_cumem_cudagraph_pool = False
+    cfg.scheduler_config = MagicMock(max_num_seqs=2, max_num_batched_tokens=64)
+    cfg.cache_config.use_kda_recoverssm = False
+    cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
+    cfg.model_config.dtype = torch.float32
+
+    def run_layers(hidden, positions, ids, pre, post, mix, residual):
+        return residual + hidden[:, None] + positions[:, None, None], pre + ids[:, None]
+
+    layers = DecoderReplayLayers(4, run_layers, MagicMock(), set(), "swa")
+    manager = DecoderReplayCudaGraphManager(cfg, DEVICE, layers)
+
+    def prepare(desc):
+        rows = torch.arange(desc.num_tokens)
+        layers.replay_batch = ReplayBatch(rows, _graph_context(desc.num_tokens))
+
+    manager.capture_replay_graphs(prepare)
+    states = [
+        torch.randn(12, *b.shape[1:], device=DEVICE).to(b.dtype)
+        for b in manager.input_buffers
+    ]
+    rows = torch.tensor([11, 2, 7], device=DEVICE)
+    desc = manager.dispatch(2, 3, None, 0)
+    with override_forward_context(_graph_context(desc.num_tokens)):
+        actual = manager.run(rows, states)
+    for a, e in zip(actual, run_layers(*(t[rows] for t in states))):
+        torch.testing.assert_close(a, e, rtol=0, atol=0)
