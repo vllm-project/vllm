@@ -93,12 +93,19 @@ torch_utils.async_tensor_h2d = async_tensor_h2d
 
 # Patch model runner APIs
 import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
+import vllm.v1.worker.gpu.input_batch as gpu_input_batch
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
+import vllm.v1.worker.cpu.input_batch as cpu_input_batch
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
 
 # Patch Triton
 from vllm.triton_utils import HAS_TRITON, tl
+
+if not HAS_TRITON:
+    gpu_input_batch.get_num_sampled_and_rejected = (
+        cpu_input_batch.get_num_sampled_and_rejected
+    )
 
 if HAS_TRITON:
     tl.debug_barrier = noop
