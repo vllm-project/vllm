@@ -19,6 +19,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import (
     get_safetensors_params_metadata,
+    get_sentence_transformers_chat_template_kwargs,
     mrope_num_dims,
     patch_legacy_rope_type,
     try_get_generation_config,
@@ -323,3 +324,103 @@ def test_mrope_num_dims_from_nested_rope_parameters():
 
 def test_mrope_num_dims_without_mrope():
     assert mrope_num_dims(PreTrainedConfig()) == 0
+
+
+def _write_st_cross_encoder(path, modules=None, transformer_config=None):
+    files = {
+        "config_sentence_transformers.json": {"model_type": "CrossEncoder"},
+        "modules.json": modules
+        or [
+            {
+                "idx": 0,
+                "name": "0",
+                "path": "",
+                "type": "sentence_transformers.base.modules.transformer.Transformer",
+            }
+        ],
+        "sentence_bert_config.json": transformer_config
+        or {
+            "transformer_task": "sequence-classification",
+            "modality_config": {
+                "text": {"method": "forward", "method_output_name": "logits"},
+                "message": {
+                    "method": "forward",
+                    "method_output_name": "logits",
+                    "format": "flat",
+                },
+            },
+            "module_output_name": "scores",
+            "processing_kwargs": {
+                "chat_template": {
+                    "chat_template": "score",
+                    "add_generation_prompt": True,
+                    "restore_suffix": True,
+                }
+            },
+        },
+    }
+    for name, content in files.items():
+        (path / name).write_text(json.dumps(content))
+
+
+def test_sentence_transformers_chat_template_kwargs(tmp_path):
+    _write_st_cross_encoder(tmp_path)
+
+    kwargs = get_sentence_transformers_chat_template_kwargs(str(tmp_path))
+
+    assert kwargs == {"chat_template": "score", "add_generation_prompt": True}
+
+
+@pytest.mark.parametrize(
+    "modules,transformer_config",
+    [
+        # No message modality: pairs are encoded as text pairs.
+        (
+            None,
+            {
+                "transformer_task": "sequence-classification",
+                "modality_config": {
+                    "text": {"method": "forward", "method_output_name": "logits"}
+                },
+            },
+        ),
+        # Modular CrossEncoders are not handled here.
+        (
+            [
+                {
+                    "path": "",
+                    "type": "sentence_transformers.base.modules.transformer."
+                    "Transformer",
+                },
+                {
+                    "path": "1_LogitScore",
+                    "type": "sentence_transformers.cross_encoder.modules."
+                    "logit_score.LogitScore",
+                },
+            ],
+            None,
+        ),
+    ],
+)
+def test_sentence_transformers_chat_template_kwargs_not_declared(
+    tmp_path, modules, transformer_config
+):
+    _write_st_cross_encoder(tmp_path, modules, transformer_config)
+
+    assert get_sentence_transformers_chat_template_kwargs(str(tmp_path)) is None
+
+
+def test_sentence_transformers_chat_template_kwargs_rejects_unsupported(tmp_path):
+    _write_st_cross_encoder(
+        tmp_path,
+        transformer_config={
+            "transformer_task": "sequence-classification",
+            "modality_config": {
+                "message": {"method": "forward", "method_output_name": "logits"}
+            },
+            "processing_kwargs": {"chat_template": {"tokenize": False}},
+        },
+    )
+
+    with pytest.raises(ValueError, match="tokenize"):
+        get_sentence_transformers_chat_template_kwargs(str(tmp_path))
