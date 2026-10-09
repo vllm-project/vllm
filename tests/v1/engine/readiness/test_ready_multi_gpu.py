@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`/ready` with DP=2.
+"""`/ready` against injected failures across two GPUs (DP=2).
 
 MoE DP ranks step in lockstep waves where idle ranks run dummy batches, and
 must not be probed with an ad-hoc dummy batch; dense DP ranks are independent

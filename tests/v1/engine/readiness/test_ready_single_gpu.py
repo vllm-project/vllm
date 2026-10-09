@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`/ready` against injected failures with a single engine.
+"""`/ready` against injected failures on a single GPU.
 
 `/health` stays 200 for all of these; `/ready` must not.
 """
