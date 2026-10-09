@@ -175,6 +175,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
+- `/v1/systemone` - Structured decisions API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`)
@@ -571,7 +572,7 @@ An attacker sharing the same backend can measure differences in Time to First To
 
 vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See [Automatic Prefix Caching](../design/prefix_caching.md) for the implementation details.
 
-`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
+`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, the Anthropic `/v1/messages` endpoint, the structured decisions `/v1/systemone` endpoint, and the generative scoring `/generative_scoring` endpoint.
 
 #### Usage with the OpenAI Python client
 
