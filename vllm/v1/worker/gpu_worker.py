@@ -613,17 +613,6 @@ class Worker(WorkerBase):
         """
         maybe_apply_startup_plan(self)
 
-        from vllm.v1.worker.tpsp_profile import initialize_tpsp
-
-        has_tpsp_projections = initialize_tpsp(
-            self.model_runner.model, self.model_runner.max_num_tokens
-        )
-        if self.model_config.enable_tpsp and not has_tpsp_projections:
-            logger.warning_once(
-                "TPSP was requested but this model has no TPSP projections; "
-                "using the regular forward path."
-            )
-
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens

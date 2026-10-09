@@ -15,7 +15,15 @@ from torch import nn
 
 from vllm.model_executor.models import llama
 from vllm.platforms import current_platform
-from vllm.v1.worker.tpsp_profile import SPProfile, TPSPProjection, get_tpsp_backend
+from vllm.v1.worker import tpsp_profile
+from vllm.v1.worker.tpsp_profile import (
+    SPProfile,
+    TPSPProfile,
+    TPSPProjection,
+    get_tpsp_backend,
+    profile_tpsp,
+    profile_tpsp_pair,
+)
 
 
 def _check_tpsp_backend(
@@ -159,6 +167,107 @@ def _check_tpsp_backend(
         assert profile.max_batched_tokens == 128
         if profile.enabled:
             assert isinstance(profile.config, int)
+        chunk_profile = backend.profile(
+            tp_size=world_size,
+            hidden_size=4096,
+            input_width=64,
+            max_batched_tokens=16,
+            norm_eps=1e-5,
+            time_budget_s=60,
+            context=context,
+            config_only=True,
+        )
+        assert chunk_profile.status == "candidate"
+        assert chunk_profile.config is not None
+        assert chunk_profile.threshold_tokens is None
+
+        class Projection(nn.Module):
+            def __init__(self, width):
+                super().__init__()
+                self.input_size_per_partition = width
+                self.weight = nn.Parameter(
+                    torch.randn(
+                        4096,
+                        width,
+                        device=device,
+                        dtype=torch.bfloat16,
+                        generator=torch.Generator(device=device).manual_seed(
+                            2026 + rank + width
+                        ),
+                    )
+                    / math.sqrt(width)
+                )
+                self.bias = None
+
+            def forward(self, x):
+                result = torch.nn.functional.linear(x, self.weight)
+                dist.all_reduce(result)
+                return result, None
+
+        class Norm(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.ones(4096, device=device, dtype=torch.bfloat16)
+                )
+                self.variance_epsilon = 1e-5
+
+            def forward(self, x, residual):
+                torch.ops._C.fused_add_rms_norm(
+                    x, residual, self.weight, self.variance_epsilon
+                )
+                return x, residual
+
+        class MLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.down_proj = Projection(4096)
+
+            def forward(self, x, skip_down_proj=False):
+                x = torch.nn.functional.silu(x)
+                return x if skip_down_proj else self.down_proj(x)[0]
+
+        layer = llama.LlamaDecoderLayer.__new__(llama.LlamaDecoderLayer)
+        nn.Module.__init__(layer)
+        layer.hidden_size = 4096
+        layer.self_attn = nn.Module()
+        layer.self_attn.o_proj = Projection(64)
+        layer.post_attention_layernorm = Norm()
+        layer.mlp = MLP()
+        model = nn.Module()
+        model.layers = nn.ModuleList([layer])
+        model.norm = Norm()
+        plans = (
+            TPSPProjection(64, 4096, 1e-5, world_size, dist.group.WORLD.group_name),
+            TPSPProjection(4096, 4096, 1e-5, world_size, dist.group.WORLD.group_name),
+        )
+        with (
+            patch(
+                "vllm.distributed.parallel_state.get_tp_group",
+                return_value=SimpleNamespace(
+                    world_size=world_size,
+                    rank_in_group=rank,
+                    device_group=dist.group.WORLD,
+                    device_communicator=tp_group.device_communicator,
+                ),
+            ),
+        ):
+            for plan in plans:
+                plan.backend = backend
+                plan.config = 64
+                plan.context = backend.open(
+                    dtype=torch.bfloat16,
+                    tp_size=world_size,
+                    hidden_size=4096,
+                    max_batched_tokens=128,
+                    group_name=dist.group.WORLD.group_name,
+                    device=device,
+                )
+                assert plan.context is not None
+            pair = profile_tpsp_pair(model, *plans, 128)
+            assert pair.measurements and pair.measurements[0].tokens == 128
+            for plan in plans:
+                backend.close(plan.context)
         backend.close(context)
         backend.close()
     finally:
@@ -186,7 +295,9 @@ def test_tpsp_backend(tp_size: int):
 
 def test_llama_tpsp_forward(monkeypatch):
     group = SimpleNamespace(world_size=1, rank_in_group=0, device_group=object())
-    monkeypatch.setattr(llama, "get_tp_group", lambda: group)
+    from vllm.distributed import parallel_state
+
+    monkeypatch.setattr(parallel_state, "get_tp_group", lambda: group)
     monkeypatch.setattr(
         llama,
         "get_pp_group",
@@ -260,7 +371,7 @@ def test_llama_tpsp_forward(monkeypatch):
         ):
             self.calls += 1
             self.biases.append(projection_bias)
-            assert context is model.tpsp_projections["o"].context
+            assert context is o_plan.context or context is down_plan.context
             reduced = x @ weight + residual
             if projection_bias is not None:
                 reduced += projection_bias
@@ -283,23 +394,40 @@ def test_llama_tpsp_forward(monkeypatch):
     model.start_layer, model.end_layer = 0, 1
     model.aux_hidden_state_layers = ()
     model._aux_upstream_total_cached = 0
+    model.tpsp_requested = False
+    model.max_tpsp_batched_tokens = 8
     backend = Backend()
-    model.tpsp_projections = nn.ModuleDict(
-        {name: TPSPProjection(2, 2, 1e-5, 1, "test") for name in ("o", "down")}
-    )
-    layer.tpsp_projections = dict(model.tpsp_projections.items())
-    owner = llama.LlamaForCausalLM.__new__(llama.LlamaForCausalLM)
-    nn.Module.__init__(owner)
-    owner.model = model
-    owner.config = model.config
-    for projection in model.tpsp_projections.values():
-        projection.profile = SPProfile(
-            1, 2, 8, "enabled", "", threshold_tokens=1, config=64
-        )
+    o_plan, down_plan = (TPSPProjection(2, 2, 1e-5, 1, "test") for _ in range(2))
+    for projection in (o_plan, down_plan):
+        projection.config = 64
         projection.backend = backend
         projection.context = context
-    owner.finalize_tpsp()
-    assert model.tpsp_enabled and layer.tpsp_enabled
+
+    def set_profile(threshold: int | None) -> None:
+        model.tpsp_profile = TPSPProfile(
+            threshold is not None, threshold, 8, o_plan, down_plan
+        )
+        if threshold is not None:
+            layer.tpsp_profile = model.tpsp_profile
+
+    set_profile(1)
+    assert model.tpsp_profile.is_active(2)
+    with pytest.raises(ValueError, match="profiled range"):
+        model.tpsp_profile.is_active(9)
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        model.forward(
+            None,
+            None,
+            None,
+            inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16),
+            unexpected=1,
+        )
+    model.aux_hidden_state_layers = (1,)
+    with pytest.raises(ValueError, match="auxiliary hidden states"):
+        model.forward(
+            None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
+        )
+    model.aux_hidden_state_layers = ()
 
     result = model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
@@ -311,30 +439,17 @@ def test_llama_tpsp_forward(monkeypatch):
     assert layer.self_attn.o_proj.calls == 0
     assert layer.mlp.down_proj.calls == 0
 
-    model.tpsp_projections["o"].profile = SPProfile(
-        1, 2, 8, "enabled", "", threshold_tokens=3, config=64
-    )
-    owner.finalize_tpsp()
+    set_profile(3)
+    assert not model.tpsp_profile.is_active(2)
     result = model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
     )
     torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
-    assert backend.calls == 3
+    assert backend.calls == 2
     assert layer.self_attn.o_proj.calls == 1
-    assert layer.mlp.down_proj.calls == 0
+    assert layer.mlp.down_proj.calls == 1
 
-    model.tpsp_projections["o"].profile = SPProfile(
-        1, 2, 8, "enabled", "", threshold_tokens=1, config=64
-    )
-    model.tpsp_projections["down"].profile = SPProfile(
-        1, 2, 8, "enabled", "", threshold_tokens=3, config=64
-    )
-    owner.finalize_tpsp()
-    monkeypatch.setattr(
-        llama.dist,
-        "all_gather_into_tensor",
-        lambda output, source, group: output.copy_(source),
-    )
+    set_profile(1)
     result = model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
     )
@@ -342,11 +457,7 @@ def test_llama_tpsp_forward(monkeypatch):
     assert backend.calls == 4
     assert layer.self_attn.o_proj.calls == 1
     assert layer.mlp.down_proj.calls == 1
-
-    for projection in model.tpsp_projections.values():
-        projection.profile = SPProfile(1, 2, 8, "disabled", "")
-    owner.finalize_tpsp()
-    assert not model.tpsp_enabled and not layer.tpsp_enabled
+    set_profile(3)
     result = model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
     )
@@ -354,3 +465,121 @@ def test_llama_tpsp_forward(monkeypatch):
     assert backend.calls == 4
     assert layer.self_attn.o_proj.calls == 2
     assert layer.mlp.down_proj.calls == 2
+
+    set_profile(None)
+    assert not model.tpsp_profile.enabled
+    assert not model.tpsp_profile.is_active(2)
+    with pytest.raises(RuntimeError, match="invalid enabled profile"):
+        TPSPProfile(True, None, 8, o_plan, down_plan).is_active(2)
+    result = model.forward(
+        None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
+    )
+    torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
+    assert backend.calls == 4
+    assert layer.self_attn.o_proj.calls == 3
+    assert layer.mlp.down_proj.calls == 3
+
+    set_profile(1)
+    first_hidden, first_residual = layer(
+        None,
+        torch.ones(2, 2, dtype=torch.bfloat16),
+        None,
+        next_norm=model.norm,
+    )
+    hidden, residual = layer(
+        None,
+        first_hidden,
+        first_residual,
+        next_norm=model.norm,
+    )
+    torch.testing.assert_close(hidden, torch.full((2, 2), 31, dtype=torch.bfloat16))
+    torch.testing.assert_close(residual, hidden)
+
+    set_profile(None)
+    disabled_profile = model.tpsp_profile
+    model.tpsp_profile = None
+    model.tpsp_requested = True
+    calls = []
+
+    def profile_once(target, max_tokens):
+        calls.append((target, max_tokens))
+        return disabled_profile
+
+    monkeypatch.setattr(llama, "profile_tpsp", profile_once)
+    for _ in range(2):
+        result = model.forward(
+            None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
+        )
+        torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
+    assert calls == [(model, 8)]
+
+    enabled_profile = TPSPProfile(True, 1, 8, o_plan, down_plan)
+    model.tpsp_profile = None
+    monkeypatch.setattr(llama, "profile_tpsp", lambda *args: enabled_profile)
+    model.forward(
+        None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
+    )
+    assert layer.tpsp_profile is enabled_profile
+
+
+def test_tpsp_pair_profile_keeps_distinct_projection_configs(monkeypatch):
+    class Projection(nn.Module):
+        def __init__(self, width):
+            super().__init__()
+            self.input_size_per_partition = width
+            self.weight = nn.Parameter(torch.ones(2, width))
+
+    layer = nn.Module()
+    layer.self_attn = nn.Module()
+    layer.self_attn.o_proj = Projection(2)
+    layer.post_attention_layernorm = nn.Module()
+    layer.post_attention_layernorm.variance_epsilon = 1e-5
+    layer.mlp = nn.Module()
+    layer.mlp.down_proj = Projection(4)
+
+    model = nn.Module()
+    model.layers = nn.ModuleList([layer])
+    model.norm = nn.Module()
+    model.norm.variance_epsilon = 1e-5
+    model.config = SimpleNamespace(hidden_size=2)
+
+    class Backend:
+        def open(self, **kwargs):
+            return object()
+
+        def profile(self, *, input_width, config_only, **kwargs):
+            assert config_only
+            return SPProfile(
+                2,
+                2,
+                8,
+                "candidate",
+                "",
+                input_width=input_width,
+                config=input_width * 8,
+            )
+
+    backend = Backend()
+    monkeypatch.setattr(tpsp_profile, "get_tpsp_backend", lambda *args: backend)
+    monkeypatch.setattr(
+        tpsp_profile,
+        "profile_tpsp_pair",
+        lambda model, o, down, tokens: SPProfile(
+            2, 2, 8, "enabled", "", threshold_tokens=3
+        ),
+    )
+    from vllm.distributed import parallel_state
+
+    monkeypatch.setattr(
+        parallel_state,
+        "get_tp_group",
+        lambda: SimpleNamespace(
+            world_size=2, device_group=SimpleNamespace(group_name="test")
+        ),
+    )
+
+    profile = profile_tpsp(model, 8)
+    assert profile.enabled and profile.threshold_tokens == 3
+    assert (profile.o_proj.config, profile.down_proj.config) == (16, 32)
+    assert profile.o_proj.context is not profile.down_proj.context
+    assert profile.o_proj.backend is profile.down_proj.backend is backend

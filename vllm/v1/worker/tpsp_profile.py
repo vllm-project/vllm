@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Startup profiling for BF16 TP projection / residual RMSNorm chains."""
+"""BF16 TP projection plans and startup profiling.
+
+Stage 1 screens chunk sizes for each projection; stage 2 retests finalists.
+Stage 3 checks each chunk's numerical result. Stage 4 checks the fused pair's
+result, and stage 5 measures the pair to choose one token threshold.
+"""
 
 from __future__ import annotations
 
@@ -62,7 +67,7 @@ class SPProfile:
 
 
 class TPSPProjection(nn.Module):
-    """A model-owned projection plan, populated after weights are loaded."""
+    """A projection's chunk configuration and rank-local backend context."""
 
     def __init__(
         self,
@@ -78,141 +83,361 @@ class TPSPProjection(nn.Module):
         self.norm_eps = norm_eps
         self.tp_size = tp_size
         self.group_name = group_name
-        self.profile: SPProfile | None = None
         self.config: object = None
         self.backend: TPSPBackend | None = None
         self.context: Any | None = None
 
-    @property
-    def enabled(self) -> bool:
-        return self.profile is not None and self.profile.enabled
+    def run(
+        self,
+        x: torch.Tensor,
+        projection: nn.Module,
+        residual: torch.Tensor,
+        norm: nn.Module,
+        residual_is_sharded: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        backend = self.backend
+        if backend is None:
+            raise RuntimeError("TP/SP backend is unavailable")
+        from vllm.distributed.parallel_state import get_tp_group
 
+        group = get_tp_group()
+        rows = math.ceil(x.size(0) / group.world_size)
+        if residual_is_sharded:
+            if residual.shape != (rows, self.hidden_size):
+                raise RuntimeError("TP/SP residual shard has an unexpected shape")
+            local_residual = residual
+        else:
+            if residual.shape != (x.size(0), self.hidden_size):
+                raise RuntimeError("TP/SP full residual has an unexpected shape")
+            start = group.rank_in_group * rows
+            local_residual = residual.new_zeros((rows, self.hidden_size))
+            count = min(rows, max(0, x.size(0) - start))
+            if count:
+                local_residual[:count] = residual[start : start + count]
 
-def _tpsp_projections(model: nn.Module) -> dict[str, TPSPProjection]:
-    return {
-        name: module
-        for name, module in model.named_modules()
-        if isinstance(module, TPSPProjection)
-    }
-
-
-def close_tpsp_projections(model: nn.Module) -> None:
-    projections = _tpsp_projections(model)
-    backends: dict[int, TPSPBackend] = {}
-    for projection in projections.values():
-        backend = projection.backend
-        if backend is not None:
-            backends[id(backend)] = backend
-            if projection.context is not None:
-                backend.close(projection.context)
-        projection.context = None
-        projection.backend = None
-        projection.config = None
-        if profile := projection.profile:
-            projection.profile = SPProfile(
-                profile.tp_size,
-                profile.hidden_size,
-                profile.max_batched_tokens,
-                "disabled",
-                "TPSP closed",
-                input_width=profile.input_width,
-            )
-    for backend in backends.values():
-        backend.close()
-
-
-def initialize_tpsp(model: nn.Module, max_batched_tokens: int) -> bool:
-    """Open TPSP backends and profile projections after loading weights."""
-    projections = _tpsp_projections(model)
-    if not projections:
-        return False
-    if all(projection.profile is not None for projection in projections.values()):
-        if (finalize := getattr(model, "finalize_tpsp", None)) is not None:
-            finalize()
-        return True
-    if any(projection.profile is not None for projection in projections.values()):
-        raise RuntimeError("TPSP projections were only partially profiled")
-    parameter = next(model.parameters())
-    groups: dict[tuple[str, int], dict[str, TPSPProjection]] = {}
-    for name, projection in projections.items():
-        groups.setdefault((projection.group_name, projection.tp_size), {})[name] = (
-            projection
+        weight = projection.weight
+        key = (weight.data_ptr(), weight._version)
+        cached = getattr(projection, "_tpsp_transposed_weight", None)
+        if cached is None or cached[0] != key:
+            cached = (key, weight.T.contiguous())
+            projection._tpsp_transposed_weight = cached
+        reduced, _, gathered = backend.fused_gemm_rs_norm_ag(
+            x.contiguous(),
+            cached[1],
+            norm.weight,
+            local_residual,
+            norm.variance_epsilon,
+            self.config,
+            projection_bias=projection.bias,
+            context=self.context,
         )
+        return gathered, reduced
+
+
+@dataclass(frozen=True)
+class TPSPProfile:
+    enabled: bool
+    threshold_tokens: int | None
+    max_batched_tokens: int
+    o_proj: TPSPProjection
+    down_proj: TPSPProjection
+    reason: str = ""
+
+    def is_active(self, num_tokens: int) -> bool:
+        if not self.enabled:
+            return False
+        if self.threshold_tokens is None:
+            raise RuntimeError("TP/SP has an invalid enabled profile")
+        if not 1 <= num_tokens <= self.max_batched_tokens:
+            raise ValueError("current_batched_tokens must be within the profiled range")
+        return num_tokens >= self.threshold_tokens
+
+
+def _clear_tpsp_weight_caches(model: nn.Module) -> None:
+    for module in model.modules():
+        if hasattr(module, "_tpsp_transposed_weight"):
+            del module._tpsp_transposed_weight
+
+
+def profile_tpsp(model: nn.Module, max_batched_tokens: int) -> TPSPProfile:
+    """Open rank-local contexts and profile both projections as one unit."""
+    from vllm.distributed.parallel_state import get_tp_group
+
+    group = get_tp_group()
+    first_layer = model.layers[0]
+    hidden_size = model.config.hidden_size
+    group_name = group.device_group.group_name
+    o_plan = TPSPProjection(
+        first_layer.self_attn.o_proj.input_size_per_partition,
+        hidden_size,
+        first_layer.post_attention_layernorm.variance_epsilon,
+        group.world_size,
+        group_name,
+    )
+    down_plan = TPSPProjection(
+        first_layer.mlp.down_proj.input_size_per_partition,
+        hidden_size,
+        model.norm.variance_epsilon,
+        group.world_size,
+        group_name,
+    )
+    plans = (o_plan, down_plan)
+
+    def disabled(reason: str) -> TPSPProfile:
+        _LOG.warning("TPSP using regular forward: %s", reason)
+        return TPSPProfile(False, None, max_batched_tokens, o_plan, down_plan, reason)
+
+    for layer in model.layers:
+        if (
+            layer.self_attn.o_proj.input_size_per_partition != o_plan.input_width
+            or layer.mlp.down_proj.input_size_per_partition != down_plan.input_width
+        ):
+            raise RuntimeError("TP/SP profile does not match the Llama projection")
+
+    parameter = first_layer.self_attn.o_proj.weight
+    backend = get_tpsp_backend(group_name, parameter.device)
+    if backend is None:
+        return disabled("no fused backend on this device")
+    enabled = False
     try:
-        for (group_name, tp_size), members in groups.items():
-            backend = get_tpsp_backend(group_name, parameter.device)
-            for projection in members.values():
-                projection.backend = backend
-                context = (
-                    backend.open(
-                        dtype=parameter.dtype,
-                        tp_size=tp_size,
-                        hidden_size=projection.hidden_size,
-                        max_batched_tokens=max_batched_tokens,
-                        group_name=group_name,
-                        device=parameter.device,
-                    )
-                    if backend is not None
-                    else None
+        for plan in plans:
+            plan.backend = backend
+            plan.context = backend.open(
+                dtype=parameter.dtype,
+                tp_size=group.world_size,
+                hidden_size=hidden_size,
+                max_batched_tokens=max_batched_tokens,
+                group_name=group_name,
+                device=parameter.device,
+            )
+            if plan.context is None:
+                return disabled("fused backend unavailable for this projection")
+            candidate = backend.profile(
+                tp_size=group.world_size,
+                hidden_size=hidden_size,
+                input_width=plan.input_width,
+                max_batched_tokens=max_batched_tokens,
+                norm_eps=plan.norm_eps,
+                time_budget_s=240.0,
+                context=plan.context,
+                config_only=True,
+            )
+            if candidate.status != "candidate" or candidate.config is None:
+                return disabled(
+                    f"chunk selection {candidate.status}: {candidate.reason}"
                 )
-                if context is not None:
-                    assert backend is not None
-                    projection.context = context
-                    projection.profile = backend.profile(
-                        tp_size=tp_size,
-                        hidden_size=projection.hidden_size,
-                        input_width=projection.input_width,
-                        max_batched_tokens=max_batched_tokens,
-                        norm_eps=projection.norm_eps,
-                        time_budget_s=240.0,
-                        context=context,
-                    )
-                else:
-                    projection.profile = SPProfile(
-                        tp_size,
-                        projection.hidden_size,
-                        max_batched_tokens,
-                        "unsupported",
-                        "no fused backend on this device"
-                        if backend is None
-                        else "fused backend unavailable for this projection",
-                        input_width=projection.input_width,
-                    )
-                if not projection.enabled and projection.context is not None:
-                    assert backend is not None
-                    backend.close(projection.context)
-                    projection.context = None
-            if not any(projection.enabled for projection in members.values()):
-                if backend is not None:
-                    backend.close()
-                for projection in members.values():
-                    projection.backend = None
-            inactive = [
-                f"{name}={projection.profile.status}"
-                + (
-                    f" ({projection.profile.reason})"
-                    if projection.profile.reason
-                    else ""
-                )
-                for name, projection in members.items()
-                if projection.profile is not None and not projection.enabled
-            ]
-            if inactive:
-                _LOG.warning(
-                    "TPSP using regular projection for %s: %s",
-                    "all plans" if len(inactive) == len(members) else "inactive plans",
-                    ", ".join(inactive),
-                )
-        if (finalize := getattr(model, "finalize_tpsp", None)) is not None:
-            finalize()
-    except Exception:
-        close_tpsp_projections(model)
-        raise
-    return True
+            plan.config = candidate.config
+
+        measurement = profile_tpsp_pair(model, o_plan, down_plan, max_batched_tokens)
+        if not measurement.enabled:
+            return disabled(
+                f"paired profile {measurement.status}: {measurement.reason}"
+            )
+        threshold = measurement.threshold_tokens
+        if threshold is None or not 1 <= threshold <= max_batched_tokens:
+            raise RuntimeError("TP/SP Llama has an invalid enabled profile")
+        enabled = True
+        return TPSPProfile(True, threshold, max_batched_tokens, o_plan, down_plan)
+    finally:
+        if not enabled:
+            for plan in plans:
+                if plan.context is not None:
+                    backend.close(plan.context)
+                plan.context = None
+                plan.backend = None
+                plan.config = None
+            backend.close()
+            _clear_tpsp_weight_caches(model)
 
 
 def _beneficial(measurement: SPMeasurement) -> bool:
     return measurement.lower_benefit_ms > max(0.05, 0.02 * measurement.conventional_ms)
+
+
+@torch.inference_mode()
+def profile_tpsp_pair(
+    model: nn.Module,
+    o_plan: TPSPProjection,
+    down_plan: TPSPProjection,
+    max_batched_tokens: int,
+) -> SPProfile:
+    """Measure the attention-output-to-next-norm path with both projections."""
+    from vllm.distributed.parallel_state import get_tp_group
+
+    layers = model.layers
+    layer_idx = min(1, len(layers) - 1)
+    layer = layers[layer_idx]
+    next_norm = (
+        layers[layer_idx + 1].input_layernorm
+        if layer_idx + 1 < len(layers)
+        else model.norm
+    )
+    group = get_tp_group()
+    device_group = group.device_group
+    rank = group.rank_in_group
+    tp_size = group.world_size
+    device = layer.self_attn.o_proj.weight.device
+    dtype = layer.self_attn.o_proj.weight.dtype
+    hidden_size = layer.hidden_size
+    width = layer.self_attn.o_proj.input_size_per_partition
+    deadline = time.monotonic() + 240.0
+
+    def inputs(
+        tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        attn_output = torch.randn(
+            (tokens, width),
+            dtype=dtype,
+            device=device,
+            generator=torch.Generator(device=device).manual_seed(1831 + rank),
+        )
+        full_residual = torch.randn(
+            (tokens, hidden_size),
+            dtype=dtype,
+            device=device,
+            generator=torch.Generator(device=device).manual_seed(407),
+        )
+        rows = math.ceil(tokens / tp_size)
+        local_residual = full_residual.new_zeros((rows, hidden_size))
+        start = rank * rows
+        count = min(rows, max(0, tokens - start))
+        if count:
+            local_residual[:count] = full_residual[start : start + count]
+        return attn_output, full_residual, local_residual, full_residual.clone()
+
+    def project(
+        data: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], fused: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        attn_output, full_residual, local_residual, baseline_residual = data
+        if fused:
+            hidden, residual = o_plan.run(
+                attn_output,
+                layer.self_attn.o_proj,
+                local_residual if layer_idx else full_residual,
+                layer.post_attention_layernorm,
+                bool(layer_idx),
+            )
+            mlp_input = layer.mlp(hidden, skip_down_proj=True)
+            return down_plan.run(
+                mlp_input, layer.mlp.down_proj, residual, next_norm, True
+            )
+        hidden, _ = layer.self_attn.o_proj(attn_output)
+        hidden, residual = layer.post_attention_layernorm(hidden, baseline_residual)
+        hidden = layer.mlp(hidden)
+        return next_norm(hidden, residual)
+
+    def expired() -> bool:
+        flag = torch.tensor(
+            [time.monotonic() >= deadline], dtype=torch.int32, device=device
+        )
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=device_group)
+        return bool(flag.item())
+
+    def measure(
+        data: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], fused: bool
+    ) -> float:
+        if not fused:
+            data[3].copy_(data[1])
+        dist.barrier(group=device_group)
+        torch.accelerator.synchronize(device)
+        start = time.perf_counter()
+        project(data, fused)
+        torch.accelerator.synchronize(device)
+        elapsed = torch.tensor(
+            [(time.perf_counter() - start) * 1000], dtype=torch.float64, device=device
+        )
+        dist.all_reduce(elapsed, op=dist.ReduceOp.MAX, group=device_group)
+        return elapsed.item()
+
+    # Stage 4: check the complete o -> MLP -> down chain against the normal path.
+    check_data = inputs(min(max_batched_tokens, tp_size * 5 + 1))
+    conventional, conventional_residual = project(check_data, False)
+    native, native_residual = project(check_data, True)
+    padded = native_residual.new_empty((tp_size * native_residual.size(0), hidden_size))
+    dist.all_gather_into_tensor(
+        padded, native_residual.contiguous(), group=device_group
+    )
+    torch.accelerator.synchronize(device)
+    torch.testing.assert_close(native, conventional, rtol=0.03, atol=0.1)
+    torch.testing.assert_close(
+        padded[: check_data[0].size(0)], conventional_residual, rtol=0.03, atol=0.1
+    )
+    del check_data, conventional, conventional_residual, native, native_residual
+
+    # Stage 5: select one token threshold for both projections together.
+    measurements: list[SPMeasurement] = []
+    sizes = list(range(128, max_batched_tokens + 1, 128))
+    if not sizes or sizes[-1] != max_batched_tokens:
+        sizes.append(max_batched_tokens)
+
+    def measure_size(tokens: int) -> SPMeasurement | None:
+        data = inputs(tokens)
+        measure(data, False)
+        measure(data, True)
+        paired: list[float] = []
+        conventional: list[float] = []
+        fused: list[float] = []
+        for trial in range(_TRIALS):
+            order = (False, True) if trial % 2 == 0 else (True, False)
+            times = {item: measure(data, item) for item in order}
+            conventional.append(times[False])
+            fused.append(times[True])
+            paired.append(times[False] - times[True])
+            if expired():
+                return None
+        lower = statistics.mean(paired) - 2.776 * statistics.stdev(paired) / math.sqrt(
+            _TRIALS
+        )
+        return SPMeasurement(
+            tokens, statistics.median(conventional), statistics.median(fused), lower
+        )
+
+    threshold = None
+    streak = 0
+    for tokens in sizes:
+        result = measure_size(tokens)
+        if result is None:
+            break
+        measurements.append(result)
+        streak = streak + 1 if _beneficial(result) else 0
+        if streak == min(3, len(sizes)):
+            threshold = measurements[-streak].tokens
+            break
+    if threshold is not None and sizes[-1] != tokens:
+        maximum = measure_size(sizes[-1])
+        if maximum is None:
+            threshold = None
+        else:
+            measurements.append(maximum)
+            if not _beneficial(maximum):
+                threshold = None
+    if (
+        threshold is None
+        and measurements
+        and measurements[-1].tokens == max_batched_tokens
+        and measurements[-1].lower_benefit_ms > 0
+    ):
+        threshold = max_batched_tokens
+    status = "enabled" if threshold is not None else "disabled"
+    reason = "" if threshold is not None else "no sustained paired TPSP benefit"
+    if expired():
+        status, reason, threshold = (
+            "inconclusive",
+            "paired profiling time budget exceeded",
+            None,
+        )
+    profile = SPProfile(
+        tp_size,
+        hidden_size,
+        max_batched_tokens,
+        status,
+        reason,
+        threshold_tokens=threshold,
+        measurements=tuple(measurements),
+    )
+    if rank == 0:
+        _LOG.warning("TPSP paired startup profile: %s", profile)
+    return profile
 
 
 def profile_sp_config(
@@ -224,17 +449,19 @@ def profile_sp_config(
     time_budget_s: float,
     norm_eps: float = _EPS,
     context: Any | None = None,
+    config_only: bool = False,
 ) -> SPProfile:
     """Time chunks through the backend, check correctness, and find a threshold.
 
-    Screen chunks, retest the two finalists, and compare the winner with the
-    conventional path in 128-token steps. Keep the existing confidence-bound
-    and maximum-size checks when choosing the threshold.
+    Screen chunks and retest the two finalists. Unless ``config_only`` is set,
+    compare the winner with the conventional path in 128-token steps, retaining
+    the existing confidence-bound and maximum-size checks.
 
     Returns:
         SPProfile with candidate timings and per-size measurements. An enabled
         profile contains the selected chunk in ``config`` and the first
-        beneficial size in ``threshold_tokens``; other statuses have no config.
+        beneficial size in ``threshold_tokens``. With ``config_only``, return
+        the selected chunk without a threshold for the paired profile to use.
 
     """
     if backend._closed:
@@ -365,6 +592,7 @@ def profile_sp_config(
             input_width=input_width,
         )
 
+    # Stage 1: screen micro-chunk sizes for this projection at maximum load.
     data = inputs(max_batched_tokens)
     samples: dict[int, list[float]] = {}
 
@@ -412,6 +640,7 @@ def profile_sp_config(
         (candidate, float(score))
         for candidate, score in zip(candidates, scores.tolist())
     )
+    # Stage 2: retest the two fastest chunks before committing to one.
     finalists = sorted(candidate_results, key=lambda result: result[1])[:2]
     retested: dict[int, list[float]] = {}
     for finalist, _ in finalists:
@@ -432,12 +661,25 @@ def profile_sp_config(
     candidate = min(finalist_results, key=lambda item: item[1])[0]
     data = None
 
+    # Stage 3: verify numerical parity before passing this chunk to the pair.
     check_data = inputs(min(max_batched_tokens, tp_size * 5 + 1))
     conventional = project(check_data, None)
     native = project(check_data, candidate)
     torch.accelerator.synchronize(device)
     torch.testing.assert_close(native, conventional, rtol=0.02, atol=0.05)
     del check_data, conventional, native
+    if config_only:
+        return SPProfile(
+            tp_size,
+            hidden_size,
+            max_batched_tokens,
+            "candidate",
+            "",
+            config=candidate,
+            candidates=tuple(candidate_results),
+            input_width=input_width,
+            finalists=finalist_results,
+        )
 
     def measure_size(tokens: int) -> SPMeasurement | None:
         data = inputs(tokens)

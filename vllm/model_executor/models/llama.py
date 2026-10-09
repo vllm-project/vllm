@@ -29,15 +29,12 @@ from itertools import islice
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
 from torch import nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.distributed.parallel_state import get_tp_group
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -60,8 +57,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.worker.tpsp_profile import (
-    TPSPProjection,
-    close_tpsp_projections,
+    TPSPProfile,
+    profile_tpsp,
 )
 
 from .adapters import as_embedding_model, as_seq_cls_model
@@ -84,8 +81,6 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
-
-logger = init_logger(__name__)
 
 
 class LlamaMLP(nn.Module):
@@ -263,6 +258,8 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
+    tpsp_profile: TPSPProfile
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -323,8 +320,6 @@ class LlamaDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.tpsp_projections: dict[str, TPSPProjection] | None = None
-        self.tpsp_enabled = False
 
     def forward(
         self,
@@ -333,175 +328,38 @@ class LlamaDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         *,
         next_norm: RMSNorm | None = None,
-        skip_o_proj: bool = False,
-        skip_down_proj: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        plans = self.tpsp_projections
-        tpsp_enabled = self.tpsp_enabled
-        tpsp_o = plans.get("o") if plans is not None else None
-        tpsp_down = plans.get("down") if plans is not None else None
-        if (skip_o_proj or skip_down_proj) and not tpsp_enabled:
-            raise RuntimeError("TP/SP projection cannot be skipped without a profile")
-        if tpsp_enabled and (tpsp_o is None or tpsp_down is None or next_norm is None):
-            raise RuntimeError(
-                "Active TP/SP Llama requires profiled projections and norm"
-            )
-        if tpsp_enabled:
-            tokens = hidden_states.size(0)
+        use_tpsp = next_norm is not None
         residual_is_sharded = residual is not None
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
-        elif not tpsp_enabled:
+        elif not use_tpsp:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if not tpsp_enabled:
-            hidden_states = self.self_attn(
-                positions=positions, hidden_states=hidden_states
-            )
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual
-            )
-        else:
-            assert tpsp_o is not None
-            hidden_states = self.self_attn(
-                positions=positions,
-                hidden_states=hidden_states,
-                skip_o_proj=skip_o_proj,
-            )
-            if skip_o_proj:
-                hidden_states, residual = self._project_and_normalize(
-                    hidden_states,
-                    self.self_attn.o_proj,
-                    residual,
-                    self.post_attention_layernorm,
-                    tpsp_o,
-                    residual_is_sharded,
-                )
-            else:
-                group = get_tp_group()
-                rows = (tokens + group.world_size - 1) // group.world_size
-                if residual_is_sharded:
-                    if residual.shape != (rows, self.hidden_size):
-                        raise RuntimeError(
-                            "TP/SP residual shard has an unexpected shape"
-                        )
-                    padded = torch.empty(
-                        (group.world_size * rows, self.hidden_size),
-                        device=hidden_states.device,
-                        dtype=hidden_states.dtype,
-                    )
-                    dist.all_gather_into_tensor(
-                        padded, residual.contiguous(), group=group.device_group
-                    )
-                    full_residual = padded[:tokens].contiguous()
-                else:
-                    if residual.shape != (tokens, self.hidden_size):
-                        raise RuntimeError(
-                            "TP/SP full residual has an unexpected shape"
-                        )
-                    full_residual = residual.clone()
-                hidden_states, full_residual = self.post_attention_layernorm(
-                    hidden_states, full_residual
-                )
-                residual = torch.zeros(
-                    (rows, self.hidden_size),
-                    device=hidden_states.device,
-                    dtype=hidden_states.dtype,
-                )
-                start = group.rank_in_group * rows
-                count = min(rows, max(0, tokens - start))
-                if count:
-                    residual[:count] = full_residual[start : start + count]
-        if not tpsp_enabled:
-            hidden_states = self.mlp(hidden_states)
-        else:
-            assert tpsp_down is not None
-            assert next_norm is not None
-            hidden_states = self.mlp(hidden_states, skip_down_proj=skip_down_proj)
-            if skip_down_proj:
-                hidden_states, residual = self._project_and_normalize(
-                    hidden_states,
-                    self.mlp.down_proj,
-                    residual,
-                    next_norm,
-                    tpsp_down,
-                    True,
-                )
-            else:
-                group = get_tp_group()
-                rows = (tokens + group.world_size - 1) // group.world_size
-                if residual.shape != (rows, self.hidden_size):
-                    raise RuntimeError("TP/SP residual shard has an unexpected shape")
-                padded = torch.empty(
-                    (group.world_size * rows, self.hidden_size),
-                    device=hidden_states.device,
-                    dtype=hidden_states.dtype,
-                )
-                dist.all_gather_into_tensor(
-                    padded, residual.contiguous(), group=group.device_group
-                )
-                hidden_states, full_residual = next_norm(
-                    hidden_states, padded[:tokens].contiguous()
-                )
-                residual = torch.zeros(
-                    (rows, self.hidden_size),
-                    device=hidden_states.device,
-                    dtype=hidden_states.dtype,
-                )
-                start = group.rank_in_group * rows
-                count = min(rows, max(0, tokens - start))
-                if count:
-                    residual[:count] = full_residual[start : start + count]
-        return hidden_states, residual
-
-    def _project_and_normalize(
-        self,
-        x,
-        projection,
-        residual,
-        norm,
-        tpsp: TPSPProjection,
-        residual_is_sharded: bool,
-    ):
-        """Run the fused projection and normalization."""
-        backend = tpsp.backend
-        if backend is None:
-            raise RuntimeError("TP/SP Llama backend is unavailable")
-        group = get_tp_group()
-        tp_size = group.world_size
-        rows = (x.size(0) + tp_size - 1) // tp_size
-        if not residual_is_sharded:
-            if residual.shape != (x.size(0), self.hidden_size):
-                raise RuntimeError("TP/SP full residual has an unexpected shape")
-            start = group.rank_in_group * rows
-            local_residual = torch.zeros(
-                (rows, residual.size(-1)), device=residual.device, dtype=residual.dtype
-            )
-            count = min(rows, max(0, x.size(0) - start))
-            if count:
-                local_residual[:count] = residual[start : start + count]
-        else:
-            if residual.shape != (rows, self.hidden_size):
-                raise RuntimeError("TP/SP residual shard has an unexpected shape")
-            local_residual = residual
-        weight = projection.weight
-        key = (weight.data_ptr(), weight._version)
-        cached = getattr(projection, "_tpsp_transposed_weight", None)
-        if cached is None or cached[0] != key:
-            cached = (key, weight.T.contiguous())
-            projection._tpsp_transposed_weight = cached
-        reduced, _, gathered = backend.fused_gemm_rs_norm_ag(
-            x.contiguous(),
-            cached[1],
-            norm.weight,
-            local_residual,
-            norm.variance_epsilon,
-            tpsp.config,
-            projection_bias=projection.bias,
-            context=tpsp.context,
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            skip_o_proj=use_tpsp,
         )
-        return gathered, reduced
+        if use_tpsp:
+            hidden_states, residual = self.tpsp_profile.o_proj.run(
+                hidden_states,
+                self.self_attn.o_proj,
+                residual,
+                self.post_attention_layernorm,
+                residual_is_sharded,
+            )
+            hidden_states = self.mlp(hidden_states, skip_down_proj=True)
+            return self.tpsp_profile.down_proj.run(
+                hidden_states,
+                self.mlp.down_proj,
+                residual,
+                next_norm,
+                True,
+            )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        return self.mlp(hidden_states), residual
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Get quantization config for this layer. Override in subclasses."""
@@ -573,11 +431,11 @@ class LlamaModel(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        self.tpsp_projections: nn.ModuleDict | None = None
-        self.tpsp_thresholds = (0, 0)
-        self.tpsp_max_batched_tokens = 0
-        self.tpsp_enabled = False
-        self.tpsp_profiled = False
+        self.tpsp_requested = False
+        self.tpsp_profile: TPSPProfile | None = None
+        self.max_tpsp_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -590,18 +448,12 @@ class LlamaModel(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        projections = self.tpsp_projections
-        if projections is not None and not self.tpsp_profiled:
-            raise RuntimeError("TP/SP Llama requires worker startup profiling")
-        tpsp_enabled = self.tpsp_enabled
-        if tpsp_enabled and (
-            get_pp_group().world_size != 1
-            or intermediate_tensors is not None
-            or extra_layer_kwargs
-        ):
-            raise RuntimeError(
-                "TP/SP Llama does not support pipeline or extra layer inputs"
-            )
+        if self.tpsp_requested and self.tpsp_profile is None:
+            new_profile = profile_tpsp(self, self.max_tpsp_batched_tokens)
+            if new_profile.enabled:
+                for layer in islice(self.layers, self.start_layer, self.end_layer):
+                    layer.tpsp_profile = new_profile
+            self.tpsp_profile = new_profile
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -614,16 +466,12 @@ class LlamaModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        if tpsp_enabled:
-            tokens = hidden_states.size(0)
-            if not 1 <= tokens <= self.tpsp_max_batched_tokens:
-                raise ValueError(
-                    "current_batched_tokens must be within the profiled range"
-                )
-            o_threshold, down_threshold = self.tpsp_thresholds
-            skip_o_proj = o_threshold > 0 and tokens >= o_threshold
-            skip_down_proj = down_threshold > 0 and tokens >= down_threshold
-
+        profile = self.tpsp_profile
+        tpsp_active = profile is not None and profile.is_active(hidden_states.size(0))
+        if tpsp_active and intermediate_tensors is not None:
+            raise RuntimeError("TP/SP Llama does not support pipeline inputs")
+        if tpsp_active and self.aux_hidden_state_layers:
+            raise ValueError("TP/SP Llama does not support auxiliary hidden states")
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         aux_hidden_states: list[torch.Tensor] = []
@@ -635,7 +483,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if tpsp_enabled:
+            if tpsp_active:
                 next_norm = (
                     self.layers[idx + 1].input_layernorm
                     if idx + 1 < self.end_layer
@@ -646,32 +494,15 @@ class LlamaModel(nn.Module, EagleModelMixin):
                     hidden_states,
                     residual,
                     next_norm=next_norm,
-                    skip_o_proj=skip_o_proj,
-                    skip_down_proj=skip_down_proj,
+                    **extra_layer_kwargs,
                 )
-                if idx + 1 in self.aux_hidden_state_layers:
-                    group = get_tp_group()
-                    padded = torch.empty(
-                        (group.world_size * residual.size(0), self.config.hidden_size),
-                        device=residual.device,
-                        dtype=residual.dtype,
-                    )
-                    dist.all_gather_into_tensor(
-                        padded, residual.contiguous(), group=group.device_group
-                    )
-                    self._maybe_add_hidden_state(
-                        aux_hidden_states,
-                        idx + 1,
-                        padded[: hidden_states.size(0)],
-                        None,
-                    )
             else:
                 hidden_states, residual = layer(
                     positions, hidden_states, residual, **extra_layer_kwargs
                 )
-                self._maybe_add_hidden_state(
-                    aux_hidden_states, idx + 1, hidden_states, residual
-                )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -682,7 +513,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
                 }
             )
 
-        if not tpsp_enabled:
+        if not tpsp_active:
             hidden_states, _ = self.norm(hidden_states, residual)
 
         aux_hidden_states = remote_aux + aux_hidden_states
@@ -755,116 +586,16 @@ class LlamaForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
         if vllm_config.model_config.enable_tpsp:
-            self._init_tpsp(vllm_config)
-
-    def _init_tpsp(self, vllm_config: VllmConfig) -> None:
-        if not type(self).__dict__.get("tpsp_capable", False):
-            logger.warning(
-                "TPSP is not supported by %s; using regular forward", type(self)
-            )
-            return
-        if (
-            vllm_config.parallel_config.pipeline_parallel_size > 1
-            or vllm_config.quant_config is not None
-            or vllm_config.lora_config is not None
-        ):
-            logger.warning(
-                "TPSP does not support PP, quantization or LoRA; using regular forward"
-            )
-            return
-        group = get_tp_group()
-        first_layer = self.model.layers[0]
-        hidden_size = self.config.hidden_size
-        self.model.tpsp_projections = nn.ModuleDict(
-            {
-                "o": TPSPProjection(
-                    first_layer.self_attn.o_proj.input_size_per_partition,
-                    hidden_size,
-                    first_layer.post_attention_layernorm.variance_epsilon,
-                    group.world_size,
-                    group.device_group.group_name,
-                ),
-                "down": TPSPProjection(
-                    first_layer.mlp.down_proj.input_size_per_partition,
-                    hidden_size,
-                    self.model.layers[-1].input_layernorm.variance_epsilon,
-                    group.world_size,
-                    group.device_group.group_name,
-                ),
-            }
-        )
-        # The model owns the modules; layers only keep references to them.
-        plans = dict(self.model.tpsp_projections.items())
-        for layer in self.model.layers:
-            layer.tpsp_projections = plans
-        if vllm_config.device_config.device_type == "cuda":
-            self.model.do_not_compile = True
-
-    def finalize_tpsp(self) -> None:
-        plans = self.model.tpsp_projections
-        if plans is None:
-            return
-        o_plan, down_plan = plans["o"], plans["down"]
-        if (
-            not isinstance(o_plan, TPSPProjection)
-            or not isinstance(down_plan, TPSPProjection)
-            or o_plan.profile is None
-            or down_plan.profile is None
-        ):
-            raise RuntimeError("TP/SP Llama requires profiled projections")
-        o_profile, down_profile = o_plan.profile, down_plan.profile
-        if o_profile.max_batched_tokens != down_profile.max_batched_tokens:
-            raise RuntimeError("TP/SP Llama profiles have different token ranges")
-        for profile in (o_profile, down_profile):
-            if profile.enabled and (
-                profile.config is None
-                or profile.threshold_tokens is None
-                or not 1 <= profile.threshold_tokens <= profile.max_batched_tokens
+            if not type(self).__dict__.get("tpsp_capable", False):
+                raise ValueError(f"TPSP is not supported by {type(self).__name__}")
+            if (
+                vllm_config.quant_config is not None
+                or vllm_config.lora_config is not None
             ):
-                raise RuntimeError("TP/SP Llama has an invalid enabled profile")
-        enabled = o_profile.enabled or down_profile.enabled
-        if enabled:
-            tp_size = get_tp_group().world_size
-            for layer in self.model.layers:
-                for profile, projection in (
-                    (o_profile, layer.self_attn.o_proj),
-                    (down_profile, layer.mlp.down_proj),
-                ):
-                    if profile.enabled and (
-                        profile.tp_size != tp_size
-                        or profile.hidden_size != self.config.hidden_size
-                        or (
-                            profile.input_width is not None
-                            and profile.input_width
-                            != projection.input_size_per_partition
-                        )
-                    ):
-                        raise RuntimeError(
-                            "TP/SP profile does not match the Llama projection"
-                        )
-        o_plan.config = o_profile.config if o_profile.enabled else None
-        down_plan.config = down_profile.config if down_profile.enabled else None
-        self.model.tpsp_thresholds = (
-            o_profile.threshold_tokens or 0,
-            down_profile.threshold_tokens or 0,
-        )
-        self.model.tpsp_max_batched_tokens = o_profile.max_batched_tokens
-        self.model.tpsp_enabled = enabled
-        self.model.tpsp_profiled = True
-        for layer in self.model.layers:
-            layer.tpsp_enabled = enabled
-
-    def close_tpsp(self) -> None:
-        if self.model.tpsp_projections is None:
-            return
-        close_tpsp_projections(self)
-        self.model.tpsp_enabled = False
-        self.model.tpsp_thresholds = (0, 0)
-        for layer in self.model.layers:
-            layer.tpsp_enabled = False
-            for projection in (layer.self_attn.o_proj, layer.mlp.down_proj):
-                if hasattr(projection, "_tpsp_transposed_weight"):
-                    del projection._tpsp_transposed_weight
+                raise ValueError("TPSP does not support quantization or LoRA")
+            self.model.tpsp_requested = True
+            if vllm_config.device_config.device_type == "cuda":
+                self.model.do_not_compile = True
 
     def _init_model(
         self,

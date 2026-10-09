@@ -164,13 +164,16 @@ class TPSPBackend(ABC):
         norm_eps: float,
         time_budget_s: float,
         context: Any | None = None,
+        config_only: bool = False,
     ) -> "SPProfile":
         """Benchmark fused projections and return a chunk/threshold plan.
 
         Returns:
             SPProfile with ``status``, measured candidates, and token timings.
             When enabled, ``config`` holds the chosen chunk size and
-            ``threshold_tokens`` marks when to use the fused op.
+            ``threshold_tokens`` marks when to use the fused op. If
+            ``config_only`` is set, only select a chunk size; the caller
+            profiles the combined path to determine the threshold.
 
         """
         from vllm.v1.worker.tpsp_profile import profile_sp_config
@@ -184,6 +187,7 @@ class TPSPBackend(ABC):
             time_budget_s=time_budget_s,
             norm_eps=norm_eps,
             context=context,
+            config_only=config_only,
         )
 
     def _profile_context(self, context: Any | None) -> Any:

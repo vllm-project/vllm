@@ -356,7 +356,8 @@ class ModelConfig:
     "vllm.models.deepseek_v32.nvidia.model:DeepseekV32ForCausalLM"}`. This
     argument is for development and debugging purposes only."""
     enable_tpsp: bool = False
-    """Attempt TP/SP for models that support the fused forward path."""
+    """Attempt paired TP/SP projections above a jointly profiled token threshold.
+    Incompatible with pipeline parallelism and target-hidden-state speculation."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
