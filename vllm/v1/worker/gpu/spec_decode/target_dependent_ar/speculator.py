@@ -577,6 +577,11 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         idx_mapping = self.idx_mapping[:num_reqs]
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            for groups in self.attn_groups:
+                for group in groups:
+                    group.map_to_kernel_block_table(
+                        self.block_tables.input_block_tables[group.kv_cache_group_id]
+                    )
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
