@@ -6,6 +6,7 @@ The public Triton helpers dispatch on dtype at compile time. Conversion code
 lives in an always-inline CUDA C++ helper linked from portable SM75 LLVM
 bitcode. Scalar adapters support Triton layouts with partial packs. Inference assumes
 finite activations; pass HANDLE_NAN=True to preserve signed NaNs.
+SM89+ compilation requires FORCE_SOFTWARE_CONVERSION=True; prefer native conversion.
 """
 
 from pathlib import Path
@@ -15,6 +16,23 @@ from vllm.triton_utils import tl, triton
 _HELPER_PATH = Path(__file__).with_name("fp8e4nv_helper_sm75.bc")
 _HELPER_PATH_STR = str(_HELPER_PATH)
 FP8E4NV_EXTERN_LIBS = {"fp8e4nv": _HELPER_PATH_STR}
+
+
+@tl.core.builtin
+def _check_software_conversion(FORCE_SOFTWARE_CONVERSION, _semantic=None):
+    """Catch accidental software conversion on native-FP8 CUDA targets."""
+    arch = _semantic.builder.options.arch
+    if arch.startswith("sm"):
+        capability = int("".join(c for c in arch[2:] if c.isdigit()))
+        if capability >= 89 and not tl.core._unwrap_if_constexpr(
+            FORCE_SOFTWARE_CONVERSION
+        ):
+            raise ValueError(
+                f"Triton is compiling for {arch}, which supports native FP8 E4M3 "
+                "conversion. Use native conversion, or set "
+                "FORCE_SOFTWARE_CONVERSION=True to deliberately use "
+                "software conversion."
+            )
 
 
 @tl.core.extern
@@ -261,12 +279,17 @@ def _encode_pack4_nan(x0, x1, x2, x3):
 
 
 @triton.jit
-def convert_to_fp8e4m3(x, HANDLE_NAN: tl.constexpr = False):
+def convert_to_fp8e4m3(
+    x,
+    HANDLE_NAN: tl.constexpr = False,
+    FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
+):
     """Encode float -> uint8 fp8e4m3 bytes (saturating RNE); NaNs are opt-in."""
     tl.static_assert(
         (x.dtype == tl.float16) or (x.dtype == tl.bfloat16) or (x.dtype == tl.float32),
         "convert_to_fp8e4m3 expects fp16, bf16, or fp32 input",
     )
+    _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
     if x.numel >= 4 * tl.extra.cuda.num_threads():
         if HANDLE_NAN:
             return tl.map_elementwise(_encode_pack4_nan, x, pack=4)[0]
@@ -281,7 +304,12 @@ def convert_to_fp8e4m3(x, HANDLE_NAN: tl.constexpr = False):
 
 
 @triton.jit
-def convert_from_fp8e4m3(x, dtype: tl.constexpr, HANDLE_NAN: tl.constexpr = False):
+def convert_from_fp8e4m3(
+    x,
+    dtype: tl.constexpr,
+    HANDLE_NAN: tl.constexpr = False,
+    FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
+):
     """Decode uint8 fp8e4m3 bytes to fp16, bf16, or fp32.
 
     Scalar adapters accept partial per-thread packs. NaN handling is opt-in.
@@ -290,6 +318,7 @@ def convert_from_fp8e4m3(x, dtype: tl.constexpr, HANDLE_NAN: tl.constexpr = Fals
         (dtype == tl.float16) or (dtype == tl.bfloat16) or (dtype == tl.float32),
         "convert_from_fp8e4m3 expects fp16 or bf16, or fp32 output",
     )
+    _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
     # Keep packed decoding when each thread has at least one complete pack.
     if dtype != tl.float32 and x.numel >= 4 * tl.extra.cuda.num_threads():
         if dtype == tl.float16:
