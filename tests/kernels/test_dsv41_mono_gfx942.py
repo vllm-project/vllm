@@ -552,3 +552,75 @@ def test_moe_down_matches_float64():
     torch.accelerator.synchronize()
     assert not torch.isnan(out).any()
     assert _rel_err(out, ydeq @ deq.t()) < 1e-5
+
+
+def _build_contrib(rs):
+    picks = rs.picks
+
+    @fx.struct
+    class Lds:
+        tab: fx.Array[fx.Int32, 2 * picks, 16]
+        contrib: fx.Array[fx.Int32, 2 * picks * 8, 16]
+
+    @fx.union
+    class U:
+        t: Lds
+
+    @flyc.kernel(
+        name=f"test_contrib942_{rs.tokens}_{rs.topk}", known_block_size=[THREADS, 1, 1]
+    )
+    def kern(tab: Int64, v: Int64, out: Int64):
+        tid = fx.thread_idx.x
+        lds = fx.SharedAllocator().allocate(U).t.peek()
+        c = {"contrib": lds.contrib.ptr, "rs": rs}
+        for i in range_constexpr(-(-2 * picks // THREADS)):
+            u = tid + THREADS * i
+            if u < 2 * picks:
+                fx.ptr_store(_ld(tab, u), lds.tab.ptr + u)
+        gpu.barrier()
+        # The words of task 1, so that the task's offset is part of the address.
+        for i in range_constexpr(-(-picks * 8 // THREADS)):
+            u = tid + THREADS * i
+            if u < picks * 8:
+                pick, word = u // 8, u % 8
+                w = rs.pick_w(lds.tab.ptr, pick)
+                a = _ld(v, pick * 16 + 2 * word).bitcast(fx.Float32) * w
+                b = _ld(v, pick * 16 + 2 * word + 1).bitcast(fx.Float32) * w
+                M.contrib_store_942(c, 1, pick, word, a, b)
+        gpu.barrier()
+        for i in range_constexpr(-(-picks * 16 // THREADS)):
+            u = tid + THREADS * i
+            if u < picks * 16:
+                _st(M.contrib_load_942(c, 1, u // 16, u % 16), out, u)
+
+    @flyc.jit
+    def launch(tab: Int64, v: Int64, out: Int64):
+        kern(tab, v, out).launch(grid=(1,), block=(THREADS,))
+
+    return launch
+
+
+@pytest.mark.parametrize("routing", [(384, 6), (128, 3)], ids=["target", "draft"])
+def test_contrib_942_is_bf16_of_product(routing):
+    """contrib_store_942 and contrib_load_942 return bf16(v w) for every row of
+    every pick of a 42-row step, with w the pick's route weight from the route
+    table (RouteShape.pick_w). down_combine rounds this same f32 product on
+    gfx950, so the gfx942 combine adds the same values."""
+    from vllm.models.deepseek_v41.amd.mono.stages.moe_shape import RouteShape
+
+    experts, topk = routing
+    rs = RouteShape(experts, topk, 42, 4)
+    g = torch.Generator(device="cuda").manual_seed(4)
+    v = torch.randn(rs.picks, 16, device="cuda", generator=g) * 8
+    w = torch.rand(rs.tokens, topk, device="cuda", generator=g)
+    # A token's route table entries: its topk expert ids, then their weights.
+    tab = torch.zeros(rs.tokens, 2, topk, device="cuda", dtype=torch.int32)
+    tab[:, 0] = torch.randint(
+        0, experts, (rs.tokens, topk), device="cuda", generator=g, dtype=torch.int32
+    )
+    tab[:, 1] = w.view(torch.int32)
+    out = torch.zeros(rs.picks * 16, device="cuda", dtype=torch.float32)
+    _build_contrib(rs)(tab.data_ptr(), v.data_ptr(), out.data_ptr())
+    torch.accelerator.synchronize()
+    ref = (v * w.view(rs.picks, 1)).to(torch.bfloat16).float()
+    assert torch.equal(out.view(rs.picks, 16), ref)

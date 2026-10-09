@@ -23,7 +23,10 @@ TOPK = 512
 EPS = 1e-20
 
 ROWS = 16  # GEMV rows a task
-TILE = 16  # tokens a GEMV pass (an MFMA's N)
+# The tokens a GEMV pass takes, at most an MFMA's N (16). A gfx942 pass takes 6
+# tokens, as the seam and MoE stages do (``stages.gemv.TILE``), so that K1's x
+# tiles and K2's wo_a and wo_b tiles stay within its 64 KB of LDS.
+TILE = 6 if GFX942 else 16
 HEAD_TILE = 16  # heads an attention MFMA takes
 WOA_ROWS = 32  # a wo_a task's rows: one MX group of its output
 MAX_TOKENS = 48

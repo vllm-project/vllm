@@ -47,10 +47,14 @@ logger = init_logger(__name__)
 RECORD = 584  # an fp8_ds_mla KV record: 576 data bytes, 8 scale bytes
 SWA_WIDTH = 128  # a causal decode token's window slots
 MAX_ROWS = 48  # the kernels' step rows at most: 8 requests x (1 + 5 DSpark drafts)
-# A gfx942 workgroup has 64 KB of LDS, not 160 KB as on gfx950. At TP 4 the
-# gfx942 kernels fit in it with 6 rows (1 request with 5 DSpark drafts, or 6
-# requests without drafts) but not with 12. A larger step runs vLLM's path.
-MAX_ROWS_GFX942 = 6
+# A gfx942 workgroup has 64 KB of LDS, not 160 KB as on gfx950. Its kernels
+# take a step's tokens 6 at a time (``mono.stages.gemv.TILE``), and at TP 4 they
+# take up to 42 rows, 7 requests with 5 DSpark drafts each. With 5 drafts vLLM
+# captures FULL CUDA graphs of 6, 12, 18, 24, 36 and 42 rows, so a step of 5
+# requests runs padded to 36 rows. At 48 rows the shared expert has 8 token
+# tiles of 36 tasks each, 288 units, and the MoE runs one unit a CTA on 256
+# CTAs. A larger step runs vLLM's path.
+MAX_ROWS_GFX942 = 42
 # The kernels' ISA: CDNA4 (gfx950) scaled MFMA and MX formats, or CDNA3
 # (gfx942), where the kernels compute the same layer with FNUZ FP8 MFMAs on
 # their own copies of the weights (mono/weights942.py).
@@ -64,9 +68,9 @@ TARGET_ROUTING = (384, 6)
 DRAFT_ROUTING = (128, 3)
 # VLLM_ROCM_MONO_SHADOW=1 (eager only): a whole mono layer runs the kernels
 # and then vLLM's own layer on the same inputs, logs how far apart the
-# outputs are for the first SHADOW_STEPS steps, and continues with vLLM's
-# outputs. A layer that takes the FFN launch does the same with the part of
-# vLLM's layer after its attention.
+# outputs are for the first SHADOW_STEPS steps of each step width, and
+# continues with vLLM's outputs. A layer that takes the FFN launch does the
+# same with the part of vLLM's layer after its attention.
 SHADOW_STEPS = 4
 
 _runner = None
@@ -144,9 +148,10 @@ def _capture_plain_experts(experts) -> None:
     qm.process_weights_after_loading = process_weights_after_loading
 
 
-def _shadow_report(layer_id: int, step: int, got: tuple, ref: tuple) -> None:
-    """Log, a layer and step, each output's largest difference relative to
-    the largest reference value and the relative norm of the difference."""
+def _shadow_report(layer_id: int, rows: int, step: int, got: tuple, ref: tuple) -> None:
+    """Log, a layer and step of ``rows`` rows, each output's largest difference
+    relative to the largest reference value and the relative norm of the
+    difference."""
     names = ("out", "residual", "post_mix", "res_mix", "pre_mix")
     parts = []
     for name, g, r in zip(names, got, ref):
@@ -156,7 +161,13 @@ def _shadow_report(layer_id: int, step: int, got: tuple, ref: tuple) -> None:
         rel_norm = ((g - r).norm() / r.norm().clamp_min(1e-30)).item()
         bad = int((~torch.isfinite(g)).sum())
         parts.append(f"{name} max {rel_max:.3g} norm {rel_norm:.3g} nonfinite {bad}")
-    logger.info("mono shadow layer %d step %d: %s", layer_id, step, "; ".join(parts))
+    logger.info(
+        "mono shadow layer %d rows %d step %d: %s",
+        layer_id,
+        rows,
+        step,
+        "; ".join(parts),
+    )
 
 
 def _topk_report(
@@ -229,7 +240,8 @@ class MonoDecodeLayer:
         # A window-only layer's constant K1 inputs, one set for each step size.
         self._identity_seams: dict[int, tuple[torch.Tensor, ...]] = {}
         self._weights: MonoLayerWeights | None = None
-        self._shadow_steps = 0
+        # The shadow steps that ran so far, one count for each step width.
+        self._shadow_steps: dict[int, int] = {}
 
     @staticmethod
     def create(
@@ -625,7 +637,7 @@ class MonoDecodeLayer:
                 comp_block_table=comp.block_table if ratio else None,
             )
         if shadow:
-            steps = self._shadow_steps
+            steps = self._shadow_steps.get(x.shape[0], 0)
             ref = self._shadow(
                 layer, out, x, positions, residual, post_mix, res_mix, pre_mix,
                 input_ids, engram_hashes, engram_mask,
@@ -735,10 +747,15 @@ class MonoDecodeLayer:
             )
         finally:
             layer.mono = self
-        if self._shadow_steps < SHADOW_STEPS:
-            _shadow_report(layer.attn.layer_id, self._shadow_steps, out, ref)
-        self._shadow_steps += 1
+        self._shadow_count(layer, out, ref, x.shape[0])
         return ref
+
+    def _shadow_count(self, layer, out, ref, rows: int) -> None:
+        """Report the first SHADOW_STEPS shadow steps of each step width."""
+        steps = self._shadow_steps.get(rows, 0)
+        if steps < SHADOW_STEPS:
+            _shadow_report(layer.attn.layer_id, rows, steps, out, ref)
+        self._shadow_steps[rows] = steps + 1
 
     def ffn(
         self,
@@ -804,7 +821,5 @@ class MonoDecodeLayer:
         # routing, so the ids have no other use here.
         ids = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
         ref = (layer.ffn(x, ids), residual, post_mix, res_mix, ffn_pre)
-        if self._shadow_steps < SHADOW_STEPS:
-            _shadow_report(layer.attn.layer_id, self._shadow_steps, out, ref)
-        self._shadow_steps += 1
+        self._shadow_count(layer, out, ref, part.shape[0])
         return ref

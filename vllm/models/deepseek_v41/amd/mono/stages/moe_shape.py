@@ -198,13 +198,19 @@ class RouteShape:
 
     @property
     def tile_picks(self) -> int:
-        """A slot's picks at most: a token picks an expert once."""
-        return min(self.tokens, 16)
+        """An ug task's picks at most: a token picks an expert once, and past
+        one token tile a task takes one pick tile of TILE picks."""
+        return min(self.tokens, TILE)
 
     def route_w(self, tab, s, t, k):
         return fx.ptr_load(tab + (t * 2 * self.topk + self.topk + k)).bitcast(
             fx.Float32
         )
+
+    def pick_w(self, tab, p):
+        """The route weight of pick ``p`` (t topk + k), as ``route_w`` reads it."""
+        t = p // self.topk
+        return self.route_w(tab, None, t, p - t * self.topk)
 
     def n_union(self, tab, s):
         return fx.ptr_load(tab + 2 * s * self.topk)

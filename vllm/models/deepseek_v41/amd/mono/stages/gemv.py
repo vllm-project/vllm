@@ -32,7 +32,14 @@ from vllm.models.deepseek_v41.amd.mono.common.plan import WAVES
 from vllm.models.deepseek_v41.amd.mono.common.sync import POLL_MAX
 
 ROWS = 16  # GEMV rows a task
-TILE = 16  # an MFMA's N: the tokens a GEMV pass takes (``token_tiles``)
+# An MFMA's N: the tokens or picks that one 16x16 MFMA takes.
+MFMA_N = 16
+# The tokens a GEMV pass takes (``token_tiles``), at most MFMA_N. A pass holds
+# its tokens' x rows in LDS. A gfx942 workgroup has 64 KB of LDS, not 160 KB
+# as on gfx950, and the MoE's x tile of 16 MXFP8 rows of 5120 would need 93 KB
+# there. So a gfx942 pass takes 6 tokens, the rows of one request with 5 DSpark
+# drafts, and a step of 12 to 42 rows runs 2 to 7 passes on weights loaded once.
+TILE = 6 if GFX942 else MFMA_N
 
 
 def ld_f32(ptr, i):

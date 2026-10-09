@@ -73,6 +73,7 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
     CM_NT,
     _hw_f32,
     ballot,
+    bf16_pair,
     bf16_round,
     bf_hi,
     bf_lo,
@@ -105,6 +106,7 @@ from vllm.models.deepseek_v41.amd.mono.stages.dims import UG_PART
 # helpers the kernel calls are imported by name: FlyDSL keys a build by the
 # source of the same-directory functions it names, never through a module
 from vllm.models.deepseek_v41.amd.mono.stages.gemv import (
+    MFMA_N,
     ROWS,
     TILE,
     gemv_fp8_loads,
@@ -964,6 +966,13 @@ def ug_tile_task(c, task):
     u = rs.tile_slot(tab, tile)
     first = mplan.tile_pick0(rs.slot_first(tab, u), tile, rs.tile_first(tab, u))
     count = rs.slot_first(tab, u + 1) - first
+    if const_expr(GFX942):
+        # A gfx942 task takes its pick tile's picks only, TILE (6) at most. The
+        # slot's picks past them belong to the slot's next tiles: their x rows
+        # are not in this task's LDS tile, and their tasks write their MID
+        # rows. On gfx950 a pick tile has an MFMA's 16 picks, and every use of
+        # count below already stops at 16, so gfx950 keeps the code of #60397.
+        count = fx.min(count, fx.Int32(TILE))
     return rs.union_expert(tab, s, u), task % ug_parts * rs.ug_groups, first, count
 
 
@@ -989,7 +998,7 @@ def stage_ug_tile(c, task, total):
 @traced
 def ug_pass(c, e, part0, first, count, col):
     """An ug task's GEMV and epilogue for the slot's picks first .. first +
-    min(count, 16) (column lane % 16's x in LDS row ``col``)."""
+    min(count, TILE) (column lane % 16's x in LDS row ``col``)."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     a, d, rs = c["args"], c["d"], c["rs"]
     p, rg0, ks, real = ug_wave_pair(c, part0)
@@ -1075,9 +1084,9 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
 
 
 def gather_x8r(c, first, count):
-    """The X8R rows and codes of the slot's picks first .. first + min(count, 16)
-    into LDS rows 0 .. (only those rows: an ug pass reads a pick's row, the
-    columns past them repeat the last one's)."""
+    """The X8R rows and codes of the slot's picks first .. first +
+    min(count, TILE) into LDS rows 0 .. (only those rows: an ug pass reads a
+    pick's row, the columns past them repeat the last one's)."""
     tab, topk = c["tab"], c["rs"].topk
 
     def token(j):
@@ -1462,10 +1471,24 @@ def down_mfma_942(c, j, task, mid, first, count, wop, live):
         if const_expr(b % 6 == 5):
             acc = pin_acc(acc)
     pick = c["rs"].pick_at(tab, first + col)
-    for q in range_constexpr(4):
-        r = 4 * (lane // 16) + q
+    w = c["rs"].pick_w(tab, pick)
+    # The lane's 4 rows are 2 words of ``contrib_store_942``: rows 4 (l / 16)
+    # and 4 (l / 16) + 1, then rows 4 (l / 16) + 2 and 4 (l / 16) + 3.
+    for h in range_constexpr(2):
         if live & (jj < count):
-            contrib_store(c, j, pick * 16 + r, acc[q])
+            contrib_store_942(
+                c, j, pick, 2 * (lane // 16) + h, acc[2 * h] * w, acc[2 * h + 1] * w
+            )
+
+
+def fresh_wop(wop):
+    """A down task's packed weight words and codes (``down_weights_942``)
+    through opaque moves, for a slot's second pass. The pass then converts
+    the FP4 words and unpacks the code bytes again. Without the copies LLVM
+    keeps the first pass's converted words and unpacked codes for the second
+    pass, and from 18 rows the kernel needs more than 256 VGPRs and spills."""
+    wd, sc = wop
+    return [fresh(w) for w in wd], [fresh(w) for w in sc]
 
 
 @traced
@@ -1488,8 +1511,11 @@ def stage_down_942(c, tasks):
         mid = mid_operands_942(c, first, count)
         for jt in range_constexpr(n):
             down_mfma_942(c, jt, tasks[jt], mid, first, count, wops[jt], u < nu)
-        if const_expr(s > TILE):
-            for j0 in range_constexpr(TILE, s, TILE):
+        # A slot of more than MFMA_N picks: its next picks. The down MFMAs read
+        # their B operands from MID in global memory, not from an LDS tile, so
+        # a pass takes MFMA_N picks even where a token tile (TILE) is smaller.
+        if const_expr(s > MFMA_N):
+            for j0 in range_constexpr(MFMA_N, s, MFMA_N):
                 if j0 < count:
                     more = mid_operands_942(c, first + j0, count - j0)
                     for jt in range_constexpr(n):
@@ -1500,7 +1526,7 @@ def stage_down_942(c, tasks):
                             more,
                             first + j0,
                             count - j0,
-                            wops[jt],
+                            fresh_wop(wops[jt]),
                             u < nu,
                         )
     gpu.barrier()
@@ -1765,9 +1791,13 @@ def down_combine(c, task, j, t0, n):
         # at every add (its order is the atomics'; here top-k order)
         routed = fx.Float32(0.0)
         for k in range_constexpr(topk):
-            w = c["rs"].route_w(tab, s, t, k)
-            v = contrib_load(c, j, (t * topk + k) * 16 + r)
-            routed = bf16_round(routed + bf16_round(v * w))
+            if const_expr(GFX942):
+                vw = contrib_load_942(c, j, t * topk + k, r)
+            else:
+                w = c["rs"].route_w(tab, s, t, k)
+                v = contrib_load(c, j, (t * topk + k) * 16 + r)
+                vw = bf16_round(v * w)
+            routed = bf16_round(routed + vw)
         fx.ptr_store(bf16_round(routed + shared), c["pair"] + tid)
     gpu.barrier()
     if tid < ROWS * n // 2:
@@ -1818,6 +1848,24 @@ def contrib_store(c, j, i, v):
 
 def contrib_load(c, j, i):
     return fx.ptr_load(c["contrib"] + (j * c["rs"].picks * 16 + i)).bitcast(fx.Float32)
+
+
+def contrib_store_942(c, j, pick, word, a, b):
+    """gfx942: task j's routed contribution of ``pick`` (t topk + k), rows
+    2 word and 2 word + 1, as bf16(a) and bf16(b) in one word (``[pick][8
+    words]``). ``a`` and ``b`` are the rows' f32 sums already times the pick's
+    route weight. ``down_combine`` rounds exactly that product to bf16 on
+    gfx950, so it adds the same values here, and the contributions take half
+    the LDS. Without that the gfx942 kernels need more than 64 KB of LDS from
+    36 rows on."""
+    at = j * c["rs"].picks * 8 + pick * 8 + word
+    fx.ptr_store(bf16_pair(a, b).bitcast(fx.Int32), c["contrib"] + at)
+
+
+def contrib_load_942(c, j, pick, r):
+    """Row ``r`` of ``contrib_store_942``'s word: bf16(v w) as f32."""
+    w = fx.ptr_load(c["contrib"] + (j * c["rs"].picks * 8 + pick * 8 + r // 2))
+    return (r % 2 == 0).select(bf_lo(w), bf_hi(w))
 
 
 # ---------------------------------------------------------------- loaders
@@ -1881,7 +1929,12 @@ def moe_smem(s, rs, timeline):
         # an ug task's partial C: 2 tiles a wave (``ug_red_slot``)
         red: fx.Array[fx.Float32, 2 * WAVES * 64 * 4, 16]
         tab: fx.Array[fx.Int32, rs.tab_words, 16]
-        pair: fx.Array[fx.Float32, ROWS * s, 16]
+        # The 16 rows of each token of one token tile: the shared stage's
+        # silu x up (``smid_quant``) and the combine's sums (``down_combine``).
+        # gfx942 sizes it for one tile, which is all a stage uses. Sized for
+        # every token, the gfx942 kernels need more than 64 KB of LDS at 42
+        # rows.
+        pair: fx.Array[fx.Float32, ROWS * (tile_rows(s) if GFX942 else s), 16]
         # one stage's buffers at a time (``stage_lds``)
         stage: fx.Array[fx.Int32, sum(stage_lds(s, rs)["words"].values()), 16]
         tls: fx.Array[fx.Int64, TL_POINTS if timeline else 1, 16]
@@ -1894,7 +1947,8 @@ def stage_lds(s, rs):
     shared stage's MXFP8 x tile; the waves' scale blocks (``wsl``, the ug and
     down stages'), then the ug stage's routed MXFP8 x tile, or the down stage's
     token tile of the shared expert's MXFP8 intermediate (``load_smid_tile``),
-    each down task's routed contributions (``contrib_store``) and its shared
+    each down task's routed contributions (``contrib_store``, or
+    ``contrib_store_942`` on gfx942) and its shared
     expert rows (``down_shared``). A barrier ends every stage."""
     d = rs.dims
     # the x tile the shared / ug stages hold (every token's up to one tile)
@@ -1905,7 +1959,9 @@ def stage_lds(s, rs):
     wsl = 0 if GFX942 else WAVES * wsl_words(d)
     shared_xl = rows * lds_row(d.sh_inter // 4) + lds_tail(d.sh_inter)
     shared_xsl = rows * lds_row(d.sh_inter // 32)
-    contrib = 2 * rs.picks * 16  # two down tasks' at most
+    # Two down tasks' at most. A pick's 16 rows take 16 f32 words, or 8 words
+    # of bf16 pairs on gfx942 (``contrib_store_942``).
+    contrib = 2 * rs.picks * (8 if GFX942 else 16)
     offsets = {
         "x8l": 0,
         "x8sl": x8,
