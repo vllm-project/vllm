@@ -131,8 +131,10 @@ def batched_moe(
     per_act_token_quant: bool = False,
     block_shape: list[int] | None = None,
     moe_config: FusedMoEConfig | None = None,
+    max_num_tokens: int | None = None,
 ) -> torch.Tensor:
-    max_num_tokens = round_up(a.shape[0], 64)
+    if max_num_tokens is None:
+        max_num_tokens = round_up(a.shape[0], 64)
 
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype,

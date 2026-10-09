@@ -671,6 +671,48 @@ def test_batched_experts_end_to_end(m, n, k, e, topk):
     torch.testing.assert_close(triton_output, baseline_output, atol=3e-2, rtol=2e-2)
 
 
+@pytest.mark.parametrize("max_tokens_across_dp", [None, 448])
+def test_batched_experts_chunked_dispatch(max_tokens_across_dp: int | None):
+    """Batches larger than the prepare/finalize per-rank capacity are split into
+    several dispatch rounds; the round count follows the largest DP rank, with
+    dummy rounds once this rank runs out of tokens."""
+    from vllm.forward_context import (
+        DPMetadata,
+        create_forward_context,
+        override_forward_context,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    m, n, k, e, topk, max_num_tokens = 200, 512, 512, 8, 2, 64
+    set_random_seed(7)
+    device = current_platform.device_type
+    init_workspace_manager(torch.device(f"{device}:0"))
+
+    a = torch.randn((m, k), device=device, dtype=torch.bfloat16) / 10
+    score = torch.randn((m, e), device=device, dtype=torch.bfloat16)
+    w1 = torch.randn((e, 2 * n, k), device=device, dtype=torch.bfloat16) / 15
+    w2 = torch.randn((e, k, n), device=device, dtype=torch.bfloat16) / 15
+
+    dp_metadata = (
+        None
+        if max_tokens_across_dp is None
+        else DPMetadata(torch.tensor([m, max_tokens_across_dp]))
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        override_forward_context(
+            create_forward_context(None, vllm_config, dp_metadata=dp_metadata)
+        ),
+    ):
+        topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
+        baseline_output = torch_experts(a, w1, w2, topk_weight, topk_ids)
+        triton_output = batched_moe(
+            a, w1, w2, topk_weight, topk_ids, max_num_tokens=max_num_tokens
+        )
+
+    torch.testing.assert_close(triton_output, baseline_output, atol=3e-2, rtol=2e-2)
+
+
 def test_batched_triton_backend_mapping():
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
         UnquantizedMoeBackend,
