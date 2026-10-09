@@ -901,8 +901,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             == attn_metadata.num_actual_tokens
             == topk_indices.shape[0]
         )
-        uses_host_cache = isinstance(index_group, HiSparseMLAIndexGroup)
-        if not uses_host_cache and decode_only:
+        if decode_only:
             topk_indices, topk_length = self._convert_logical_to_physical_topk(
                 topk_indices,
                 attn_metadata,
@@ -920,16 +919,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 return_valid_counts=True,
             )
 
-        attn_out, lse = self._bf16_flash_mla_kernel(
+        return self._bf16_flash_mla_kernel(
             q,
             kv_rows,
             topk_indices,
             topk_length,
             actual_num_heads,
         )
-        if decode_out is None:
-            return attn_out, lse
-        return torch.cat([decode_out, attn_out], dim=0), None
 
     def _gather_prefill_chunk(
         self,

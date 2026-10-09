@@ -550,8 +550,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                     valid_counts,
                 )
 
-            prefill_outs: list[torch.Tensor] = []
-            prefill_lses: list[torch.Tensor | None] = []
+            outputs = [] if decode_out is None else [decode_out]
+            lses = [] if decode_lse is None else [decode_lse]
             for (
                 tokens,
                 prefill_cache,
@@ -573,18 +573,13 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 plan_out, plan_lse = self._run_mqa_kernel(
                     q[tokens], prefill_cache, prefill_indices, prefill_lens
                 )
-                prefill_outs.append(plan_out)
-                prefill_lses.append(plan_lse)
-            prefill_lse = None if prefill_lses[0] is None else torch.cat(prefill_lses)
-            if decode_out is None:
-                if len(prefill_outs) == 1:
-                    return prefill_outs[0], prefill_lse
-                return torch.cat(prefill_outs), prefill_lse
-            output = torch.cat((decode_out, *prefill_outs))
-            if decode_lse is None:
+                outputs.append(plan_out)
+                if plan_lse is not None:
+                    lses.append(plan_lse)
+            output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
+            if not lses:
                 return output, None
-            assert prefill_lse is not None
-            return output, torch.cat((decode_lse, prefill_lse))
+            return output, torch.cat(lses) if len(lses) > 1 else lses[0]
 
         _, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
