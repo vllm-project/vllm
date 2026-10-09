@@ -448,16 +448,16 @@ class DeepseekCompressor(nn.Module):
         compress_norm_rope_store_fn: Any
         if (
             current_platform.is_cuda()
-            and current_platform.has_device_capability(90)
             and self.head_dim == 512
-            and has_cutedsl()
+            and (
+                store_full_kv
+                or (current_platform.has_device_capability(90) and has_cutedsl())
+            )
         ):
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
             )
 
-            # CuTeDSL's sparse compressor requires SM90+. It handles both
-            # the fp8_ds_mla layout and the plain full-cache layout.
             compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL
             extra_kwargs: dict[str, Any] = dict(
                 store_full_kv=store_full_kv,
@@ -478,7 +478,7 @@ class DeepseekCompressor(nn.Module):
             # the portable Triton sparse compressor for fp8_ds_mla.
             if current_platform.is_cuda() and self.head_dim == 512 and store_full_kv:
                 raise NotImplementedError(
-                    "DeepSeek V4 full-row KV cache on CUDA requires SM90+ and the "
+                    "DeepSeek V4 full-row KV cache on CUDA requires the "
                     "CuTeDSL sparse compressor; install cutlass or use fp8_ds_mla "
                     "KV cache"
                 )
