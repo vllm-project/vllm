@@ -1498,7 +1498,8 @@ def autotune_indexer_wq_b(model: nn.Module, num_tokens: int) -> None:
     """Short-context dummy runs skip wq_b, so tune it directly."""
     for module in model.modules():
         if isinstance(module, DeepseekV4Indexer):
-            # All indexers share the wq_b shape; tuning one is enough.
+            # Run every wq_b: FlashInfer keys on op, runner, shapes and dtype,
+            # and skips profiling on a cache hit, so duplicates are cheap.
             qr = torch.randn(
                 num_tokens,
                 module.q_lora_rank,
@@ -1506,4 +1507,3 @@ def autotune_indexer_wq_b(model: nn.Module, num_tokens: int) -> None:
                 device=next(module.weights_proj.parameters()).device,
             )
             module.wq_b(qr)
-            return

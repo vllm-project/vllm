@@ -360,6 +360,7 @@ def _run_flashinfer_autotune_dummy_runs(
     runner: "GPUModelRunner", *, skip_attn: bool = False
 ) -> None:
     import vllm.utils.flashinfer as fi_utils
+    from vllm.models.deepseek_v41.attention import autotune_indexer_wq_b
 
     dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
     for num_tokens in _flashinfer_autotune_token_counts(runner, include_bf16=False):
@@ -396,9 +397,7 @@ def _run_flashinfer_autotune_dummy_runs(
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
-            dsv41 = sys.modules.get("vllm.models.deepseek_v41.attention")
-            if dsv41 is not None:
-                dsv41.autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
+            autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
 def _run_flashinfer_bf16_autotune_dummy_run(
