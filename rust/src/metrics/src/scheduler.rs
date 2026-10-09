@@ -87,6 +87,13 @@ pub struct EngineLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct CacheHitSourceLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub source: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct EnginePositionLabels {
     pub model_name: String,
     pub engine: u32,
@@ -246,6 +253,7 @@ pub struct SchedulerMetrics {
     pub prefix_cache_hits: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_hits: Family<EngineLabels, U64Counter>,
+    pub prompt_tokens_cached_by_source: Family<CacheHitSourceLabels, U64Counter>,
 
     // Speculative decoding counters.
     pub spec_decode_num_drafts: Family<EngineLabels, U64Counter>,
@@ -361,6 +369,13 @@ impl SchedulerMetrics {
         );
 
         let external_prefix_cache_hits = Family::default();
+
+        let prompt_tokens_cached_by_source = Family::default();
+        registry.register(
+            "vllm:prompt_tokens_cached_by_source",
+            "Prefix-cache hit tokens by the cache tier that supplied them: device (local HBM), host (offloaded to DRAM), disk, p2p (transferred from another vLLM instance) or external_unspecified. Counted at admission; sums to vllm:prefix_cache_hits + vllm:external_prefix_cache_hits.",
+            prompt_tokens_cached_by_source.clone(),
+        );
         registry.register(
             "vllm:external_prefix_cache_hits",
             "External prefix cache hits from KV connector cross-instance cache sharing, in terms of number of cached tokens.",
@@ -552,6 +567,7 @@ impl SchedulerMetrics {
             prefix_cache_hits,
             external_prefix_cache_queries,
             external_prefix_cache_hits,
+            prompt_tokens_cached_by_source,
             spec_decode_num_drafts,
             spec_decode_num_draft_tokens,
             spec_decode_num_accepted_tokens,

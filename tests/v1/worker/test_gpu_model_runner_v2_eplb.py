@@ -79,6 +79,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.use_aux_hidden_state_outputs = False
     runner.speculative_config = None
     runner.speculator = None
+    runner.pcp_manager = None
     runner.num_speculative_steps = 0
     runner.encoder_cache = None
     runner.is_pooling_model = False
@@ -189,6 +190,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         ec_connector_output=None,
         routed_experts=None,
         cudagraph_stats=None,
+        num_spec_tokens_to_schedule=0,
     )
     runner.req_states = SimpleNamespace()
 

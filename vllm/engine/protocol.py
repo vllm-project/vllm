@@ -162,8 +162,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine."""
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides."""
         ...
 
     @abstractmethod
@@ -200,7 +206,7 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def wake_up(self, tags: list[str] | None = None) -> bool:
-        """Wake up the engine."""
+        """Wake the tagged resources; return whether every engine is fully awake."""
         ...
 
     @abstractmethod

@@ -23,14 +23,15 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
-    get_open_port,
+    ZmqListener,
     get_open_zmq_ipc_path,
     get_tcp_uri,
+    make_zmq_listener,
     zmq_socket_ctx,
 )
-from vllm.utils.system_utils import get_mp_context
+from vllm.utils.system_utils import get_mp_context, set_env_var
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.executor import Executor
+from vllm.v1.executor import Executor, UniProcExecutor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdown
 
@@ -83,7 +84,17 @@ class CoreEngine:
 
 
 @dataclass
+class EngineZmqBindAddresses:
+    """Frontend endpoints before their owning sockets bind."""
+
+    inputs: list[str]
+    outputs: list[str]
+
+
+@dataclass
 class EngineZmqAddresses:
+    """Resolved frontend endpoints advertised to engine processes."""
+
     # ZMQ input socket addresses for each front-end client (requests)
     inputs: list[str]
     # ZMQ output socket addresses for each front-end client (responses)
@@ -96,6 +107,27 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+
+
+@dataclass
+class EngineZmqListeners:
+    inputs: list[ZmqListener]
+    outputs: list[ZmqListener]
+
+    @property
+    def addresses(self) -> EngineZmqAddresses:
+        return EngineZmqAddresses(
+            inputs=[listener.address for listener in self.inputs],
+            outputs=[listener.address for listener in self.outputs],
+        )
+
+    def cleanup(self) -> None:
+        for listener in (*self.inputs, *self.outputs):
+            listener.cleanup()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.cleanup()
 
 
 @dataclass
@@ -166,6 +198,42 @@ def _node_ip_from_resources(node_resources: dict) -> str | None:
     return None
 
 
+@contextlib.contextmanager
+def _configure_uniproc_startup_threads(
+    executor_class: type[Executor], local_engine_count: int
+) -> Iterator[None]:
+    if (
+        not issubclass(executor_class, UniProcExecutor)
+        or current_platform.is_cpu()
+        or "OMP_NUM_THREADS" in os.environ
+    ):
+        yield
+        return
+
+    import torch
+
+    from vllm.utils.torch_utils import (
+        OMP_NUM_THREADS_SET_BY_VLLM,
+        set_default_torch_num_threads,
+        startup_omp_num_threads,
+    )
+
+    original_threads = torch.get_num_threads()
+    num_threads = min(original_threads, startup_omp_num_threads(local_engine_count))
+    torch_threads = (
+        set_default_torch_num_threads(num_threads)
+        if num_threads < original_threads
+        else contextlib.nullcontext()
+    )
+    # Fork inherits Torch's setting; spawn reads OMP_NUM_THREADS on import.
+    with (
+        set_env_var("OMP_NUM_THREADS", str(num_threads)),
+        set_env_var(OMP_NUM_THREADS_SET_BY_VLLM, "1"),
+        torch_threads,
+    ):
+        yield
+
+
 class CoreEngineProcManager:
     """Utility class to handle creation, readiness, and shutdown
     of background processes used by the AsyncLLM and LLMEngine.
@@ -229,34 +297,36 @@ class CoreEngineProcManager:
         # pickles process args at start() time, sequentially per rank.
         user_assigned_gpu_ids = vllm_config.parallel_config.assigned_physical_gpu_ids
         try:
-            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Populate the logical-to-physical GPU mapping in DP for
-                # platforms that cannot rely on
-                # torch.accelerator.set_device_index(), and for Ray.
-                needs_device_env_isolation = not (
-                    current_platform.is_cuda_alike() or current_platform.is_xpu()
-                )
-                if is_dp and (
-                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
-                ):
-                    set_assigned_physical_gpu_ids_for_dp_rank(
-                        vllm_config, local_dp_rank, user_assigned_gpu_ids
+            with _configure_uniproc_startup_threads(executor_class, local_engine_count):
+                for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                    # Populate the logical-to-physical GPU mapping in DP for
+                    # platforms that cannot rely on
+                    # torch.accelerator.set_device_index(), and for Ray.
+                    needs_device_env_isolation = not (
+                        current_platform.is_cuda_alike() or current_platform.is_xpu()
                     )
+                    if is_dp and (
+                        needs_device_env_isolation
+                        or vllm_config.parallel_config.use_ray
+                    ):
+                        set_assigned_physical_gpu_ids_for_dp_rank(
+                            vllm_config, local_dp_rank, user_assigned_gpu_ids
+                        )
 
-                with numa_utils.configure_subprocess(
-                    # EngineCore itself does not have a TP/PP-local rank.
-                    # When DP is enabled, set_assigned_physical_gpu_ids_for_dp_rank()
-                    # populates the logical-to-physical mapping for this DP
-                    # shard, so local_rank=0 means "the first local GPU in
-                    # this shard". The actual TP/PP worker processes spawned
-                    # by the executor are bound separately with their own
-                    # local_rank values.
-                    vllm_config,
-                    local_rank=0,
-                    dp_local_rank=local_dp_rank,
-                    process_kind="EngineCore",
-                ):
-                    proc.start()
+                    with numa_utils.configure_subprocess(
+                        # EngineCore itself does not have a TP/PP-local rank.
+                        # set_assigned_physical_gpu_ids_for_dp_rank() populates
+                        # the logical-to-physical mapping for this DP
+                        # shard, so local_rank=0 means "the first local GPU in
+                        # this shard". The actual TP/PP worker processes spawned
+                        # by the executor are bound separately with their own
+                        # local_rank values.
+                        vllm_config,
+                        local_rank=0,
+                        dp_local_rank=local_dp_rank,
+                        process_kind="EngineCore",
+                    ):
+                        proc.start()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
@@ -904,6 +974,7 @@ class CoreEngineActorManager:
         runtime_env = RuntimeEnv(
             env_vars=self.env_vars_dict | {"VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"}
         )
+        new_actors = []
         for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
             rank = cur_data_parallel_size + i
             dp_vllm_config = copy.deepcopy(cur_vllm_config)
@@ -947,6 +1018,7 @@ class CoreEngineActorManager:
                     local_dp_rank=local_rank,
                 )
             )
+            new_actors.append(actor)
 
             if local_client:
                 self.local_engine_actors.append(actor)
@@ -955,14 +1027,8 @@ class CoreEngineActorManager:
             self.created_placement_groups.append(pg)
             self.placement_group_is_local.append(local_client)
 
-        actors = (
-            self.local_engine_actors[-new_local_engines:]
-            if new_local_engines > 0
-            else []
-        ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
-
-        ray.get([actor.wait_for_init.remote() for actor in actors])
-        for actor in actors:
+        ray.get([actor.wait_for_init.remote() for actor in new_actors])
+        for actor in new_actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)
             self.actor_run_ref_dict[actor] = ref
@@ -1045,22 +1111,16 @@ class CoreEngineActorManager:
             ray.util.remove_placement_group(pg)
 
 
-def get_engine_zmq_addresses(
+def get_engine_zmq_bind_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
-    *,
-    defer_api_server_ports: bool = True,
-) -> EngineZmqAddresses:
-    """Allocate ZMQ addresses for engine-client communication.
+) -> EngineZmqBindAddresses:
+    """Create ZMQ endpoint templates for engine-client communication.
 
-    By default each TCP address is a ``tcp://host:0`` placeholder; the
-    consumer (API-server child or single-process ``MPClient``) binds, then
-    recovers the kernel-assigned port via ``getsockopt(zmq.LAST_ENDPOINT)``
-    and writes it back into ``addresses`` before the engine handshake.
-
-    Set ``defer_api_server_ports=False`` only when the consumer cannot
-    report a bound port back (e.g. the Rust front-end). IPC paths are
-    unaffected."""
+    Each TCP address is a ``tcp://host:0`` placeholder. A single-process
+    ``MPClient`` binds its own ZMQ sockets. Cross-process frontends use
+    ``bind_engine_zmq_listeners`` so the supervisor binds raw listeners before
+    launching engines and transfers listener ownership to each frontend."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -1085,12 +1145,37 @@ def get_engine_zmq_addresses(
     def _addr() -> str:
         if client_local_only:
             return get_open_zmq_ipc_path()
-        return get_tcp_uri(host, 0 if defer_api_server_ports else get_open_port())
+        return get_tcp_uri(host, 0)
 
-    return EngineZmqAddresses(
+    return EngineZmqBindAddresses(
         inputs=[_addr() for _ in range(num_api_servers)],
         outputs=[_addr() for _ in range(num_api_servers)],
     )
+
+
+def bind_engine_zmq_listeners(
+    vllm_config: VllmConfig,
+    num_api_servers: int = 1,
+) -> EngineZmqListeners:
+    """Bind frontend transport listeners before launching engines."""
+    bind_addresses = get_engine_zmq_bind_addresses(
+        vllm_config,
+        num_api_servers,
+    )
+    inputs: list[ZmqListener] = []
+    outputs: list[ZmqListener] = []
+    try:
+        inputs.extend(
+            make_zmq_listener(address, zmq.ROUTER) for address in bind_addresses.inputs
+        )
+        outputs.extend(
+            make_zmq_listener(address, zmq.PULL) for address in bind_addresses.outputs
+        )
+        return EngineZmqListeners(inputs=inputs, outputs=outputs)
+    except BaseException:
+        for listener in (*inputs, *outputs):
+            listener.cleanup()
+        raise
 
 
 FrontendProcess = BaseProcess | _SubprocessWrapper
@@ -1160,6 +1245,23 @@ def launch_core_engines(
         logger.info("Started DP Coordinator process (PID: %d)", coordinator.proc.pid)
     else:
         coordinator = None
+
+    # Hold a coordination TCPStore (alive for this frame) so engines pick DP
+    # master ports at bind time; pre-allocated ports can be taken before use.
+    coord_store = None
+    if (
+        dp_size > 1
+        and not offline_mode
+        and dp_rank == 0
+        and local_engine_count > 0
+        and not parallel_config.enable_elastic_ep
+    ):
+        from vllm.distributed.utils import create_tcp_store
+
+        coord_store = create_tcp_store(
+            host, 0, is_master=True, world_size=-1, wait_for_workers=False
+        )
+        parallel_config._coord_store_port = coord_store.port
 
     if parallel_config.data_parallel_backend == "ray":
         logger.info("Starting ray-based data parallel backend")
@@ -1381,6 +1483,7 @@ def wait_for_engine_startup(
                             "data_parallel_master_ip",
                             "data_parallel_master_port",
                             "_data_parallel_master_port_list",
+                            "_coord_store_port",
                             "data_parallel_size",
                         )
                     }
