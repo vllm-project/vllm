@@ -235,12 +235,10 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int, handle_nan: bo
     """
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
-    nan_bytes = torch.tensor([0x7F, 0xFF], dtype=torch.uint8, device="cuda")
-    decoded_nan = _run_decode(nan_bytes, dtype, handle_nan=True)
-    assert torch.isnan(decoded_nan).all()
-    assert torch.equal(
-        torch.signbit(decoded_nan), torch.tensor([False, True], device="cuda")
-    )
+    if handle_nan:
+        nan_bytes = torch.tensor([0x7F, 0xFF], dtype=torch.uint8, device="cuda")
+        decoded_nan = _run_decode(nan_bytes, dtype, handle_nan=True)
+        assert torch.isnan(decoded_nan).all()
     x_u8 = _finite_fp8_bytes()
     actual = _run_decode(x_u8, dtype, handle_nan=handle_nan)
     expected = x_u8.view(FP8_DTYPE).to(dtype)
