@@ -26,6 +26,8 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    block_size: int = 4,
+    kernel_block_size: int = 4,
 ):
     device = torch.device("cuda")
     max_num_reqs = 4
@@ -102,7 +104,8 @@ def _run_prepare(
         block_tables=SimpleNamespace(
             slot_mappings=query_slot_mapping.unsqueeze(0),
             input_block_tables=[block_table],
-            kernel_block_sizes=[4],
+            block_sizes=[block_size],
+            kernel_block_sizes=[kernel_block_size],
             cp_rank=cp_rank,
             cp_size=cp_size,
             cp_interleave=cp_interleave,
@@ -191,6 +194,53 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
     assert out.context_positions[:4].tolist() == [10, 11, 0, 0]
     assert out.context_slot_mapping[:4].tolist() == [28, 29, PAD_SLOT_ID, PAD_SLOT_ID]
     assert out.query_slot_mapping[:3].tolist() == [PAD_SLOT_ID, PAD_SLOT_ID, 30]
+
+
+@pytest.mark.parametrize(
+    ("target_positions", "cp_rank", "expected_context", "expected_query"),
+    [
+        (
+            [63, 64, 65, 66],
+            2,
+            [PAD_SLOT_ID, 160],
+            [161, 162, 163],
+        ),
+        (
+            [63, 64, 65, 66],
+            0,
+            [PAD_SLOT_ID, PAD_SLOT_ID],
+            [PAD_SLOT_ID, PAD_SLOT_ID, PAD_SLOT_ID],
+        ),
+        # Position 80 maps to rank-local position 16 on rank 2, crossing into
+        # the second expanded kernel sub-block (ID 11 -> slot 11 * 16 = 176).
+        (
+            [79, 80, 81, 82],
+            2,
+            [175, 176],
+            [177, 178, 179],
+        ),
+    ],
+)
+def test_prepare_dflash_inputs_dcp_with_smaller_kernel_blocks(
+    target_positions,
+    cp_rank,
+    expected_context,
+    expected_query,
+):
+    # Physical/manager block size B = 32, kernel block size K = 16.
+    # Physical block ID 5 expands to kernel block IDs [10, 11].
+    out = _run_prepare(
+        target_positions=target_positions,
+        block_table_values=[10, 11, 12, 13],
+        cp_rank=cp_rank,
+        cp_size=4,
+        cp_interleave=32,
+        block_size=32,
+        kernel_block_size=16,
+    )
+
+    assert out.context_slot_mapping[:2].tolist() == expected_context
+    assert out.query_slot_mapping[:3].tolist() == expected_query
 
 
 def test_prepare_dflash_inputs_never_writes_the_null_block():
