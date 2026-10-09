@@ -145,12 +145,10 @@ class OptimizationLevel(IntEnum):
 PerformanceMode = Literal["balanced", "interactivity", "throughput"]
 
 IS_QUANTIZED = False
-IS_DENSE = False
 # The optimizations that depend on these properties currently set to False
 # in all cases.
 # if model_config is not None:
 #     IS_QUANTIZED = lambda c: c.model_config.is_quantized()
-#     IS_DENSE = lambda c: not c.model_config.is_model_moe()
 # See https://github.com/vllm-project/vllm/issues/25689.
 
 
@@ -259,8 +257,6 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_act_quant": False,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
-            "enable_sp": False,
-            "fuse_gemm_comms": False,
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
@@ -282,8 +278,6 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
-            "enable_sp": False,
-            "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
@@ -305,8 +299,6 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
-            "enable_sp": IS_DENSE,
-            "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -328,8 +320,6 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
-            "enable_sp": IS_DENSE,
-            "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -712,7 +702,7 @@ class VllmConfig:
             and model_config.enable_sleep_mode
             and model_config.sleep_mode_backend == "cumem"
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and current_platform.is_cuda()
+            and current_platform.is_cuda_alike()
         )
 
     @property
@@ -828,9 +818,6 @@ class VllmConfig:
             or model.dtype != torch.bfloat16
             or model.quantization is not None
             or not current_platform.is_cuda()
-            # Sequence parallelism / async TP are torch.compile passes.
-            or self.compilation_config.pass_config.enable_sp
-            or self.compilation_config.pass_config.fuse_gemm_comms
         ):
             return False
         family = bi._get_tuned_matmul_arch_family(
@@ -1323,7 +1310,7 @@ class VllmConfig:
     ) -> bool:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
-            if config is not None and config.watermarking is not False:
+            if config is not None and config.watermarking is True:
                 logger.warning_once(
                     "Watermarking is enabled for this request, but the engine has no "
                     "watermark configuration. This and subsequent requests will run "
@@ -1770,26 +1757,6 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # TODO: This is a stopgap that turns sequence parallelism / async TP
-        # off under batch invariance. Make the sequence-parallel reduce-scatter
-        # path batch-invariant instead so they can stay enabled (#56370).
-        # Sequence parallelism / async TP rewrite all_reduce + rms_norm into a
-        # reduce-scatter whose reduction order depends on the batch, so they
-        # are not batch-invariant. Decide this before the breakable-CUDA-graph
-        # default below, which declines to auto-enable when they are on.
-        pass_config = self.compilation_config.pass_config
-        if envs.VLLM_BATCH_INVARIANT and (
-            pass_config.enable_sp or pass_config.fuse_gemm_comms
-        ):
-            logger.warning_once(
-                "Disabling sequence parallelism and async TP "
-                "(pass_config.enable_sp / fuse_gemm_comms) when "
-                "VLLM_BATCH_INVARIANT is enabled: the reduce-scatter path "
-                "is not batch-invariant (see vllm-project/vllm#56370)."
-            )
-            pass_config.enable_sp = False
-            pass_config.fuse_gemm_comms = False
-
         breakable_cudagraph_enabled = self._maybe_enable_breakable_cudagraph()
 
         if not breakable_cudagraph_enabled and (
@@ -1919,38 +1886,6 @@ class VllmConfig:
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
-
-        # async tp is built on top of sequence parallelism and requires it.
-        pass_config = self.compilation_config.pass_config
-        if pass_config.fuse_gemm_comms:
-            pass_config.enable_sp = True
-        if pass_config.enable_sp:
-            if self.parallel_config.tensor_parallel_size == 1:
-                logger.warning_once("Sequence Parallelism requires TP>1, disabling")
-                pass_config.enable_sp = False
-                pass_config.fuse_gemm_comms = False
-            else:
-                if pass_config.sp_min_token_num is None:
-                    from vllm.compilation.passes.fusion.sequence_parallelism import (
-                        get_sequence_parallelism_threshold,
-                    )
-
-                    tp_size = self.parallel_config.tensor_parallel_size
-                    hidden_size = self.model_config.get_hidden_size()
-                    assert isinstance(self.model_config.dtype, torch.dtype)
-                    element_size = self.model_config.dtype.itemsize
-                    pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
-                        hidden_size, tp_size, element_size
-                    )
-
-                if pass_config.sp_min_token_num is None:
-                    logger.warning_once(
-                        "Model hidden_size too small for the SP "
-                        "threshold heuristic, disabling. To force SP, "
-                        "set pass_config.sp_min_token_num manually."
-                    )
-                    pass_config.enable_sp = False
-                    pass_config.fuse_gemm_comms = False
 
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
 
@@ -2184,30 +2119,6 @@ class VllmConfig:
             data_parallel_size=effective_dp_size,
         )
 
-        if self.compilation_config.pass_config.enable_sp:
-            # With pipeline parallelism, native rms norm tracing errors due to
-            # incorrect residual shape.
-            # Use custom rms norm to unblock. In the future,
-            # the pass will operate on higher-level IR to avoid the issue.
-            # TODO: https://github.com/vllm-project/vllm/issues/27894
-            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
-                logger.warning_once(
-                    "Sequence parallelism is enabled, but running in wrong "
-                    "vllm compile mode: %s.",
-                    self.compilation_config.mode,
-                )
-
-            if self.parallel_config.pipeline_parallel_size > 1:
-                if "-rms_norm" not in self.compilation_config.custom_ops:
-                    self.compilation_config.custom_ops.append("+rms_norm")
-                else:
-                    logger.warning_once(
-                        "Sequence parallelism not supported with "
-                        "native rms_norm when using %s, "
-                        "this will likely lead to an error.",
-                        "pipeline parallelism",
-                    )
-
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
             if (
@@ -2394,29 +2305,6 @@ class VllmConfig:
                 )
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
-
-    def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
-        # remove the sizes that not multiple of tp_size when
-        # enable sequence parallelism
-        removed_sizes = [
-            size
-            for size in possible_sizes
-            if size % self.parallel_config.tensor_parallel_size != 0
-        ]
-        if removed_sizes:
-            logger.warning(
-                "Batch sizes %s are removed because they are not "
-                "multiple of tp_size %d when "
-                "sequence parallelism is enabled",
-                removed_sizes,
-                self.parallel_config.tensor_parallel_size,
-            )
-
-        return [
-            size
-            for size in possible_sizes
-            if size % self.parallel_config.tensor_parallel_size == 0
-        ]
 
     def _set_max_num_scheduled_tokens(self):
         """In most cases, the scheduler may schedule a batch with as many tokens as the
@@ -2665,16 +2553,6 @@ class VllmConfig:
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
-            if (
-                self.parallel_config.tensor_parallel_size > 1
-                and self.compilation_config.pass_config.enable_sp
-            ):
-                # Sequence parallelism only captures TP-divisible sizes, so a
-                # wider non-divisible decode batch cannot be captured under SP.
-                cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
-                    cudagraph_capture_sizes
-                )
-
             # user-specific compilation_config.max_cudagraph_capture_size get
             # truncated to valid_max_size when they are inconsistent.
             valid_max_size = (
@@ -2763,37 +2641,6 @@ class VllmConfig:
                         "Max num batched tokens below allreduce-rms fusion threshold, "
                         "allreduce-rms fusion will be enabled for all num_tokens."
                     )
-
-        # Add the compile ranges for sequence parallelism
-        if compilation_config.pass_config.enable_sp:
-            pass_config = compilation_config.pass_config
-
-            # Calculate min_token_num if not explicitly provided
-            # User override works regardless of hidden_size
-            if pass_config.sp_min_token_num is None:
-                from vllm.compilation.passes.fusion.sequence_parallelism import (
-                    get_sequence_parallelism_threshold,
-                )
-
-                tp_size = self.parallel_config.tensor_parallel_size
-                hidden_size = self.model_config.get_hidden_size()
-                assert isinstance(self.model_config.dtype, torch.dtype)
-                element_size = self.model_config.dtype.itemsize
-                pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
-                    hidden_size, tp_size, element_size
-                )
-
-            min_token_num = pass_config.sp_min_token_num
-            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
-            if min_token_num is not None and (
-                max_num_batched_tokens is not None
-                and min_token_num < max_num_batched_tokens
-                and min_token_num > 1
-            ):
-                # Add endpoint at min_token_num - 1 to ensure SP applies
-                # starting from min_token_num
-                # This creates ranges: [1, min-1] (no SP), [min, max] (SP applies)
-                computed_compile_ranges_endpoints.append(min_token_num - 1)
 
         if compilation_config.pass_config.fuse_rope_kvcache:
             max_token_num = (
@@ -3123,12 +2970,6 @@ class VllmConfig:
         """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
         speculative_config = self.speculative_config
-
-        if (
-            self.compilation_config.pass_config.enable_sp
-            and self.parallel_config.tensor_parallel_size > 1
-        ):
-            unsupported.append("sequence parallelism")
 
         # V2 does not implement the external_launcher (torchrun) PP-output
         # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).
