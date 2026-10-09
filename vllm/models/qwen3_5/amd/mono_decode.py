@@ -149,7 +149,10 @@ class MonoDecode:
         widths = range(1, L.MAX_TOKENS + 1)
         self.k1_scratch = {
             s: buf(
-                max(gdn.scratch_bytes(gdn.K1Build(tokens=s, first=f)) for f in (0, 1))
+                max(
+                    gdn.scratch_bytes(gdn.K1Build(tokens=s, first=f))
+                    for f in (False, True)
+                )
             )
             for s in widths
         }
@@ -197,7 +200,7 @@ class MonoDecode:
                 return "routed experts not all local"
             if layer.layer_type == "linear_attention":
                 a = layer.linear_attn
-                dense = (
+                dense: tuple[torch.Tensor, ...] = (
                     a.in_proj_qkvz.weight,
                     a.in_proj_ba.weight,
                     a.conv1d.weight,
