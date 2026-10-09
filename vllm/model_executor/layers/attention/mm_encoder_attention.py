@@ -650,7 +650,7 @@ class MMEncoderAttention(CustomOp):
             (key, self._fp8_k_amax, self._fp8_k_scale),
             (value, self._fp8_v_amax, self._fp8_v_scale),
         ):
-            amax_buf[pos] = tensor.amax()
+            amax_buf[pos] = tensor.abs().amax()
             max_amax = amax_buf.max()
             scale_buf.fill_(
                 torch.clamp(max_amax, min=torch.finfo(torch.float32).tiny) / _FP8_MAX
