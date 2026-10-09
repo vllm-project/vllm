@@ -7,9 +7,8 @@ on dtype; encode is round-to-nearest-even, and decode is exact.
 
 Oracle (per the test plan):
   * SM75-SM88: compare against a PyTorch reference. The reference SATURATES
-    overflow (and +-inf / NaN) to the fp8 representable max (+-448), never NaN --
-    matching our kernels, which treat anything past the fp8 range as overflow and
-    do not spend cycles distinguishing NaN (NaN must not occur in KV activations).
+    overflow (and +-inf) to the fp8 representable max (+-448), preserving
+    NaNs as signed E4M3 NaN bytes.
   * SM89+: the same sampled set, plus a FULL barrage over every one of the 65,536
     fp16/bf16 bit patterns, cross-checked against the native hardware fp8 cast
     (which the saturating reference lowers to once the input is clamped in range).
@@ -97,8 +96,9 @@ def _run_encode(x: torch.Tensor) -> torch.Tensor:
 def _saturating_fp8_ref(x: torch.Tensor) -> torch.Tensor:
     """PyTorch reference matching our kernels' saturating instruction.
 
-    Overflow -- finite ``|x| > 448``, ``+-inf``, and NaN -- saturates to the fp8
-    max (``+-448``), sign preserved, never NaN. For in-range finite inputs this is
+    Overflow -- finite ``|x| > 448`` and ``+-inf`` -- saturates to the fp8
+    max (``+-448``), sign preserved. NaN encodes as signed 0x7f/0xff.
+    For in-range finite inputs this is
     exactly ``clamp(+-448).to(fp8)`` (which is bit-exact vs our encode over the
     whole finite domain); clamping the input in range before ``.to(fp8)`` makes the
     cast -- torch software emulation on pre-SM89, native hardware cvt on SM89+ --
@@ -109,10 +109,11 @@ def _saturating_fp8_ref(x: torch.Tensor) -> torch.Tensor:
     """
     neg = x.view(torch.int32 if x.element_size() == 4 else torch.int16) < 0
     mag = x.abs()
-    over = mag.isnan() | (mag > FP8_MAX)
+    over = mag > FP8_MAX
     mag = torch.where(over, torch.full_like(mag, FP8_MAX), mag)
     sat = torch.where(neg, -mag, mag)
-    return sat.to(FP8_DTYPE).view(torch.uint8)
+    encoded = sat.to(FP8_DTYPE).view(torch.uint8)
+    return torch.where(x.isnan(), 0x7F | (neg.to(torch.uint8) << 7), encoded)
 
 
 def _edge_case_inputs(dtype: torch.dtype) -> torch.Tensor:
@@ -135,7 +136,7 @@ def _edge_case_inputs(dtype: torch.dtype) -> torch.Tensor:
         inf_v,
         -inf_v,
         nan_v,
-        -nan_v,  # non-finite -> saturate, sign preserved
+        -nan_v,  # NaN encodes as 0x7f/0xff; infinities saturate
         2.0**-9,
         -(2.0**-9),  # fp8 smallest normal-ish
         2.0**-10,
@@ -171,10 +172,18 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int):
     """
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
+    nan_bytes = torch.tensor([0x7F, 0xFF], dtype=torch.uint8, device="cuda")
+    decoded_nan = _run_decode(nan_bytes, dtype)
+    assert torch.isnan(decoded_nan).all()
+    assert torch.equal(
+        torch.signbit(decoded_nan), torch.tensor([False, True], device="cuda")
+    )
     x_u8 = _finite_fp8_bytes()
     actual = _run_decode(x_u8, dtype)
     expected = x_u8.view(FP8_DTYPE).to(dtype)
-    torch.testing.assert_close(actual.float(), expected.float(), atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        actual.view(torch.uint8), expected.view(torch.uint8), atol=0.0, rtol=0.0
+    )
 
 
 # --------------------------- encode (write path) ---------------------------
@@ -192,8 +201,8 @@ def test_encode_sampled_edge_cases(dtype: torch.dtype, min_cap: int):
     actual = _run_encode(x)
     ref = _saturating_fp8_ref(x)
     torch.testing.assert_close(
-        actual.view(FP8_DTYPE).float(),
-        ref.view(FP8_DTYPE).float(),
+        actual.view(torch.uint8),
+        ref.view(torch.uint8),
         atol=0.0,
         rtol=0.0,
     )
@@ -229,13 +238,13 @@ def test_encode_fp32_avoids_16bit_double_rounding(
 def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype):
     """On SM89+, the RNE encode is cross-checked against the native float -> fp8 cvt
     over EVERY one of the 65,536 input bit patterns (normals, subnormals, signed
-    zeros, overflow, +-inf, +-NaN -- all saturating, never NaN)."""
+    zeros, overflow, +-inf, +-NaN -- overflow saturates, NaNs remain NaNs)."""
     x = _all_uint16_as(dtype)
     actual = _run_encode(x)
     native = _saturating_fp8_ref(x)  # native hardware cvt on SM89+ (clamped input)
     torch.testing.assert_close(
-        actual.view(FP8_DTYPE).float(),
-        native.view(FP8_DTYPE).float(),
+        actual.view(torch.uint8),
+        native.view(torch.uint8),
         atol=0.0,
         rtol=0.0,
     )

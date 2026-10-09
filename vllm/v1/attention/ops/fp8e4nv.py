@@ -154,6 +154,10 @@ def convert_from_fp8e4m3(x, dtype: tl.constexpr):
 
     The fp16/bf16 paths require a multiple of four elements per thread.
     """
+    tl.static_assert(
+        (dtype == tl.float16) or (dtype == tl.bfloat16) or (dtype == tl.float32),
+        "convert_from_fp8e4m3 expects fp16 or bf16, or fp32 output",
+    )
     if dtype == tl.float32:
         return _fp8e4m3x1_to_fp32x1(x).to(tl.float32, bitcast=True)
     elif dtype == tl.float16:
