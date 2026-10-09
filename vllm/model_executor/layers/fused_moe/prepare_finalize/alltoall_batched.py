@@ -9,8 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
 
 class AllToAllBatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Routed all-to-all EP dispatch/combine in the batched activation format,
+    """Routed all-to-all EP dispatch/combine in the batched activation format,
     over fixed-capacity all_to_all_single collectives. A token is sent to a
     destination rank once, however many of its experts live there, carrying
     its local expert ids and router weights as metadata.
