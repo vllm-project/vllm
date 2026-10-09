@@ -285,6 +285,9 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
         experts = object.__new__(RoutedExperts)
         torch.nn.Module.__init__(experts)
+        experts.quant_method = SimpleNamespace(
+            intermediate_size_per_partition_alignment=1
+        )
         experts.moe_config = make_dummy_moe_config()
         experts.moe_config.moe_parallel_config.tp_size = 2
 
