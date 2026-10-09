@@ -54,9 +54,10 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
   return old;
 }
 
+// Scale val and clamp it to the representable range of fp8_type.
 template <bool is_scale_inverted, typename fp8_type>
-__device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
-                                                          float const scale) {
+__device__ __forceinline__ float scaled_fp8_saturate(float const val,
+                                                     float const scale) {
   float x = 0.0f;
   if constexpr (is_scale_inverted) {
     x = val * scale;
@@ -64,8 +65,13 @@ __device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
     x = val / scale;
   }
 
-  float r =
-      fmaxf(-quant_type_max_v<fp8_type>, fminf(x, quant_type_max_v<fp8_type>));
+  return fmaxf(-quant_type_max_v<fp8_type>,
+               fminf(x, quant_type_max_v<fp8_type>));
+}
+
+// Round-to-nearest conversion of an already saturated float.
+template <typename fp8_type>
+__device__ __forceinline__ fp8_type fp8_from_saturated(float const r) {
 #ifndef USE_ROCM
   // Use hardware cvt instruction for fp8 on nvidia
   // Currently only support fp8_type = c10::Float8_e4m3fn
@@ -74,6 +80,13 @@ __device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
   // Use hardware cvt instruction for fp8 on rocm
   return fp8::cvt_c10<fp8_type>(r);
 #endif
+}
+
+template <bool is_scale_inverted, typename fp8_type>
+__device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
+                                                          float const scale) {
+  return fp8_from_saturated<fp8_type>(
+      scaled_fp8_saturate<is_scale_inverted, fp8_type>(val, scale));
 }
 
 }  // namespace vllm

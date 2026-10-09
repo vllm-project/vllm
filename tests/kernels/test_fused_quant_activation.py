@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import fp8_ulp_distance, opcheck
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
@@ -32,9 +34,25 @@ CUDA_DEVICES = [
 def ref_impl(
     silu_and_mul: SiluAndMul, x: torch.Tensor, scale: torch.Tensor
 ) -> torch.Tensor:
-    silu_and_mul_out = silu_and_mul.forward_native(x)
+    """fp32 reference: activation, product and scale without intermediate
+    rounding, one round-to-nearest at the fp8 cast (what Inductor generates
+    for the unfused path)."""
+    silu_and_mul_out = silu_and_mul.forward_native(x.to(torch.float32))
     out, scales = ops.scaled_fp8_quant(silu_and_mul_out, scale)
     return out
+
+
+def assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    """At most one E4M3 code apart, on a bounded number of isolated elements:
+    the kernel's fast exp and divide can land on the other side of a rounding
+    boundary from the fp32 reference."""
+    ulp = fp8_ulp_distance(actual, expected)
+    max_outliers = ulp.numel() // 100_000 + 8
+    num_outliers = int((ulp > 0).sum().item())
+    assert int(ulp.max()) <= 1, f"fp8 mismatch: {int(ulp.max())} ulp"
+    assert num_outliers <= max_outliers, (
+        f"fp8 mismatch: {num_outliers} outliers (allowed {max_outliers})"
+    )
 
 
 def ops_impl(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -75,10 +93,45 @@ def test_silu_and_mul(
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
     assert ref_out.shape == ops_out.shape
-    assert torch.allclose(
-        ref_out.to(dtype=torch.float32), ops_out.to(dtype=torch.float32)
-    )
+    assert_fp8_close(ops_out, ref_out)
     opcheck(torch.ops._C.silu_and_mul_quant, (ops_out, x, scale))
+
+
+def _misaligned_empty(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Contiguous tensor whose ``data_ptr`` is not 16B aligned."""
+    numel = math.prod(shape)
+    base = torch.empty(numel + 16, dtype=dtype)
+    view = base[1 : 1 + numel]
+    if view.data_ptr() % 16 == 0:
+        pytest.skip("allocator did not yield a misaligned offset")
+    return view.view(shape)
+
+
+@pytest.mark.parametrize("num_tokens, hidden_size", [(1, 32), (17, 4096), (3045, 8192)])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_silu_and_mul_quant_unaligned_matches_aligned(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    """The vectorized path (aligned, d % 16 == 0) and the scalar fallback
+    (unaligned data pointer) must produce identical bits."""
+    set_random_seed(seed)
+    torch.set_default_device("cuda:0")
+
+    scale = torch.rand((1), dtype=torch.float32) + 0.5
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    aligned = ops_impl(x, scale)
+
+    x_off = _misaligned_empty(x.shape, dtype).copy_(x)
+    out_off = _misaligned_empty(aligned.shape, current_platform.fp8_dtype())
+    torch.ops._C.silu_and_mul_quant(out_off, x_off, scale)
+
+    assert torch.equal(out_off.view(torch.uint8), aligned.view(torch.uint8))
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +196,7 @@ def test_maybe_fused_act_quant_fp8_static(
     assert result.orig_shape == (num_tokens, hidden_size)
 
     ref_out = ref_impl(act_fn, x, scale)
-    torch.testing.assert_close(result.data.to(torch.float32), ref_out.to(torch.float32))
+    assert_fp8_close(result.data, ref_out)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 16, 128])
