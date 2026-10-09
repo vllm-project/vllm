@@ -56,8 +56,6 @@ def test_request_finished_producer_emits_params(monkeypatch):
     # Simulate NIXL-enabled producer bookkeeping without building real NIXL.
     s._nixl_enabled = True
     s._peer_host, s._peer_port = "1.2.3.4", 5601
-    # _setup_nixl normally computes these from model_config; set them
-    # directly since this test builds gate-off then flips fields on.
     # feature length=2, hidden_dim=32, element_size=2 -> 128 bytes -> 2 blocks.
     entry = s._cache.alloc("h1", 2, (2, 32))
     assert entry is not None

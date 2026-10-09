@@ -3,7 +3,6 @@
 """Shared config builders for EC connector unit tests."""
 
 import uuid
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import torch
@@ -63,16 +62,15 @@ def create_ec_vllm_config(
         ec_connector="ECCPUConnector",
         ec_role=ec_role,
         engine_id=str(uuid.uuid4()),
-        mm_encoder_output_widths=dict.fromkeys(
-            ("image", "video", "audio"), _EMBED_WIDTH
-        )
+    )
+    ec_transfer_config.mm_encoder_output_widths = (
+        dict.fromkeys(("image", "video", "audio"), _EMBED_WIDTH)
         if encoder_output_widths is None
-        else encoder_output_widths,
+        else encoder_output_widths
     )
 
     model_config = Mock(spec=ModelConfig)
     model_config.dtype = dtype
-    model_config.hf_config = SimpleNamespace()
     model_config.get_inputs_embeds_size.return_value = _EMBED_WIDTH
 
     vllm_config = Mock(spec=VllmConfig)

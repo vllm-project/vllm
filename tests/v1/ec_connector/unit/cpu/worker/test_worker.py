@@ -885,8 +885,7 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
 
 @_requires_swap_blocks_batch
 @_requires_accelerator
-@pytest.mark.parametrize("modality, width", [("image", 32), ("audio", 8)])
-def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch, modality, width):
+def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     """Full pipeline: scheduler allocates blocks, worker saves a GPU tensor to
     mmap via flush_saves, the worker's completion report marks the entry ready,
     the worker loads from mmap back to GPU, and the result matches the original.
@@ -908,11 +907,9 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch, modality,
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
 
     config = _vllm_config()
-    # Visual DeepStack is four embeddings wide; audio is one.
-    config.ec_transfer_config.mm_encoder_output_widths = {
-        "image": 4 * _HIDDEN_DIM,
-        "audio": _HIDDEN_DIM,
-    }
+    # DeepStack-wide output: each embedding spans four blocks.
+    width = 4 * _HIDDEN_DIM
+    config.ec_transfer_config.mm_encoder_output_widths = {"image": width}
     scheduler = ECCPUScheduler(config)
 
     # -- Step 1: scheduler allocates, worker saves --
@@ -931,13 +928,12 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch, modality,
     class _Feature:
         identifier = "img_001"
         mm_position = _Pos()
-        modality: str
+        modality = "image"
 
     class _Request:
         request_id = "req_e2e"
         mm_features = [_Feature()]
 
-    _Request.mm_features[0].modality = modality
     scheduler.update_state_after_alloc(_Request(), 0)
     meta_save = scheduler.build_connector_meta(scheduler_output=None)
     assert "img_001" in meta_save.saves

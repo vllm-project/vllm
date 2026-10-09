@@ -501,12 +501,6 @@ class ECCPUScheduler:
         """
         self._step_completed.clear()
 
-    def _produced_shape(self, feature: "MultiModalFeatureSpec") -> tuple[int, int]:
-        return (
-            feature.mm_position.get_num_embeds(),
-            get_encoder_output_width(self._vllm_config, feature.modality),
-        )
-
     def _num_blocks(self, shape: tuple[int, ...]) -> int:
         size_bytes = shape[0] * shape[1] * self._dtype.itemsize
         block_size = self._region.block_size_bytes
@@ -517,7 +511,10 @@ class ECCPUScheduler:
         mm_hash = feature.identifier
 
         if self._is_producer and self._cache.get(mm_hash) is None:
-            shape = self._produced_shape(feature)
+            shape = (
+                feature.mm_position.get_num_embeds(),
+                get_encoder_output_width(self._vllm_config, feature.modality),
+            )
             entry = self._cache.alloc(mm_hash, self._num_blocks(shape), shape)
             if entry is not None:
                 self._pending_saves[mm_hash] = list(entry.block_ids)

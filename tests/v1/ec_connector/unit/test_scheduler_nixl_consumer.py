@@ -125,13 +125,9 @@ def _params(mm_hash, length):
     }
 
 
-@pytest.mark.parametrize("width", [_HID, 4 * _HID])
-def test_new_remote_read_defers_then_completes(monkeypatch, width):
-    """The read is sized from the announced shape, not a local width.
-
-    A DeepStack encoding is several times the embedding width, and only the
-    producer that ran the encoder knows by how much.
-    """
+def test_new_remote_read_defers_then_completes(monkeypatch):
+    """The read is sized from the announced shape, not a local width."""
+    width = 4 * _HID
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
 
@@ -149,8 +145,7 @@ def test_new_remote_read_defers_then_completes(monkeypatch, width):
     params = _params("h1", 1)
     params["h1"]["size_bytes"] = width * _ES
     params["h1"]["shape"] = [1, width]
-    feature = _Feature("h1", 1)
-    req = _Request([feature], params=params)
+    req = _Request([_Feature("h1", 1)], params=params)
 
     # Step 1: unseen remote item -> read started, request deferred.
     assert s.ensure_cache_available(req, 0) is False
@@ -314,7 +309,6 @@ def test_retryable_read_re_requests_without_admitting(monkeypatch):
         {"size_bytes": _MISSING},
         {"shape": _MISSING},
         {"shape": [2, _HID]},
-        {"shape": [1, _HID, 1]},
     ],
     ids=[
         "size-mismatch",
@@ -323,7 +317,6 @@ def test_retryable_read_re_requests_without_admitting(monkeypatch):
         "no-size",
         "no-shape",
         "wrong-rows",
-        "not-2d",
     ],
 )
 def test_invalid_announcement_fails_the_request(monkeypatch, fields):

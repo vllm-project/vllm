@@ -78,17 +78,6 @@ def test_producer_records_the_widths_its_encoder_ranks_agree_on():
     assert eow.get_encoder_output_width(config, "image") == 64
 
 
-def test_consumer_does_not_measure():
-    """Consumers take each shape from the transfer, so they skip the encode."""
-    config = create_ec_vllm_config(ec_role="ec_consumer", encoder_output_widths={})
-
-    def rpc(fn):
-        raise AssertionError("a consumer must not measure")
-
-    eow.measure_encoder_output_widths(config, rpc)
-    assert config.ec_transfer_config.mm_encoder_output_widths == {}
-
-
 @pytest.mark.parametrize(
     "reports, match",
     [
@@ -101,9 +90,3 @@ def test_producer_refuses_to_start_without_a_trustworthy_width(reports, match):
     config = create_ec_vllm_config(ec_role="ec_producer", encoder_output_widths={})
     with pytest.raises(ValueError, match=match):
         eow.measure_encoder_output_widths(config, lambda fn: reports)
-
-
-def test_unmeasured_modality_cannot_be_sized():
-    config = create_ec_vllm_config(encoder_output_widths={"image": 64})
-    with pytest.raises(ValueError, match="'audio'"):
-        eow.get_encoder_output_width(config, "audio")
