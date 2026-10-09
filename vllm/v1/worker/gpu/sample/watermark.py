@@ -959,6 +959,16 @@ def draft_philox_gumbel_sample(
     num_rows, vocab_size = logits.shape
     num_reqs = num_rows // num_steps
     assert logits.stride(-1) == 1 and contexts.stride(-1) == 1
+    assert logits.dtype == logits_cache.dtype, (
+        "logits cache source and destination must have the same dtype"
+    )
+    assert logits_cache.size(-1) >= vocab_size, (
+        f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
+        f"than the sampled logits ({vocab_size}). Cached logits would be truncated."
+    )
+    assert not deduplicate or (all_token_ids is not None and total_lens is not None), (
+        "context deduplication requires all_token_ids and total_lens"
+    )
     logits = logits.view(num_reqs, num_steps, vocab_size)
     # Step-major copies, so each step reads contiguous per-request slices.
     expanded_idx_mapping, positions, logits_cache_col = (
