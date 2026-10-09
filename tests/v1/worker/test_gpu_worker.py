@@ -18,6 +18,8 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups_from_workers
 from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
@@ -57,12 +59,11 @@ def test_resolved_layout_finalizes_nixl_dcp_interleave_before_profiling() -> Non
             sliding_window=128,
         ),
     }
-    worker = SimpleNamespace(
-        vllm_config=vllm_config,
-        get_kv_cache_spec=lambda: kv_cache_specs,
-    )
+    record_kv_cache_layout(vllm_config.cache_config, "BLHNC")
+    kv_cache_groups = get_kv_cache_groups_from_workers(vllm_config, [kv_cache_specs])
+    worker = SimpleNamespace(vllm_config=vllm_config)
 
-    WorkerBase.set_kv_cache_layout(worker, "BLHNC")
+    WorkerBase.set_kv_cache_layout(worker, "BLHNC", kv_cache_groups)
 
     assert vllm_config.parallel_config.cp_kv_cache_interleave_size == 64
 

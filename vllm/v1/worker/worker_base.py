@@ -20,8 +20,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -110,16 +109,12 @@ class WorkerBase:
         backends = get_current_attn_backends(self.vllm_config)
         return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
-    def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
-        """Adopt the KV cache layout resolved by the engine core."""
+    def set_kv_cache_layout(
+        self, kv_cache_layout: str, global_kv_cache_groups: list[KVCacheGroupSpec]
+    ) -> None:
+        """Adopt the KV cache layout and groups resolved by the engine core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
-
-        # Group geometry can depend on the resolved layout. Finalize related
-        # configuration before profiling builds a temporary cache and CUDA graphs.
-        kv_cache_groups = get_kv_cache_groups(
-            self.vllm_config, self.get_kv_cache_spec()
-        )
-        self.vllm_config.finalize_kv_cache_layout(kv_cache_groups)
+        self.vllm_config.finalize_kv_cache_layout(global_kv_cache_groups)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.

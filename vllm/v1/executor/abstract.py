@@ -22,7 +22,7 @@ from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -169,9 +169,13 @@ class Executor(ABC):
         """Layouts each worker's backends support, most preferred first."""
         return self.collective_rpc("get_supported_kv_cache_layouts")
 
-    def set_kv_cache_layout(self, layout_name: str) -> None:
+    def set_kv_cache_layout(
+        self, layout_name: str, global_kv_cache_groups: list[KVCacheGroupSpec]
+    ) -> None:
         """Publish the resolved KV cache layout to the workers."""
-        self.collective_rpc("set_kv_cache_layout", args=(layout_name,))
+        self.collective_rpc(
+            "set_kv_cache_layout", args=(layout_name, global_kv_cache_groups)
+        )
 
     @overload
     def collective_rpc(
