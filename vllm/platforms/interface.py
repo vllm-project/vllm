@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     FlexibleArgumentParser = object
@@ -430,6 +432,88 @@ class Platform:
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
+    def get_mla_prefill_backend_cls(
+        cls,
+        mla_selector_config: "MLAPrefillSelectorConfig",
+    ) -> "type[MLAPrefillBackend]":
+        """Get the MLA prefill backend class of a device.
+
+        Platforms that have a single, fixed MLA prefill backend can override
+        this to return it directly. The default implementation selects the
+        best backend from a device-capability-based priority list.
+
+        Returns:
+            The selected backend class.
+
+        Raises:
+            ValueError: If no MLA prefill backend is valid for the
+                configuration.
+
+        """
+        from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
+        from vllm.v1.attention.backends.mla.prefill.registry import (
+            MLAPrefillBackendEnum,
+        )
+
+        device_capability = cls.get_device_capability()
+        if device_capability is None:
+            return MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+
+        if device_capability.major == 10:  # Blackwell
+            if mla_selector_config.mla_dimensions == MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ):
+                priorities = [
+                    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                    MLAPrefillBackendEnum.FLASH_ATTN,
+                    MLAPrefillBackendEnum.FLASHINFER,
+                    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+                ]
+            else:
+                priorities = [
+                    MLAPrefillBackendEnum.FLASH_ATTN,
+                    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                    MLAPrefillBackendEnum.FLASHINFER,
+                    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+                ]
+        else:  # Hopper (SM90) and older
+            priorities = [MLAPrefillBackendEnum.FLASH_ATTN]
+
+        all_invalid_reasons: dict[str, list[str]] = {}
+
+        for backend_enum in priorities:
+            try:
+                backend_cls = backend_enum.get_class()
+                invalid_reasons = backend_cls.validate_configuration(
+                    device_capability, mla_selector_config
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if not invalid_reasons:
+                return backend_cls
+            all_invalid_reasons[backend_enum.name] = invalid_reasons
+
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{name}: [{', '.join(reasons)}]"
+                for name, reasons in all_invalid_reasons.items()
+            )
+            + "}"
+        )
+        logger.debug_once(
+            "Some MLA prefill backends are not valid with %s. Reasons: %s.",
+            repr(mla_selector_config),
+            reasons_str,
+        )
+        raise ValueError(
+            f"No valid MLA prefill backend found with {mla_selector_config!r}. "
+            f"Reasons: {reasons_str}."
+        )
+
+    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,
@@ -698,6 +782,7 @@ class Platform:
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
+        pre_block_size = cache_config.block_size
         if model_config.is_hybrid:
             cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
@@ -706,6 +791,36 @@ class Platform:
         # May override the user's --block-size.
         if cache_config.kv_cache_dtype_skip_layers:
             cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
+        cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
+
+    @classmethod
+    def _check_aligned_block_size(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_classes: "list[type[AttentionBackend]]",
+        pre_block_size: int,
+    ) -> None:
+        """Fail now, not at worker setup, if alignment left a rejected size.
+
+        Alignment rounds by the first backend's kernel block only, so it can
+        land on a size a sibling backend rejects.
+        """
+        from vllm.config.vllm import set_current_vllm_config
+
+        block_size = vllm_config.cache_config.block_size
+        if block_size == pre_block_size:
+            return
+        with set_current_vllm_config(vllm_config):
+            rejecting = [
+                b.get_name()
+                for b in backend_classes
+                if not b.supports_block_size(block_size)
+            ]
+        if rejecting:
+            raise ValueError(
+                f"Aligned KV cache block size {block_size} is not supported by "
+                f"attention backend(s): {', '.join(rejecting)}."
+            )
 
     @classmethod
     def _align_heterogeneous_kv_block_size(
@@ -875,15 +990,29 @@ class Platform:
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
-        elif cache_config.cache_dtype.startswith("turboquant_"):
-            # TQ has a packed K|V layout; the standard FullAttentionSpec
-            # formula over-sizes it and trips unify_kv_cache_spec_page_size
-            # when all attention layers are TQ. With mixed skip+TQ the skip
-            # layers still use the standard layout — take max so mamba
-            # padding covers the largest actual page.
-            from vllm.v1.attention.backends.turboquant_attn import (
-                TurboQuantAttentionBackend,
-            )
+        elif (
+            cache_config.cache_dtype.startswith("turboquant_")
+            or cache_config.cache_dtype == "ultraquant_4bit"
+        ):
+            # TurboQuant and UltraQuant have packed K|V layouts; the standard
+            # FullAttentionSpec formula over-sizes them and trips
+            # unify_kv_cache_spec_page_size when all attention layers are
+            # packed. With mixed skip+packed the skip layers still use the
+            # standard layout — take max so mamba padding covers the largest
+            # actual page. Each dtype packs via its own backend.
+            _pack_backend: type[AttentionBackend]
+            if cache_config.cache_dtype == "ultraquant_4bit":
+                from vllm.v1.attention.backends.ultraquant_attn import (
+                    UltraQuantAttentionBackend,
+                )
+
+                _pack_backend = UltraQuantAttentionBackend
+            else:
+                from vllm.v1.attention.backends.turboquant_attn import (
+                    TurboQuantAttentionBackend,
+                )
+
+                _pack_backend = TurboQuantAttentionBackend
 
             tq_spec = FullAttentionSpec(
                 block_size=1,
@@ -892,7 +1021,7 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            tq_page = TurboQuantAttentionBackend.customize_spec(tq_spec).page_size_bytes
+            tq_page = _pack_backend.customize_spec(tq_spec).page_size_bytes
             if cache_config.kv_cache_dtype_skip_layers:
                 skip_page = FullAttentionSpec(
                     block_size=1,
@@ -1079,11 +1208,6 @@ class Platform:
     def can_update_inplace(cls) -> bool:
         """Checks if the platform allows inplace memory updates."""
         return True
-
-    @classmethod
-    def get_lora_vocab_padding_size(cls) -> int:
-        """Returns how much padding the LoRA logits need for kernels."""
-        return 256
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

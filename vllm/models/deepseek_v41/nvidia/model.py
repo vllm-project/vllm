@@ -623,6 +623,40 @@ class DeepseekV4DecoderLayer(nn.Module):
             torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
 
+    def write_kv(
+        self,
+        x: torch.Tensor | MoEOutput,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        pre_mix: torch.Tensor,
+        post_mix: torch.Tensor,
+        res_mix: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> None:
+        """Write the KV ``forward`` would for the replay layers' inputs, skipping
+        the rest of the layer; the replay batch then reruns its rows."""
+        # The replay batch rules out Engram and sequence parallel here.
+        assert self.engram is None and not self.use_sequence_parallel
+        *_, x, _, _ = mhc_shifted_post_pre(
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            pre_mix=pre_mix,
+            norm_weight=self.attn_norm.weight,
+            norm_eps=self.attn_norm.variance_epsilon,
+            reduce_results=self.fuse_mhc_all_reduce,
+        )
+        self.attn.forward_kv(positions, x)
+
 
 class DeepseekV4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -765,19 +799,30 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):
-            self.decoder_replay_start = cut + 1
+            assert self.layers[cut].attn.compress_ratio <= 1
+            # The last KV source writes every row's KV, then replays.
+            self.decoder_replay_start = cut
+            # The attention metadata keys the replay layers read.
+            metadata_prefixes = set()
+            for layer in islice(self.layers, cut, self.end_layer):
+                attn = typing.cast(DeepseekV4DecoderLayer, layer).attn
+                metadata_prefixes.add(attn.swa_cache_layer.prefix)
+                if attn.compressed_cache_prefix is not None:
+                    metadata_prefixes.add(attn.compressed_cache_prefix)
+                if attn.indexer is not None:
+                    metadata_prefixes.add(attn.indexer.k_cache.prefix)
             self.decoder_replay_layers = DecoderReplayLayers(
                 config.sliding_window,
                 self._run_replay_layers,
-                [
-                    buf
-                    for buf in (self.topk_indices_buffer, self.candidate_block_buffer)
-                    if buf is not None
-                ],
+                self.layers[cut].write_kv,
+                metadata_prefixes,
+                self.layers[cut].attn.swa_cache_layer.prefix,
             )
             logger.info_once(
-                "Decoder SWA bounded replay: in eager prefill steps, layers "
+                "Decoder SWA bounded replay: in eager prefill steps, layer %d "
+                "writes its KV for every token, and the rest of it and layers "
                 "%d-%d run on each request's last %d tokens only.",
+                cut,
                 cut + 1,
                 self.end_layer - 1,
                 config.sliding_window,
@@ -1110,9 +1155,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        """The layers past the last KV source, on whatever rows they are given;
-        returns their output, the last FFN's pre-mix and the aux hidden states
-        they capture."""
+        """Layers ``decoder_replay_start``.. on the given rows; returns their output,
+        the last FFN's pre-mix and the aux hidden states they capture."""
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
             range(self.decoder_replay_start, self.end_layer),
@@ -1144,7 +1188,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
 
     def _decoder_replay_supported(self, vllm_config: VllmConfig, cut: int) -> bool:
-        """Whether this rank may trim the layers after ``cut``; warns when not."""
+        """Whether this rank may replay from layer ``cut`` on; warns when not."""
         parallel_config = vllm_config.parallel_config
         spec_config = vllm_config.speculative_config
         draft_config = spec_config.draft_model_config if spec_config else None
@@ -1166,8 +1210,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 "the replay-layer batch shrinks per rank, which sequence and "
                 "prefill-context parallelism and microbatching cannot follow"
             )
-        elif any(i > cut for i in getattr(self.config, "engram_layer_ids", ())):
-            reason = "an Engram layer sits after the last KV source layer"
+        elif any(i >= cut for i in getattr(self.config, "engram_layer_ids", ())):
+            reason = "an Engram layer sits at or after the last KV source layer"
         elif draft_config is not None and (
             draft_window is None
             or draft_window > window
@@ -1353,17 +1397,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def finalize_mega_moe_weights(self) -> None:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
-
-    def finalize_mega_attn_weights(self) -> None:
-        """Permute wq_b / wo_a into FlashMLA's mega-attention layouts.
-
-        A no-op for every other attention layer, and idempotent, so a second
-        post-load pass cannot permute twice.
-        """
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
-            if finalize is not None:
-                finalize()
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
@@ -1637,7 +1670,6 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
-        self.model.finalize_mega_attn_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
