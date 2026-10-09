@@ -231,6 +231,38 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
 }'
 ```
 
+### Registering an Adapter from Tensors
+
+An adapter can also be registered without a checkpoint on disk. Inside the worker, typically from a worker extension (the `worker_extension_cls` engine argument), build the `LoRAModel` with `LoRAModel.from_lora_tensors`, the step the path loader runs after reading the files, and add it to the manager:
+
+```python
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.peft_helper import PEFTHelper
+
+
+class LoRARegistrar:  # in an importable module, passed as worker_extension_cls
+    def register_lora(self, lora_id: int, adapter_config: dict) -> None:
+        tensors = ...  # PEFT-named lora_A/lora_B tensors, produced in the worker
+        manager = self.model_runner.get_model().lora_manager
+        peft_helper = PEFTHelper.from_dict(adapter_config)
+        peft_helper.validate_legal(manager.lora_config)
+        mapper = getattr(manager.model, "hf_to_vllm_mapper", None)
+        lora = LoRAModel.from_lora_tensors(
+            lora_id,
+            tensors,
+            peft_helper,
+            device="cpu",
+            dtype=manager.lora_config.lora_dtype,
+            model_vocab_size=manager.vocab_size,
+            weights_mapper=mapper.get_rename_mapper() if mapper else None,
+            skip_prefixes=getattr(manager.model, "lora_skip_prefixes", None),
+        )
+        manager.add_adapter(lora)
+        manager.pin_adapter(lora_id)
+```
+
+Requests then reference the adapter as `LoRARequest(name, lora_id, lora_path)` with any non-empty placeholder path: an adapter already registered under that ID is used as is, and the path is only read if the adapter has to be loaded again. Pin it, as above, so it is never evicted, and do not set `load_inplace` on its requests.
+
 ### Updating LoRA Weights from Tensors
 
 The LoRA manager of each worker can also replace an adapter's weights from tensors, without writing a checkpoint, or expose the GPU slot that holds them. These calls run inside the worker, typically from a worker extension (the `worker_extension_cls` engine argument) that obtains the tensors itself, e.g. generates them from a seed or receives them through a weight-transfer channel; `collective_rpc` then only carries small arguments:
