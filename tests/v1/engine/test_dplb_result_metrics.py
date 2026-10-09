@@ -12,6 +12,7 @@ Run with pytest, or directly:
 
 import ast
 import sys
+import textwrap
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from typing import Any
 VLLM_ROOT = Path(__file__).resolve().parents[3]
 CORE_CLIENT_PATH = VLLM_ROOT / "vllm" / "v1" / "engine" / "core_client.py"
 STATS_PATH = VLLM_ROOT / "vllm" / "v1" / "metrics" / "stats.py"
+SCHEDULER_PATH = VLLM_ROOT / "vllm" / "v1" / "core" / "sched" / "scheduler.py"
 
 # Fake monotonic clock shared by all tests (injected into the exec'd class
 # globals as the ``time`` module).
@@ -36,6 +38,16 @@ def _extract_class_source(path: Path, name: str) -> str:
             lines = source.splitlines(keepends=True)
             return "".join(lines[start - 1 : node.end_lineno])
     raise AssertionError(f"class {name} not found in {path}")
+
+
+def _extract_method_source(path: Path, name: str) -> str:
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            lines = source.splitlines(keepends=True)
+            return textwrap.dedent("".join(lines[node.lineno - 1 : node.end_lineno]))
+    raise AssertionError(f"method {name} not found in {path}")
 
 
 def _build_dplb_class() -> type:
@@ -371,6 +383,33 @@ def test_scheduler_stats_backward_compatible():
     assert stats.num_running_reqs == 1
     assert stats.mean_queue_time == 0.0
     assert stats.preempted_total == 0
+
+
+def test_scheduler_stats_getters():
+    """get_mean_queue_time averages the queue age of waiting + skipped
+    requests (0.0 when empty) and get_preempted_count returns the
+    cumulative counter — the signals make_stats() now publishes."""
+    src = "\n".join(
+        _extract_method_source(SCHEDULER_PATH, name)
+        for name in ("get_mean_queue_time", "get_preempted_count")
+    )
+    namespace: dict[str, Any] = {
+        "time": SimpleNamespace(time=lambda: 100.0),
+    }
+    exec(compile(src, str(SCHEDULER_PATH), "exec"), namespace)
+    stub = SimpleNamespace(
+        waiting=[
+            SimpleNamespace(arrival_time=90.0),
+            SimpleNamespace(arrival_time=80.0),
+        ],
+        skipped_waiting=[SimpleNamespace(arrival_time=70.0)],
+        total_preempted_reqs=7,
+    )
+    assert namespace["get_mean_queue_time"](stub) == 20.0
+    assert namespace["get_preempted_count"](stub) == 7
+    empty = SimpleNamespace(waiting=[], skipped_waiting=[], total_preempted_reqs=0)
+    assert namespace["get_mean_queue_time"](empty) == 0.0
+    assert namespace["get_preempted_count"](empty) == 0
 
 
 if __name__ == "__main__":
