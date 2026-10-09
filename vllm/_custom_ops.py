@@ -1985,6 +1985,32 @@ def prepare_pos_seq_lens_cpu(
     )
 
 
+def combine_sampled_and_draft_tokens_cpu(
+    input_ids: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefill_len: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_logits: int,
+    num_new_sampled_tokens: int,
+) -> torch.Tensor:
+    return torch.ops._C.combine_sampled_and_draft_tokens_cpu(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        num_logits,
+        num_new_sampled_tokens,
+    )
+
+
 # mamba
 def selective_scan_fwd(
     u: torch.Tensor,
