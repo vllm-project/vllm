@@ -120,8 +120,8 @@ fn request_output_with_logprobs_and_kv(
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
         finish_reason,
         stop_reason,
-        kv_transfer_params,
-        ec_transfer_params,
+        kv_transfer_params: kv_transfer_params.map(Box::new),
+        ec_transfer_params: ec_transfer_params.map(Box::new),
         ..Default::default()
     }
 }
@@ -542,7 +542,7 @@ impl ChatRenderer for FakeChatBackend {
         Ok(vllm_chat::RenderedPrompt {
             prompt: Prompt::Text(prompt),
             media_order: None,
-            effective_template_kwargs: Default::default(),
+            effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
 }
@@ -615,7 +615,7 @@ fn qwen_multimodal_model_info_with_limits(
 async fn test_models_with_engine_outputs_and_backend_inner(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
-    expected_prompt_token_ids: Option<Vec<u32>>,
+    check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
@@ -630,12 +630,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
-                if let Some(expected_prompt_token_ids) = expected_prompt_token_ids {
-                    assert_eq!(
-                        request.prompt_token_ids.as_deref(),
-                        Some(expected_prompt_token_ids.as_slice())
-                    );
-                }
+                check_request(&request);
                 send_outputs(
                     push,
                     engine_outputs_for_request(&request.request_id, output_specs),
@@ -667,7 +662,8 @@ async fn test_models_with_engine_outputs_and_backend(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
-    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, None, backend).await
+    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, |_| {}, backend)
+        .await
 }
 
 async fn test_chat_with_engine_outputs(
@@ -1440,6 +1436,8 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
     assert!(json[0].get("mm_features").is_none());
+    assert!(json[0].get("reasoning_ended").is_none());
+    assert!(json[0].get("reasoning_parser_kwargs").is_none());
 }
 
 #[tokio::test]
@@ -1479,7 +1477,8 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "messages": [{"role": "user", "content": "hello"}],
                         "max_completion_tokens": 8,
                         "bad_words": ["blocked"],
-                        "vllm_xargs": {"custom": 1}
+                        "vllm_xargs": {"custom": 1},
+                        "chat_template_kwargs": {"enable_thinking": false}
                     })
                     .to_string(),
                 ))
@@ -1502,11 +1501,27 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         json!(["blocked"])
     );
     assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+    assert_eq!(
+        render_json["reasoning_parser_kwargs"],
+        json!({"chat_template_kwargs": {"enable_thinking": false}})
+    );
 
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
         b"engine-render-generate-round-trip",
         default_stream_output_specs(),
-        Some(token_ids),
+        move |request| {
+            assert_eq!(
+                request.prompt_token_ids.as_deref(),
+                Some(token_ids.as_slice())
+            );
+            assert_eq!(
+                request
+                    .reasoning_parser_kwargs
+                    .as_ref()
+                    .map(|kwargs| &kwargs.chat_template_kwargs["enable_thinking"]),
+                Some(&json!(false))
+            );
+        },
         Arc::new(FakeChatBackend::new()),
     )
     .await;
@@ -4453,13 +4468,15 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     assert_eq!(json["choices"][0]["index"], 0);
     assert_eq!(json["choices"][0]["token_ids"], json!([33, 44]));
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    // Output logprobs carry integer token ids and rank, not the OpenAI
+    // "token_id:N" placeholder string; `bytes` is gone.
+    assert_eq!(json["choices"][0]["logprobs"]["content"][0]["token_id"], 33);
+    assert_eq!(json["choices"][0]["logprobs"]["content"][0]["rank"], 1);
+    assert!(json["choices"][0]["logprobs"]["content"][0]["token"].is_null());
+    assert!(json["choices"][0]["logprobs"]["content"][0]["bytes"].is_null());
     assert_eq!(
-        json["choices"][0]["logprobs"]["content"][0]["token"],
-        "token_id:33"
-    );
-    assert_eq!(
-        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"][0]["token"],
-        "token_id:44"
+        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"][0]["token_id"],
+        44
     );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert_eq!(
@@ -4581,9 +4598,11 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(first["choices"][0]["index"], 0);
     assert_eq!(first["choices"][0]["token_ids"], json!([33]));
     assert_eq!(
-        first["choices"][0]["logprobs"]["content"][0]["token"],
-        "token_id:33"
+        first["choices"][0]["logprobs"]["content"][0]["token_id"],
+        33
     );
+    assert_eq!(first["choices"][0]["logprobs"]["content"][0]["rank"], 1);
+    assert!(first["choices"][0]["logprobs"]["content"][0]["token"].is_null());
     assert_eq!(first["usage"]["prompt_tokens"], 2);
     assert_eq!(first["usage"]["completion_tokens"], 1);
 
@@ -7802,21 +7821,56 @@ where
     )
 }
 
+/// An empty body starts profiling without overrides, with or without a JSON
+/// content type.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn start_profile_route_sends_expected_utility_call() {
+    for content_type in [None, Some("application/json")] {
+        let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+            boxed_test_future(async move {
+                let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+                let call_id = recv_profile_call(dealer, start).await;
+                send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            })
+        })
+        .await;
+
+        let mut request = Request::builder().method("POST").uri("/start_profile");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        let response = app
+            .clone()
+            .call(request.body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{content_type:?}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(body.is_empty());
+        engine_task.await.expect("mock engine task");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_forwards_session_overrides() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
-
-            assert_eq!(array[2], Value::from("profile"));
-            assert_eq!(array[3], Value::Array(vec![Value::from(true), Value::Nil]));
-
+            let start = vec![
+                Value::from(true),
+                Value::from("sharegpt_run-1"),
+                Value::from(5000),
+                Value::from(20),
+            ];
+            let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
     })
@@ -7828,16 +7882,241 @@ async fn start_profile_route_sends_expected_utility_call() {
             Request::builder()
                 .method("POST")
                 .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "profile_prefix": "sharegpt_run-1",
+                        "delay_iterations": 5000,
+                        "max_iterations": 20,
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_ignores_completion_payload() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let call_id = recv_profile_call(dealer, start).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen3-0.6B",
+                        "prompt": "profile this request",
+                        "max_tokens": 16,
+                        "stream": false,
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn duplicate_start_profile_returns_conflict() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let call_id = recv_profile_call(dealer, start).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let first = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    let second = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
                 .body(Body::empty())
                 .expect("build request"),
         )
         .await
         .expect("call app");
 
-    let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_succeeds_again_after_stop() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let expected_args = [
+                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                vec![Value::from(false), Value::Nil],
+                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                vec![Value::from(false), Value::Nil],
+            ];
+            for expected in expected_args {
+                let call_id = recv_profile_call(dealer, expected).await;
+                send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            }
+        })
+    })
+    .await;
+
+    for uri in [
+        "/start_profile",
+        "/stop_profile",
+        "/start_profile",
+        "/stop_profile",
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+    engine_task.await.expect("mock engine task");
+}
+
+/// Receive a `profile` utility call with the expected args and return its call id.
+async fn recv_profile_call(dealer: &mut DealerSocket, expected_args: Vec<Value>) -> u64 {
+    let utility = recv_engine_message(dealer).await;
+    assert_eq!(utility[0].as_ref(), &[0x03]);
+    let payload = decode_value(&utility[1]).expect("decode utility payload");
+    let array = payload.as_array().expect("utility payload array");
+    assert_eq!(array[2], Value::from("profile"));
+    assert_eq!(array[3], Value::Array(expected_args));
+    array[1].as_u64().expect("call id")
+}
+
+/// A start issued while a stop is in flight waits for that stop instead of
+/// racing it, so a stale stop reply cannot clear the new session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_waits_for_inflight_stop() {
+    let (stop_received_tx, stop_received_rx) = tokio::sync::oneshot::channel();
+    let (release_stop_tx, release_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (app, engine_task) = test_profiling_app_with_engine_script(move |dealer, push| {
+        boxed_test_future(async move {
+            let start = || vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+
+            let call_id = recv_profile_call(dealer, start()).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+
+            let call_id = recv_profile_call(dealer, vec![Value::from(false), Value::Nil]).await;
+            stop_received_tx.send(()).expect("notify stop received");
+            release_stop_rx.await.expect("release stop");
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+
+            let call_id = recv_profile_call(dealer, start()).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let post = |uri: &'static str| {
+        let mut app = app.clone();
+        async move {
+            app.call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app")
+            .status()
+        }
+    };
+
+    let timeout = Duration::from_secs(2);
+    assert_eq!(post("/start_profile").await, StatusCode::OK);
+    let stop = tokio::spawn(post("/stop_profile"));
+    tokio::time::timeout(timeout, stop_received_rx)
+        .await
+        .expect("stop dispatch timeout")
+        .expect("stop received");
+
+    // Nothing before the profile lock awaits, so one poll reaches it; an
+    // unserialized client would instead reject against the stale session.
+    let mut restart = std::pin::pin!(post("/start_profile"));
+    assert!(futures::poll!(restart.as_mut()).is_pending());
+
+    release_stop_tx.send(()).expect("release stop");
+    let stop = tokio::time::timeout(timeout, stop).await.expect("stop timeout");
+    assert_eq!(stop.expect("stop task"), StatusCode::OK);
+    let restart = tokio::time::timeout(timeout, restart).await.expect("restart timeout");
+    assert_eq!(restart, StatusCode::OK);
+    tokio::time::timeout(timeout, engine_task)
+        .await
+        .expect("mock engine timeout")
+        .expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_rejects_invalid_prefix() {
+    let (app, engine_task) =
+        test_profiling_app_with_engine_script(|_, _| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"profile_prefix": "../trace"}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     engine_task.await.expect("mock engine task");
 }
 
@@ -7846,16 +8125,8 @@ async fn start_profile_route_sends_expected_utility_call() {
 async fn stop_profile_route_sends_expected_utility_call() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
-
-            assert_eq!(array[2], Value::from("profile"));
-            assert_eq!(array[3], Value::Array(vec![Value::from(false), Value::Nil]));
-
+            let stop = vec![Value::from(false), Value::Nil];
+            let call_id = recv_profile_call(dealer, stop).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
     })
