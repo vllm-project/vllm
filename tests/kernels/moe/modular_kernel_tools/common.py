@@ -167,6 +167,9 @@ class Config:
         vllm_config.model_config = SimpleNamespace(
             enforce_eager=True,
             is_moe=True,
+            enable_sleep_mode=False,
+            sleep_mode_backend="cumem",
+            sleep_mode_offload_cudagraph=False,
         )
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
