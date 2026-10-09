@@ -52,6 +52,8 @@ never stores.
 | `lookup_async` | `false` | Look up the pool off the scheduler thread; the request waits until the lookup completes. |
 | `enable_lookup` | `true` | Restore from the pool. With `false` the connector only stores. |
 | `save_decode_cache` | `false` | Also store blocks produced by decoding. |
+| `lazy_offload` | `false` | Store reusable blocks selected from the GPU free queue instead of storing them eagerly after each forward step. |
+| `lazy_offload_max_blocks` | derived | Maximum number of free-queue blocks examined by each lazy scan. |
 | `enable_partial_hash_hits` | `false` | Allow hits that end inside a block, at core's prefix-match unit (`cache_config.prefix_match_unit`). |
 | `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and how long a worker waits for a transfer it must finish before failing the step rather than reusing its blocks. |
 | `lookup_instance` | | Distinguishes independent engines serving the same model on one host. Data-parallel ranks are already distinguished. |

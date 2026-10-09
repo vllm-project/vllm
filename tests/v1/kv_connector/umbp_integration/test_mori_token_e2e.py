@@ -31,13 +31,15 @@ def _flush_gpu_cache(llm: LLM, sampling_params: SamplingParams) -> None:
         llm.generate(prompts, sampling_params, use_tqdm=False)
 
 
-def test_mori_external_kv_preserves_generated_tokens(tmp_path):
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_mori_external_kv_preserves_generated_tokens(tmp_path, lazy_offload):
     model = os.environ.get("VLLM_UMBP_TEST_MODEL", "Qwen/Qwen3-0.6B")
     llm = LLM(
         model=model,
         enforce_eager=True,
         compilation_config={"custom_ops": ["none"]},
         max_model_len=1024,
+        gpu_memory_utilization=0.05,
         # A few max-length requests fit, so the flush below evicts the prompt.
         block_size=16,
         num_gpu_blocks_override=128,
@@ -53,6 +55,7 @@ def test_mori_external_kv_preserves_generated_tokens(tmp_path):
                 "num_workers": 2,
                 "timeout_ms": 60000,
                 "load_async": False,
+                "lazy_offload": lazy_offload,
             },
         ),
     )
