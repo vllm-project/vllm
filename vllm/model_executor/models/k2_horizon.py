@@ -71,6 +71,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -117,6 +118,96 @@ def interleaved_to_split(x):
     # Interleaved:   x0 y0 x1 y1 x2 y2 x3 y3 ...
     # Split halves:  x0 x1 x2 x3 ... y0 y1 y2 y3 ...
     return x.reshape(*x.shape[:-1], -1, 2).transpose(-1, -2).reshape(*x.shape[:-1], -1)
+
+
+def is_rope_weights_folding_supported(
+    qk_proj: nn.Module,
+    dual_chunk_attention_config: dict[str, Any] | None,
+) -> bool:
+    """Whether the partial-RoPE weight-fold path is safe for this attention.
+
+    Folding permutes the q/k projection's output channels at load time, which
+    only produces correct numerics when:
+
+    * the q/k projection is dense/unquantized and
+    * dual-chunk attention is disabled -- the P.RoPE equivalence has not been
+      validated with dual-chunk attention.
+
+    When either condition fails we fall back to the runtime channel-permutation
+    RoPE path instead of folding.
+    """
+    is_dense_qk_proj = isinstance(
+        getattr(qk_proj, "quant_method", None), UnquantizedLinearMethod
+    )
+    return is_dense_qk_proj and dual_chunk_attention_config is None
+
+
+def apply_partial_rope(
+    rotary_emb,
+    positions: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rope_head_dim: int,
+    fold_rope_weights: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if fold_rope_weights or rope_head_dim == head_dim:
+        return rotary_emb(positions, q, k)
+
+    q = q.reshape(*q.shape[:-1], num_heads, head_dim)
+    k = k.reshape(*k.shape[:-1], num_kv_heads, head_dim)
+
+    q_rope, q_nope = torch.split(
+        split_to_interleaved(q),
+        split_size_or_sections=[rope_head_dim, head_dim - rope_head_dim],
+        dim=-1,
+    )
+    k_rope, k_nope = torch.split(
+        split_to_interleaved(k),
+        split_size_or_sections=[rope_head_dim, head_dim - rope_head_dim],
+        dim=-1,
+    )
+
+    q_rope, k_rope = rotary_emb(
+        positions, interleaved_to_split(q_rope), interleaved_to_split(k_rope)
+    )
+
+    q = interleaved_to_split(
+        torch.cat([split_to_interleaved(q_rope), q_nope], dim=-1)
+    ).reshape(*q.shape[:-2], -1)
+    k = interleaved_to_split(
+        torch.cat([split_to_interleaved(k_rope), k_nope], dim=-1)
+    ).reshape(*k.shape[:-2], -1)
+
+    return q, k
+
+
+def _rope_weight_perm(head_dim: int, rope_head_dim: int) -> torch.Tensor:
+    """Per-head gather index that folds K2Horizon's partial-RoPE channel reordering.
+
+    The K2Horizon checkpoint stores each head's channels in a GPT-J-interleaved
+    convention with rope/nope channels interleaved. Applying this fixed
+    (position-independent) permutation to the q/k weight rows lets the runtime
+    use vLLM's *native* NeoX partial-RoPE path (``head_size = head_dim``,
+    ``rotary_dim = rope_head_dim``) with no per-forward permutes/all-gather.
+    """
+    D, R = head_dim, rope_head_dim
+    assert R % 2 == 0 and R <= D, (
+        f"partial NeoX RoPE requires an even rope_head_dim <= head_dim, "
+        f"got R={R}, D={D}"
+    )
+    h = D // 2
+    idx = torch.cat(
+        [
+            torch.arange(0, R // 2),  # rope first-half channels
+            torch.arange(h, h + R // 2),  # rope second-half channels
+            torch.arange(R // 2, h),  # nope remainder (first half)
+            torch.arange(h + R // 2, D),  # nope remainder (second half)
+        ]
+    )
+    return idx
 
 
 def calc_router_weights(
@@ -411,6 +502,7 @@ class K2HorizonSparseMoeBlock(nn.Module):
             self.gate.bias = nn.Parameter(self.gate.bias.float(), requires_grad=False)
 
         self.num_shared_experts = config.num_shared_experts
+        self.shared_experts: K2HorizonMLP | None
         if config.num_shared_experts > 0:
             self.shared_experts = K2HorizonMLP(
                 hidden_size=config.hidden_size,
@@ -529,11 +621,37 @@ class K2HorizonAttention(nn.Module):
         )
 
         self.rope_head_dim = rope_head_dim or self.head_dim
-        self.rotary_emb = get_rope(
-            self.rope_head_dim,
-            max_position=max_position_embeddings,
-            rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
+        # Fold the partial-RoPE channel permutation into the q/k weights only
+        # when supported (dense projections + no dual-chunk attention);
+        # otherwise keep the runtime channel-permutation path
+        # (see ``is_rope_weights_folding_supported``).
+        self.fold_rope_weights = is_rope_weights_folding_supported(
+            self.qkv_proj, dual_chunk_attention_config
+        )
+        if self.fold_rope_weights:
+            rope_parameters = dict(rope_parameters)
+            rope_parameters["rope_dim"] = self.rope_head_dim
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=True,
+                rope_parameters=rope_parameters,
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
+        else:
+            self.rotary_emb = get_rope(
+                self.rope_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=rope_parameters,
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
+        attn_kwargs: dict[str, Any] = (
+            {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
+            if dual_chunk_attention_config
+            else {}
         )
         self.attn = Attention(
             self.num_heads,
@@ -543,12 +661,7 @@ class K2HorizonAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attn_kwargs,
         )
 
         self.query_key_norm = query_key_norm
@@ -584,40 +697,17 @@ class K2HorizonAttention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        if self.rope_head_dim == self.head_dim:
-            q, k = self.rotary_emb(positions, q, k)
-        else:
-            q = q.reshape(*q.shape[:-1], self.num_heads, self.head_dim)
-            k = k.reshape(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-
-            q_rope, q_nope = torch.split(
-                split_to_interleaved(q),
-                split_size_or_sections=[
-                    self.rope_head_dim,
-                    self.head_dim - self.rope_head_dim,
-                ],
-                dim=-1,
-            )
-            k_rope, k_nope = torch.split(
-                split_to_interleaved(k),
-                split_size_or_sections=[
-                    self.rope_head_dim,
-                    self.head_dim - self.rope_head_dim,
-                ],
-                dim=-1,
-            )
-
-            q_rope, k_rope = self.rotary_emb(
-                positions, interleaved_to_split(q_rope), interleaved_to_split(k_rope)
-            )
-
-            q = interleaved_to_split(
-                torch.cat([split_to_interleaved(q_rope), q_nope], dim=-1)
-            ).reshape(*q.shape[:-2], -1)
-
-            k = interleaved_to_split(
-                torch.cat([split_to_interleaved(k_rope), k_nope], dim=-1)
-            ).reshape(*k.shape[:-2], -1)
+        q, k = apply_partial_rope(
+            self.rotary_emb,
+            positions,
+            q,
+            k,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rope_head_dim,
+            self.fold_rope_weights,
+        )
 
         attn_output = self.attn(q, k, v)
 
@@ -732,11 +822,37 @@ class K2HorizonMoVAAttention(nn.Module):
         )
 
         self.rope_head_dim = rope_head_dim or self.head_dim
-        self.rotary_emb = get_rope(
-            self.rope_head_dim,
-            max_position=max_position_embeddings,
-            rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
+        # Fold the partial-RoPE channel permutation into the q/k weights only
+        # when supported (dense projections + no dual-chunk attention);
+        # otherwise keep the runtime channel-permutation path
+        # (see ``is_rope_weights_folding_supported``).
+        self.fold_rope_weights = is_rope_weights_folding_supported(
+            self.qk_proj, dual_chunk_attention_config
+        )
+        if self.fold_rope_weights:
+            rope_parameters = dict(rope_parameters)
+            rope_parameters["rope_dim"] = self.rope_head_dim
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=True,
+                rope_parameters=rope_parameters,
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
+        else:
+            self.rotary_emb = get_rope(
+                self.rope_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=rope_parameters,
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
+        attn_kwargs: dict[str, Any] = (
+            {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
+            if dual_chunk_attention_config
+            else {}
         )
         self.attn = Attention(
             self.num_heads,
@@ -746,12 +862,7 @@ class K2HorizonMoVAAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attn_kwargs,
         )
 
         self.query_key_norm = query_key_norm
@@ -838,40 +949,17 @@ class K2HorizonMoVAAttention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        if self.rope_head_dim == self.head_dim:
-            q, k = self.rotary_emb(positions, q, k)
-        else:
-            q = q.reshape(*q.shape[:-1], self.num_heads, self.head_dim)
-            k = k.reshape(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-
-            q_rope, q_nope = torch.split(
-                split_to_interleaved(q),
-                split_size_or_sections=[
-                    self.rope_head_dim,
-                    self.head_dim - self.rope_head_dim,
-                ],
-                dim=-1,
-            )
-            k_rope, k_nope = torch.split(
-                split_to_interleaved(k),
-                split_size_or_sections=[
-                    self.rope_head_dim,
-                    self.head_dim - self.rope_head_dim,
-                ],
-                dim=-1,
-            )
-
-            q_rope, k_rope = self.rotary_emb(
-                positions, interleaved_to_split(q_rope), interleaved_to_split(k_rope)
-            )
-
-            q = interleaved_to_split(
-                torch.cat([split_to_interleaved(q_rope), q_nope], dim=-1)
-            ).reshape(*q.shape[:-2], -1)
-
-            k = interleaved_to_split(
-                torch.cat([split_to_interleaved(k_rope), k_nope], dim=-1)
-            ).reshape(*k.shape[:-2], -1)
+        q, k = apply_partial_rope(
+            self.rotary_emb,
+            positions,
+            q,
+            k,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rope_head_dim,
+            self.fold_rope_weights,
+        )
 
         attn_output = self.attn(q, k, v)
 
@@ -1109,6 +1197,27 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        # Per-head gather index used to fold K2Horizon's partial-RoPE channel
+        # reordering into the q_proj/k_proj rows and the q_norm/k_norm scales,
+        # so the runtime can use vLLM's native partial NeoX RoPE.
+        head_dim = self.config.head_dim or (
+            self.config.hidden_size // self.config.num_attention_heads
+        )
+        rope_head_dim = self.config.rope_head_dim or head_dim
+        rope_perm_idx = _rope_weight_perm(head_dim, rope_head_dim)
+
+        # Attention modules whose q/k projections are dense: only these fold the
+        # RoPE channel permutation into their q/k weights, biases and q/k norm
+        # scales at load time. Attentions with packed/quantized q/k projections
+        # keep the runtime channel-permutation path, so their weights must be
+        # loaded verbatim (folding would misalign per-channel scales).
+        rope_fold_prefixes = tuple(
+            f"{module_name}."
+            for module_name, module in self.named_modules()
+            if isinstance(module, (K2HorizonAttention, K2HorizonMoVAAttention))
+            and getattr(module, "fold_rope_weights", False)
+        )
+
         # Skip loading extra parameters for GPTQ/modelopt models.
         # ignore_suffixes = (
         #     ".bias",
@@ -1126,9 +1235,10 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             if "scale" in name or "zero_point" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
 
             # QK norm weights
             if name.endswith(".self_attn.q_norm.weight") or name.endswith(
@@ -1138,6 +1248,14 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     continue
                 if name not in params_dict:
                     continue
+
+                # Fold the per-head RoPE channel permutation into the norm scales.
+                if self.config.query_key_norm and name.startswith(rope_fold_prefixes):
+                    loaded_weight = (
+                        loaded_weight.view(-1, head_dim)[:, rope_perm_idx]
+                        .reshape(-1)
+                        .contiguous()
+                    )
 
                 param = params_dict[name]
                 tp_rank = get_tensor_model_parallel_rank()
@@ -1157,7 +1275,9 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                                 kv_rank
                             ]
 
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader: Callable[..., Any] = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
                 continue
@@ -1203,6 +1323,27 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                 if ".self_attn." in name and param_name == "gate_up_proj":
                     assert weight_name == "gate_proj"
                     continue
+
+                # Fold the per-head RoPE channel permutation into the dense
+                # q_proj / k_proj rows (W' = P W), and biases, before TP
+                # sharding.
+                if shard_id in ("q", "k") and name.startswith(rope_fold_prefixes):
+                    if name.endswith(".weight"):
+                        hidden = loaded_weight.shape[-1]
+                        loaded_weight = (
+                            loaded_weight.view(-1, head_dim, hidden)[
+                                :, rope_perm_idx, :
+                            ]
+                            .reshape(-1, hidden)
+                            .contiguous()
+                        )
+                    elif self.config.attention_bias and name.endswith(".bias"):
+                        loaded_weight = (
+                            loaded_weight.view(-1, head_dim)[:, rope_perm_idx]
+                            .reshape(-1)
+                            .contiguous()
+                        )
+
                 if (
                     ".self_attn." in name
                     and param_name == "qkv_proj"
@@ -1249,9 +1390,10 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     continue
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
                 if name not in params_dict:
                     continue
 

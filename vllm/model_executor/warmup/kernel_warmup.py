@@ -5,8 +5,10 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import json
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -18,7 +20,6 @@ from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
-    write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     autotune_hisparse_flashinfer_attention,
@@ -220,6 +221,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if process_local_only:
         return
 
+    if current_platform.is_rocm():
+        from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
+            rocm_segmented_attn_autotune_warmup,
+        )
+
+        rocm_segmented_attn_autotune_warmup(worker)
+
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
@@ -308,9 +316,6 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
-_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
-
-
 def _flashinfer_deferred_moe_token_counts(
     runner: "GPUModelRunner",
 ) -> tuple[int, ...]:
@@ -331,19 +336,10 @@ def _flashinfer_deferred_moe_token_counts(
     return tuple(dict.fromkeys(token_counts))
 
 
-def _flashinfer_autotune_token_counts(
-    runner: "GPUModelRunner", *, include_bf16: bool = True
-) -> tuple[int, ...]:
+def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     # Tune the widest bucket set first so bounded passes reuse its configs.
     token_counts = [max_tokens]
-    linear_backend = runner.vllm_config.kernel_config.linear_backend
-    if (
-        include_bf16
-        and linear_backend == "flashinfer_cutedsl"
-        and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    ):
-        token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
     token_counts.extend(_flashinfer_deferred_moe_token_counts(runner))
     return tuple(dict.fromkeys(token_counts))
 
@@ -354,14 +350,33 @@ def _run_flashinfer_autotune_dummy_runs(
     import vllm.utils.flashinfer as fi_utils
 
     dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
-    for num_tokens in _flashinfer_autotune_token_counts(runner, include_bf16=False):
-        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
+    for num_tokens in _flashinfer_autotune_token_counts(runner):
+        # The drafter may use more tokens than this pass in the same dummy run.
+        # Include its max M when building the autotune buckets.
+        max_tuning_tokens = num_tokens
+        speculator = getattr(runner, "speculator", None)
+        if speculator is not None:
+            num_query_per_req = speculator.num_query_per_req
+            num_draft_reqs = min(
+                num_tokens,
+                runner.max_num_reqs,
+                runner.max_num_tokens // num_query_per_req,
+            )
+            max_tuning_tokens = max(
+                max_tuning_tokens, num_draft_reqs * num_query_per_req
+            )
+
+        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
+            max_tuning_tokens
+        )
         logger.info(
             "Running FlashInfer autotune with %d tokens and token buckets %s.",
             num_tokens,
             tuning_buckets,
         )
-        with fi_utils.autotune(tuning_buckets=tuning_buckets):
+        # Round M up to match serving-time bucket selection for non-bucket M.
+        # See https://github.com/flashinfer-ai/flashinfer/issues/5450
+        with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):
             runner._dummy_run(
                 num_tokens=num_tokens,
                 skip_eplb=True,
@@ -371,34 +386,24 @@ def _run_flashinfer_autotune_dummy_runs(
             )
 
 
-def _run_flashinfer_bf16_autotune_dummy_run(
-    runner: "GPUModelRunner",
-    *,
-    skip_ops: set[str] | None = None,
-    skip_attn: bool = False,
-) -> None:
-    import vllm.utils.flashinfer as fi_utils
+def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
+    """Identify a saved autotune file by its FlashInfer metadata and size."""
+    try:
+        configs = json.loads(path.read_text())
+        metadata = configs.pop("_metadata", None)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return json.dumps(metadata, sort_keys=True), len(configs)
 
-    if (
-        runner.vllm_config.kernel_config.linear_backend != "flashinfer_cutedsl"
-        or runner.scheduler_config.max_num_batched_tokens
-        <= _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    ):
-        return
 
-    num_tokens = _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
-    logger.info("Running FlashInfer BF16-only autotune with %d tokens.", num_tokens)
-    # Other ops execute from their existing cache or fallback, without the
-    # BF16 bucket cap. No full-model autotune context may enclose this pass.
-    with fi_utils.autotune_bf16_only(tuning_buckets, skip_ops=skip_ops):
-        runner._dummy_run(
-            num_tokens=num_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            randomize_inputs=True,
-            **({"skip_attn": True} if skip_attn else {}),
-        )
+def _all_ranks_have_matching_cache(path: Path, group) -> bool:
+    """True iff every rank in ``group`` has its own, mutually consistent file."""
+    fingerprint = _autotune_cache_fingerprint(path)
+    if group.world_size == 1:
+        return fingerprint is not None
+    gathered: list[tuple[str, int] | None] = [None] * group.world_size
+    torch.distributed.all_gather_object(gathered, fingerprint, group=group.cpu_group)
+    return fingerprint is not None and all(f == fingerprint for f in gathered)
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
@@ -410,17 +415,30 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
 
-    Every rank profiles the same tactics. When distributed, per-tactic
-    timings are averaged over the world CPU group so all ranks select the
-    same tactic.
+    With PP > 1, stages run different layers and may profile different ops,
+    so each stage's TP group tunes separately with its own cache file;
+    otherwise the world group tunes together. Per-tactic timings are
+    averaged over the tuning group so all its ranks select the same tactic.
+
+    Results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
+    (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
+    rank. A rank with a cache hit skips the per-tactic reduce the others block
+    in, so ranks keep loaded configs only if every rank in the tuning group
+    has a matching file and successfully loads it.
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
     import vllm.utils.flashinfer as fi_utils
-    from vllm.distributed.parallel_state import get_world_group
+    from vllm.distributed.parallel_state import (
+        get_pp_group,
+        get_tp_group,
+        get_world_group,
+    )
 
     world = get_world_group()
-    is_leader = world.rank_in_group == 0
+    pp_size = get_pp_group().world_size
+    tune_group = get_tp_group() if pp_size > 1 else world
+    is_leader = tune_group.rank_in_group == 0
     tuner = AutoTuner.get()
 
     autotune_kwargs: dict = {}
@@ -433,6 +451,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         autotune_kwargs["skip_ops"] = skip_ops
 
     cache_path = resolve_flashinfer_autotune_file(runner)
+    # The world group only spans DP ranks when vLLM folds DP into it.
+    dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
+    cache_path = cache_path.with_name(
+        f"{cache_path.stem}_dp{dp_rank}_rank{world.rank_in_group}{cache_path.suffix}"
+    )
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
@@ -441,18 +464,18 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    # Read cached autotune results and broadcast to all ranks.
-    cached_results: bytes | None = None
-    if is_leader and cache_path.exists():
-        with open(cache_path, "rb") as f:
-            cached_results = f.read()
-    cached_results = world.broadcast_object(cached_results, src=0)
-    if cached_results is not None:
-        write_flashinfer_autotune_cache(cache_path, cached_results)
-        world.barrier()
-        tuner.load_configs(str(cache_path))
+    if _all_ranks_have_matching_cache(cache_path, tune_group):
+        loaded = tuner.load_configs(str(cache_path))
+        if tune_group.world_size > 1:
+            loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
+            torch.distributed.all_gather_object(
+                loaded_by_rank, loaded, group=tune_group.cpu_group
+            )
+            loaded = all(loaded_by_rank)
+        if not loaded:
+            tuner.clear_cache()
 
-    group = world.cpu_group if world.world_size > 1 else None
+    group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)
     try:
         with (
@@ -469,14 +492,12 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             _run_flashinfer_autotune_dummy_runs(runner, skip_attn=hisparse_enabled)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
-        with torch.inference_mode():
-            _run_flashinfer_bf16_autotune_dummy_run(
-                runner, skip_ops=skip_ops, skip_attn=hisparse_enabled
-            )
     finally:
         set_autotune_process_group(None)
 
     if world.world_size > 1:
         world.barrier()
-    if is_leader:
+    # Skip the rewrite when nothing was tuned this start (every entry came from
+    # the file). FlashInfer gates its own autotune(cache=...) save the same way.
+    if tuner._dirty:
         tuner.save_configs(str(cache_path))
