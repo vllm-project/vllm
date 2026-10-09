@@ -33,7 +33,12 @@ def _client(port: str) -> openai.OpenAI:
     return openai.OpenAI(api_key="MY_KEY", base_url=f"http://{HOST}:{port}/v1")
 
 
-def _logprobs(client: openai.OpenAI, model: str, prompt: str) -> list[float]:
+def _logprobs(
+    client: openai.OpenAI, model: str, prompt: str
+) -> tuple[list[str], list[float]]:
+    """Selected tokens and their logprobs; both must agree where the runs
+    are expected to match, otherwise two confident but different tokens
+    would compare as close."""
     choice = client.completions.create(
         model=model,
         prompt=prompt,
@@ -42,7 +47,7 @@ def _logprobs(client: openai.OpenAI, model: str, prompt: str) -> list[float]:
         logprobs=1,
         seed=0,
     ).choices[0]
-    return choice.logprobs.token_logprobs
+    return choice.logprobs.tokens, choice.logprobs.token_logprobs
 
 
 def test_pd_logprobs_match_single_instance():
@@ -59,9 +64,9 @@ def test_pd_logprobs_match_single_instance():
         "long": " ".join(f"word{i}" for i in range(LONG_PROMPT_WORDS)),
     }
     for name, prompt in prompts.items():
-        lp_p = _logprobs(prefill, model, prompt)
-        lp_d = _logprobs(decode, model, prompt)
-        lp_x = _logprobs(proxy, model, prompt)
+        tok_p, lp_p = _logprobs(prefill, model, prompt)
+        _, lp_d = _logprobs(decode, model, prompt)
+        tok_x, lp_x = _logprobs(proxy, model, prompt)
         delta_pd_single = max(abs(a - b) for a, b in zip(lp_p, lp_d))
         delta_proxy = max(abs(a - b) for a, b in zip(lp_p[:4], lp_x[:4]))
         print(
@@ -69,6 +74,9 @@ def test_pd_logprobs_match_single_instance():
             f"P-vs-proxy first-4 max|dlogprob|={delta_proxy:.3f}"
         )
         assert len(lp_x) == NUM_TOKENS
+        assert tok_x[:4] == tok_p[:4], (
+            f"{name}: P->D selected tokens diverged: {tok_x[:4]} vs {tok_p[:4]}"
+        )
         assert delta_proxy < MAX_LOGPROB_DELTA, (
             f"{name}: P->D logprobs drifted by {delta_proxy:.3f}"
         )

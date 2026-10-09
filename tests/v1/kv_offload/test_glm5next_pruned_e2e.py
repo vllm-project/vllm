@@ -12,6 +12,7 @@ SimpleCPUOffloadConnector).
 """
 
 import os
+import time
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ import torch
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVTransferConfig
 from vllm.platforms import current_platform
+from vllm.v1.metrics.reader import Counter
 
 PRUNED_MODEL = os.getenv("GLM5_PRUNED_MODEL", "JaredforReal/GLM-5.3-Flash-4L")
 MAX_MODEL_LEN = 16384
@@ -51,7 +53,23 @@ def _connector_config(name: str) -> KVTransferConfig:
 
 
 def _metric(llm: LLM, name: str) -> float:
-    return sum(m.value for m in llm.get_metrics() if m.name == name)
+    return sum(
+        m.value for m in llm.get_metrics() if isinstance(m, Counter) and m.name == name
+    )
+
+
+def _reset_prefix_cache(llm: LLM, timeout_s: float = 60.0) -> None:
+    """Offload stores finish asynchronously, so step the engine with a
+    one-token request until the GPU blocks they hold are released and the
+    reset succeeds (same pattern as the offloading connector unit tests)."""
+    deadline = time.monotonic() + timeout_s
+    while not llm.reset_prefix_cache():
+        assert time.monotonic() < deadline, "async offload stores did not drain"
+        llm.generate(
+            [TokensPrompt(prompt_token_ids=[0])],
+            SamplingParams(max_tokens=1),
+            use_tqdm=False,
+        )
 
 
 @pytest.mark.parametrize(
@@ -80,7 +98,7 @@ def test_cpu_offload_round_trip(connector: str):
     sp = SamplingParams(temperature=0, max_tokens=8)
 
     cold = llm.generate([prompt], sp, use_tqdm=False)[0].outputs[0].token_ids
-    assert llm.reset_prefix_cache()
+    _reset_prefix_cache(llm)
     warm = llm.generate([prompt], sp, use_tqdm=False)[0].outputs[0].token_ids
 
     hits = _metric(llm, "vllm:external_prefix_cache_hits")
