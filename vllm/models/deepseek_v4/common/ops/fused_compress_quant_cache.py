@@ -589,6 +589,7 @@ def _launch_two_stage_sparse_attn_compressor(
     num_actual: int,
     compress_scratch: torch.Tensor,
 ) -> None:
+    """Compress states first, then normalize, rotate, quantize, and insert keys."""
     fp8_software_conv = (
         current_platform.is_cuda()
         and current_platform.has_device_capability(75)
@@ -1157,6 +1158,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         runtime_scale_dim: int | None = None,
         runtime_kv_block_stride: int | None = None,
     ) -> CompileKey:
+        """Specialize compression for the cache layout and runtime state width."""
         overlap = compress_ratio == 4
         default_quant_block = 32 if use_fp4_cache else 128
         quant_block = (
@@ -1252,6 +1254,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        """Construct synthetic compressor inputs with the specialized cache strides."""
         fp32_ptr = TritonWarmupTensor(torch.float32, shape=(1, 1))
         int32_ptr = TritonWarmupTensor(torch.int32)
         int64_ptr = TritonWarmupTensor(torch.int64)
@@ -1319,6 +1322,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         scale_dim: int,
         fp8_software_conv: bool,
     ) -> LaunchSpec:
+        """Build a fused compressor launch for the supplied state and cache tensors."""
         fp8_kwargs = (
             {}
             if use_fp4_cache

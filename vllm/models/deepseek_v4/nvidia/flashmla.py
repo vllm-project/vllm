@@ -185,6 +185,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
+        """Compute sparse decode attention using the selected cache implementation."""
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -301,6 +302,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
     ) -> None:
+        """Gather keys and compute sparse prefill attention into the output buffer."""
         swa_only = attn_metadata is None
 
         num_prefill_tokens = swa_metadata.num_prefill_tokens

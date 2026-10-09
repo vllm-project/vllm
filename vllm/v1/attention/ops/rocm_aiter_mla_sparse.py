@@ -2445,6 +2445,7 @@ def _sparse_attn_decode_ragged_kernel(
     BLOCK_H: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
+    """Compute ragged sparse attention over main and extra key caches."""
     query_idx = tl.program_id(0)
     pid_h = tl.program_id(1)
 

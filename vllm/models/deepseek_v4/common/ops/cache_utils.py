@@ -44,6 +44,7 @@ from vllm.v1.attention.ops.fp8e4nv import (
 
 
 def _can_use_cutedsl() -> bool:
+    """Return whether CUDA capability and installed CuTeDSL support this kernel."""
     capability = current_platform.get_device_capability()
     return (
         current_platform.is_cuda()
@@ -284,6 +285,7 @@ class DequantizeAndGatherKCacheKernel(
         fp8_software_conv: tl.constexpr = False,
         use_fnuz: tl.constexpr = False,
     ):
+        """Gather paged cache rows and dequantize their FP8 portions into BF16."""
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
         num_workers = tl.num_programs(1)
@@ -389,6 +391,7 @@ class DequantizeAndGatherKCacheKernel(
         offset: int,
         **compile_key_fields: bool,
     ) -> CompileKey:
+        """Specialize cache gathering for the padded block layout."""
         token_stride = 576
         scale_stride = 8
         unpadded = cache_block_size * (token_stride + scale_stride)
@@ -497,6 +500,7 @@ class DequantizeAndGatherKCacheKernel(
         *,
         use_fnuz: bool = False,
     ) -> LaunchSpec:
+        """Build the gather launch from the actual cache and block-table strides."""
         num_reqs = seq_lens.shape[0]
         fp8_software_conv = (
             current_platform.is_cuda()

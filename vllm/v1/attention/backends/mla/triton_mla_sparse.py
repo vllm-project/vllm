@@ -49,6 +49,7 @@ class TritonMLASparseImpl(XPUMLASparseImpl):
     single-pass XPU base for single-query decode on SM80 / SM121)."""
 
     def __init__(self, *args, **kwargs) -> None:
+        """Initialize sparse attention and warm up indexer-dependent autotuning."""
         super().__init__(*args, **kwargs)
         self._sm_count: int | None = None
         if self.topk_indices_buffer is not None:
@@ -97,6 +98,7 @@ class TritonMLASparseImpl(XPUMLASparseImpl):
         topk_indices: torch.Tensor,  # [sq, topk]
         attn_metadata: XPUMLASparseMetadata,
     ) -> torch.Tensor:
+        """Compute sparse attention over the BF16 cache using split-KV when needed."""
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
@@ -125,6 +127,7 @@ class TritonMLASparseBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
+        """Return the sparse Triton backend identifier."""
         return "TRITON_MLA_SPARSE"
 
     @staticmethod
@@ -136,26 +139,32 @@ class TritonMLASparseBackend(AttentionBackend):
         # MultipleOf(64) (rather than [64]) keeps larger user-specified
         # sizes like 128 usable, which measurably lowers profile-time peak
         # memory for very long contexts.
+        """Return block sizes compatible with the shared sparse indexer cache."""
         return [MultipleOf(64)]
 
     @staticmethod
     def get_metadata_cls() -> type[XPUMLASparseMetadata]:
+        """Return the sparse attention metadata type."""
         return XPUMLASparseMetadata
 
     @staticmethod
     def get_builder_cls() -> type["TritonMLASparseMetadataBuilder"]:
+        """Return the sparse attention metadata builder."""
         return TritonMLASparseMetadataBuilder
 
     @staticmethod
     def get_impl_cls() -> type["TritonMLASparseImpl"]:
+        """Return the sparse Triton attention implementation."""
         return TritonMLASparseImpl
 
     @classmethod
     def is_mla(cls) -> bool:
+        """Identify this backend as multi-head latent attention."""
         return True
 
     @classmethod
     def is_sparse(cls) -> bool:
+        """Identify this backend as sparse attention."""
         return True
 
     @staticmethod
@@ -166,12 +175,15 @@ class TritonMLASparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
+        """Return the paged sparse cache shape without a separate head dimension."""
         return (num_blocks, block_size, head_size)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
+        """Return the supported sparse MLA head dimension."""
         return [_DIM_QK]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        """Require SM80 or newer for this BF16 sparse attention implementation."""
         return capability.major >= 8

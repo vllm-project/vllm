@@ -362,6 +362,7 @@ class DeepseekCompressor(nn.Module):
     ) -> None:
         # Each of shape [num_tokens, coff * self.head_dim]
         # input bf16, output are fp32
+        """Compress projected keys and scores into the rotary-encoded key cache."""
         kv, score = kv_score.split(
             [self.coff * self.head_dim, self.coff * self.head_dim], dim=-1
         )

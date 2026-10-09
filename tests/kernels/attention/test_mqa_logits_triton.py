@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(
 def _quantize_k_per_row(
     k_bf16: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize each key row to FP8 and return its dequantization scale."""
     amax = k_bf16.abs().float().amax(dim=-1, keepdim=True).clamp_min(1e-4)
     sf = amax / 448.0
     k_fp8 = (k_bf16.float() / sf).to(torch.float8_e4m3fn)
@@ -59,6 +60,7 @@ def _fp8_mqa_logits_ref(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
 ) -> torch.Tensor:
+    """Compute dense MQA indexing logits from dequantized keys."""
     k_fp8, scale = kv
     seq_len_kv = k_fp8.shape[0]
     k = k_fp8.to(torch.bfloat16)
@@ -78,6 +80,7 @@ def _fp8_paged_mqa_logits_ref(
     block_tables: torch.Tensor,
     max_model_len: int,
 ) -> torch.Tensor:
+    """Compute reference indexing logits from a paged FP8 key cache."""
     fp8_dtype = torch.float8_e4m3fn
     batch_size, next_n, _, dim = q.size()
     num_blocks, block_size = kv_cache.shape[0], kv_cache.shape[1]

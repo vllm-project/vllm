@@ -98,6 +98,7 @@ def test_triton_placeholder_decorators_with_args():
 
 
 def test_triton_placeholder_language():
+    """Verify language placeholders preserve imports when Triton is unavailable."""
     lang = TritonLanguagePlaceholder()
     assert isinstance(lang, types.ModuleType)
     assert lang.__name__ == "triton.language"
@@ -110,6 +111,7 @@ def test_triton_placeholder_language():
 
     @lang.core.extern
     def identity(x):
+        """Return the input to exercise the placeholder extern decorator."""
         return x
 
     assert identity(1) == 1
