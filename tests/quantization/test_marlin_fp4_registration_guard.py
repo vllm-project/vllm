@@ -10,6 +10,8 @@ missing-op error. These tests pin the registration-aware behavior.
 Run `pytest tests/quantization/test_marlin_fp4_registration_guard.py`.
 """
 
+import pytest
+
 from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
 from vllm.model_executor.layers.quantization.utils import marlin_utils_fp4
 
@@ -61,3 +63,28 @@ def test_marlin_fp4_reason_reports_all_missing_ops(monkeypatch):
     assert reason is not None
     for qualname in marlin_utils_fp4._FP4_MARLIN_REQUIRED_CUDA_OPS:
         assert qualname in reason
+
+
+def test_unregistered_schema_is_unavailable(monkeypatch):
+    def missing_schema(*args):
+        raise RuntimeError("operator does not exist")
+
+    monkeypatch.setattr(
+        marlin_utils_fp4.torch._C,
+        "_dispatch_has_kernel_for_dispatch_key",
+        missing_schema,
+    )
+    assert not marlin_utils_fp4._has_cuda_kernel("_C::missing_test_op")
+
+
+def test_unexpected_dispatch_error_propagates(monkeypatch):
+    def unexpected_error(*args):
+        raise TypeError("bad dispatcher invocation")
+
+    monkeypatch.setattr(
+        marlin_utils_fp4.torch._C,
+        "_dispatch_has_kernel_for_dispatch_key",
+        unexpected_error,
+    )
+    with pytest.raises(TypeError, match="bad dispatcher invocation"):
+        marlin_utils_fp4._has_cuda_kernel("_C::missing_test_op")
