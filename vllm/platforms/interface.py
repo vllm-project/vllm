@@ -958,6 +958,7 @@ class Platform:
             MambaSpec,
             MLAAttentionSpec,
             get_kv_quant_mode,
+            get_mla_state_content_bytes,
         )
 
         cache_config = vllm_config.cache_config
@@ -980,6 +981,9 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                state_content_bytes=get_mla_state_content_bytes(
+                    cache_config.cache_dtype
+                ),
             ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")

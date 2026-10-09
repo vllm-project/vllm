@@ -551,7 +551,7 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
 @pytest.mark.parametrize(
     ("backends", "mamba_page_size_padded"),
     [
-        ([_mock_backend([64])], 4352 * 512),
+        ([_mock_backend([64])], 3328 * 656),
         # KPOOL_TAIL supports only BLHNC, which packs Mamba states unpadded.
         ([_mock_backend([64]), KpoolTailBackend], None),
     ],
@@ -567,7 +567,7 @@ def test_hybrid_mla_block_alignment(monkeypatch, backends, mamba_page_size_padde
     monkeypatch.setattr(
         ModelRegistry, "resolve_model_cls", lambda *args, **kwargs: (model_cls, None)
     )
-    vllm_config = VllmConfig(cache_config=CacheConfig(cache_dtype="fp8"))
+    vllm_config = VllmConfig(cache_config=CacheConfig(cache_dtype="fp8_ds_mla"))
     vllm_config.model_config = SimpleNamespace(
         use_mla=True,
         architecture=None,
@@ -577,7 +577,7 @@ def test_hybrid_mla_block_alignment(monkeypatch, backends, mamba_page_size_padde
 
     Platform._align_hybrid_block_size(vllm_config, backends[0])
 
-    assert vllm_config.cache_config.block_size == 4352
+    assert vllm_config.cache_config.block_size == 3328
     assert vllm_config.cache_config.mamba_page_size_padded == mamba_page_size_padded
 
 
