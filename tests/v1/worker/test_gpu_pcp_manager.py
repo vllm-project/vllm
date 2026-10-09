@@ -288,9 +288,10 @@ def test_dummy_context_updates_pcp_local_block_tables():
         input_block_tables=local_block_tables,
     )
 
+    # Fabricated context skips the null block 0.
     torch.testing.assert_close(
         local_block_tables[0][:2, :2],
-        torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
+        torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
     )
     assert torch.all(global_block_table == -1)
 
@@ -476,6 +477,41 @@ def test_replicated_draft_cache_inputs_keep_unexpanded_slot_mapping(monkeypatch)
 
     assert torch.equal(cache_kv, kv[:2])
     assert torch.equal(cache_slot_mapping, slot_mapping)
+
+
+def test_dummy_context_keeps_state_slots_apart_from_context_blocks():
+    """Recurrent-state groups index state slots, not context tokens. Hybrid
+    models back every group with the same tensors, so a state slot that equals
+    a context block would write fp32 state over that block's KV."""
+    global_block_table = torch.full((4, 4), -1, dtype=torch.int32)
+    manager, block_tables = _make_capture_manager(global_block_table)
+    input_batch = InputBatch.make_dummy(
+        num_reqs=2,
+        num_tokens=2,
+        input_buffers=manager.input_buffers,
+        max_query_len=1,
+    )
+    input_batch = manager.prepare_inputs_to_capture(input_batch)
+    local_block_tables = manager.get_dummy_block_tables(input_batch.num_reqs)
+
+    set_dummy_context(
+        input_batch,
+        block_tables,
+        context_len=3,
+        num_kv_blocks=16,
+        max_model_len=16,
+        input_block_tables=local_block_tables,
+        context_groups=[False],
+    )
+
+    # Slots count down from the top of the 16-block pool, clear of both the
+    # null block and the context blocks counting up from block 1; the spec
+    # columns stay on the null block.
+    torch.testing.assert_close(
+        local_block_tables[0][:2, 0], torch.tensor([15, 14], dtype=torch.int32)
+    )
+    assert torch.all(local_block_tables[0][:2, 1:] == 0)
+    assert int(input_batch.seq_lens[0]) == 4
 
 
 def _rank_rows(

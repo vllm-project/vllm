@@ -59,9 +59,11 @@ class _ExpandPageIndicesKernel:
         stride_0,
         stride_1,
         paged_kv_indptr,
+        num_real_tokens,
         *,
         KERNEL_BLOCK_SIZE,
         BLOCK_SIZE,
+        CLAMP_TAIL=False,
     ):
         # Both block-table strides are passed explicitly: the kernel no longer
         # assumes the column stride is 1. This stand-in indexes the tensor
@@ -77,12 +79,14 @@ class _ExpandPageIndicesKernel:
             seq_len = int(
                 (paged_kv_indptr[req_idx + 1] - paged_kv_indptr[req_idx]).item()
             )
+            real_len = int(num_real_tokens[req_idx].item()) if CLAMP_TAIL else seq_len
             for token_idx in range(seq_len):
+                source_idx = token_idx if token_idx < real_len else 0
                 block_id = int(
-                    block_table_tensor[req_idx, token_idx // KERNEL_BLOCK_SIZE].item()
+                    block_table_tensor[req_idx, source_idx // KERNEL_BLOCK_SIZE].item()
                 )
                 page_indices[out_start + token_idx] = (
-                    block_id * KERNEL_BLOCK_SIZE + token_idx % KERNEL_BLOCK_SIZE
+                    block_id * KERNEL_BLOCK_SIZE + source_idx % KERNEL_BLOCK_SIZE
                 )
 
 
@@ -138,6 +142,7 @@ def _builder(
             )
         ),
         _mtp_decode_qlen=mtp_decode_qlen,
+        _varlen_decode_qlen=0,
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
@@ -493,6 +498,7 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
     impl.qk_rope_head_dim = 64
     impl.scale = 576**-0.5
     decode = SimpleNamespace(
+        varlen_q_rows=None,
         max_qo_len=4,
         qo_indptr=torch.tensor([0, 4], dtype=torch.int32),
         paged_kv_indptr=torch.tensor([0, 1], dtype=torch.int32),
@@ -556,6 +562,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
     impl.qk_rope_head_dim = 64
     impl.scale = head_dim**-0.5
     decode = SimpleNamespace(
+        varlen_q_rows=None,
         max_qo_len=1,
         qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
         paged_kv_indptr=torch.zeros(num_tokens + 1, dtype=torch.int32),
@@ -687,6 +694,7 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             torch.tensor([global_seq_len], dtype=torch.int32, device=device),
         )
         decode = SimpleNamespace(
+            varlen_q_rows=None,
             max_qo_len=qlen,
             paged_kv_indptr=torch.tensor(
                 [0, local_kv.shape[0]], dtype=torch.int32, device=device
@@ -1305,3 +1313,56 @@ def test_a_two_token_bf16_block_is_allowed(monkeypatch):
         monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
     )
     assert metadata.has_persistent_metadata
+
+
+def _adaptive_config(
+    *, adaptive: bool = True, dcp: int = 1, num_speculative_tokens: int = 7
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens,
+            enable_adaptive_verification=adaptive,
+            parallel_drafting=False,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+        use_v2_model_runner=True,
+    )
+
+
+def test_varlen_cudagraph_bound_follows_adaptive_verification():
+    bound = AiterMLAMetadataBuilder.get_varlen_cudagraph_max_query_len
+    assert bound(_adaptive_config(), SimpleNamespace()) == 8
+    assert bound(_adaptive_config(adaptive=False), SimpleNamespace()) is None
+    # DCP routes plan per-row windows from host lengths.
+    assert bound(_adaptive_config(dcp=2), SimpleNamespace()) is None
+    # Kimi-K3 DSpark draft layers share the target's group; causality is
+    # decided per batch, so the merged non-causal spec keeps the bound.
+    shared_draft_group = SimpleNamespace(non_causal_multi_token_decode=True)
+    assert bound(_adaptive_config(), shared_draft_group) == 8
+
+
+def test_varlen_rows_left_align_each_request_in_its_block():
+    """Packed request lengths [3, 1, 0] (the last is graph padding) in blocks of
+    4: real tokens take the first qlen rows of their block, the rest read
+    packed row 0, and every packed token maps back to its own row."""
+    width = 4
+    max_rows = 3 * width
+    row_ids = torch.arange(max_rows, dtype=torch.int64)
+    stub = SimpleNamespace(
+        _varlen_decode_qlen=width,
+        _varlen_row_req=row_ids // width,
+        _varlen_row_pos=row_ids % width,
+        _varlen_row_ids=row_ids,
+        _varlen_q_rows=torch.zeros_like(row_ids),
+        _varlen_o_rows=torch.zeros(max_rows + 1, dtype=torch.int64),
+    )
+    qo_lens = torch.tensor([3, 1, 0], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 3, 4, 4], dtype=torch.int32)
+
+    q_rows, o_rows = AiterMLAMetadataBuilder._fill_varlen_rows(
+        stub, query_start_loc, qo_lens, num_reqs=3
+    )
+
+    assert q_rows.tolist() == [0, 1, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0]
+    # Packed tokens 0..3 -> rows 0, 1, 2 (request 0) and 4 (request 1).
+    assert o_rows[:4].tolist() == [0, 1, 2, 4]

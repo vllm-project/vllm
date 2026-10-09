@@ -227,6 +227,7 @@ def set_dummy_context(
     num_kv_blocks: int,
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
+    context_groups: Sequence[bool] | None = None,
 ) -> None:
     """Give each dummy request context_len of context, used when profiling step cost."""
     if input_block_tables is None:
@@ -252,17 +253,41 @@ def set_dummy_context(
     input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
 
     seq_len = context_len + query_len
-    for block_table, block_size, bpk in zip(
+    if context_groups is None:
+        context_groups = [True] * len(input_block_tables)
+    for block_table, block_size, bpk, is_context in zip(
         input_block_tables,
         block_tables.kernel_block_sizes,
         block_tables.blocks_per_kv_block,
+        context_groups,
+        strict=True,
     ):
+        num_usable = max(num_kv_blocks - 1, 1) * bpk
+        if not is_context:
+            state_slots = (
+                num_kv_blocks * bpk
+                - 1
+                - (
+                    torch.arange(
+                        num_reqs, dtype=block_table.dtype, device=block_table.device
+                    )
+                    % num_usable
+                )
+            )
+            block_table[:num_reqs, 0] = state_slots
+            continue
         num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
-        block_ids = torch.arange(
-            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
-        ) % (num_kv_blocks * bpk)
+        block_ids = (
+            bpk
+            + torch.arange(
+                num_reqs * num_blocks,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            % num_usable
+        )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
 

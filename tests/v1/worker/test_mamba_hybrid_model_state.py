@@ -314,6 +314,83 @@ def test_padded_rows_keep_the_sentinel(monkeypatch):
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, 0, -1, -1]
 
 
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3, 7])
+@pytest.mark.parametrize("has_drafts", [False, True])
+def test_decode_rows_must_fit_in_the_speculative_state_window(
+    monkeypatch: pytest.MonkeyPatch, num_speculative_tokens: int, has_drafts: bool
+) -> None:
+    """Unflagged profiling rows must not overrun the speculative state window."""
+    max_query_len = num_speculative_tokens + 1
+    query_lens = [0, 1, max_query_len, max_query_len + 1, 12, 1]
+    state = _mamba_hybrid_state(num_speculative_tokens=num_speculative_tokens)
+    state.num_accepted_tokens_gpu = torch.ones(len(query_lens), dtype=torch.int32)
+    input_batch = _input_batch(
+        query_lens,
+        [0] * len(query_lens) if has_drafts else None,
+        [False, False, False, False, False, True],
+        num_reqs_after_padding=8,
+    )
+
+    metadata = _prepare_attn_metadata(
+        state, monkeypatch, input_batch, cudagraph_mode=CUDAGraphMode.FULL
+    )
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [
+        -1,
+        0,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+    ]
+
+
+def test_adaptive_verification_keeps_the_supplied_draft_count(monkeypatch):
+    state = _mamba_hybrid_state(num_speculative_tokens=5)
+    input_batch = _input_batch([2, 1, 0], [5, 0, 0], [False, False, False])
+
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [5, 0, -1]
+
+
+@pytest.mark.parametrize("query_lens", [[12, 12], [1, 12], [8, 12]])
+def test_prepare_attn_excludes_oversized_dummy_rows_from_spec_decode(
+    monkeypatch: pytest.MonkeyPatch, query_lens: list[int]
+) -> None:
+    """Profiling rows wider than the state window must build prefill metadata."""
+    state = _mamba_hybrid_state(num_speculative_tokens=7)
+    input_batch = _input_batch(query_lens, None, [False, False])
+    input_batch.seq_lens = input_batch.seq_lens_cpu_upper_bound = torch.tensor(
+        [128, 128], dtype=torch.int32
+    )
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+    builder = _create_gdn_builder(num_speculative_tokens=7)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[128, 128], query_lens=query_lens), BLOCK_SIZE, DEVICE
+    ).replace(**metadata.get_extra_common_attn_kwargs(0, 2))
+    result = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=metadata.num_accepted_tokens,
+        num_decode_draft_tokens_cpu=metadata.num_decode_draft_tokens_cpu,
+    )
+
+    expected_spec_decodes = int(query_lens[0] <= 8)
+    assert result.num_spec_decodes == expected_spec_decodes
+    assert result.num_prefills == 2 - expected_spec_decodes
+    assert result.num_prefill_tokens == sum(query_lens[expected_spec_decodes:])
+    if expected_spec_decodes:
+        assert result.num_accepted_tokens.tolist() == [4]
+        assert result.spec_state_indices_tensor.shape[1] == 8
+        assert torch.diff(result.spec_query_start_loc).tolist() == [query_lens[0]]
+    else:
+        assert result.spec_state_indices_tensor is None
+
+
 def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
     monkeypatch,
 ):

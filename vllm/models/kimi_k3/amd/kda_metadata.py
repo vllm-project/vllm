@@ -11,6 +11,7 @@ from dataclasses import replace
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
@@ -18,12 +19,14 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
+from vllm.v1.attention.backend import AttentionCGSupport, max_decode_query_len
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -92,7 +95,29 @@ def prepare_chunk_metadata_device(
     return chunk_indices, chunk_offsets
 
 
+def _adaptive_verification_enabled(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    return speculative_config is not None and bool(
+        getattr(speculative_config, "enable_adaptive_verification", False)
+    )
+
+
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["KimiK3ROCmKDAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        if not _adaptive_verification_enabled(vllm_config):
+            return None
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -108,6 +133,11 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             num_decode_draft_tokens_cpu,
             fast_build,
         )
+        if (
+            attn_metadata.uniform_spec_sequence_length is not None
+            and _adaptive_verification_enabled(self.vllm_config)
+        ):
+            attn_metadata = replace(attn_metadata, uniform_spec_sequence_length=None)
         if attn_metadata.checkpoint is None:
             return attn_metadata
         # The shared builder keys checkpoint rows on every request; the ROCm
@@ -163,3 +193,7 @@ class KimiK3ROCmKDABackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[KimiK3ROCmKDAMetadataBuilder]:
         return KimiK3ROCmKDAMetadataBuilder
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True

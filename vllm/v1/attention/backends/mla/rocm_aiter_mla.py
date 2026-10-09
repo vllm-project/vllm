@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
@@ -38,7 +39,11 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheSpec,
+    is_quantized_kv_cache,
+)
 
 if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
@@ -340,6 +345,22 @@ def _aiter_mla_small_head_mode() -> str:
     return mode
 
 
+def _adaptive_varlen_verify_enabled(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    return (
+        speculative_config is not None
+        and bool(getattr(speculative_config, "enable_adaptive_verification", False))
+        and vllm_config.parallel_config.decode_context_parallel_size == 1
+        and max_decode_query_len(vllm_config) > 1
+    )
+
+
+def _gather_rows(x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    if x.dtype.itemsize == 1 and x.dtype.is_floating_point:
+        return x.view(torch.uint8).index_select(0, index).view(x.dtype)
+    return x.index_select(0, index)
+
+
 class AiterMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -503,6 +524,8 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     use_gluon_verify: bool = False
     # Whether persistent MLA metadata was computed
     has_persistent_metadata: bool = False
+    varlen_q_rows: torch.Tensor | None = None
+    varlen_o_rows: torch.Tensor | None = None
 
 
 @dataclass
@@ -589,6 +612,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return uniform_qo_len
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AiterMLAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        if not _adaptive_varlen_verify_enabled(vllm_config):
+            return None
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -663,6 +701,26 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # persistent gate below and makes aiter raise a KeyError mid-run.
         self._mtp_decode_qlen = self.reorder_batch_threshold or 1
 
+        self._varlen_decode_qlen = 0
+        if _adaptive_varlen_verify_enabled(vllm_config):
+            assert self._mtp_decode_qlen == max_decode_query_len(vllm_config), (
+                self._mtp_decode_qlen,
+                max_decode_query_len(vllm_config),
+            )
+            self._varlen_decode_qlen = self._mtp_decode_qlen
+            self.query_len_support = QueryLenSupport.VARLEN  # type: ignore[misc]
+            max_rows = vllm_config.scheduler_config.max_num_seqs * (
+                self._varlen_decode_qlen
+            )
+            row_ids = torch.arange(max_rows, dtype=torch.int64, device=device)
+            self._varlen_row_req = row_ids // self._varlen_decode_qlen
+            self._varlen_row_pos = row_ids % self._varlen_decode_qlen
+            self._varlen_row_ids = row_ids
+            self._varlen_q_rows = torch.zeros_like(row_ids)
+            self._varlen_o_rows = torch.zeros(
+                max_rows + 1, dtype=torch.int64, device=device
+            )
+
         # Store the kernel block size from the spec. When kernel_block_size=1
         # (no spec-dec), behavior is identical to the original. When > 1
         # (e.g. 16 with Eagle3), we expand block-level indices into per-token
@@ -676,6 +734,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_num_pages_per_req = vllm_config.model_config.max_model_len
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        speculative_config = vllm_config.speculative_config
+        if _adaptive_varlen_verify_enabled(vllm_config):
+            assert speculative_config is not None
+            max_num_pages += max_num_reqs * (
+                speculative_config.num_speculative_tokens or 0
+            )
 
         # Preparing persistent buffers
         # TODO: we can disambiguate between decode and mixed-prefill decode here
@@ -1244,13 +1308,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         device = self.device
         num_reqs = seq_lens_device.size(0)
         qo_len = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        max_qo_len = qo_len.max().item()
-        padded_mtp_qo_len = self._uniform_padded_mtp_qo_len(
-            qo_len, max_qo_len, num_decode_tokens
-        )
-        if padded_mtp_qo_len > 0:
-            max_qo_len = padded_mtp_qo_len
-        pad_uniform_mtp = padded_mtp_qo_len > 0
+        varlen_decode = self._varlen_decode_qlen > 0 and causal
+        if varlen_decode:
+            max_qo_len = self._varlen_decode_qlen
+            pad_uniform_mtp = True
+        else:
+            max_qo_len = qo_len.max().item()
+            padded_mtp_qo_len = self._uniform_padded_mtp_qo_len(
+                qo_len, max_qo_len, num_decode_tokens
+            )
+            if padded_mtp_qo_len > 0:
+                max_qo_len = padded_mtp_qo_len
+            pad_uniform_mtp = padded_mtp_qo_len > 0
 
         seq_lens_for_kernel = seq_lens_device
         # the global lengths need the same dummy-row
@@ -1283,6 +1352,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     g_tot_seq_lens,
                     g_tot_seq_lens.new_full((), max_qo_len * self.dcp_world_size),
                 )
+
+        varlen_q_rows = varlen_o_rows = None
+        if varlen_decode:
+            seq_lens_for_kernel = seq_lens_device + (max_qo_len - qo_lens_device)
+            varlen_q_rows, varlen_o_rows = self._fill_varlen_rows(
+                query_start_loc_device, qo_lens_device, num_reqs
+            )
 
         if self._graph_seq_lens is not None:
             self._graph_seq_lens[:num_kernel_reqs].copy_(
@@ -1343,6 +1419,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # device synchronisation. Programs whose chunk lies past
             # num_tokens mask out entirely.
             max_tokens_per_req = block_table_tensor.shape[1] * self.kernel_block_size
+            if varlen_decode:
+                max_tokens_per_req += max_qo_len - 1
             num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
             _expand_page_indices_kernel[(num_reqs, num_chunks)](
                 self.paged_kv_indices,
@@ -1350,8 +1428,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 block_table_tensor.stride(0),
                 block_table_tensor.stride(1),
                 paged_kv_indptr,
+                seq_lens_device,
                 KERNEL_BLOCK_SIZE=self.kernel_block_size,
                 BLOCK_SIZE=1024,
+                CLAMP_TAIL=varlen_decode,
             )
             paged_kv_indices = self.paged_kv_indices
 
@@ -1546,9 +1626,37 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             use_gluon_verify=use_gluon_verify,
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,
+            varlen_q_rows=varlen_q_rows,
+            varlen_o_rows=varlen_o_rows,
         )
 
         return attn_metadata
+
+    def _fill_varlen_rows(
+        self,
+        query_start_loc_device: torch.Tensor,
+        qo_lens_device: torch.Tensor,
+        num_reqs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        width = self._varlen_decode_qlen
+        num_rows = num_reqs * width
+        row_req = self._varlen_row_req[:num_rows]
+        row_pos = self._varlen_row_pos[:num_rows]
+        row_qlen = qo_lens_device.to(torch.int64).index_select(0, row_req)
+        row_start = query_start_loc_device.to(torch.int64).index_select(0, row_req)
+        is_real = row_pos < row_qlen
+        packed_row = row_start + row_pos
+        q_rows = self._varlen_q_rows[:num_rows]
+        q_rows.copy_(torch.where(is_real, packed_row, 0))
+        o_rows = self._varlen_o_rows
+        o_rows.zero_()
+        dump_slot = o_rows.size(0) - 1
+        o_rows.scatter_(
+            0,
+            torch.where(is_real, packed_row, dump_slot),
+            self._varlen_row_ids[:num_rows],
+        )
+        return q_rows, o_rows
 
     def build(
         self,
@@ -1590,8 +1698,10 @@ def _expand_page_indices_kernel(
     block_table_stride_0,
     block_table_stride_1,
     cu_num_tokens,
+    num_real_tokens,
     KERNEL_BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    CLAMP_TAIL: tl.constexpr = False,
 ):
     """Expand block table entries into per-token flat page indices.
 
@@ -1605,6 +1715,10 @@ def _expand_page_indices_kernel(
 
     When KERNEL_BLOCK_SIZE=K: block table entry b (covering K tokens)
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
+
+    With CLAMP_TAIL, entries past num_real_tokens[req] (padding a request's
+    page list out to its kernel length) repeat the request's first page, so
+    they never index past its block-table row.
     """
     # One program per (request, token-chunk). Parallelising over requests
     # alone degenerates at low concurrency: with num_reqs == 1 a single
@@ -1614,6 +1728,8 @@ def _expand_page_indices_kernel(
     row_ptr = block_table + req_idx * block_table_stride_0
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
+    if CLAMP_TAIL:
+        real_tokens = tl.load(num_real_tokens + req_idx)
 
     # The grid is sized from the block table width, an upper bound over all
     # requests, so a ragged batch launches chunks past a short request's end.
@@ -1625,11 +1741,14 @@ def _expand_page_indices_kernel(
 
     token_offsets = chunk_start + tl.arange(0, BLOCK_SIZE)
     mask = token_offsets < num_tokens
+    source_offsets = token_offsets
+    if CLAMP_TAIL:
+        source_offsets = tl.where(token_offsets < real_tokens, token_offsets, 0)
 
     # Which block in the block table does this token belong to?
-    block_idx = token_offsets // KERNEL_BLOCK_SIZE
+    block_idx = source_offsets // KERNEL_BLOCK_SIZE
     # Offset within that block
-    offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
+    offset_in_block = source_offsets % KERNEL_BLOCK_SIZE
 
     # Load the block ID from the block table
     # Both strides are taken from the caller: the block table is a view owned
@@ -2229,6 +2348,31 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
 
     def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: AiterMLAMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        decode = attn_metadata.decode
+        if decode is None or decode.varlen_q_rows is None:
+            return self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
+        assert decode.varlen_o_rows is not None
+        q_rows = decode.varlen_q_rows
+        if isinstance(q, tuple):
+            num_tokens = q[0].shape[0]
+            q = (_gather_rows(q[0], q_rows), _gather_rows(q[1], q_rows))
+        else:
+            num_tokens = q.shape[0]
+            q = _gather_rows(q, q_rows)
+        o, lse = self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
+        o_rows = decode.varlen_o_rows[:num_tokens]
+        o = o.index_select(0, o_rows)
+        if lse is not None:
+            lse = lse.index_select(0, o_rows)
+        return o, lse
+
+    def _forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
