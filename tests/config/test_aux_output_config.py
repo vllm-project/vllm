@@ -101,6 +101,17 @@ def test_logprobs_only_aux_output_does_not_require_moe():
     VllmConfig._verify_aux_output_compatibility(config)
 
 
+def test_logprobs_replay_prefix_cache_error_is_feature_specific():
+    config = _config(
+        is_moe=False,
+        enable_prefix_caching=False,
+        aux_output_config=AuxOutputConfig(enable_logprobs_replay=True),
+    )
+
+    with pytest.raises(ValueError, match="Logprobs replay AuxOutput"):
+        VllmConfig._verify_aux_output_compatibility(config)
+
+
 def test_prompt_logprobs_replay_requires_generated_logprobs_replay():
     config = _config(
         aux_output_config=AuxOutputConfig(enable_prompt_logprobs_replay=True),

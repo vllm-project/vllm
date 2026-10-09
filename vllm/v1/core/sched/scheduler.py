@@ -2275,11 +2275,12 @@ class Scheduler(SchedulerInterface):
                     )
                     if replayed is not None:
                         new_logprobs = replayed.slice_request(0, len(new_token_ids))
-                replayed_prompt = self.aux_output_connector.take_prompt_logprobs(
-                    request, model_runner_output.aux_output_connector_output
-                )
-                if replayed_prompt is not None:
-                    prompt_logprobs_tensors = replayed_prompt
+                if should_emit_output:
+                    replayed_prompt = self.aux_output_connector.take_prompt_logprobs(
+                        request, model_runner_output.aux_output_connector_output
+                    )
+                    if replayed_prompt is not None:
+                        prompt_logprobs_tensors = replayed_prompt
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.

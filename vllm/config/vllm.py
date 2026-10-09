@@ -1198,8 +1198,19 @@ class VllmConfig:
             and not self.model_config.is_moe
         ):
             raise ValueError("AuxOutput Connector only supports MoE models.")
-        if not self.cache_config.enable_prefix_caching:
-            raise ValueError("AuxOutput Connector requires prefix caching.")
+        if (
+            self.aux_output_config.enable_return_routed_experts
+            and not self.cache_config.enable_prefix_caching
+        ):
+            raise ValueError("Routed-experts AuxOutput requires prefix caching.")
+        if (
+            self.aux_output_config.enable_logprobs_replay
+            and not self.cache_config.enable_prefix_caching
+        ):
+            raise ValueError(
+                "Logprobs replay AuxOutput requires prefix caching for "
+                "stable KV block artifact identity."
+            )
         if (
             self.aux_output_config.enable_prompt_logprobs_replay
             and not self.aux_output_config.enable_logprobs_replay

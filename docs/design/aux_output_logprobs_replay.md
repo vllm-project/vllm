@@ -145,6 +145,12 @@ engine/model generation. Online weight updates are rejected because there is
 not yet a reliable weight-version identity. Request ID is deliberately absent
 so compatible shared-prefix blocks remain reusable.
 
+Prefix caching remains a configuration prerequisite for logprob replay in this
+implementation: EngineCore creates the request block hasher only for prefix
+cache/KV-cache identities, and those hashes are part of the artifact key. This
+requirement is independent from the MoE-only restrictions of routed-expert
+capture; logprob-only replay does not require an MoE model.
+
 The stored payload is a versioned NPZ record with explicit absolute positions,
 token IDs, score values, and selected-token ranks. Decode validates schema and
 shape before reconstructing the existing `LogprobsLists` /
@@ -205,6 +211,10 @@ make prompt-logprob cache hits useful, an
 opted-in request may read prefix KV blocks; the connector supplies prompt
 logprobs for the cached portion and the worker computes the uncached portion
 as usual.
+
+The scheduler consumes prompt replay only on a step that emits an engine
+output. Intermediate chunked-prefill steps may carry captured prompt tensors
+while `num_sampled == 0`; they must not be treated as missing artifacts.
 
 Publish known rows once the corresponding block hash is available. Logprob
 blocks may be sparse at first (notably generated-only replay at the

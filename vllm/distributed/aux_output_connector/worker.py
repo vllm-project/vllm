@@ -48,6 +48,7 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import LogprobsLists, LogprobsTensors
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -90,9 +91,9 @@ class PendingAuxOutput:
     routed_experts: np.ndarray | None = None
     num_sampled: np.ndarray | None = None
     num_rejected: np.ndarray | None = None
-    logprobs_tensors: Any = None
-    logprobs: dict[str, Any] = field(default_factory=dict)
-    prompt_logprobs: dict[str, Any] = field(default_factory=dict)
+    logprobs_tensors: LogprobsTensors | None = None
+    logprobs: dict[str, LogprobsLists] = field(default_factory=dict)
+    prompt_logprobs: dict[str, LogprobsTensors] = field(default_factory=dict)
     replay_logprobs: frozenset[str] = frozenset()
     replay_prompt_logprobs: frozenset[str] = frozenset()
 
@@ -100,8 +101,8 @@ class PendingAuxOutput:
         self,
         num_sampled: np.ndarray,
         num_rejected: np.ndarray,
-        logprobs: Any = None,
-        prompt_logprobs: dict[str, Any] | None = None,
+        logprobs: LogprobsTensors | None = None,
+        prompt_logprobs: dict[str, LogprobsTensors | None] | None = None,
     ) -> None:
         """Enqueue asynchronous D2H copies; call on the output copy stream."""
         self.num_sampled = num_sampled[self.batch_indices]

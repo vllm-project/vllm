@@ -293,7 +293,11 @@ class AuxOutputSchedulerConnector:
         assert output is not None and request.request_id in output, (
             f"auxiliary prompt logprobs output is missing {request.request_id}"
         )
-        return output[request.request_id].prompt_logprobs
+        value = output[request.request_id].prompt_logprobs
+        assert value is not None, (
+            f"auxiliary prompt logprobs artifact is missing {request.request_id}"
+        )
+        return value
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""

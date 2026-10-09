@@ -1911,6 +1911,27 @@ def test_scheduler_marks_only_opted_in_logprob_requests():
     assert metadata.logprob_block_hashes.keys() == {opted_in.request_id}
 
 
+def test_scheduler_rejects_missing_prompt_logprob_artifact():
+    connector = AuxOutputSchedulerConnector(
+        enable_routed_experts=False,
+        enable_prompt_logprobs=True,
+    )
+    request = _scheduler_request("request", [b"a" * 32])
+    request.sampling_params = SimpleNamespace(
+        routed_experts_prompt_start=0,
+        extra_args={"aux_output_replay": True},
+        num_logprobs=2,
+        prompt_logprobs=2,
+        logprob_token_ids=None,
+        prompt_logprob_token_ids=None,
+    )
+
+    with pytest.raises(AssertionError, match="prompt logprobs artifact is missing"):
+        connector.take_prompt_logprobs(
+            request, {request.request_id: AuxRequestOutput(0)}
+        )
+
+
 def test_logprob_artifact_identity_includes_boundary_token():
     connector = AuxOutputSchedulerConnector(
         enable_routed_experts=False,
