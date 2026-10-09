@@ -247,6 +247,8 @@ class TestRenderPrompt:
         )
 
         assert len(results) == 1
+        # max_output_tokens defaults to 0, so there is no output budget to
+        # reserve and -1 truncates to the full max_total_tokens.
         assert len(results[0]["prompt_token_ids"]) == 100  # max_total_tokens
 
     def test_truncation_left(self):
@@ -544,7 +546,7 @@ class TestMaxTokensNotReservation:
             )
 
     def test_negative_truncation_uses_max_total(self):
-        """truncate_prompt_tokens=-1 pads to max_total_tokens, not max_input."""
+        """truncate_prompt_tokens=-1 reserves one output token."""
         renderer = _build_renderer(MockModelConfig())
 
         prompts = renderer.render_prompts(
@@ -558,8 +560,10 @@ class TestMaxTokensNotReservation:
                 truncate_prompt_tokens=-1,
             ),
         )
-        # -1 should map to max_total_tokens (100), not max_total - max_output (60).
-        assert len(results[0]["prompt_token_ids"]) == 100
+        # -1 maps to max_total_tokens (100) rather than the old
+        # max_total - max_output (60), minus the one token held back so
+        # truncation cannot leave a zero-token output budget.
+        assert len(results[0]["prompt_token_ids"]) == 99
 
     def test_negative_pad_uses_max_total(self):
         """pad_prompt_tokens=-1 pads to max_total_tokens, not max_input."""

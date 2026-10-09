@@ -219,6 +219,27 @@ class TokenizeParams:
 
         return self.max_total_tokens
 
+    @property
+    def max_truncation_tokens(self) -> int | None:
+        """Maximum prompt length that truncation may reduce a prompt to.
+
+        For generative requests this is `max_input_tokens` less one, holding a
+        token of context back for output.  Truncating to the full
+        `max_total_tokens` would leave `get_max_tokens()` clamping the sampling
+        budget to 0, turning an over-long prompt into a silent zero-token
+        generation.
+
+        Pooling requests set `max_output_tokens = 0` and emit an embedding
+        rather than generated tokens, so they keep the full input budget.
+        """
+        max_input_tokens = self.max_input_tokens
+        if max_input_tokens is None:
+            return None
+        if self.max_output_tokens == 0:
+            return max_input_tokens
+
+        return max(0, max_input_tokens - 1)
+
     def __post_init__(self) -> None:
         max_total_tokens = self.max_total_tokens
         max_output_tokens = self.max_output_tokens
@@ -331,7 +352,7 @@ class TokenizeParams:
         """The arguments to pass to `tokenizer.encode`."""
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
-            max_length = self.max_input_tokens
+            max_length = self.max_truncation_tokens
         elif max_length is None and self.max_input_tokens is not None:
             # This prevents tokenization from taking up more resources than necessary
             # while still failing `self._token_len_check` as expected by users
@@ -468,7 +489,7 @@ class TokenizeParams:
         """
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
-            max_length = self.max_input_tokens
+            max_length = self.max_truncation_tokens
 
         if max_length is None or max_length >= length:
             return None
