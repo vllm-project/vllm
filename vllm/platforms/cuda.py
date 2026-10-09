@@ -34,11 +34,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.worker.tpsp_profile import (
-    ChunkConfig,
-    ProfilingTPSPBackend,
-    TPSPProjectionContext,
-)
 
 from .interface import DeviceCapability, Platform, PlatformEnum, TPSPBackend, in_wsl
 
@@ -305,17 +300,15 @@ class CudaTPSPOps:
         context = CudaTPSPContext(
             group_name, device, tp_size, rank, comm_address, frozenset()
         )
-        cls._initialize_p2p(context, group, max_batched_tokens, hidden_size)
         nccl_available = torch.tensor(int(nccl_ready), device=device)
         dist.all_reduce(nccl_available, op=dist.ReduceOp.MIN, group=group)
-        modes = set()
-        if nccl_available.item():
-            modes.add("nccl")
+        if not nccl_available.item():
+            logger.warning("CUDA TPSP default NCCL transport is unavailable")
+            return None
+        cls._initialize_p2p(context, group, max_batched_tokens, hidden_size)
+        modes = {"nccl"}
         if context.workspace is not None:
             modes.add("p2p")
-        if not modes:
-            logger.warning("TPSP unavailable: neither NCCL nor P2P is usable")
-            return None
         context.modes = frozenset(modes)
         return context
 
@@ -361,7 +354,7 @@ class CudaTPSPOps:
         supported = torch.tensor(int(accessible), device=device)
         dist.all_reduce(supported, op=dist.ReduceOp.MIN, group=group)
         if not supported.item():
-            logger.info("TPSP P2P topology unavailable; profiling NCCL only")
+            logger.info("TPSP P2P topology unavailable")
             return
         try:
             workspace = torch_symm_mem.empty(
@@ -511,9 +504,8 @@ class CudaTPSPOps:
         context.closed = True
 
 
-class CudaTPSPBackend(ProfilingTPSPBackend):
+class CudaTPSPBackend(TPSPBackend):
     ops = CudaTPSPOps
-    profiles_transport_modes = True
     supports_projection_bias = True
 
     def __init__(self, group_name: str, device: torch.device):
@@ -536,15 +528,30 @@ class CudaTPSPBackend(ProfilingTPSPBackend):
             device != self.device
             or group_name != self.group_name
             or device.type != "cuda"
-            or not self._valid_open(
-                dtype=dtype,
-                tp_size=tp_size,
-                hidden_size=hidden_size,
-                max_batched_tokens=max_batched_tokens,
-                group_name=group_name,
-                device=device,
-            )
         ):
+            return None
+        if (
+            dtype != torch.bfloat16
+            or tp_size < 2
+            or hidden_size <= 0
+            or hidden_size % tp_size
+            or max_batched_tokens <= 0
+        ):
+            logger.warning(
+                "TPSP unavailable for dtype=%s tp_size=%s hidden_size=%s",
+                dtype,
+                tp_size,
+                hidden_size,
+            )
+            return None
+        if not torch._C._dispatch_has_kernel_for_dispatch_key(
+            "_C::fused_add_rms_norm", device.type.upper()
+        ):
+            logger.warning("TPSP unavailable: %s fused_add_rms_norm is missing", device)
+            return None
+        group = c10d._resolve_process_group(group_name)
+        if dist.get_world_size(group) != tp_size:
+            logger.warning("TPSP unavailable: group_name and tp_size disagree")
             return None
         context = self.ops.open(group_name, device, max_batched_tokens, hidden_size)
         if context is not None:
@@ -580,12 +587,8 @@ class CudaTPSPBackend(ProfilingTPSPBackend):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self._closed:
             raise RuntimeError("TPSP backend is closed")
-        if isinstance(config, TPSPProjectionContext):
-            if context is not None:
-                raise ValueError("TPSP context was supplied twice")
-            context, config = config.transport, config.config
-        if not isinstance(config, ChunkConfig):
-            raise ValueError("CUDA TPSP requires a chunk configuration")
+        if type(config) is not int or config <= 0:
+            raise ValueError("CUDA TPSP requires a positive microchunk size")
         context = self._profile_context(context)
         return self.ops.fused_matmul_reduce_scatter_norm_all_gather(
             context,
@@ -596,10 +599,9 @@ class CudaTPSPBackend(ProfilingTPSPBackend):
             eps=eps,
             norm_type=norm_type,
             residual=residual,
-            microchunk_tokens=config.microchunk_tokens,
+            microchunk_tokens=config,
             projection_bias=projection_bias,
             norm_bias=norm_bias,
-            comm_mode=config.comm_mode,
         )
 
     def close(self, context: CudaTPSPContext | None = None) -> None:
@@ -608,7 +610,7 @@ class CudaTPSPBackend(ProfilingTPSPBackend):
             self.ops.close_tpsp(context)
             self._open_context_ids.remove(id(context))
         else:
-            super().close()
+            self._closed = True
 
 
 class CudaPlatformBase(Platform):

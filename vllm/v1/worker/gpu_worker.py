@@ -613,9 +613,9 @@ class Worker(WorkerBase):
         """
         maybe_apply_startup_plan(self)
 
-        from vllm.v1.worker.tpsp_profile import profile_tpsp_projections
+        from vllm.v1.worker.tpsp_profile import initialize_tpsp
 
-        has_tpsp_projections = profile_tpsp_projections(
+        has_tpsp_projections = initialize_tpsp(
             self.model_runner.model, self.model_runner.max_num_tokens
         )
         if self.model_config.enable_tpsp and not has_tpsp_projections:

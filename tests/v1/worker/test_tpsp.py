@@ -15,13 +15,7 @@ from torch import nn
 
 from vllm.model_executor.models import llama
 from vllm.platforms import current_platform
-from vllm.v1.worker.tpsp_profile import (
-    ChunkConfig,
-    SPProfile,
-    TPSPProjection,
-    TPSPShape,
-    get_tpsp_backend,
-)
+from vllm.v1.worker.tpsp_profile import SPProfile, TPSPProjection, get_tpsp_backend
 
 
 def _check_tpsp_backend(
@@ -104,7 +98,7 @@ def _check_tpsp_backend(
             expected_residual = residual.clone()
             torch.ops._C.fused_add_rms_norm(expected, expected_residual, weight, 1e-5)
             reduced, _, gathered = backend.fused_gemm_rs_norm_ag(
-                a, b, weight, local_residual, 1e-5, ChunkConfig(64), context=context
+                a, b, weight, local_residual, 1e-5, 64, context=context
             )
             torch.testing.assert_close(
                 gathered,
@@ -135,7 +129,7 @@ def _check_tpsp_backend(
                     weight,
                     local_residual,
                     1e-5,
-                    ChunkConfig(64),
+                    64,
                     norm_type="layer_norm",
                     projection_bias=projection_bias,
                     norm_bias=norm_bias,
@@ -157,7 +151,6 @@ def _check_tpsp_backend(
             input_width=64,
             max_batched_tokens=128,
             norm_eps=1e-5,
-            sharded_residual=False,
             time_budget_s=60,
             context=context,
         )
@@ -165,7 +158,7 @@ def _check_tpsp_backend(
         assert profile.hidden_size == 4096
         assert profile.max_batched_tokens == 128
         if profile.enabled:
-            assert profile.config is not None
+            assert isinstance(profile.config, int)
         backend.close(context)
         backend.close()
     finally:
@@ -199,7 +192,6 @@ def test_llama_tpsp_forward(monkeypatch):
         "get_pp_group",
         lambda: SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True),
     )
-    monkeypatch.setattr(llama, "select_sp_config", lambda profile, tokens: True)
 
     class Projection(nn.Module):
         input_size_per_partition = 2
@@ -209,11 +201,18 @@ def test_llama_tpsp_forward(monkeypatch):
             super().__init__()
             self.weight = nn.Parameter(torch.eye(2, dtype=torch.bfloat16))
 
+        def forward(self, x):
+            return x @ self.weight, None
+
     class Norm(nn.Module):
         def __init__(self):
             super().__init__()
             self.weight = nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
             self.variance_epsilon = 1e-5
+
+        def forward(self, x, residual):
+            result = x + residual
+            return result, result
 
     class Attention(nn.Module):
         def __init__(self):
@@ -231,6 +230,8 @@ def test_llama_tpsp_forward(monkeypatch):
         def compute_down_proj_input(self, hidden_states):
             return hidden_states + 1
 
+    context = object()
+
     class Backend:
         supports_projection_bias = False
 
@@ -238,10 +239,20 @@ def test_llama_tpsp_forward(monkeypatch):
             self.calls = 0
 
         def fused_gemm_rs_norm_ag(
-            self, x, weight, norm_weight, residual, eps, config, *, projection_bias
+            self,
+            x,
+            weight,
+            norm_weight,
+            residual,
+            eps,
+            config,
+            *,
+            projection_bias,
+            context,
         ):
             self.calls += 1
             assert projection_bias is None
+            assert context is model.tpsp_projections["o"].context
             reduced = x @ weight + residual
             return reduced, None, reduced
 
@@ -264,19 +275,27 @@ def test_llama_tpsp_forward(monkeypatch):
     model._aux_upstream_total_cached = 0
     backend = Backend()
     model.tpsp_projections = nn.ModuleDict(
-        {
-            name: TPSPProjection(TPSPShape(2, 2, 1e-5, True), 1, "test")
-            for name in ("o", "down")
-        }
+        {name: TPSPProjection(2, 2, 1e-5, 1, "test") for name in ("o", "down")}
     )
+    layer.tpsp_projections = dict(model.tpsp_projections.items())
     for projection in model.tpsp_projections.values():
         projection.profile = SPProfile(
-            1, 2, 8, "enabled", "", threshold_tokens=1, config=ChunkConfig(64)
+            1, 2, 8, "enabled", "", threshold_tokens=1, config=64
         )
         projection.backend = backend
+        projection.context = context
 
     result = model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
     )
     torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
     assert backend.calls == 2
+
+    model.tpsp_projections["o"].profile = SPProfile(
+        1, 2, 8, "enabled", "", threshold_tokens=3, config=64
+    )
+    result = model.forward(
+        None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
+    )
+    torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
+    assert backend.calls == 3

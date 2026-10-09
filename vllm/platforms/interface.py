@@ -136,9 +136,12 @@ class DeviceCapability(NamedTuple):
 
 class TPSPBackend(ABC):
     supports_projection_bias = False
+    ops: Any
 
-    @abstractmethod
-    def __init__(self, group_name: str, device: torch.device) -> None: ...
+    def __init__(self, group_name: str, device: torch.device) -> None:
+        self.group_name = group_name
+        self.device = device
+        self._closed = False
 
     @abstractmethod
     def open(
@@ -152,7 +155,6 @@ class TPSPBackend(ABC):
         device: torch.device,
     ) -> Any | None: ...
 
-    @abstractmethod
     def profile(
         self,
         *,
@@ -161,10 +163,34 @@ class TPSPBackend(ABC):
         input_width: int,
         max_batched_tokens: int,
         norm_eps: float,
-        sharded_residual: bool,
         time_budget_s: float,
         context: Any | None = None,
-    ) -> "SPProfile": ...
+    ) -> "SPProfile":
+        """Benchmark fused projections and return a chunk/threshold plan.
+
+        Returns:
+            SPProfile with ``status``, measured candidates, and token timings.
+            When enabled, ``config`` holds the chosen chunk size and
+            ``threshold_tokens`` marks when to use the fused op.
+
+        """
+        from vllm.v1.worker.tpsp_profile import profile_sp_config
+
+        return profile_sp_config(
+            self,
+            tp_size=tp_size,
+            hidden_size=hidden_size,
+            input_width=input_width,
+            max_batched_tokens=max_batched_tokens,
+            time_budget_s=time_budget_s,
+            norm_eps=norm_eps,
+            context=context,
+        )
+
+    def _profile_context(self, context: Any | None) -> Any:
+        if context is None:
+            raise ValueError("TPSP requires a projection context")
+        return context
 
     @abstractmethod
     def fused_gemm_rs_norm_ag(
