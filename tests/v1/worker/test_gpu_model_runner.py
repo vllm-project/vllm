@@ -430,7 +430,9 @@ def test_select_common_block_size_no_valid_option():
         select_common_block_size(48, [backend_a, backend_b])
 
 
-def _mock_backend(supported: list, *, exact: bool = False):
+def _mock_backend(
+    supported: list, *, exact: bool = False, preferred: int | None = None
+):
     """Backend accepting multiples of ``supported``, or only those exact sizes
     when ``exact`` (as CPU_MLA does)."""
     from vllm.v1.attention.backend import AttentionBackend
@@ -444,6 +446,12 @@ def _mock_backend(supported: list, *, exact: bool = False):
         def get_supported_kernel_block_sizes():
             return list(supported)
 
+        if preferred is not None:
+
+            @classmethod
+            def get_preferred_block_size(cls, default_block_size: int) -> int:
+                return preferred
+
         if exact:
 
             @classmethod
@@ -451,7 +459,6 @@ def _mock_backend(supported: list, *, exact: bool = False):
                 return block_size is None or block_size in supported
 
     return _MockBackendCls
-
 
 @pytest.mark.parametrize(
     "backends,expected",
@@ -472,6 +479,33 @@ def test_preferred_block_size_satisfies_every_backend(backends, expected):
     classes = [_mock_backend(s) for s in backends]
     assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
 
+
+def test_preferred_block_size_honors_common_backend_preference():
+    # Regression for mixed-backend models whose kernels accept 16 but prefer
+    # a larger block (for example HPUAttentionBackendV1 prefers 128).
+    classes = [
+        _mock_backend([16, 128], preferred=128),
+        _mock_backend([16, 128], preferred=128),
+    ]
+    assert Platform._preferred_block_size_for_backends(classes, 16, None) == 128
+
+
+def test_preferred_block_size_uses_common_non_default_preference():
+    # A backend-specific preference should beat the generic default if every
+    # sibling backend supports it, even when another backend is happy with 16.
+    classes = [
+        _mock_backend([MultipleOf(16)], preferred=64),
+        _mock_backend([MultipleOf(16)]),
+    ]
+    assert Platform._preferred_block_size_for_backends(classes, 16, None) == 64
+
+
+def test_preferred_block_size_falls_back_when_preference_is_not_common():
+    classes = [
+        _mock_backend([16, 128], exact=True, preferred=128),
+        _mock_backend([16], exact=True),
+    ]
+    assert Platform._preferred_block_size_for_backends(classes, 16, None) == 16
 
 def test_preferred_block_size_searches_past_an_exact_size_backend():
     # Extending greedily picks lcm(16, 32) = 32, which the exact backend
