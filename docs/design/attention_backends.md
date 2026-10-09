@@ -147,25 +147,14 @@ Priority is **1 = highest** (tried first).
 
 The generic Triton sparse-MLA kernel preserves the query's FP16 or BF16 output
 dtype. DeepSeek V4's separate sparse-MLA backend accepts BF16 model activations.
-This omnibus also enables DeepSeek V4 routing on SM8x using software FP8
+This integration enables DeepSeek V4 routing on SM8x using software FP8
 conversion and the output-projection fallback; the generic backend accepts
 FP16 and BF16 model activations.
 
 --8<-- "gen:priority-mla"
 
-**Ampere/Hopper (SM 8.x-9.x):**
-
-| Priority | Head size 512 | Other head sizes |
-| -------- | ------------- | ---------------- |
-| 1 | `FLASH_ATTN_MLA` | `FLASH_ATTN_MLA` |
-| 2 | `FLASHMLA` | `FLASHMLA` |
-| 3 | `FLASHINFER_MLA` | `FLASHINFER_MLA` |
-| 4 | `TRITON_MLA` | `TRITON_MLA` |
-| 5 | `FLASHINFER_MLA_SPARSE_SM90` | `FLASH_ATTN_MLA_SPARSE` |
-| 6 | `FLASH_ATTN_MLA_SPARSE` | `FLASHMLA_SPARSE` |
-| 7 | `FLASHMLA_SPARSE` | `FLASHINFER_MLA_SPARSE_SM90` |
-| 8 | `TRITON_MLA_SPARSE` | `TRITON_MLA_SPARSE` |
-
+> **†** On SM90, `FLASHINFER_MLA_SPARSE_SM90` precedes the other sparse backends when `head_size == 512` and follows them otherwise. `TRITON_MLA_SPARSE` remains the final fallback at priority 8 in both cases.
+>
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 
 ## Legend
