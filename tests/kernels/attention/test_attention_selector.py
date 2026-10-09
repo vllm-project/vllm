@@ -928,6 +928,7 @@ def sm90_config(monkeypatch):
     config = SimpleNamespace(
         attention_config=SimpleNamespace(flash_attn_version=None),
         cache_config=SimpleNamespace(cache_dtype="fp8"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(
             is_diffusion=False,
             is_mm_prefix_lm=False,
