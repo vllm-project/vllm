@@ -445,7 +445,7 @@ class LlamaDecoderLayer(nn.Module):
             if cached is None or cached[0] != key:
                 cached = (key, weight.T.contiguous())
                 projection._tpsp_transposed_weight = cached
-            reduced, _, gathered = backend.fused(
+            reduced, _, gathered = backend.fused_gemm_rs_norm_ag(
                 x.contiguous(),
                 cached[1],
                 norm.weight,

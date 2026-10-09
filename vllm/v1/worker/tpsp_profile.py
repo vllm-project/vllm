@@ -19,6 +19,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed import distributed_c10d as c10d
 
+from vllm.platforms.interface import TPSPBackend
+
 _LOG = logging.getLogger(__name__)
 _EPS = 1e-5
 _TRIALS = 5
@@ -37,36 +39,16 @@ class TPSPProjectionContext:
     config: object
 
 
-class TPSPBackend:
-    """Profile a fused projection with platform-owned resources.
+class ProfilingTPSPBackend(TPSPBackend):
+    """Profile a fused projection with platform-owned resources."""
 
-    A native ``profile_tpsp_config`` returns an object with
-    ``threshold_tokens`` and opaque ``config`` attributes. It requires a
-    matching native ``fused_matmul_reduce_scatter_norm_all_gather_profiled``
-    entry point. When the native profiler is absent, vLLM scans chunks
-    through the standard fused op, checking both NCCL and P2P when available.
-    Set ``VLLM_TPSP_COMM_MODE`` to ``nccl`` or ``p2p`` to restrict the sweep.
-    """
-
-    requires_projection_context = False
+    ops: Any = None
     profiles_transport_modes = False
-    synchronize_after_fused = True
-    supports_projection_bias = False
 
-    @classmethod
-    def create(cls, group_name: str, device: torch.device) -> TPSPBackend | None:
-        return cls(None, group_name, device)
-
-    def __init__(
-        self,
-        ops: Any,
-        group_name: str,
-        device: torch.device,
-    ):
-        self.ops = ops
+    def __init__(self, group_name: str, device: torch.device):
         self.group_name = group_name
         self.device = device
-        self.chunk_granularity = getattr(ops, "tpsp_chunk_granularity", 64)
+        self.chunk_granularity = getattr(self.ops, "tpsp_chunk_granularity", 64)
         if type(self.chunk_granularity) is not int or self.chunk_granularity <= 0:
             raise ValueError("TPSP chunk granularity must be a positive integer")
         self._closed = False
@@ -137,62 +119,6 @@ class TPSPBackend:
         if self._closed:
             raise RuntimeError("TPSP backend is closed")
         context = self._profile_context(context)
-        kwargs = dict(
-            tp_size=tp_size,
-            hidden_size=hidden_size,
-            input_width=input_width,
-            max_batched_tokens=max_batched_tokens,
-            group_name=self.group_name,
-            norm_eps=norm_eps,
-            sharded_residual=sharded_residual,
-            time_budget_s=time_budget_s,
-        )
-        external = getattr(getattr(self.ops, "_C", None), "profile_tpsp_config", None)
-        if external is not None:
-            if not hasattr(
-                self.ops._C,
-                "fused_matmul_reduce_scatter_norm_all_gather_profiled",
-            ):
-                raise RuntimeError(
-                    "TPSP external profiler requires a profiled fused op"
-                )
-            result = external(**kwargs)
-            threshold = result.threshold_tokens
-            config = result.config
-            if threshold is not None and (
-                type(threshold) is not int
-                or not 1 <= threshold <= max_batched_tokens
-                or config is None
-            ):
-                raise ValueError("TPSP external profiler returned an invalid plan")
-            if threshold is None and config is not None:
-                raise ValueError("TPSP disabled plan must not contain a config")
-            group = c10d._resolve_process_group(self.group_name)
-            shared = torch.tensor(
-                [threshold or 0, threshold or 0], dtype=torch.int64, device=self.device
-            )
-            dist.all_reduce(shared[:1], op=dist.ReduceOp.MIN, group=group)
-            dist.all_reduce(shared[1:], op=dist.ReduceOp.MAX, group=group)
-            if shared[0] != shared[1]:
-                raise ValueError(
-                    "TPSP external profiler returned inconsistent thresholds"
-                )
-            return SPProfile(
-                tp_size,
-                hidden_size,
-                max_batched_tokens,
-                "enabled" if threshold is not None else "disabled",
-                "",
-                threshold_tokens=threshold,
-                config=(
-                    TPSPProjectionContext(context, config)
-                    if threshold is not None and context is not None
-                    else config
-                ),
-                input_width=input_width,
-                norm_eps=norm_eps,
-                gather_sharded_residual=sharded_residual,
-            )
         return profile_sp_config(
             self,
             tp_size=tp_size,
@@ -205,73 +131,6 @@ class TPSPBackend:
             time_budget_s=time_budget_s,
             context=context,
         )
-
-    def fused(
-        self,
-        a,
-        b,
-        weight,
-        residual,
-        eps: float,
-        config: object,
-        *,
-        synchronize: bool = True,
-        norm_type: str = "rms_norm",
-        projection_bias: torch.Tensor | None = None,
-        norm_bias: torch.Tensor | None = None,
-        context: Any | None = None,
-    ):
-        if self._closed:
-            raise RuntimeError("TPSP backend is closed")
-        if isinstance(config, TPSPProjectionContext):
-            if context is not None:
-                raise ValueError("TPSP context was supplied twice")
-            context, config = config.transport, config.config
-        context = self._profile_context(context)
-        if isinstance(config, ChunkConfig):
-            result = self.run(
-                a,
-                b,
-                weight,
-                residual,
-                eps,
-                config,
-                norm_type=norm_type,
-                projection_bias=projection_bias,
-                norm_bias=norm_bias,
-                context=context,
-            )
-        else:
-            if (
-                norm_type != "rms_norm"
-                or norm_bias is not None
-                or projection_bias is not None
-            ):
-                raise ValueError(
-                    "TPSP profiled configuration only supports RMSNorm without bias"
-                )
-            result = self.ops._C.fused_matmul_reduce_scatter_norm_all_gather_profiled(
-                a, b, weight, residual, self.group_name, eps=eps, config=config
-            )
-        if synchronize and self.synchronize_after_fused:
-            self.device_synchronize()
-        return result
-
-    def run(
-        self,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        weight: torch.Tensor,
-        residual: torch.Tensor,
-        eps: float,
-        config: ChunkConfig,
-        *,
-        norm_type: str = "rms_norm",
-        projection_bias: torch.Tensor | None = None,
-        norm_bias: torch.Tensor | None = None,
-        context: Any | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
 
     def device_synchronize(self) -> None:
         getattr(torch, self.device.type).synchronize(self.device)
@@ -287,7 +146,7 @@ def get_tpsp_backend(group_name: str, device: torch.device) -> TPSPBackend | Non
     backend_cls = current_platform.get_tpsp_backend_cls()
     if backend_cls is None:
         return None
-    return backend_cls.create(group_name, device)
+    return backend_cls(group_name, device)
 
 
 @dataclass(frozen=True)
@@ -521,7 +380,7 @@ def _search_chunks(
 
 
 def profile_sp_config(
-    backend: TPSPBackend,
+    backend: ProfilingTPSPBackend,
     tp_size: int,
     hidden_size: int,
     input_width: int,
@@ -623,17 +482,16 @@ def profile_sp_config(
             residual.clone() if device.type == "cuda" else residual,
         )
 
-    def run(data, candidate):
+    def project(data, candidate):
         (a, b, linear_weight), weight, residual, local_residual, _ = data
         if candidate is not None:
-            return backend.fused(
+            return backend.fused_gemm_rs_norm_ag(
                 a,
                 b,
                 weight,
                 local_residual,
                 norm_eps,
                 candidate,
-                synchronize=False,
                 context=context,
             )[2]
         partial = F.linear(a, linear_weight)
@@ -658,7 +516,7 @@ def profile_sp_config(
             data[2].copy_(data[4])
         backend.device_synchronize()
         start = time.perf_counter()
-        result = run(data, candidate)
+        result = project(data, candidate)
         backend.device_synchronize()
         elapsed = torch.tensor(
             [(time.perf_counter() - start) * 1000], dtype=torch.float64, device=device
@@ -770,8 +628,8 @@ def profile_sp_config(
     data = None
 
     check_data = inputs(min(max_batched_tokens, tp_size * 5 + 1))
-    conventional = run(check_data, None)
-    native = run(check_data, candidate)
+    conventional = project(check_data, None)
+    native = project(check_data, candidate)
     backend.device_synchronize()
     if device.type == "cuda":
         torch.testing.assert_close(native, conventional, rtol=0.02, atol=0.05)

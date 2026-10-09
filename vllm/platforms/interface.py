@@ -8,6 +8,7 @@ import math
 import os
 import platform
 import sys
+from abc import ABC, abstractmethod
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
-    from vllm.v1.worker.tpsp_profile import TPSPBackend
+    from vllm.v1.worker.tpsp_profile import SPProfile
 else:
     FlexibleArgumentParser = object
 
@@ -131,6 +132,58 @@ class DeviceCapability(NamedTuple):
         """
         assert 0 <= self.minor < 10
         return self.major * 10 + self.minor
+
+
+class TPSPBackend(ABC):
+    supports_projection_bias = False
+
+    @abstractmethod
+    def __init__(self, group_name: str, device: torch.device) -> None: ...
+
+    @abstractmethod
+    def open(
+        self,
+        *,
+        dtype: torch.dtype,
+        tp_size: int,
+        hidden_size: int,
+        max_batched_tokens: int,
+        group_name: str,
+        device: torch.device,
+    ) -> Any | None: ...
+
+    @abstractmethod
+    def profile(
+        self,
+        *,
+        tp_size: int,
+        hidden_size: int,
+        input_width: int,
+        max_batched_tokens: int,
+        norm_eps: float,
+        sharded_residual: bool,
+        time_budget_s: float,
+        context: Any | None = None,
+    ) -> "SPProfile": ...
+
+    @abstractmethod
+    def fused_gemm_rs_norm_ag(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+        eps: float,
+        config: object,
+        *,
+        norm_type: str = "rms_norm",
+        projection_bias: torch.Tensor | None = None,
+        norm_bias: torch.Tensor | None = None,
+        context: Any | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+
+    @abstractmethod
+    def close(self, context: Any | None = None) -> None: ...
 
 
 class Platform:
@@ -255,7 +308,7 @@ class Platform:
         return cls.simple_compile_backend
 
     @classmethod
-    def get_tpsp_backend_cls(cls) -> "type[TPSPBackend] | None":
+    def get_tpsp_backend_cls(cls) -> type[TPSPBackend] | None:
         """Return the TPSP backend class, or None if unsupported."""
         return None
 

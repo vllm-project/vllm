@@ -103,7 +103,7 @@ def _check_tpsp_backend(
             dist.all_reduce(expected)
             expected_residual = residual.clone()
             torch.ops._C.fused_add_rms_norm(expected, expected_residual, weight, 1e-5)
-            reduced, _, gathered = backend.fused(
+            reduced, _, gathered = backend.fused_gemm_rs_norm_ag(
                 a, b, weight, local_residual, 1e-5, ChunkConfig(64), context=context
             )
             torch.testing.assert_close(
@@ -129,7 +129,7 @@ def _check_tpsp_backend(
                 expected_normalized = torch.nn.functional.layer_norm(
                     expected_residual_with_bias, (4096,), weight, norm_bias, 1e-5
                 )
-                reduced, _, gathered = backend.fused(
+                reduced, _, gathered = backend.fused_gemm_rs_norm_ag(
                     a,
                     b,
                     weight,
@@ -176,8 +176,8 @@ def _check_tpsp_backend(
 
 @pytest.mark.parametrize("tp_size", (2, 4))
 def test_tpsp_backend(tp_size: int):
-    if current_platform.device_type not in ("cuda", "xpu"):
-        pytest.skip("TPSP requires CUDA or XPU")
+    if current_platform.get_tpsp_backend_cls() is None:
+        pytest.skip("TPSP is not supported on this platform")
     if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"Requires {tp_size} devices")
     with tempfile.TemporaryDirectory() as directory:
@@ -237,7 +237,7 @@ def test_llama_tpsp_forward(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        def fused(
+        def fused_gemm_rs_norm_ag(
             self, x, weight, norm_weight, residual, eps, config, *, projection_bias
         ):
             self.calls += 1
