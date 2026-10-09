@@ -138,6 +138,7 @@ def _make_client(snapshots, client_count=1, result_metrics=True):
     client._preempt_window_elapsed = 0.0
     client._last_preempt_rates = [0.0] * num_engines
     client._last_snapshot_time = 0.0
+    client._smoothed_baseline = None
     client.eng_start_index = 0
     return client
 
@@ -189,10 +190,53 @@ def _production_snapshot_client():
 
 
 def test_production_snapshot_penalty_capped():
-    """DP1 penalty hits the cap base_est * 0.5 + 500 = 506.5; DP0 stays 0."""
+    """Result-metric penalties hit the cap base_est * 0.5 + 500 = 506.5 and
+    the uncapped KV-pressure term (8 * 6 * 0.42 = 20.16) adds on top; DP0
+    stays 0."""
     client = _production_snapshot_client()
     assert client._static_scores[0] == 0.0
-    assert client._static_scores[1] == 506.5
+    assert abs(client._static_scores[1] - 526.66) < 1e-6
+
+
+def test_kv_pressure_term_not_capped():
+    """The KV-pressure term is main's own signal and stays uncapped; only
+    the result-metric penalties are capped. waiting=500 at kv=1.0 gives
+    500 * 6 * 0.5 = 1500, above the base_est * 0.5 + 500 = 750 cap."""
+    _reset_clock()
+    client = _make_client(
+        [
+            [0, 0, 0.0, 0.0, 0],
+            [500, 0, 1.0, 0.0, 0],
+        ],
+        result_metrics=True,
+    )
+    client._apply_snapshot_metrics()
+    assert client._static_scores[0] == 0.0
+    assert client._static_scores[1] == 1500.0
+
+
+def test_queue_wait_baseline_hysteresis():
+    """The cross-engine baseline is slow-EMA smoothed (beta=0.1): a sudden
+    jump in the healthiest engine's queue wait moves the baseline only 10%
+    per snapshot instead of instantly, so other engines' ratio penalties
+    do not collapse or spike within one snapshot."""
+    _reset_clock()
+    client = _make_client(
+        [
+            [0, 0, 0.0, 0.0, 0],
+            [0, 0, 0.0, 10.0, 0],
+        ],
+        result_metrics=True,
+    )
+    client._apply_snapshot_metrics()  # baseline seeds at the 1.0 floor
+    assert client._smoothed_baseline == 1.0
+    # The healthiest engine's queue wait jumps 0 -> 10s; its EMA lands at
+    # 3.0, the raw min baseline at 3.0, and the smoothed baseline moves
+    # 10% of the way: 0.1 * 3.0 + 0.9 * 1.0 = 1.2.
+    client.lb_engines[0][3] = 10.0
+    _CLOCK["now"] += 0.1
+    client._apply_snapshot_metrics()
+    assert abs(client._smoothed_baseline - 1.2) < 1e-9
 
 
 def test_preempt_rate_survives_rapid_snapshots():

@@ -1560,6 +1560,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self._preempt_window_elapsed: float = 0.0
         self._last_preempt_rates: list[float] = [0.0] * num_engines
         self._last_snapshot_time: float = 0.0
+        # Slow-smoothed cross-engine queue-wait baseline (None until the
+        # first snapshot; moves at beta=0.1 per snapshot to avoid flapping).
+        self._smoothed_baseline: float | None = None
 
         super().__init__(
             vllm_config,
@@ -1663,7 +1666,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             baseline = smoothed[0]
         else:
             baseline = smoothed[max(1, len(smoothed) // 4)]
+        # Slow-EMA the baseline itself (beta=0.1, ~1s memory): the min tracks
+        # the healthiest engine, so a sudden queue formation or dissolution
+        # there jumps the raw baseline and spikes or collapses every other
+        # engine's quadratic ratio term within one snapshot, flapping
+        # routing. A slow reference damps both directions; the floor keeps
+        # the ratio meaningful.
         baseline = max(baseline, 1.0)
+        beta = 0.1
+        prev_baseline = self._smoothed_baseline
+        self._smoothed_baseline = (
+            baseline
+            if prev_baseline is None
+            else beta * baseline + (1.0 - beta) * prev_baseline
+        )
+        baseline = self._smoothed_baseline
 
         for idx in range(num_engines):
             waiting, running, kv_cache_usage = counts[idx][:3]
@@ -1671,22 +1688,28 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
             penalty = 0.0
             if waiting:
-                # KV pressure penalty: identical to the per-request term it
-                # replaces, now derived once per snapshot.
+                # KV pressure penalty: identical to the per-request term main
+                # applies (uncapped), now derived once per snapshot.
                 penalty += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
+            result_penalty = 0.0
             ratio = queue_time / baseline
             if ratio > 1.2:
-                penalty += 20.0 * (ratio - 1.0) ** 2
+                result_penalty += 20.0 * (ratio - 1.0) ** 2
             if preempt_rates[idx] > 5.0:
-                penalty += 30.0 * (preempt_rates[idx] - 5.0)
+                result_penalty += 30.0 * (preempt_rates[idx] - 5.0)
 
-            # Cap the penalty relative to the engine's own load estimate so
-            # noisy result metrics can't fully dominate queue-based routing.
+            # Cap only the result-metric penalties relative to the engine's
+            # own load estimate so noisy metrics can't fully dominate
+            # queue-based routing. The KV-pressure term above stays uncapped:
+            # capping it would shed less than main in extreme queue +
+            # KV-bound regimes.
             base_est = max(
                 self.client_count * self.engine_inflight[self.core_engines[idx]],
                 waiting + running,
             )
-            self._static_scores[idx] = min(penalty, base_est * 0.5 + 500.0)
+            self._static_scores[idx] = penalty + min(
+                result_penalty, base_est * 0.5 + 500.0
+            )
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
