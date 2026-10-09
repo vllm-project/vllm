@@ -278,8 +278,9 @@ def _config(**parallel):
     )
 
 
-def _deployment(monkeypatch, cdna=4, cus=256, tp=2):
-    """A deployment the kernels take (the runner module stubbed: no FlyDSL)."""
+def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
+    """A deployment the kernels take (the runner module stubbed: no FlyDSL).
+    ``target`` is the architecture FlyDSL compiles for, by default the GPU's."""
     import vllm.platforms.rocm as rocm
 
     monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
@@ -287,6 +288,11 @@ def _deployment(monkeypatch, cdna=4, cus=256, tp=2):
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
     monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: tp)
     monkeypatch.setattr(md, "_compute_units", lambda: cus)
+    gpu = "gfx942" if cdna == 3 else "gfx950"
+    monkeypatch.setattr(md, "_gpu_arch", lambda: gpu)
+    arch = ModuleType("vllm.models.deepseek_v41.amd.mono.common.arch")
+    arch.target_arch = lambda: target or gpu  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, arch.__name__, arch)
     # On gfx942, create builds the top-k extension with hipcc. These tests do
     # not need it, so they skip the build.
     from vllm.model_executor.layers.dsv41_gfx942 import topk
@@ -302,6 +308,18 @@ def _deployment(monkeypatch, cdna=4, cus=256, tp=2):
 def test_opt_in_outside_the_kernels_cdna_raises(monkeypatch, cdna):
     _deployment(monkeypatch, cdna=cdna)
     with pytest.raises(ValueError, match="needs CDNA3/4"):
+        md.MonoDecodeLayer.create(_decoder_layer(), _config())
+
+
+@pytest.mark.parametrize(
+    "cdna, tp, target", [(3, 4, "gfx950"), (4, 2, "gfx942")], ids=["gfx942", "gfx950"]
+)
+def test_opt_in_with_another_arch_for_flydsl_raises(monkeypatch, cdna, tp, target):
+    """An ARCH environment variable that names another architecture than the
+    GPU's would make FlyDSL build kernels that do not match the weight copies,
+    so the opt-in stops the server."""
+    _deployment(monkeypatch, cdna=cdna, tp=tp, target=target)
+    with pytest.raises(ValueError, match=f"makes it compile for {target}"):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 

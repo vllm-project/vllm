@@ -221,6 +221,12 @@ def _compute_units() -> int:
     return current_platform.num_compute_units(torch.accelerator.current_device_index())
 
 
+def _gpu_arch() -> str:
+    """The GPU's architecture without its feature flags, for example gfx942."""
+    props = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
+    return props.gcnArchName.split(":")[0].lower()
+
+
 def _unsupported_moe(layer: "DeepseekV4DecoderLayer", vllm_config) -> str | None:
     """Why the kernels cannot run this deployment's MoE, or None. They read every
     one of the 384 experts on each rank, TP-sharded, in AITER's A8W4 MXFP4
@@ -296,10 +302,22 @@ class MonoDecodeLayer:
             except ImportError as err:
                 why = f"needs FlyDSL and AITER's FlyDSL helpers ({err})"
             else:
+                from vllm.models.deepseek_v41.amd.mono.common.arch import target_arch
+
                 # every CTA of a launch stays resident: a partitioned GPU deadlocks
                 cus = _compute_units()
+                target, gpu = target_arch(), _gpu_arch()
                 if cus < BLOCKS:
                     why = f"needs {BLOCKS} compute units, the GPU has {cus}"
+                elif target != gpu:
+                    # FlyDSL compiles the kernels for the ARCH environment
+                    # variable when it is set, while the choice of the gfx942
+                    # weight copies follows the GPU. A stray ARCH would make
+                    # the two disagree, so it stops the server here.
+                    why = (
+                        f"needs FlyDSL to compile for the GPU's {gpu}, but the "
+                        f"ARCH environment variable makes it compile for {target}"
+                    )
         if why is not None:
             raise ValueError(f"VLLM_ROCM_MONO_DECODE {why}.")
         # the layer: the kernels serve the backbone's seams and MoE
