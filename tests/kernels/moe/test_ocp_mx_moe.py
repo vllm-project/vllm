@@ -7,7 +7,11 @@ from dataclasses import dataclass, replace
 import pytest
 import torch
 
-from tests.kernels.moe.utils import check_accuracy, check_deferred_moe_finalize
+from tests.kernels.moe.utils import (
+    check_accuracy,
+    check_deferred_moe_finalize,
+    make_dummy_moe_config,
+)
 from vllm._aiter_ops import (
     is_aiter_found,
     is_aiter_found_and_supported,
@@ -2007,6 +2011,52 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
 
     with pytest.raises(NotImplementedError, match="Unsupported reasons"):
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
+
+
+@pytest.mark.parametrize(
+    "moe_backend,w4a4,supported,expected",
+    [
+        # The checkpoint's activation wins over BF16 backends listed first.
+        ("auto", True, {"CUTLASS_MXFP4_MXFP4", "MARLIN"}, "CUTLASS_MXFP4_MXFP4"),
+        # No W4A4 kernel: run at BF16 rather than another quantized activation.
+        ("auto", True, {"FLASHINFER_TRTLLM_MXFP4_MXFP8", "MARLIN"}, "MARLIN"),
+        ("marlin", True, {"MARLIN"}, "MARLIN"),
+        # A BF16 checkpoint never gets its activations quantized.
+        ("auto", False, {"CUTLASS_MXFP4_MXFP4", "MARLIN"}, "MARLIN"),
+    ],
+)
+def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    moe_backend: str,
+    w4a4: bool,
+    supported: set[str],
+    expected: str,
+):
+    """Activations run at the checkpoint's precision when a backend supports
+    it and fall back to BF16 otherwise, never to a lower precision."""
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Dynamic,
+    )
+
+    def backend_to_kernel_cls(backend):
+        class Experts:
+            @staticmethod
+            def is_supported_config(*args):
+                return backend.name in supported, None
+
+        return [Experts]
+
+    monkeypatch.setattr(mxfp4_oracle, "backend_to_kernel_cls", backend_to_kernel_cls)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_backend = moe_backend
+
+    backend, _ = mxfp4_oracle.select_mxfp4_moe_backend(
+        moe_config, activation_key=kMxfp4Dynamic if w4a4 else None
+    )
+
+    assert backend.name == expected
 
 
 @pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
