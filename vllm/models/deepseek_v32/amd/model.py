@@ -7,6 +7,7 @@ from itertools import islice
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
@@ -40,6 +41,7 @@ from vllm.model_executor.models.utils import (
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.sequence import IntermediateTensors
 
+from .mono_decode import GlmMonoDecode
 from .rocm import DeepseekV32MLAAttention
 
 
@@ -180,6 +182,10 @@ class DeepseekV32Model(torch.nn.Module):
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
 
+        self.mono_decode: GlmMonoDecode | None = None
+        if envs.VLLM_ROCM_GLM_MONO_DECODE:
+            self.mono_decode = GlmMonoDecode(self, vllm_config)
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -190,6 +196,11 @@ class DeepseekV32Model(torch.nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if self.mono_decode is not None and self.mono_decode.eligible(
+            input_ids, inputs_embeds
+        ):
+            assert input_ids is not None
+            return self.mono_decode.forward(input_ids, positions)
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
