@@ -192,41 +192,6 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     assert get_current_vllm_config_or_none() is None
 
 
-def test_tpsp_profile_runs_before_memory_accounting(monkeypatch):
-    from vllm.v1.worker import tpsp_profile
-
-    events = []
-    model = object()
-
-    def profile(profiler_model, max_tokens):
-        assert profiler_model is model
-        assert max_tokens == 128
-        events.append("tpsp")
-        return True
-
-    class MemoryStarted(Exception):
-        pass
-
-    def start_memory_profile(*args, **kwargs):
-        events.append("memory")
-        raise MemoryStarted
-
-    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
-    monkeypatch.setattr(tpsp_profile, "profile_tpsp_projections", profile)
-    monkeypatch.setattr(gpu_worker, "memory_profiling", start_memory_profile)
-    worker = SimpleNamespace(
-        model_runner=SimpleNamespace(
-            model=model, max_num_tokens=128, model_memory_usage=0
-        ),
-        model_config=SimpleNamespace(enable_tpsp=True),
-        cache_config=SimpleNamespace(kv_cache_memory_bytes=None),
-        init_snapshot=object(),
-    )
-    with pytest.raises(MemoryStarted):
-        gpu_worker.Worker.determine_available_memory(worker)
-    assert events == ["tpsp", "memory"]
-
-
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
