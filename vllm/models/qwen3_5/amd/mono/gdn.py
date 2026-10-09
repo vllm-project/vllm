@@ -328,7 +328,7 @@ def gdn_stage(c, t, h, ch):
     k["st"] = fx.Vector(
         bo.buffer_load(rsrc(k["sbase"]), k["head_off"], vec_width=4, dtype=T.f32)
     )
-    k["alog"] = ld_f32(a["a_log"], h)
+    k["a_log"] = ld_f32(a["a_log"], h)
     k["dtb"] = ld_bf(a["dt_bias"], h)
     return k
 
@@ -381,7 +381,7 @@ def gdn_gates(c, k, t, h):
         x = f32_of(got[1][0]) + k["dtb"]
         sp = hw_log2(fx.Float32(1.0) + hw_exp(x)) * fx.Float32(LN2)
         sp = (x <= fx.Float32(SOFTPLUS_THRESHOLD)).select(sp, x)
-        g = -hw_exp(k["alog"]) * sp
+        g = -hw_exp(k["a_log"]) * sp
         fx.ptr_store(hw_exp(g), c["scal"] + 0)
         fx.ptr_store(sigmoid(f32_of(got[0][0])), c["scal"] + 1)
     gpu.barrier()
