@@ -3,7 +3,8 @@
 """Correctness tests for software fp8e4m3 <-> {fp16, bf16, fp32} conversion.
 
 These back the pre-SM89 fp8 KV cache path of the Triton attention backend: fp8
-<-> bf16 on SM80-SM88, fp8 <-> fp16 on SM75, and fp8 <-> fp32 scaling intermediates.
+<-> bf16 on SM80-SM88, fp8 <-> fp16 on SM75-SM88, and fp8 <-> fp32 scaling
+intermediates.
 The unified ``convert_to_fp8e4m3`` / ``convert_from_fp8e4m3`` (fp8e4nv.py)
 dispatch on dtype; encode is round-to-nearest-even, decode is exact.
 
