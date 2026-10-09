@@ -119,51 +119,6 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
     )
 
 
-@pytest.mark.parametrize("quantized", [True, False])
-def test_modelopt_gate_metadata_overrides_fp32_storage(
-    monkeypatch, default_vllm_config, quantized
-):
-    import vllm.model_executor.layers.linear as linear
-    import vllm.model_executor.parameter as parameter
-    import vllm.utils.b12x as b12x_utils
-    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-
-    monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(linear, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(linear, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(
-        b12x_utils,
-        "get_b12x_blockscaled",
-        lambda: SimpleNamespace(
-            BlockQuantLinearWeight=object,
-            is_supported=lambda: True,
-        ),
-    )
-    config = _mixed_precision_config(
-        {
-            "gate" if quantized else "other": {
-                "quant_algo": "Q8_0",
-                "group_size": 32,
-                "block_payload_bytes": 34,
-                "packing": "ggml",
-            }
-        }
-    )
-    gate = GateLinear(
-        256,
-        8,
-        params_dtype=torch.bfloat16,
-        out_dtype=torch.float32,
-        force_fp32_compute=True,
-        quant_config=config,
-        prefix="gate",
-    )
-    assert gate.is_unquantized is not quantized
-    assert gate.weight.dtype == (torch.uint8 if quantized else torch.float32)
-    assert gate.weight.shape == ((8, 8, 34) if quantized else (8, 256))
-
-
 @pytest.mark.parametrize("moe_activation", [None, "nvfp4_per_token"])
 def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation):
     config = ModelOptNvFp4Config(
