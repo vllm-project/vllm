@@ -1098,6 +1098,7 @@ def test_flashinfer_mla_dspark_dcp_supports_target_and_draft(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("cp_interleave_size", [1, 16, 896])
+@pytest.mark.parametrize("min_split_kv", [1, 8])
 def test_tokenspeed_mla_decode_contract(
     monkeypatch,
     causal,
@@ -1105,6 +1106,7 @@ def test_tokenspeed_mla_decode_contract(
     dcp_world_size,
     dcp_rank,
     cp_interleave_size,
+    min_split_kv,
 ):
     decode_call = None
     num_decodes = 2
@@ -1148,7 +1150,12 @@ def test_tokenspeed_mla_decode_contract(
     impl.scale = 1.0
     impl.softmax_scale = 1.0
     impl.output_scale = 1.0
-    impl._workspace_buffer = torch.empty(1, dtype=torch.int8)
+    impl._min_split_kv = min_split_kv
+    impl._max_decode_tokens = num_decode_tokens
+    workspace = torch.empty(1, dtype=torch.int8)
+    monkeypatch.setattr(
+        tokenspeed_mla_module, "_get_workspace", lambda *args: workspace
+    )
 
     metadata = SimpleNamespace(
         num_decodes=num_decodes,
@@ -1183,6 +1190,8 @@ def test_tokenspeed_mla_decode_contract(
     assert lse.shape == (num_decode_tokens, num_heads)
 
     assert decode_call is not None
+    assert decode_call["workspace_buffer"] is workspace
+    assert decode_call["min_split_kv"] == min_split_kv
     assert decode_call["query"].shape == (
         num_decodes,
         tokens_per_decode,
@@ -1217,16 +1226,23 @@ def test_tokenspeed_mla_decode_contract(
         pytest.param(896, 8 * 896 + 17, id="block-interleave-full-cycle"),
     ],
 )
-def test_tokenspeed_mla_dcp_matches_unsharded_decode(cp_interleave_size, seq_len):
+def test_tokenspeed_mla_dcp_matches_unsharded_decode(
+    monkeypatch, cp_interleave_size, seq_len
+):
     from tokenspeed_mla import tokenspeed_mla_decode
 
     from vllm.v1.attention.ops.dcp import (
         _lse_weighted_combine,
         mask_dcp_empty_shards_,
     )
+    from vllm.v1.worker.workspace import WorkspaceManager
 
     torch.manual_seed(7)
     device = torch.device("cuda")
+    workspace_manager = WorkspaceManager(device)
+    monkeypatch.setattr(
+        tokenspeed_mla_module, "current_workspace_manager", lambda: workspace_manager
+    )
     dcp_world_size = 8
     kernel_block_size = 64
     num_heads = 128
@@ -1257,7 +1273,9 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(cp_interleave_size, seq_len
     global_tokens = (torch.randn(seq_len, head_size, device=device) * 0.1).to(
         torch.float8_e4m3fn
     )
-    workspace = tokenspeed_mla_module._get_workspace(device, num_heads, kv_lora_rank)
+    workspace = tokenspeed_mla_module._get_workspace(
+        device, num_heads, kv_lora_rank, 1, query.shape[1]
+    )
     global_cache, global_block_table = make_paged_cache(global_tokens)
     global_seq_len = torch.tensor([seq_len], dtype=torch.int32, device=device)
     reference, _ = tokenspeed_mla_decode(
@@ -1301,7 +1319,8 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(cp_interleave_size, seq_len
         impl.scale = head_size**-0.5
         impl.softmax_scale = None
         impl.output_scale = None
-        impl._workspace_buffer = workspace
+        impl._min_split_kv = 1
+        impl._max_decode_tokens = query.shape[1]
         metadata = SimpleNamespace(
             num_decodes=1,
             num_decode_tokens=query.shape[1],
