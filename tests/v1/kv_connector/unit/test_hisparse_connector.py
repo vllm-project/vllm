@@ -412,7 +412,7 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
     metadata = scheduler.build_connector_meta(scheduler_output)
 
     update = metadata.residency_updates[resumed.request_id]
-    assert update.start_page == 0
+    assert update.pages == [0, 1, 2, 3]
     assert update.block_ids[0][:3] == copy_ids[:3]
     assert manager.get_block_ids(resumed.request_id)[2] == core_row
     assert core_row[:3] == [0, 0, 0]
@@ -421,22 +421,22 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
 def test_residency_updates_persist_by_state_row():
     """Updates name requests by batch row but are stored by state row.
 
-    A suffix update for a lost page must leave the earlier pages and the other
-    request's row intact across steps that reorder the batch.
+    An update for a lost page and an appended page must leave the other pages
+    and the other request's row intact across steps that reorder the batch.
     """
     table = torch.zeros((4, 2, 4), dtype=torch.int32)
     update_hisparse_residency(
         table,
         {
-            "a": SparseKVResidencyUpdate(0, ([1, 2, 3], [11, 12, 13])),
-            "b": SparseKVResidencyUpdate(0, ([4, 5], [14, 15])),
+            "a": SparseKVResidencyUpdate([0, 1, 2], ([1, 2, 3], [11, 12, 13])),
+            "b": SparseKVResidencyUpdate([0, 1], ([4, 5], [14, 15])),
         },
         ["a", "b"],
         torch.tensor([2, 0], dtype=torch.int32),
     )
     update_hisparse_residency(
         table,
-        {"a": SparseKVResidencyUpdate(1, ([0, 3, 6], [0, 13, 16]))},
+        {"a": SparseKVResidencyUpdate([1, 3], ([0, 6], [0, 16]))},
         ["b", "a"],
         torch.tensor([0, 2], dtype=torch.int32),
     )

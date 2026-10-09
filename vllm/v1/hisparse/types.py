@@ -30,10 +30,10 @@ class SparseKVRowMirror:
 
 @dataclass(frozen=True)
 class SparseKVResidencyUpdate:
-    """GPU block ids of a request's resident pages from ``start_page`` on, per
-    resident group. A null block id means the page is read from the host."""
+    """GPU block ids of some of a request's resident pages, per resident group.
+    A null block id means the page is read from the host."""
 
-    start_page: int
+    pages: list[int]
     block_ids: tuple[list[int], ...]
 
 

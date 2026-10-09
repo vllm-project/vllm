@@ -66,7 +66,10 @@ class _HiSparseRequestState:
     unpinned_pages: set[int] = field(default_factory=set)
     # Prefix pages whose GPU copies are adopted after the admitting allocation.
     pages_to_adopt: int = 0
+    # The worker holds this request's residency for every page below
+    # synced_pages, except the stale pages changed since it was sent.
     synced_pages: int = 0
+    stale_pages: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -271,7 +274,8 @@ class HiSparseCoordinator:
                 if manager.adopt_resident_page(request_id, host_idx, block):
                     manager.block_pool.touch([block])
                     state.pinned_clean.add(host_idx)
-                    state.synced_pages = min(state.synced_pages, host_idx)
+                    if host_idx < state.synced_pages:
+                        state.stale_pages.add(host_idx)
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
@@ -398,7 +402,8 @@ class HiSparseCoordinator:
             if owners is not None:
                 owners.discard((request_id, page_idx))
         state.unpinned_pages.discard(page_idx)
-        state.synced_pages = min(state.synced_pages, page_idx)
+        if page_idx < state.synced_pages:
+            state.stale_pages.add(page_idx)
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
 
@@ -696,7 +701,8 @@ class HiSparseCoordinator:
     def take_residency_updates(
         self, request_ids: Iterable[str]
     ) -> dict[str, SparseKVResidencyUpdate]:
-        """Resident block ids the worker lacks for the scheduled requests.
+        """Resident block ids the worker lacks for the scheduled requests:
+        stale pages plus pages appended since the last update.
 
         Requests that are not scheduled keep their changes until they are:
         only a scheduled request's residency is read.
@@ -709,18 +715,29 @@ class HiSparseCoordinator:
             state = self._get_request_state(request_id)
             num_pages = len(first.req_to_blocks.get(request_id, ()))
             start = state.synced_pages
-            if start >= num_pages:
+            if not state.stale_pages and start >= num_pages:
                 continue
+            stale_pages = sorted(state.stale_pages)
+            block_ids: list[list[int]] = []
+            for manager in self.resident_managers:
+                null_block_id = manager.block_pool.null_block.block_id
+                group_block_ids = [
+                    null_block_id if block is None else block.block_id
+                    for block in (
+                        manager.get_resident_page(request_id, page_idx)
+                        for page_idx in stale_pages
+                    )
+                ]
+                group_block_ids.extend(
+                    block.block_id
+                    for block in manager.get_resident_pages(request_id, start)
+                )
+                block_ids.append(group_block_ids)
             updates[request_id] = SparseKVResidencyUpdate(
-                start_page=start,
-                block_ids=tuple(
-                    [
-                        block.block_id
-                        for block in manager.get_resident_pages(request_id, start)
-                    ]
-                    for manager in self.resident_managers
-                ),
+                pages=[*stale_pages, *range(start, num_pages)],
+                block_ids=tuple(block_ids),
             )
+            state.stale_pages.clear()
             state.synced_pages = num_pages
         return updates
 

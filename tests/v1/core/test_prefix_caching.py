@@ -388,8 +388,32 @@ def test_hisparse_reports_when_context_is_fully_resident():
     lost = [page for page, block_id in enumerate(resident_ids) if block_id == 0]
     assert lost
     update = coordinator.take_residency_updates([request.request_id])
-    assert update[request.request_id].start_page == lost[0]
-    assert update[request.request_id].block_ids[0] == resident_ids[lost[0] :]
+    assert update[request.request_id].pages == lost
+    assert update[request.request_id].block_ids[0] == [0] * len(lost)
+
+
+def test_hisparse_residency_update_sends_only_changed_pages():
+    """Losing one early page must not resend the pages after it: per-step
+    residency updates would otherwise grow with the context length."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    tokens = list(range(6 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator = get_hisparse_coordinator(manager)
+    for hot_manager in coordinator.hot_managers:
+        hot_manager.require_hot(request.request_id)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator.take_residency_updates([request.request_id])
+    pool = manager.block_pool
+    num_never_used = pool.get_num_free_blocks()
+    # Pages unpin as their host copies complete, so page 0 is reused first.
+    _publish_hisparse_pages(manager)
+    pool.get_new_blocks(num_never_used + 1)
+
+    update = coordinator.take_residency_updates([request.request_id])
+
+    assert update[request.request_id].pages == [0]
+    assert update[request.request_id].block_ids == ([0],)
 
 
 def test_hisparse_readmitted_request_resends_its_full_residency():
@@ -407,7 +431,7 @@ def test_hisparse_readmitted_request_resends_its_full_residency():
 
     assert _allocate_scheduled(manager, request, len(tokens)) is not None
     update = coordinator.take_residency_updates([request.request_id])
-    assert update[request.request_id].start_page == 0
+    assert update[request.request_id].pages == [0, 1]
     assert update[request.request_id].block_ids[0] == _resident_block_ids(
         manager, request.request_id
     )

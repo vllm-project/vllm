@@ -1129,18 +1129,25 @@ def update_hisparse_residency(
     if not updates:
         return
     batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
+    num_groups = residency.shape[1]
     rows: list[int] = []
     pages: list[int] = []
-    block_ids: list[tuple[int, ...]] = []
+    block_ids: list[list[int]] = [[] for _ in range(num_groups)]
     for request_id, update in updates.items():
-        num_pages = len(update.block_ids[0])
-        rows.extend([batch_rows[request_id]] * num_pages)
-        pages.extend(range(update.start_page, update.start_page + num_pages))
-        block_ids.extend(zip(*update.block_ids, strict=True))
+        rows.append(batch_rows[request_id])
+        pages.extend(update.pages)
+        for group_block_ids, update_block_ids in zip(
+            block_ids, update.block_ids, strict=True
+        ):
+            group_block_ids.extend(update_block_ids)
+    host_values = np.empty((len(pages), 2 + num_groups), dtype=np.int32)
+    host_values[:, 0] = np.repeat(
+        rows, [len(update.pages) for update in updates.values()]
+    )
+    host_values[:, 1] = pages
+    host_values[:, 2:] = np.asarray(block_ids, dtype=np.int32).T
     values = async_tensor_h2d(
-        np.column_stack([rows, pages, np.asarray(block_ids, dtype=np.int32)]),
-        device=request_state_indices.device,
-        dtype=torch.int32,
+        host_values, device=request_state_indices.device, dtype=torch.int32
     )
     state_rows = request_state_indices[values[:, 0]]
     residency[state_rows, :, values[:, 1]] = values[:, 2:]
