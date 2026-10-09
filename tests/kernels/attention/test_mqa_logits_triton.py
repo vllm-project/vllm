@@ -432,3 +432,17 @@ def test_fp8_paged_mqa_logits_triton_strided_pool_no_int32_overflow():
     torch.testing.assert_close(
         out_triton[finite], out_torch[finite], atol=_ATOL, rtol=_RTOL
     )
+
+
+def test_sparse_indexer_fp8_byte_padding():
+    """Packing storage bytes preserves FP8 values without native FP8 conversion."""
+    from vllm.v1.attention.ops.common import pack_seq_triton
+
+    values = torch.arange(24, device="cuda", dtype=torch.uint8).reshape(6, 2, 2)
+    lengths = torch.tensor([1, 3, 2], device="cuda")
+    packed = pack_seq_triton(values, lengths, pad_value=0)
+    expected = torch.zeros((3, 3, 2, 2), device="cuda", dtype=torch.uint8)
+    expected[0, :1] = values[:1]
+    expected[1, :3] = values[1:4]
+    expected[2, :2] = values[4:]
+    torch.testing.assert_close(packed, expected, atol=0, rtol=0)
