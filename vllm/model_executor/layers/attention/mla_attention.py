@@ -802,18 +802,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype,
             k_scale,
         )
-        if cache is not None:
-            mirror_target = cache.mirror_write_target(kv_c_normed.shape[0])
-            if mirror_target is not None:
-                mirror_cache, mirror_slots = mirror_target
-                self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                    kv_c_normed,
-                    k_pe,
-                    mirror_cache,
-                    mirror_slots,
-                    kv_cache_dtype,
-                    k_scale,
-                )
 
     def prepare_kv_cache_update(
         self, attn_metadata: "MLACommonMetadata | None"
@@ -1388,14 +1376,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
-        # SM100 FlashMLA paged kernels also express TMA coordinates in token rows.
-        uses_tma_rows = (
-            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
-            and self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
-            and current_platform.is_device_capability_family(100)
-        )
-        if self._uses_flat_kv_cache() or uses_tma_rows:
-            spec = replace(spec, block_stride_alignment=spec.state_content_size_bytes)
         return spec
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):

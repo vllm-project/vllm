@@ -857,13 +857,14 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
 
 
 class TestDeviceIds:
-    def test_device_ids_with_cvd_out_of_range(self, monkeypatch):
+    @pytest.mark.parametrize("device_ids", [[0, 2], [-1]])
+    def test_device_ids_with_cvd_out_of_range(self, monkeypatch, device_ids):
         """--device-ids index beyond the CVD set raises ValueError."""
         from vllm.platforms import current_platform
 
         key = current_platform.device_control_env_var
         monkeypatch.setenv(key, "4,5")
-        args = EngineArgs(model="m", device_ids=[0, 2])
+        args = EngineArgs(model="m", device_ids=device_ids)
         with pytest.raises(ValueError, match="out of range"):
             args._resolve_device_ids()
 

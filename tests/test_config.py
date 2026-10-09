@@ -843,7 +843,6 @@ def test_breakable_cudagraph_platform_default(
         ("bi-off", 2048, (16, 8), 6144, 1, False),
         ("opt-out", 2048, (16, 8), 6144, 1, False),
         ("eager", 2048, (16, 8), 6144, 1, False),
-        ("sp", 2048, (16, 8), 6144, 1, False),
         ("fp16", 2048, (16, 8), 6144, 1, False),
         ("quantized", 2048, (16, 8), 6144, 1, False),
         ("untuned", 4096, (32, 32), 11008, 1, False),
@@ -886,11 +885,7 @@ def test_batch_invariant_breakable_cudagraph(
         get_num_kv_heads=lambda pc: heads[1],
     )
     config.parallel_config = SimpleNamespace(tensor_parallel_size=tp)
-    config.compilation_config = (
-        CompilationConfig(pass_config=PassConfig(enable_sp=True))
-        if case == "sp"
-        else CompilationConfig()
-    )
+    config.compilation_config = CompilationConfig()
     try:
         assert config._maybe_enable_breakable_cudagraph() is expected
         if expected:
@@ -1021,7 +1016,6 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         "FakeAttentionBackend",
         uniform_decode_query_len=4,
         use_v2_model_runner=use_v2_model_runner,
-        tensor_parallel_size=1,
     )
 
     assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
@@ -1104,7 +1098,6 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
             "FakeAttentionBackend",
             uniform_decode_query_len=1,
             use_v2_model_runner=True,
-            tensor_parallel_size=1,
             kv_cache_config=kv_cache_config,
             max_num_reqs=256,
         )
@@ -1117,7 +1110,6 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
         "FakeAttentionBackend",
         uniform_decode_query_len=1,
         use_v2_model_runner=True,
-        tensor_parallel_size=1,
         kv_cache_config=kv_cache_config,
         max_num_reqs=256,
         is_profiling=True,
@@ -3359,8 +3351,6 @@ def test_vllm_config_explicit_overrides():
     take precedence over callable defaults, across different models and
     optimization levels.
     """
-    from vllm.config.compilation import PassConfig
-
     quantized_model = ModelConfig("RedHatAI/Llama-3.2-1B-FP8")
     moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
     regular_model = ModelConfig("Qwen/Qwen1.5-7B")
@@ -3494,6 +3484,12 @@ def test_scheduler_config_init():
     with pytest.raises(AttributeError):
         # InitVar does not become an attribute
         print(SchedulerConfig.default_factory().max_model_len)
+
+
+def test_scheduler_config_rejects_zero_max_num_scheduled_tokens():
+    """A zero token budget never schedules anything, so generation would hang."""
+    with pytest.raises(ValidationError, match="max_num_scheduled_tokens"):
+        SchedulerConfig.default_factory(max_num_scheduled_tokens=0)
 
 
 @pytest.mark.parametrize(
