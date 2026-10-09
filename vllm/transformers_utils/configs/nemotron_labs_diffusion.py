@@ -10,10 +10,10 @@ backbone fields and derives ``canvas_length`` from ``block_size``.
 
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 
-class NemotronLabsDiffusionConfig(PretrainedConfig):
+class NemotronLabsDiffusionConfig(PreTrainedConfig):
     model_type = "nemotron_labs_diffusion"
 
     def __init__(
@@ -65,7 +65,7 @@ class NemotronLabsDiffusionConfig(PretrainedConfig):
 
         # Normalize RoPE config: the checkpoint carries the same YaRN dict
         # under both ``rope_parameters`` and (legacy) ``rope_scaling``. Pop
-        # the legacy key so PretrainedConfig's rope_scaling property setter
+        # the legacy key so PreTrainedConfig's rope_scaling property setter
         # doesn't overwrite the normalized dict below.
         rope_scaling = kwargs.pop("rope_scaling", None)
         rope_parameters = dict(rope_parameters or rope_scaling or {})
