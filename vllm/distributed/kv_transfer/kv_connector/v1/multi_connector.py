@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -30,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -294,6 +296,26 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Worker-side methods
     # ==============================
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Forward a custom KV cache memory pool from a child connector.
+
+        KV cache is allocated once and can only live in one pool, so at
+        most one child may provide a context.
+        """
+        found: list[tuple[str, AbstractContextManager]] = []
+        for connector in self._connectors:
+            if (ctx := connector.get_mem_pool_context()) is not None:
+                found.append((type(connector).__name__, ctx))
+
+        if len(found) > 1:
+            names = [name for name, _ in found]
+            raise ValueError(
+                f"Multiple connectors provide a KV cache memory pool {names}; "
+                "KV cache is allocated once and can only live in one pool. "
+                "Configure custom_mem_pool on at most one connector."
+            )
+        return found[0][1] if found else None
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         for c in self._connectors:
             c.start_load_kv(forward_context, **kwargs)
@@ -405,6 +427,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Scheduler-side methods
     # ==============================
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        connector = self._connectors[self._requests_to_connector[request.request_id]]
+        return connector.get_loaded_kv_cache_group_ids(request)
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -425,6 +451,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 self._requests_to_connector[request.request_id] = i
                 to_return = (toks, load_async)
         return to_return
+
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> dict[CacheHitSource, int]:
+        chosen_connector = self._requests_to_connector.get(request.request_id)
+        if chosen_connector is None:
+            return super().get_external_cache_hit_sources(request, num_external_tokens)
+        return self._connectors[chosen_connector].get_external_cache_hit_sources(
+            request, num_external_tokens
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

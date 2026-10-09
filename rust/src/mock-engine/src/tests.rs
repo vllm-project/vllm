@@ -29,6 +29,7 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
         coordinator_mode: None,
         model_name: "mock-model".to_string(),
         client_index: 0,
+        engine_stats_enabled: true,
     }
 }
 
@@ -122,11 +123,11 @@ async fn chunk_size_one_outputs_one_token_per_update() {
     assert_eq!(first.finish_reason, None);
     assert_eq!(
         first.prefill_stats,
-        Some(PrefillStats {
+        Some(Box::new(PrefillStats {
             num_prompt_tokens: 3,
             num_computed_tokens: 3,
             ..Default::default()
-        })
+        }))
     );
     let second = stream.next().await.expect("second").expect("second ok");
     assert_eq!(second.new_token_ids.len(), 1);
