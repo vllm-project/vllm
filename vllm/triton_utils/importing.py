@@ -7,7 +7,7 @@ from importlib.util import find_spec
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform, vllm_version_matches_substr
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 
@@ -109,6 +109,7 @@ class TritonPlaceholder(types.ModuleType):
         self.heuristics = self._dummy_decorator("heuristics")
         self.Config = self._dummy_decorator("Config")
         self.cdiv = cdiv
+        self.next_power_of_2 = next_power_of_2
         self.language = TritonLanguagePlaceholder()
 
     def _dummy_decorator(self, name):

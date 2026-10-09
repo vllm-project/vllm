@@ -73,6 +73,11 @@ model_tests() {
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
+
+  # Arm has no Triton, so this covers the torch kernels behind Model Runner V2.
+  docker exec "$CONTAINER_NAME" bash -c "
+    set -e
+    pytest -x -v -s tests/v1/worker/test_cpu_sampler.py tests/v1/e2e/test_cpu_model_runner_v2.py"
 }
 
 serving_tests() {
