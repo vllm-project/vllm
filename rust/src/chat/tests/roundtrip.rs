@@ -270,7 +270,12 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            // The MiniMax M3 tool parser builds no tool grammar, so the schema
+            // excludes the calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
         }
     }
 
@@ -447,7 +452,12 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            // The Seed-OSS tool parser builds no tool grammar, so the schema
+            // excludes the calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
         }
     }
 

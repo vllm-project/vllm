@@ -3,16 +3,14 @@
 
 //! Output grammar construction shared by reasoning and tool parsers.
 
-use std::sync::Once;
 use std::{fmt, str::FromStr};
 
 use serde::Serialize;
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
-use tracing::warn;
 use xgrammar_structural_tag::builders::{StructuralTagBuilder, StructuralTagOptions};
 use xgrammar_structural_tag::format::Format;
-use xgrammar_structural_tag::tool::{AllowedToolsMode, ToolChoiceValue};
+use xgrammar_structural_tag::tool::ToolChoiceValue;
 use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, NormalizedToolChoice, ToolChoice, ToolParam,
     build_structural_tag,
@@ -239,49 +237,6 @@ pub(crate) fn normalize_tool_choice(
     let normalized =
         xgrammar_structural_tag::normalize_tool_choice(&tools, ctx.tool_choice.clone())?;
     Ok(Some(normalized))
-}
-
-/// How a request's tool choice combines with its answer constraint.
-pub(crate) enum AnswerTools {
-    /// No tool may be called, so the grammar is the answer alone.
-    None,
-    /// The model chooses between the answer and tool calls. The calls are
-    /// built from this choice, the request's own with the call made
-    /// obligatory: built from `auto`, they would also admit free text in
-    /// place of the answer.
-    Optional(ToolChoice),
-    /// The request requires a tool call, so the answer constraint does not
-    /// apply.
-    Required,
-}
-
-/// Classify how the request's tool choice combines with its answer constraint.
-pub(crate) fn answer_tools(ctx: &OutputGrammarContext<'_>) -> AnswerTools {
-    if ctx.tools.is_empty() {
-        return AnswerTools::None;
-    }
-    let mut required = ctx.tool_choice.clone();
-    match &mut required {
-        ToolChoice::Value(ToolChoiceValue::None) => return AnswerTools::None,
-        ToolChoice::Value(value @ ToolChoiceValue::Auto) => *value = ToolChoiceValue::Required,
-        ToolChoice::AllowedTools(choice) if choice.allowed_tools.mode == AllowedToolsMode::Auto => {
-            choice.allowed_tools.mode = AllowedToolsMode::Required;
-        }
-        ToolChoice::FlatAllowedTools(choice) if choice.mode == AllowedToolsMode::Auto => {
-            choice.mode = AllowedToolsMode::Required;
-        }
-        _ => return AnswerTools::Required,
-    }
-    AnswerTools::Optional(required)
-}
-
-/// Warn that a request's answer constraint is ignored because its tool
-/// choice requires a call, as the Python frontend does.
-pub(crate) fn warn_answer_ignored_once() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        warn!("structured outputs are ignored because tool_choice forces a tool call");
-    });
 }
 
 /// Whether the request asks for a tool grammar at all.

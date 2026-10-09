@@ -20,6 +20,7 @@ mod seed_oss;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
+use std::sync::Once;
 
 pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser, DeepSeekV41ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
@@ -39,8 +40,11 @@ pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::warn;
+use xgrammar_structural_tag::ToolChoice;
 pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 use xgrammar_structural_tag::format::Format;
+use xgrammar_structural_tag::tool::{AllowedToolsMode, ToolChoiceValue};
 
 use crate::output_grammar::{self, OutputGrammarContext};
 use crate::utils;
@@ -196,21 +200,54 @@ pub trait ToolParser: Send {
     }
 
     /// Build the language of everything the model may emit after reasoning
-    /// ends: visible text plus tool calls. `None` means no tool grammar applies.
+    /// ends for the context's tool choice: visible text plus tool calls. `None`
+    /// means no tool grammar applies.
     ///
     /// The default forwards to [`Self::structural_tag_builder`] with reasoning
     /// disabled, which is exactly today's strict-tool-calling grammar.
-    fn build_visible_format(
+    fn build_call_format(
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<Format>> {
         output_grammar::visible_format_from_builder(self.structural_tag_builder(), ctx)
     }
 
+    /// Build the visible language with the request's answer constraint
+    /// composed in, as the Python frontend does: an optional call becomes
+    /// `Or[calls built as required, answer]`, and a tool choice that obliges a
+    /// call ignores the answer. Parsers override [`Self::build_call_format`]
+    /// instead.
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let Some(answer) = ctx.answer else {
+            return self.build_call_format(ctx);
+        };
+        match call_required(ctx.tool_choice) {
+            // Calls built from the optional choice would also admit free text
+            // in place of the answer.
+            Some(tool_choice) => {
+                let calls = self.build_call_format(&OutputGrammarContext {
+                    tool_choice: &tool_choice,
+                    ..*ctx
+                })?;
+                Ok(calls.map(|calls| Format::or(vec![calls, answer.clone()])))
+            }
+            None => {
+                let calls = self.build_call_format(ctx)?;
+                if calls.is_some() {
+                    warn_answer_ignored_once();
+                }
+                Ok(calls)
+            }
+        }
+    }
+
     /// Return the xgrammar structural-tag builder used for strict tool calling.
     ///
     /// To be deprecated: this only exists to back the default
-    /// [`Self::build_visible_format`]. New parsers should override that method
+    /// [`Self::build_call_format`]. New parsers should override that method
     /// directly instead of exposing a builder.
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
@@ -241,6 +278,32 @@ pub trait ToolParser: Send {
     /// Callers may use this to recover any text that failed to parse after an error
     /// and output it as normal text.
     fn reset(&mut self) -> String;
+}
+
+/// The tool choice with an optional call made obligatory, or `None` when the
+/// choice forbids or already obliges a call.
+fn call_required(tool_choice: &ToolChoice) -> Option<ToolChoice> {
+    let mut required = tool_choice.clone();
+    match &mut required {
+        ToolChoice::Value(value @ ToolChoiceValue::Auto) => *value = ToolChoiceValue::Required,
+        ToolChoice::AllowedTools(choice) if choice.allowed_tools.mode == AllowedToolsMode::Auto => {
+            choice.allowed_tools.mode = AllowedToolsMode::Required;
+        }
+        ToolChoice::FlatAllowedTools(choice) if choice.mode == AllowedToolsMode::Auto => {
+            choice.mode = AllowedToolsMode::Required;
+        }
+        _ => return None,
+    }
+    Some(required)
+}
+
+/// Warn that a request's answer constraint is ignored because its tool
+/// choice obliges a call, as the Python frontend does.
+fn warn_answer_ignored_once() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        warn!("structured outputs are ignored because tool_choice forces a tool call");
+    });
 }
 
 /// Extension methods for easily testing `ToolParser` implementations.

@@ -4,13 +4,9 @@
 //! Adapter that combines reasoning and tool parsers.
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
-use xgrammar_structural_tag::format::Format;
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
-use crate::output_grammar::{
-    self, AnswerTools, BuiltOutputGrammar, OutputGrammarContext, answer_tools,
-    warn_answer_ignored_once,
-};
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
 use crate::reasoning::ReasoningParser;
 use crate::tool::{Tool, ToolParser, ToolParserOutput};
 
@@ -64,61 +60,6 @@ impl CombinedParser {
     }
 }
 
-/// The language of everything after reasoning, and whether it holds tool
-/// calls built by the tool parser.
-struct VisibleFormat {
-    format: Format,
-    has_calls: bool,
-}
-
-impl CombinedParser {
-    /// Build the visible language: the tool parser's calls, the user's answer
-    /// constraint, or both, as the tool choice allows.
-    fn build_visible_format(
-        &self,
-        ctx: &OutputGrammarContext<'_>,
-    ) -> output_grammar::Result<Option<VisibleFormat>> {
-        let calls = |ctx: &OutputGrammarContext<'_>| -> output_grammar::Result<Option<Format>> {
-            match self.tool.as_ref() {
-                Some(tool) => tool.build_visible_format(ctx),
-                None => Ok(None),
-            }
-        };
-        let with_calls = |format| VisibleFormat {
-            format,
-            has_calls: true,
-        };
-        let Some(answer) = ctx.answer else {
-            return Ok(calls(ctx)?.map(with_calls));
-        };
-        let answer_only = || {
-            Some(VisibleFormat {
-                format: answer.clone(),
-                has_calls: false,
-            })
-        };
-        Ok(match answer_tools(ctx) {
-            AnswerTools::None => answer_only(),
-            AnswerTools::Optional(required) => {
-                let required = OutputGrammarContext {
-                    tool_choice: &required,
-                    ..*ctx
-                };
-                match calls(&required)? {
-                    Some(calls) => Some(with_calls(Format::or(vec![calls, answer.clone()]))),
-                    // Without a tool grammar the calls cannot be held next to
-                    // the answer, so the answer applies alone, as in Python.
-                    None => answer_only(),
-                }
-            }
-            AnswerTools::Required => {
-                warn_answer_ignored_once();
-                calls(ctx)?.map(with_calls)
-            }
-        })
-    }
-}
-
 impl UnifiedParser for CombinedParser {
     fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
     where
@@ -146,7 +87,19 @@ impl UnifiedParser for CombinedParser {
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
-        let Some(visible) = self.build_visible_format(ctx)? else {
+        // Without an active reasoning or tool parser, the request's own
+        // constraint applies unchanged.
+        if self.reasoning.is_none() && self.tool.is_none() {
+            return Ok(None);
+        }
+
+        // The tool parser composes the answer constraint into its calls where
+        // it can; without a tool grammar, the answer is the visible language.
+        let calls = match self.tool.as_ref() {
+            Some(tool) => tool.build_visible_format(ctx)?,
+            None => None,
+        };
+        let Some(visible) = calls.or_else(|| ctx.answer.cloned()) else {
             return Ok(None);
         };
         // The reasoning parser may wrap that language with the reasoning phase
@@ -155,16 +108,13 @@ impl UnifiedParser for CombinedParser {
         // engine can skip its own reasoning gate; if it declines, the grammar
         // covers only the final output and the engine gate stays in charge.
         let wrapped = match self.reasoning.as_ref() {
-            Some(reasoning) => reasoning.wrap_visible_format(ctx, &visible.format)?,
+            Some(reasoning) => reasoning.wrap_visible_format(ctx, &visible)?,
             None => None,
         };
-        Ok(match wrapped {
-            Some(full) => Some(BuiltOutputGrammar::from_token_zero(full)),
-            // Without the reasoning phase, an answer alone is just the user's
-            // constraint, which the engine already applies after reasoning.
-            None if !visible.has_calls => None,
-            None => Some(BuiltOutputGrammar::final_output_only(visible.format)),
-        })
+        Ok(Some(match wrapped {
+            Some(full) => BuiltOutputGrammar::from_token_zero(full),
+            None => BuiltOutputGrammar::final_output_only(visible),
+        }))
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
@@ -224,7 +174,8 @@ mod tests {
 
     use super::CombinedParser;
     use crate::output_grammar::{
-        GrammarCoverage, OutputGrammarContext, full_format_from_builder_for_test,
+        BuiltOutputGrammar, GrammarCoverage, OutputGrammarContext,
+        full_format_from_builder_for_test,
     };
     use crate::reasoning::{
         DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, Glm45ReasoningParser,
@@ -786,16 +737,22 @@ mod tests {
     }
 
     #[test]
-    fn answer_alone_without_a_reasoning_phase_stays_on_its_wire_field() {
+    fn answer_without_a_reasoning_phase_covers_the_final_output() {
         let tools = test_tools();
         let answer = Format::regex("[a-z]+");
-        let parser = CombinedParser::new(None, Some(Qwen3XmlToolParser::create(&tools).unwrap()));
-
         let none = ToolChoice::none();
-        let ctx = grammar_ctx(&tools, &none, Some(&answer));
+        let auto = ToolChoice::auto();
+
+        // Without an active parser, the request keeps its own constraint.
+        let parser = CombinedParser::new(None, None);
+        let ctx = grammar_ctx(&tools, &auto, Some(&answer));
         assert!(parser.build_output_grammar(&ctx).unwrap().is_none());
 
-        let auto = ToolChoice::auto();
+        let parser = CombinedParser::new(None, Some(Qwen3XmlToolParser::create(&tools).unwrap()));
+        let ctx = grammar_ctx(&tools, &none, Some(&answer));
+        let alone = parser.build_output_grammar(&ctx).unwrap().unwrap();
+        assert_eq!(alone, BuiltOutputGrammar::final_output_only(answer.clone()));
+
         let ctx = grammar_ctx(&tools, &auto, Some(&answer));
         let composed = parser.build_output_grammar(&ctx).unwrap().unwrap();
         assert_eq!(composed.coverage, GrammarCoverage::FinalOutputOnly);
