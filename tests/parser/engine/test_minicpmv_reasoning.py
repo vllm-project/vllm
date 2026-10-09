@@ -85,6 +85,23 @@ def test_reasoning_parser_is_registered():
     assert parser_cls.__name__ == "MiniCPMVParserReasoningAdapter"
 
 
+def test_thinking_defaults_to_the_chat_template(mock_tokenizer):
+    """Without `enable_thinking`, the grammar must wait for reasoning.
+
+    The chat template ends the assistant turn with `<think>` unless the flag is
+    explicitly false, so the model reasons by default. This is the flag
+    `serving.py` latches into the structured-output gate, so a non-thinking
+    default both disables the grammar and leaks the thinking into `content`.
+    """
+
+    def reasoning_pending(**kwargs):
+        return not _make_parser(mock_tokenizer, **kwargs).is_reasoning_end([1, 2])
+
+    assert reasoning_pending() is True  # default matches the template
+    assert reasoning_pending(enable_thinking=True) is True
+    assert reasoning_pending(enable_thinking=False) is False
+
+
 def test_no_minicpmv_tool_parser_is_registered():
     """MiniCPM-V deliberately registers no tool parser.
 

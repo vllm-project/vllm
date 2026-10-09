@@ -270,7 +270,10 @@ class MiniCPMVParser(Qwen3Parser):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking_enabled = chat_kwargs.get("enable_thinking", False)
+        # The chat template emits `<think>` unless `enable_thinking` is
+        # explicitly false, so the grammar must default to thinking too, or the
+        # reasoning span is misread as content.
+        thinking_enabled = chat_kwargs.get("enable_thinking", True)
         kwargs.setdefault("parser_engine_config", minicpmv_config(thinking_enabled))
         super().__init__(tokenizer, tools, **kwargs)
         # ``Qwen3Parser.__init__`` reads the same key with a default of True,

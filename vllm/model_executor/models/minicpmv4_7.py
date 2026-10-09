@@ -29,8 +29,12 @@ logger = init_logger(__name__)
 
 class MiniCPMV4_7ProcessingInfo(MiniCPMV4_6ProcessingInfo):
     def _mm_max_slice_nums(self, **kwargs: object) -> int | None:
-        merged = self._merge_and_resolve_mm_processor_kwargs(kwargs)
+        # No schema resolution here: it would call back into `get_hf_processor`
+        # below, which resolves this same value.
+        merged = self.ctx.get_merged_mm_kwargs(kwargs)
         max_slice = _scoped_mm_kwarg(merged, "image", "max_slice_nums")
+        if max_slice is None:
+            max_slice = merged.get("max_slice_nums")
         if max_slice is None:
             return None
         return int(max_slice)
