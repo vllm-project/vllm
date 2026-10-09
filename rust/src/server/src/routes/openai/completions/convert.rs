@@ -144,6 +144,7 @@ pub(super) fn prepare_completion_request(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
+            stream_interval: request.stream_interval,
         },
         decode_options: TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
@@ -211,6 +212,8 @@ fn completion_echo_text(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use axum::http::HeaderMap;
     use serde_json::json;
     use validator::Validate;
@@ -400,7 +403,8 @@ mod tests {
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
             "ignore_eos": true,
-            "skip_special_tokens": false
+            "skip_special_tokens": false,
+            "stream_interval": 4
         }))
         .expect("parse request");
 
@@ -436,6 +440,10 @@ mod tests {
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
+        assert_eq!(
+            prepared.text_request.sampling_params.stream_interval,
+            NonZeroU32::new(4)
+        );
     }
 
     #[test]

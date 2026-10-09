@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
@@ -147,6 +148,11 @@ pub struct SamplingParams {
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
+    /// Number of newly generated tokens to batch into each streamed output.
+    /// Raises the interval above the frontend-level `--stream-interval`;
+    /// values below it are clamped up to it. The first and final outputs are
+    /// always emitted immediately.
+    pub stream_interval: Option<NonZeroU32>,
 }
 
 #[allow(clippy::derivable_impls)] // more explicit
@@ -180,6 +186,7 @@ impl Default for SamplingParams {
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             vllm_xargs: None,
+            stream_interval: None,
         }
     }
 }
