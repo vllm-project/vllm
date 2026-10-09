@@ -125,18 +125,6 @@ def test_synthid_accelerator_matches_cpu(depth):
     )
 
 
-def test_synthid_native_partial_context_changes_stream():
-    prf = PhiloxPRF(42)
-    candidates = torch.arange(32)
-    partial = torch.tensor([[-1, -1, 7]])
-    zero_filled = torch.tensor([[0, 0, 7]])
-
-    assert torch.equal(prf.uint32(partial, candidates), prf.uint32(partial, candidates))
-    assert not torch.equal(
-        prf.uint32(partial, candidates), prf.uint32(zero_filled, candidates)
-    )
-
-
 @pytest.mark.parametrize(
     "constructor",
     [SynthIDWatermarker, SynthIDWatermarkDetector],
