@@ -38,40 +38,60 @@ def test_canvas_mrope_sizes_survive_prefix_cache_stripping():
 
 
 def test_modality_mm_kwargs_resolution():
-    """Flat keys apply to both modalities; nested scopes apply to one.
+    """Flat keys reach both modalities; scopes stay scoped, and win on conflict.
 
-    This is what `--mm-processor-kwargs` and per-request overrides are read
-    through, so `images_kwargs` must not leak into video and vice versa.
+    `_merge_and_resolve_mm_processor_kwargs` routes a flat key into every scope
+    whose HF processor declares it, so reading is a plain scope lookup. The
+    routing itself is upstream's, tested here against the MiniCPM-V schema to
+    pin the precedence rule (`scoped > flat`).
     """
     from vllm.model_executor.models.minicpmv4_6 import (
         _flat_processor_kwargs,
-        _resolve_modality_mm_kwarg,
+        _scoped_mm_kwarg,
     )
+    from vllm.multimodal.processing.context import _resolve_mm_processor_kwargs
 
-    resolve = _resolve_modality_mm_kwarg
+    # What MiniCPMV4_6{Image,Video}ProcessorKwargs declare.
+    processor_keys = {"downsample_mode", "max_slice_nums"}
+    schema = {
+        "text_kwargs": set(),
+        "images_kwargs": set(processor_keys),
+        "videos_kwargs": set(processor_keys),
+        "audio_kwargs": set(),
+    }
 
-    assert resolve({}, "image", "downsample_mode") is None
-    assert resolve({"downsample_mode": "4x"}, "image", "downsample_mode") == "4x"
-    assert resolve({"downsample_mode": "4x"}, "video", "downsample_mode") == "4x"
+    def read(mm_kwargs, modality, key):
+        merged = _resolve_mm_processor_kwargs(dict(mm_kwargs), schema)
+        return _scoped_mm_kwarg(merged, modality, key)
+
+    assert read({}, "image", "downsample_mode") is None
+    # A flat key is routed into both scopes.
+    assert read({"downsample_mode": "4x"}, "image", "downsample_mode") == "4x"
+    assert read({"downsample_mode": "4x"}, "video", "downsample_mode") == "4x"
+    # A scoped key stays in its scope.
     assert (
-        resolve(
-            {"images_kwargs": {"downsample_mode": "16x"}}, "image", "downsample_mode"
-        )
+        read({"images_kwargs": {"downsample_mode": "16x"}}, "image", "downsample_mode")
         == "16x"
     )
-    # Scoped to images, so video must not see it.
     assert (
-        resolve(
-            {"images_kwargs": {"downsample_mode": "16x"}}, "video", "downsample_mode"
-        )
+        read({"images_kwargs": {"downsample_mode": "16x"}}, "video", "downsample_mode")
         is None
     )
+    videos_only = {"videos_kwargs": {"max_slice_nums": 1}}
+    assert read(videos_only, "video", "max_slice_nums") == 1
+    # Scoped to videos, so image must not see it.
+    assert read(videos_only, "image", "max_slice_nums") is None
+    # An explicit scope wins over the flat key it is merged with.
     assert (
-        resolve({"videos_kwargs": {"max_slice_nums": 1}}, "video", "max_slice_nums")
-        == 1
+        read(
+            {"downsample_mode": "16x", "images_kwargs": {"downsample_mode": "4x"}},
+            "image",
+            "downsample_mode",
+        )
+        == "4x"
     )
     # A non-mapping scope is ignored rather than raising.
-    assert resolve({"images_kwargs": None}, "image", "downsample_mode") is None
+    assert read({"images_kwargs": None}, "image", "downsample_mode") is None
 
     # `_flat_processor_kwargs` drops the scoped keys and pins the mode.
     flat = _flat_processor_kwargs(

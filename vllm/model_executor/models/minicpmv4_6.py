@@ -186,23 +186,18 @@ _MODALITY_TO_MM_KWARGS_SCOPE = {
 }
 
 
-def _resolve_modality_mm_kwarg(
+def _scoped_mm_kwarg(
     merged: Mapping[str, object],
     modality: str,
     key: str,
 ) -> Any:
     """Read a processor kwarg for one modality.
 
-    A flat key applies to every modality; the HuggingFace-style nested
-    ``images_kwargs`` / ``videos_kwargs`` dict scopes it to one.
+    ``merged`` is what ``_merge_and_resolve_mm_processor_kwargs`` returns: it
+    routes a flat key into every scope whose processor declares it, and a value
+    scoped to the other modality stays there, so it is not visible here.
     """
-    value = merged.get(key)
-    if value is not None:
-        return value
-    scoped_key = _MODALITY_TO_MM_KWARGS_SCOPE.get(modality)
-    if scoped_key is None:
-        return None
-    scoped = merged.get(scoped_key)
+    scoped = merged.get(_MODALITY_TO_MM_KWARGS_SCOPE[modality])
     if isinstance(scoped, Mapping):
         return scoped.get(key)
     return None
@@ -219,10 +214,8 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # MiniCPMV4_6Processor.
         info = self.info
         assert isinstance(info, MiniCPMV4_6ProcessingInfo)
-        merged = info.ctx.get_merged_mm_kwargs(mm_kwargs)
-        downsample_mode = _resolve_modality_mm_kwarg(
-            merged, modality, "downsample_mode"
-        )
+        merged = info._merge_and_resolve_mm_processor_kwargs(mm_kwargs)
+        downsample_mode = _scoped_mm_kwarg(merged, modality, "downsample_mode")
         if downsample_mode is not None:
             return str(downsample_mode)
         return info._get_downsample_mode()
@@ -241,8 +234,8 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # values.
         info = self.info
         assert isinstance(info, MiniCPMV4_6ProcessingInfo)
-        merged = info.ctx.get_merged_mm_kwargs(mm_kwargs)
-        max_slice = _resolve_modality_mm_kwarg(merged, modality, "max_slice_nums")
+        merged = info._merge_and_resolve_mm_processor_kwargs(mm_kwargs)
+        max_slice = _scoped_mm_kwarg(merged, modality, "max_slice_nums")
         if max_slice is None:
             return None
         return int(max_slice)

@@ -21,7 +21,7 @@ from .minicpmv4_6 import (
     MiniCPMV4_6ForConditionalGeneration,
     MiniCPMV4_6MultiModalProcessor,
     MiniCPMV4_6ProcessingInfo,
-    _resolve_modality_mm_kwarg,
+    _scoped_mm_kwarg,
 )
 
 logger = init_logger(__name__)
@@ -29,8 +29,8 @@ logger = init_logger(__name__)
 
 class MiniCPMV4_7ProcessingInfo(MiniCPMV4_6ProcessingInfo):
     def _mm_max_slice_nums(self, **kwargs: object) -> int | None:
-        merged = self.ctx.get_merged_mm_kwargs(kwargs)
-        max_slice = _resolve_modality_mm_kwarg(merged, "image", "max_slice_nums")
+        merged = self._merge_and_resolve_mm_processor_kwargs(kwargs)
+        max_slice = _scoped_mm_kwarg(merged, "image", "max_slice_nums")
         if max_slice is None:
             return None
         return int(max_slice)
