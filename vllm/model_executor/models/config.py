@@ -1050,6 +1050,152 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
             compilation_config.cudagraph_mode = CUDAGraphMode.FULL
 
 
+class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
+    """Startup validation for Granite Switch. Changes nothing.
+
+    Every check here guards a failure that is otherwise silent, or deferred to
+    a Triton compile, or gated on a detail of the installed Transformers
+    version. Granite Switch bakes its LoRA adapters into the checkpoint and
+    routes them per token, so a misread config does not raise - it routes
+    tokens to the wrong adapter, or reads a KV cache that was never allocated.
+    """
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.model_executor.models.granite_switch_kernels import SUPPORTED_RANKS
+        from vllm.transformers_utils.configs.granite_switch import SWITCH_CACHE_LAYERS
+        from vllm.triton_utils import HAS_TRITON
+
+        model_config = vllm_config.model_config
+        hf_config = model_config.hf_config
+        num_layers = hf_config.num_hidden_layers
+        num_adapters = getattr(hf_config, "num_adapters", 0)
+
+        # 1. Every layer must be counted as an attention layer, including the
+        # two switch cache layers. The class does not declare IsHybrid, so
+        # get_num_layers_by_block_type takes its plain-transformer branch and
+        # reports num_hidden_layers. Its hybrid branch instead sums layer_types
+        # entries equal to the literal "attention", which Transformers
+        # normalizes to "full_attention" - so were this model ever routed down
+        # that branch the count would be zero, vLLM would size the KV cache for
+        # zero attention layers, and output would be wrong with no error.
+        if model_config.is_hybrid or model_config.is_attention_free:
+            raise ValueError(
+                "Granite Switch is an attention-only architecture, but this "
+                "ModelConfig reports it as hybrid or attention-free. vLLM "
+                "would then count attention layers from layer_types and size "
+                "the KV cache for the wrong number of layers. Ensure "
+                "layer_types is all-attention and that the model class does "
+                "not declare IsHybrid."
+            )
+        layer_types = getattr(hf_config, "layer_types", None)
+        if layer_types is not None:
+            non_attention = [
+                t for t in layer_types if t not in ("attention", "full_attention")
+            ]
+            if non_attention:
+                raise ValueError(
+                    "Granite Switch requires every layer_types entry to be an "
+                    f"attention type; got {sorted(set(non_attention))}."
+                )
+            if len(layer_types) != num_layers:
+                raise ValueError(
+                    f"layer_types has {len(layer_types)} entries but "
+                    f"num_hidden_layers is {num_layers}."
+                )
+
+        # 2. Triton must be available. Every projection in the model is a
+        # SwitchedLoRALinear, whose shared-MLP gate/up path runs the fused
+        # expand+SwiGLU kernel unconditionally - it is the activation, not just
+        # the adapter delta - so this holds even at num_adapters == 0. Without
+        # Triton the kernel object is an undecorated function and the first
+        # forward dies on an unindexable launch, inside a worker, after the
+        # weights are loaded.
+        if not HAS_TRITON:
+            raise ValueError(
+                "Granite Switch requires Triton. Its projections run a fused "
+                "switched-LoRA Triton kernel that also computes the shared "
+                "MLP's SwiGLU activation, so there is no non-Triton path even "
+                "with no adapters. Granite Switch is therefore supported only "
+                "on platforms with a working Triton backend (CUDA and ROCm)."
+            )
+
+        if num_adapters <= 0:
+            # No adapters: a plain Granite base model. Nothing below applies.
+            return
+
+        # 3. The switch's cache layers must leave at least one decoder layer.
+        # The model subtracts SWITCH_CACHE_LAYERS from num_hidden_layers to get
+        # its decoder-layer count; without this check an under-inflated config
+        # silently builds a zero-layer decoder.
+        if num_layers <= SWITCH_CACHE_LAYERS:
+            raise ValueError(
+                f"num_hidden_layers={num_layers} leaves no decoder layer after "
+                f"the switch's {SWITCH_CACHE_LAYERS} cache layers are "
+                "subtracted. A Granite Switch config inflates "
+                "num_hidden_layers by that many, so it must exceed it."
+            )
+
+        # 4. The attention head size must be known. Every LoRA-targeted QKV
+        # projection is sized from it, and the arch config convertor reports it
+        # as the KV-cache head size.
+        head_dim = getattr(hf_config, "projection_head_dim", None)
+        if not head_dim:
+            raise ValueError(
+                "projection_head_dim must be set when num_adapters > 0; it is "
+                "the attention head size that every LoRA-targeted QKV "
+                "projection and the KV cache are sized from."
+            )
+
+        # 5. Every adapter rank must land on a kernel tier.
+        # The fused kernel specializes on SUPPORTED_RANKS as compile-time
+        # constants, so an out-of-range rank fails inside a Triton compile -
+        # deep in a worker, after weights are loaded. Snap it here instead.
+        adapter_ranks = getattr(hf_config, "adapter_ranks", None) or []
+        max_tier = max(SUPPORTED_RANKS)
+        for name, rank in zip(
+            getattr(hf_config, "adapter_names", None) or adapter_ranks,
+            adapter_ranks,
+            strict=False,
+        ):
+            if rank <= 0 or rank > max_tier:
+                raise ValueError(
+                    f"adapter {name!r} has rank {rank}, which no Granite "
+                    f"Switch kernel tier covers. Supported tiers are "
+                    f"{list(SUPPORTED_RANKS)}; an off-tier rank is promoted to "
+                    "the next one up and zero-padded, but a rank above the "
+                    "largest tier has nowhere to go."
+                )
+
+        # 6. The counting head's dtype bound. MultiSwitch recovers a control
+        # token's write address from a 1/(1 + n) attention signal, and since
+        # both switch heads are paged-KV attention layers that signal takes the
+        # KV-cache dtype. bfloat16's 8-bit mantissa inverts 1/(1 + n) exactly
+        # only to n = 188; at 189 the reciprocal aliases onto 188's, so that
+        # token retrieves the wrong adapter. float32 is exact past n = 4095.
+        # Reported rather than rejected - it is a capacity limit, not a
+        # misconfiguration.
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        if "fp8" in str(cache_dtype):
+            raise ValueError(
+                "Granite Switch does not support an fp8 KV cache. The switch's "
+                "counting and memory heads are paged-KV attention layers, so "
+                "fp8 would quantize the 1/(1 + n) counting signal and the "
+                "scaled codebook keys, saturating both and misrouting every "
+                "control token. Use --kv-cache-dtype auto."
+            )
+        signal_dtype = model_config.dtype if cache_dtype == "auto" else cache_dtype
+        if "bfloat16" in str(signal_dtype):
+            logger.info(
+                "Granite Switch: a bfloat16 KV cache inverts the switch's "
+                "1/(1 + n) counting signal exactly only up to 188 control "
+                "tokens in one sequence; the 189th aliases onto the 188th and "
+                "retrieves its adapter. float32 is exact past 4095. This "
+                "bounds retained control tokens per sequence, not total "
+                "sequence length."
+            )
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
@@ -1066,6 +1212,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
+    "GraniteSwitchForCausalLM": GraniteSwitchConfigVerifier,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
