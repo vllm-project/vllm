@@ -428,9 +428,6 @@ class AttentionScheduler {
 
   static constexpr int32_t MaxQTileIterNum = 128;
 
-  AttentionScheduler()
-      : available_cache_size_(cpu_utils::get_available_l2_size()) {}
-
   torch::Tensor schedule(const ScheduleInput& input) const {
     const bool causal = input.causal;
     const bool is_dynamic_causal = input.dynamic_causal != nullptr;
@@ -445,16 +442,8 @@ class AttentionScheduler {
     const int32_t original_q_head_per_kv =
         input.num_heads_q / input.num_heads_kv;
     const bool supports_gqa = original_q_head_per_kv <= max_num_q_per_iter;
-    // Longest query a grouped plan accepts: the largest multiple of the GQA
-    // ratio that fits one AMX tile.
-    const int32_t max_gqa_candidate_q =
-        original_q_head_per_kv * (max_num_q_per_iter / original_q_head_per_kv);
-    const bool supported_amx_geometry =
-        input.isa == ISA::AMX && input.head_dim % 32 == 0;
+    const bool is_amx = input.isa == ISA::AMX || input.isa == ISA::AMX_FP8;
     const int32_t min_split_kv_len =
-        ((max_num_q_per_iter * 4 + kv_len_alignment - 1) / kv_len_alignment) *
-        kv_len_alignment;
-    const int32_t min_adaptive_split_kv_len =
         ((max_num_q_per_iter * 8 + kv_len_alignment - 1) / kv_len_alignment) *
         kv_len_alignment;
     const int64_t default_tile_size = calcu_default_tile_size(
@@ -464,17 +453,24 @@ class AttentionScheduler {
     const auto request_causal = [&](const int32_t req_id) {
       return is_dynamic_causal ? input.dynamic_causal[req_id] != 0 : causal;
     };
-    const auto request_adaptive_eligible = [&](const int32_t req_id) {
+    const auto group_for_request = [&](const int32_t req_id,
+                                       const int32_t group) {
       const int32_t q_tokens = request_q_token_num(req_id);
-      return q_tokens > 1 && q_tokens <= max_gqa_candidate_q &&
-             request_causal(req_id) && supports_gqa &&
-             original_q_head_per_kv > 1 && supported_amx_geometry &&
-             input.enable_kv_split;
+      if (!supports_gqa) {
+        return 1;
+      }
+      if (q_tokens == 1) {
+        return original_q_head_per_kv;
+      }
+      // Keep long prefill on MHA. Divisible groups fill short-query iterations;
+      // other groups pack only one iteration to offset unused query rows.
+      if (is_amx && request_causal(req_id) && q_tokens <= max_num_q_per_iter &&
+          (max_num_q_per_iter % original_q_head_per_kv == 0 ||
+           q_tokens <= max_num_q_per_iter / original_q_head_per_kv)) {
+        return group;
+      }
+      return 1;
     };
-    bool has_multi_token_request = false;
-    for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-      has_multi_token_request |= request_adaptive_eligible(req_id);
-    }
 
     struct PartitionItem {
       int32_t req_id;
@@ -510,25 +506,18 @@ class AttentionScheduler {
       int32_t total_splits = 0;
       int32_t head_stride = 1;
     };
-    const auto partition = [&](const int32_t adaptive_group) {
-      const auto group_for_request = [&](const int32_t req_id) {
-        if (supports_gqa && request_q_token_num(req_id) == 1) {
-          return original_q_head_per_kv;
-        }
-        return request_adaptive_eligible(req_id) ? adaptive_group : 1;
-      };
-      const int32_t split_kv_q_token_num_threshold =
-          input.enable_kv_split ? 1 : 0;
+    const auto partition = [&](const int32_t group) {
       Partitions result;
       result.head_stride = original_q_head_per_kv;
 
       // get total kv len
       int64_t total_kv_len = 0;
+      size_t query_tile_num = 0;
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
         result.head_stride =
-            std::gcd(result.head_stride, group_for_request(req_id));
+            std::gcd(result.head_stride, group_for_request(req_id, group));
         const int32_t max_num_q_token_per_iter =
-            max_num_q_per_iter / group_for_request(req_id);
+            max_num_q_per_iter / group_for_request(req_id, group);
         const int32_t seq_len = input.seq_lens[req_id];
         const int32_t q_token_num = request_q_token_num(req_id);
         const bool req_causal = request_causal(req_id);
@@ -538,6 +527,7 @@ class AttentionScheduler {
 
         for (int32_t token_id = 0; token_id < q_token_num;
              token_id += max_num_q_token_per_iter) {
+          ++query_tile_num;
           const int32_t q_tile_token_num =
               std::min(max_num_q_token_per_iter, q_token_num - token_id);
           const int32_t q_tile_pos_left = q_start_pos + token_id;
@@ -560,6 +550,8 @@ class AttentionScheduler {
           kv_len_alignment;
       auto& workitems = result.items;
       auto& reduce_workitems = result.reductions;
+      workitems.reserve(query_tile_num + thread_num);
+      reduce_workitems.reserve(std::min<size_t>(query_tile_num, thread_num));
       std::vector<int32_t> workitem_num_per_thread(thread_num, 0);
 
       // split tasks
@@ -567,18 +559,22 @@ class AttentionScheduler {
       int64_t remaining_kv_len = kv_len_per_thread;
       int32_t cum_split_num = 0;
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-        const int32_t group = group_for_request(req_id);
-        const int32_t max_num_q_token_per_iter = max_num_q_per_iter / group;
-        const int32_t default_tile_token_num = default_tile_size / group;
+        const int32_t request_group = group_for_request(req_id, group);
+        const int32_t max_num_q_token_per_iter =
+            max_num_q_per_iter / request_group;
+        const int32_t default_tile_token_num =
+            default_tile_size / request_group;
         const int32_t seq_len = input.seq_lens[req_id];
         const int32_t q_token_num = request_q_token_num(req_id);
         const bool req_causal = request_causal(req_id);
         const int32_t q_start_pos = seq_len - q_token_num;
         const int32_t kv_start_pos = 0;
         const int32_t kv_end_pos = seq_len;
-        const bool adaptive = request_adaptive_eligible(req_id) && group > 1;
+        // Short verification queries can span several packed iterations.
+        // Split each iteration separately so their reduction fits one tile.
+        const bool packed_query = request_group > 1 && q_token_num > 1;
 
-        PartitionItem curr_workitem(req_id, 0, 0, seq_len, group);
+        PartitionItem curr_workitem(req_id, 0, 0, seq_len, request_group);
         for (int32_t token_id = 0; token_id < q_token_num;
              token_id += max_num_q_token_per_iter) {
           const int32_t q_tile_token_num =
@@ -591,16 +587,15 @@ class AttentionScheduler {
           const auto [aligned_kv_tile_pos_left, aligned_kv_tile_pos_right] =
               align_kv_tile_pos(kv_tile_pos_left, kv_tile_pos_right,
                                 kv_len_alignment);
-          // Adaptive tiles charge by tile rows and need a longer minimum split.
-          const int32_t scale = adaptive ? q_tile_token_num : 1;
-          const int32_t min_kv_len =
-              adaptive ? min_adaptive_split_kv_len : min_split_kv_len;
+          // A packed query already supplies several rows of work per KV load.
+          // Discount its partition credit to avoid creating tiny KV splits.
+          const int32_t scale = packed_query ? q_tile_token_num : 1;
           const auto charge = [&](const int64_t len) {
             return ((len + scale * kv_len_alignment - 1) /
                     (scale * kv_len_alignment)) *
                    kv_len_alignment;
           };
-          const int64_t min_credit = charge(min_kv_len);
+          const int64_t min_credit = charge(min_split_kv_len);
           int32_t curr_kv_len =
               aligned_kv_tile_pos_right - aligned_kv_tile_pos_left;
           int32_t kv_token_pos_start = aligned_kv_tile_pos_left;
@@ -630,7 +625,7 @@ class AttentionScheduler {
 
                 curr_workitem =
                     PartitionItem(req_id, token_id + max_num_q_token_per_iter,
-                                  0, seq_len, group);
+                                  0, seq_len, request_group);
               }
 
               break;
@@ -645,7 +640,7 @@ class AttentionScheduler {
                 workitems.emplace_back(curr_workitem);
                 ++workitem_num_per_thread[curr_thread_id];
                 curr_workitem =
-                    PartitionItem(req_id, token_id, 0, seq_len, group);
+                    PartitionItem(req_id, token_id, 0, seq_len, request_group);
               }
 
               // switch to next thread
@@ -656,11 +651,12 @@ class AttentionScheduler {
               continue;
             }
 
-            // only split tail splits with q_tile_token_num <=
-            // split_kv_q_token_num_threshold; adaptive tiles always split
-            if (!adaptive &&
-                (token_id + max_num_q_token_per_iter < q_token_num ||
-                 q_tile_token_num > split_kv_q_token_num_threshold)) {
+            // Split a whole packed query or a one-token tail; coalesce the
+            // other prefill tiles to amortize scheduling and query copies.
+            if (!input.enable_kv_split ||
+                (!packed_query &&
+                 (token_id + max_num_q_token_per_iter < q_token_num ||
+                  q_tile_token_num > 1))) {
               // if requires a new q tile iteration and already has workitems,
               // leave this workitem to next thread
               if (curr_workitem.q_token_num % default_tile_token_num == 0 &&
@@ -671,7 +667,7 @@ class AttentionScheduler {
                   ++workitem_num_per_thread[curr_thread_id];
                 }
                 curr_workitem =
-                    PartitionItem(req_id, token_id, 0, seq_len, group);
+                    PartitionItem(req_id, token_id, 0, seq_len, request_group);
 
                 // switch to next thread
                 ++curr_thread_id;
@@ -694,16 +690,16 @@ class AttentionScheduler {
 
             if (kv_token_pos_start == aligned_kv_tile_pos_left) {
               // first split, init the workitem
-              reduce_workitems.push_back(
-                  {req_id, token_id, q_tile_token_num, cum_split_num, group});
+              reduce_workitems.push_back({req_id, token_id, q_tile_token_num,
+                                          cum_split_num, request_group});
             }
 
             int32_t spilt_size = std::min<int64_t>(
-                std::max<int64_t>(remaining_kv_len * scale, min_kv_len),
+                std::max<int64_t>(remaining_kv_len * scale, min_split_kv_len),
                 curr_kv_len);
             curr_workitem =
                 PartitionItem(req_id, token_id, kv_token_pos_start,
-                              kv_token_pos_start + spilt_size, group);
+                              kv_token_pos_start + spilt_size, request_group);
             curr_workitem.q_token_num += q_tile_token_num;
             curr_workitem.total_kv_len += spilt_size;
             curr_workitem.split_id = cum_split_num;
@@ -717,19 +713,20 @@ class AttentionScheduler {
             kv_token_pos_start += spilt_size;
             curr_kv_len -= spilt_size;
             curr_workitem = PartitionItem(req_id, token_id, kv_token_pos_start,
-                                          seq_len, group);
+                                          seq_len, request_group);
 
             // switch to next thread
             ++curr_thread_id;
             remaining_kv_len = kv_len_per_thread;
           }
 
-          if (adaptive && curr_workitem.total_kv_len > 0) {
-            // adaptive tiles never share a workitem
+          if (packed_query && curr_workitem.total_kv_len > 0) {
+            // Keep packed queries independently claimable by worker threads.
             workitems.emplace_back(curr_workitem);
             ++workitem_num_per_thread[curr_thread_id];
-            curr_workitem = PartitionItem(
-                req_id, token_id + max_num_q_token_per_iter, 0, seq_len, group);
+            curr_workitem =
+                PartitionItem(req_id, token_id + max_num_q_token_per_iter, 0,
+                              seq_len, request_group);
           }
         }
 
@@ -756,7 +753,7 @@ class AttentionScheduler {
           if (head % item.group != 0) {
             continue;
           }
-          if (item.group > 1 && request_adaptive_eligible(item.req_id)) {
+          if (item.group > 1 && request_q_token_num(item.req_id) > 1) {
             if (start >= 0) {
               emit(start, idx);
               start = -1;
@@ -780,35 +777,56 @@ class AttentionScheduler {
       }
       return count;
     };
-    // Take the largest group whose spans fill the threads, else the plan with
-    // the most spans; MHA only wins when strictly better.
-    Partitions partitions;
-    int64_t best_spans = -1;
-    if (has_multi_token_request) {
-      for (int32_t group = original_q_head_per_kv; group >= 2; --group) {
-        if (original_q_head_per_kv % group != 0) {
+    // Keep the largest group that fills the threads; otherwise prefer more
+    // spans. MHA must improve the span count; ties retain GQA.
+    Partitions partitions = partition(original_q_head_per_kv);
+    int64_t best_spans = span_count(partitions);
+    if (input.enable_kv_split && best_spans < thread_num) {
+      for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
+        if (request_q_token_num(req_id) <= 1 ||
+            group_for_request(req_id, original_q_head_per_kv) == 1) {
           continue;
         }
-        auto candidate = partition(group);
-        const int64_t spans = span_count(candidate);
-        if (spans > best_spans) {
-          partitions = std::move(candidate);
-          best_spans = spans;
+        for (int32_t group = original_q_head_per_kv - 1; group >= 2; --group) {
+          if (original_q_head_per_kv % group != 0) {
+            continue;
+          }
+          auto candidate = partition(group);
+          const int64_t spans = span_count(candidate);
+          if (spans > best_spans) {
+            partitions = std::move(candidate);
+            best_spans = spans;
+          }
+          if (best_spans >= thread_num) {
+            break;
+          }
         }
-        if (spans >= thread_num) {
-          break;
+        if (best_spans < thread_num) {
+          auto mha = partition(1);
+          if (span_count(mha) > best_spans) {
+            partitions = std::move(mha);
+          }
         }
-      }
-    }
-    if (best_spans < thread_num) {
-      auto mha = partition(1);
-      if (best_spans < 0 || span_count(mha) > best_spans) {
-        partitions = std::move(mha);
+        break;
       }
     }
     std::vector<AttentionWorkItemGroup> workitems;
     std::vector<ReductionWorkItemGroup> reduce_workitems;
     std::vector<AttentionTaskSpan> task_spans;
+    size_t workitem_num = 0;
+    size_t reduction_item_num = 0;
+    for (const auto& item : partitions.items) {
+      workitem_num += input.num_heads_q / item.group;
+    }
+    for (const auto& item : partitions.reductions) {
+      reduction_item_num += input.num_heads_q / item.group;
+    }
+    workitems.reserve(workitem_num);
+    reduce_workitems.reserve(reduction_item_num);
+    task_spans.reserve(std::min(
+        workitem_num, partitions.items.size() + size_t(thread_num) *
+                                                    input.num_heads_q /
+                                                    partitions.head_stride));
     std::vector<int32_t> reduction_for_split(partitions.total_splits);
     for (size_t idx = 0; idx < partitions.reductions.size(); ++idx) {
       const auto& reduction = partitions.reductions[idx];
@@ -1068,9 +1086,6 @@ class AttentionScheduler {
     int64_t rounded_tile_size = (tile_size / round_size) * round_size;
     return std::max(rounded_tile_size, round_size);
   }
-
- private:
-  int64_t available_cache_size_;
 };
 
 struct AttentionInput {
