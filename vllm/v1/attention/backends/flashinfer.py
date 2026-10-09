@@ -111,6 +111,21 @@ def _nvfp4_kv_on_fa2() -> bool:
     return any(current_platform.is_device_capability_family(f) for f in (80, 90, 120))
 
 
+def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
+    """Split NVFP4 V heads to fit FA2's 256-element output limit.
+
+    Each pass uses the full Q and K and a slice of V and its linear block
+    scales. The softmax is identical, so outputs concatenate without an
+    LSE merge. BF16 and FP8 keep their existing unsplit attention path.
+    """
+    if head_size <= 256 or not is_fa2_nvfp4:
+        return 1
+    split = -(-head_size // 256)
+    if head_size % split != 0 or (head_size // split) % 16 != 0:
+        raise ValueError("NVFP4 VO split requires whole 16-element scale blocks.")
+    return split
+
+
 _KVPair = tuple[torch.Tensor, torch.Tensor]
 
 
@@ -952,6 +967,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # flash_attn_varlen_func's cp_world_size/cp_rank/cp_tot_seqused_k).
             supports_dcp_with_varlen=False,
         )
+        self.vo_split = _vo_split_factor(self.head_dim, self.nvfp4_fa2)
+        if self.vo_split > 1:
+            # There is no asymmetric NVFP4 decode wrapper. Plan every step
+            # through paged prefill, including single-token decode.
+            self.reorder_batch_threshold = 0
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -1071,6 +1091,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # FlashInfer only applies to attention, so we don't consider other types
                 # of KV spec (e.g. Mamba) here. This is mostly for type checking.
                 continue
+            if (
+                spec.kv_quant_mode.is_nvfp4
+                and _nvfp4_kv_on_fa2()
+                and _vo_split_factor(spec.head_size, True) > 1
+            ):
+                # The VO-split prefill plan changes each step and has no
+                # graph buffers. FULL capture would replay stale plan data.
+                return AttentionCGSupport.NEVER
             if not can_use_trtllm_attention(
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=spec.num_kv_heads,
@@ -1800,6 +1828,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_qo_heads=self.num_qo_heads,
                         num_kv_heads=self.num_kv_heads,
                         head_dim_qk=self.head_dim,
+                        head_dim_vo=self.head_dim // self.vo_split,
                         page_size=self.page_size,
                         causal=attn_metadata.causal,
                         sm_scale=self.sm_scale,
@@ -1970,6 +1999,7 @@ class FlashInferImpl(AttentionImpl):
         self.is_kvcache_nvfp4 = kv_cache_dtype.startswith("nvfp4")
         self.nvfp4_fa2 = self.is_kvcache_nvfp4 and _nvfp4_kv_on_fa2()
         self.nvfp4_trtllm = self.is_kvcache_nvfp4 and not self.nvfp4_fa2
+        self.vo_split = _vo_split_factor(head_size, self.nvfp4_fa2)
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
@@ -2096,6 +2126,39 @@ class FlashInferImpl(AttentionImpl):
             return query_quantized.view(num_tokens, num_heads, head_size)
 
         return query
+
+    def _run_vo_split_prefill(
+        self,
+        wrapper: BatchPrefillWithPagedKVCacheWrapper,
+        query: torch.Tensor,
+        kv_cache: _KVPair,
+        kv_sf: _KVPair,
+        out: torch.Tensor,
+        *,
+        k_scale: float,
+        v_scale: float,
+    ) -> None:
+        """Run identical QK softmaxes over each linear NVFP4 V slice."""
+        head_chunk = self.head_size // self.vo_split
+        k_cache, v_cache = kv_cache
+        k_sf, v_sf = kv_sf
+        out_chunk = torch.empty(
+            (*out.shape[:-1], head_chunk), dtype=out.dtype, device=out.device
+        )
+        for i in range(self.vo_split):
+            wrapper.run(
+                query,
+                (k_cache, v_cache.narrow(-1, i * head_chunk // 2, head_chunk // 2)),
+                q_scale=1.0,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                out=out_chunk,
+                kv_cache_sf=(
+                    k_sf,
+                    v_sf.narrow(-1, i * head_chunk // 16, head_chunk // 16),
+                ),
+            )
+            out.narrow(-1, i * head_chunk, head_chunk).copy_(out_chunk)
 
     def forward(
         self,
@@ -2372,6 +2435,18 @@ class FlashInferImpl(AttentionImpl):
                             self.scale * layer._q_scale_float * layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
+                        )
+                    elif self.vo_split > 1:
+                        assert kv_cache_for_fi is not None
+                        assert kv_cache_sf is not None
+                        self._run_vo_split_prefill(
+                            prefill_wrapper,
+                            prefill_query,
+                            kv_cache_for_fi,
+                            kv_cache_sf,
+                            out_prefill,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
                         )
                     else:
                         prefill_wrapper.run(

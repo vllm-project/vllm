@@ -1070,10 +1070,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         type_ = kv_cache_scheme.get("type")
         num_bits = kv_cache_scheme.get("num_bits")
 
-        if type_ != "float" or num_bits != 8:
+        if type_ != "float" or num_bits not in (4, 8):
             raise NotImplementedError(
                 "Currently supported kv cache quantization is "
-                "num_bits=8, type=float, however "
+                "num_bits in (4, 8), type=float, however "
                 f"received num_bits={num_bits}, type={type_}"
             )
 
@@ -1087,6 +1087,12 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 "Invalid strategy for compressed-tensors KV cache. "
                 f"Expected strategies: {supported_strategies}, found strategy:"
                 f" {strategy}"
+            )
+
+        if num_bits == 4 and strategy != QuantizationStrategy.TENSOR:
+            raise NotImplementedError(
+                "NVFP4 KV cache supports only per-tensor global scales; "
+                "the cache writer reads one k/v scale per side."
             )
 
         is_symmetric = kv_cache_scheme.get("symmetric")
