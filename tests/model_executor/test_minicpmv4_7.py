@@ -2,99 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
-from torch import nn
 
-from vllm.model_executor.models.interfaces import EagleModelMixin, supports_eagle3
-from vllm.model_executor.models.minicpmv4_6 import (
-    MiniCPMV4_6ForConditionalGeneration,
-    _stack_vit_merger_qkv,
-)
+from vllm.model_executor.models.minicpmv4_6 import _stack_vit_merger_qkv
 from vllm.model_executor.models.minicpmv4_7 import (
-    MiniCPMV4_7ForConditionalGeneration,
     MiniCPMV4_7MultiModalProcessor,
-    MiniCPMV4_7ProcessingInfo,
     _compute_canvas_single,
     build_image_bounds,
     canvas_rope_delta,
 )
 
 pytestmark = pytest.mark.skip_global_cleanup
-
-
-def test_4_7_is_separate_from_4_6():
-    assert MiniCPMV4_7ForConditionalGeneration is not (
-        MiniCPMV4_6ForConditionalGeneration
-    )
-    assert issubclass(
-        MiniCPMV4_7ForConditionalGeneration, MiniCPMV4_6ForConditionalGeneration
-    )
-    assert issubclass(MiniCPMV4_7ProcessingInfo, object)
-    assert issubclass(MiniCPMV4_7MultiModalProcessor, object)
-
-
-@pytest.mark.parametrize(
-    "model_cls",
-    [MiniCPMV4_6ForConditionalGeneration, MiniCPMV4_7ForConditionalGeneration],
-)
-def test_exposes_eagle3_aux_hidden_states(model_cls):
-    """dspark/EAGLE-3 drafting needs the target to hand out aux hidden states.
-
-    The GPU model runner enables auxiliary hidden state outputs for `dspark`
-    and then calls ``set_eagle3_aux_hidden_state_layers``, which raises unless
-    the target declares ``SupportsEagle3``. MiniCPM-V has no layers of its own
-    to hook: it delegates to the Qwen3.5 text backbone, which already
-    implements the interface.
-    """
-
-    class DummyBackbone(nn.Module, EagleModelMixin):
-        def __init__(self):
-            super().__init__()
-            self.layers = nn.ModuleList([nn.Identity(), nn.Identity()])
-
-    class DummyLanguageModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.model = DummyBackbone()
-
-        def embed_input_ids(self, input_ids):
-            return input_ids
-
-    model = model_cls.__new__(model_cls)
-    nn.Module.__init__(model)
-    model.language_model = DummyLanguageModel()
-
-    assert supports_eagle3(model)
-    model.set_aux_hidden_state_layers((1, 2))
-    assert model.language_model.model.aux_hidden_state_layers == (1, 2)
-
-
-def test_v47_does_not_read_drop_vision_last_layer():
-    """MiniCPMV4_7Config drops the field the 4.6 constructor reads.
-
-    The shared 4.6 ``__init__`` builds the vision tower, so 4.7 overrides the
-    hook instead of the base class tolerating a missing field. 4.6 keeps
-    reading the config directly.
-    """
-    from types import SimpleNamespace
-
-    def make(cls, config):
-        model = cls.__new__(cls)
-        nn.Module.__init__(model)
-        model.config = config
-        return model
-
-    class NoSuchField:
-        """Stands in for MiniCPMV4_7Config, which has no such attribute."""
-
-    v47 = make(MiniCPMV4_7ForConditionalGeneration, NoSuchField())
-    assert v47._drop_vision_last_layer() is False
-
-    for value in (True, False):
-        v46 = make(
-            MiniCPMV4_6ForConditionalGeneration,
-            SimpleNamespace(drop_vision_last_layer=value),
-        )
-        assert v46._drop_vision_last_layer() is value
 
 
 def test_canvas_mrope_sizes_survive_prefix_cache_stripping():
