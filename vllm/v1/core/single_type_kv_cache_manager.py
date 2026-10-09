@@ -2508,7 +2508,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
 
     def __init__(self, kv_cache_spec: HiSparseResidentSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
-        self.resident_overrides: dict[str, dict[int, KVCacheBlock]] = {}
+        self.residency_changes: dict[str, dict[int, KVCacheBlock]] = {}
 
     def get_num_blocks_to_allocate(
         self,
@@ -2588,7 +2588,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         assert self.coordinator is not None
         self.coordinator.free(request_id)
         blocks = self.get_resident_pages(request_id)
-        self.resident_overrides.pop(request_id, None)
+        self.residency_changes.pop(request_id, None)
         super().pop_blocks_for_free(request_id)
         return blocks
 
@@ -2601,7 +2601,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             return False
         if self.get_resident_page(request_id, block_idx) is not None:
             return False
-        self.resident_overrides.setdefault(request_id, {})[block_idx] = block
+        self.residency_changes.setdefault(request_id, {})[block_idx] = block
         return True
 
     def drop_resident_page(
@@ -2610,8 +2610,8 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         """Stop reading a page from the GPU; return the block it was read from."""
         block = self.get_resident_page(request_id, block_idx)
         if block is not None:
-            overrides = self.resident_overrides.setdefault(request_id, {})
-            overrides[block_idx] = self._null_block
+            changes = self.residency_changes.setdefault(request_id, {})
+            changes[block_idx] = self._null_block
         return block
 
     def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
@@ -2619,19 +2619,19 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         if blocks is None or block_idx >= len(blocks):
             return None
         block = blocks[block_idx]
-        overrides = self.resident_overrides.get(request_id)
-        if overrides:
-            block = overrides.get(block_idx, block)
+        changes = self.residency_changes.get(request_id)
+        if changes:
+            block = changes.get(block_idx, block)
         return None if block.is_null else block
 
     def get_resident_pages(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
         """The request's GPU block per page from ``start``; null if not resident."""
         blocks = self.req_to_blocks.get(request_id, [])[start:]
-        overrides = self.resident_overrides.get(request_id)
-        if not overrides:
+        changes = self.residency_changes.get(request_id)
+        if not changes:
             return blocks
         return [
-            overrides.get(block_idx, block)
+            changes.get(block_idx, block)
             for block_idx, block in enumerate(blocks, start)
         ]
 
