@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer sparse MLA attention backend."""
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -30,6 +31,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
     flat_kv_row_view,
     prepare_sparse_mla_safe_lengths,
     triton_convert_req_index_to_global_index,
@@ -69,6 +71,13 @@ class _FlashInferMLASparseBackendBase(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        # The kernels read the rows as pages of their kernel block size.
+        (page,) = cls.get_supported_kernel_block_sizes(spec)
+        assert isinstance(page, MultipleOf)
+        return align_blocks_to_rows(spec, page.base)
+
 
 class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
     """FlashInfer sparse MLA backend using the TRTLLM-gen launcher."""
@@ -84,7 +93,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [32, 64]
+        return [MultipleOf(32)]
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -173,7 +182,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64, 256]
+        return [MultipleOf(64)]
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -575,7 +584,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             assert prefill_lse is not None
             return output, torch.cat((decode_lse, prefill_lse))
 
-        _, block_stride_rows = flat_kv_row_view(
+        kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
 
@@ -602,7 +611,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         return self._run_mqa_kernel(
             q,
-            kv_c_and_k_pe_cache,
+            # Block sizes and strides have been aligned to 32 rows.
+            kv_rows.view(
+                -1,
+                math.gcd(block_stride_rows, attn_metadata.block_size, 64),
+                kv_rows.shape[-1],
+            ),
             topk_indices_physical,
             seq_lens,
         )
