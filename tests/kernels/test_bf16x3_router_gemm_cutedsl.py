@@ -29,18 +29,20 @@ def _requires_sm100_cutedsl():
         # case below covers the small-M kernel's multi-chunk path (12 K-tiles)
         (1024, 8192, 256),
         (2048, 8192, 256),
-        # small-M path, up to the last token count below the large-M threshold
+        # small-M path, including several BM tiles above 128 tokens (M2/HV4)
         (64, 6144, 128),
         (128, 2816, 256),
-        # large-M path, cta_group=1 band (up to 512 tokens), from the threshold
+        (200, 3072, 256),
+        (256, 2816, 256),
+        # large-M path, cta_group=1, from each shape's switch point
         (129, 6144, 128),
         (300, 2816, 256),
         (512, 6144, 128),
         (512, 3072, 256),
         # large-M path, cta_group=2
-        (768, 4096, 192),
         (1024, 6144, 128),
-        (2048, 2816, 256),
+        (2304, 4096, 192),
+        (2304, 2816, 256),
         # partial 256-token pair-tile tail
         (8200, 6144, 128),
         # odd experts: large-M ineligible at any token count, small-M path

@@ -20,6 +20,7 @@ master accumulator and the MMA warp resets it.
 """
 
 from functools import cache
+from typing import NamedTuple
 
 import cutlass
 import torch
@@ -928,79 +929,96 @@ class Sm100BF16x3RouterGemmLargeM:
 # Dispatch and tuning. Two tiers, chosen per call by token count M:
 # - small-M: Sm100BF16x3RouterGemmSmallM (in-kernel decomp, swap-AB); wins
 #   where the call is launch- and decomp-latency bound.
-# - large-M: decomp kernel + Sm100BF16x3RouterGemmLargeM, from
-#   _LARGE_M_MIN_TOKENS up (wins from ~160 tokens on all tuned shapes).
-# Both write split-K partials that the Triton reduce sums. Tables are from
-# GB300 CUPTI sweeps (large-M timings include the decomp), keyed by
-# (K, N experts) and then by the next_power_of_2(M) token bucket.
+# - large-M: decomp kernel + Sm100BF16x3RouterGemmLargeM.
+# Both write split-K partials that the Triton reduce sums.
 
-_LARGE_M_MIN_TOKENS = 129
 
-# Small-M (BM, split_k), accuracy-constrained, for token buckets in (32, 512].
-# For these shapes the buckets above the large-M threshold are not reached at
-# runtime; they stay as the small-M kernel's own tuning (benchmark baseline).
-_SMALL_M_CONFIG_OVERRIDES = {
-    (2816, 256): {  # Hunyuan-V4
-        64: (16, 16),
-        128: (32, 16),
-        256: (64, 16),
-        512: (128, 16),
-    },
-    (3072, 256): {  # MiniMax-M2
-        64: (16, 16),
-        128: (32, 16),
-        256: (64, 16),
-        512: (128, 16),
-    },
-    (4096, 192): {  # Hunyuan-V3
-        64: (32, 32),
-        128: (64, 32),
-        256: (128, 32),
-        512: (128, 19),
-    },
-    (6144, 128): {  # MiniMax-M3
-        64: (32, 64),
-        128: (64, 64),
-        256: (64, 32),
-        512: (128, 32),
-    },
+class SmallMConfig(NamedTuple):
+    """Sm100BF16x3RouterGemmSmallM with BM-token tiles."""
+
+    BM: int
+    split_k: int | None = None  # None: fill one wave of SMs
+
+
+class LargeMConfig(NamedTuple):
+    """Decomp kernel + Sm100BF16x3RouterGemmLargeM."""
+
+    cta_group: int
+    split_k: int | None = None  # None: fill one wave of SMs
+
+
+RouterGemmConfig = SmallMConfig | LargeMConfig
+_ConfigTable = list[tuple[int | None, RouterGemmConfig]]
+
+# Ordered (max tokens, config) entries; the first entry with M <= max tokens
+# (None: no limit) wins. Tuned shapes are keyed by (K, N experts), from GB300
+# cold-L2 sweeps of both tiers; fixed split_k entries launch at most 148 CTAs
+# over their range, so they stay one wave on B200 as on GB300. GateLinear runs
+# MiniMax-M2/M3 at <= FP32_MAX_TOKENS on the FP32 router kernel instead.
+_TUNED_CONFIGS: dict[tuple[int, int], _ConfigTable] = {
+    (6144, 128): [  # MiniMax-M3
+        (48, SmallMConfig(16, 48)),
+        (64, SmallMConfig(32, 50)),
+        (128, SmallMConfig(32)),
+        (256, LargeMConfig(1, 64)),
+        (512, LargeMConfig(1)),
+        (1024, LargeMConfig(2, 16)),
+        (None, LargeMConfig(2)),
+    ],
+    (3072, 256): [  # MiniMax-M2
+        (48, SmallMConfig(16)),
+        (96, SmallMConfig(32)),
+        (128, SmallMConfig(32, 16)),
+        (224, SmallMConfig(32)),
+        (512, LargeMConfig(1, 16)),
+        (2048, LargeMConfig(1)),
+        (None, LargeMConfig(2)),
+    ],
+    (4096, 192): [  # Hunyuan-V3
+        (8, SmallMConfig(8)),
+        (32, SmallMConfig(16)),
+        (88, SmallMConfig(32)),
+        (128, SmallMConfig(32, 16)),
+        (264, LargeMConfig(1)),
+        (512, LargeMConfig(1, 16)),
+        (2048, LargeMConfig(1)),
+        (None, LargeMConfig(2)),
+    ],
+    (2816, 256): [  # Hunyuan-V4
+        (8, SmallMConfig(8)),
+        (48, SmallMConfig(16)),
+        (96, SmallMConfig(32)),
+        (128, SmallMConfig(32, 16)),
+        (256, SmallMConfig(32)),
+        (512, LargeMConfig(1, 16)),
+        (2048, LargeMConfig(1)),
+        (None, LargeMConfig(2)),
+    ],
 }
-
-# Large-M cta_group: 1 (m128n128 per CTA) up to this many tokens, 2 (m256n128
-# per CTA pair) above.
-_LARGE_M_CG1_MAX_TOKENS = 512
-
-# Large-M split_k where a sweep beat the generic rule.
-_LARGE_M_SPLIT_K_OVERRIDES = {
-    (6144, 128): {256: 48, 512: 32, 1024: 16},  # MiniMax-M3
-    (3072, 256): {256: 16, 512: 16},  # MiniMax-M2
-    (4096, 192): {512: 16},  # Hunyuan-V3
-    (2816, 256): {256: 16, 512: 16},  # Hunyuan-V4
-}
+_DEFAULT_CONFIGS: _ConfigTable = [
+    (16, SmallMConfig(16)),
+    (128, SmallMConfig(32)),
+    (512, LargeMConfig(1)),
+    (None, LargeMConfig(2)),
+]
 
 
-def _pick_config(M: int, K: int, N: int, num_sms: int) -> tuple[bool, int, int]:
-    """Return (large_m, tile, split_k) for M tokens; tile is cta_group for the
-    large-M tier and BM for the small-M tier. Shared by dispatch and warmup."""
-    k_tiles = math_utils.cdiv(K, 64)
-    bucket = triton.next_power_of_2(M)
-
-    # the large-M kernel needs 64-wide K tiles and 8-expert 256-bit stores
-    if K % 64 == 0 and N % 8 == 0 and M >= _LARGE_M_MIN_TOKENS:
-        cta_group = 1 if M <= _LARGE_M_CG1_MAX_TOKENS else 2
-        split_k = _LARGE_M_SPLIT_K_OVERRIDES.get((K, N), {}).get(bucket)
-        if split_k is None:
-            ctas = cta_group * math_utils.cdiv(M, 128 * cta_group)
-            ctas *= math_utils.cdiv(N, 128)
-            split_k = min(k_tiles, max(1, num_sms // ctas))
-        return True, cta_group, split_k
-
-    if 32 < M <= 512 and (K, N) in _SMALL_M_CONFIG_OVERRIDES:
-        BM, split_k = _SMALL_M_CONFIG_OVERRIDES[(K, N)][bucket]
-        return False, BM, min(split_k, k_tiles)
-    BM = min(max(bucket, 8), 128)
-    ctas = math_utils.cdiv(M, BM) * math_utils.cdiv(N, 128)
-    return False, BM, min(k_tiles, max(1, num_sms // ctas))
+def _pick_config(M: int, K: int, N: int, num_sms: int) -> tuple[RouterGemmConfig, int]:
+    """Return the config for M tokens and its resolved split_k. Shared by
+    dispatch and warmup."""
+    configs = _TUNED_CONFIGS.get((K, N), _DEFAULT_CONFIGS)
+    config = next(c for max_m, c in configs if max_m is None or max_m >= M)
+    if isinstance(config, LargeMConfig) and (K % 64 or N % 8):
+        # the large-M kernel needs 64-wide K tiles and 8-expert 256-bit stores
+        config = SmallMConfig(128)
+    split_k = config.split_k
+    if split_k is None:
+        if isinstance(config, LargeMConfig):
+            tiles = config.cta_group * math_utils.cdiv(M, 128 * config.cta_group)
+        else:
+            tiles = math_utils.cdiv(M, config.BM)
+        split_k = max(1, num_sms // (tiles * math_utils.cdiv(N, 128)))
+    return config, min(split_k, math_utils.cdiv(K, 64))
 
 
 def warmup_bf16x3_router_gemm(
@@ -1020,11 +1038,15 @@ def warmup_bf16x3_router_gemm(
     device = torch.accelerator.current_device_index()
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
 
-    tiles: dict[bool, set[int]] = {False: set(), True: set()}
+    small_m_BMs: set[int] = set()
+    large_m_cta_groups: set[int] = set()
     reduce_configs: set[tuple[int, int, int, int, int, int]] = set()
     for M in range(min_num_tokens, max_num_tokens + 1):
-        large_m, tile, split_k = _pick_config(M, K, N, num_sms)
-        tiles[large_m].add(tile)
+        config, split_k = _pick_config(M, K, N, num_sms)
+        if isinstance(config, LargeMConfig):
+            large_m_cta_groups.add(config.cta_group)
+        else:
+            small_m_BMs.add(config.BM)
         if split_k > 1:
             reduce_configs.add(
                 (
@@ -1035,9 +1057,9 @@ def warmup_bf16x3_router_gemm(
                 )
             )
 
-    for BM in sorted(tiles[False]):
+    for BM in sorted(small_m_BMs):
         Sm100BF16x3RouterGemmSmallM.compile(K, BM)
-    if tiles[True]:
+    if large_m_cta_groups:
         _bf16x3_decomp_kernel.warmup(
             TritonWarmupTensor(torch.float32),
             TritonWarmupTensor(torch.bfloat16),
@@ -1045,7 +1067,7 @@ def warmup_bf16x3_router_gemm(
             launch_pdl=True,
             grid=(1,),
         )
-    for cta_group in sorted(tiles[True]):
+    for cta_group in sorted(large_m_cta_groups):
         Sm100BF16x3RouterGemmLargeM.compile(K, cta_group)
     for M, split_stride, split_k, BM, BN, block_s in sorted(reduce_configs):
         _splitk_reduce_kernel.warmup(
@@ -1064,8 +1086,8 @@ def warmup_bf16x3_router_gemm(
             grid=(1, 1),
         )
     return (
-        ("small_m_BM", tuple(sorted(tiles[False]))),
-        ("large_m_cta_group", tuple(sorted(tiles[True]))),
+        ("small_m_BM", tuple(sorted(small_m_BMs))),
+        ("large_m_cta_group", tuple(sorted(large_m_cta_groups))),
     )
 
 
@@ -1074,10 +1096,10 @@ def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     M, K = X.shape
     N, _ = W.shape
     num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
-    large_m, tile, split_k = _pick_config(M, K, N, num_sms)
+    config, split_k = _pick_config(M, K, N, num_sms)
 
     partials = X.new_empty(split_k, M, N, dtype=torch.float32)
-    if large_m:
+    if isinstance(config, LargeMConfig):
         if not W.is_contiguous():
             # the decomp kernel indexes W flat; the small-M kernel takes strides
             raise ValueError("BF16x3 router GEMM: large-M path needs a contiguous W")
@@ -1085,9 +1107,11 @@ def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
         _bf16x3_decomp_kernel[lambda meta: (triton.cdiv(N * K, meta["BLOCK"]),)](
             W, w3, N * K, launch_pdl=True
         )
-        Sm100BF16x3RouterGemmLargeM.compile(K, tile)(X, w3, partials, split_k)
+        Sm100BF16x3RouterGemmLargeM.compile(K, config.cta_group)(
+            X, w3, partials, split_k
+        )
     else:
-        Sm100BF16x3RouterGemmSmallM.compile(K, tile)(X, W, partials, split_k)
+        Sm100BF16x3RouterGemmSmallM.compile(K, config.BM)(X, W, partials, split_k)
 
     if split_k == 1:
         return partials.squeeze(0)
