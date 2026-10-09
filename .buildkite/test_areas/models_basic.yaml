@@ -81,6 +81,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/deepseek_v4/
       - tests/models/test_deepseek_v4_vl_rocm.py
       - tests/models/test_hyv4_rocm.py
       - tests/models/transformers/test_layer_registry_e2e.py
@@ -215,7 +216,7 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_pre_indexer_amd.py
+      - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
 
