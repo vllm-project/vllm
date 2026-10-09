@@ -41,6 +41,7 @@ from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_checksum.worker import init_kv_checksum_worker
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     copy_kv_blocks,
 )
@@ -7082,6 +7083,7 @@ class GPUModelRunner(
             kv_transfer_group = get_kv_transfer_group()
             kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+            init_kv_checksum_worker(self.vllm_config, kv_cache_config, kv_caches)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """Add encoder-only layers to the KV cache config."""
