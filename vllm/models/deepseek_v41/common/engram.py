@@ -1357,7 +1357,7 @@ def _engram_unpack_fp8_kernel(
     BLOCK: tl.constexpr,
     PEER: tl.constexpr,
 ):
-    """Split [rank][token][layer][local head] packed rows into MXFP8 values and
+    """Split `[rank][token][layer][local head]` packed rows into MXFP8 values and
     F8_128x4 scales, one layer per grid column; `packed` holds per-rank
     pointers if PEER. Scales past `num_tokens` zero-pad the 128-row tile.
     """
