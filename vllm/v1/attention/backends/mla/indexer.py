@@ -702,11 +702,15 @@ def _kpool_tail_slot_mapping_kernel(
         end = tl.load(query_start_loc_ptr + pid + 1)
         end = tl.where(pid == num_reqs - 1, num_actual_tokens, end)
         own_block = tl.load(block_table_ptr + pid * block_table_stride).to(tl.int64)
+        # Every scheduled request owns a tail block; the runners give dummy and
+        # padding requests the null block, which must never be written.
+        has_block = own_block != 0
         for i in range(start, end, BLOCK):
             offs = i + tl.arange(0, BLOCK)
             mask = offs < end
             pos = tl.load(positions_ptr + offs, mask=mask, other=0).to(tl.int64)
-            tl.store(out_ptr + offs, own_block * kpool + pos % kpool, mask=mask)
+            slot = tl.where(has_block, own_block * kpool + pos % kpool, -1)
+            tl.store(out_ptr + offs, slot, mask=mask)
     else:
         offs = num_actual_tokens + (pid - num_reqs) * BLOCK + tl.arange(0, BLOCK)
         mask = offs < num_tokens
@@ -759,7 +763,8 @@ def compute_kpool_tail_slot_mapping(
     req = req.clamp_(min=0, max=num_reqs - 1)
     own_block = block_table[:num_reqs, 0].index_select(0, req).to(torch.int64)
     pos = positions[:num_actual_tokens].to(torch.int64)
-    out[:num_actual_tokens] = own_block * kpool + torch.remainder(pos, kpool)
+    slots = own_block * kpool + torch.remainder(pos, kpool)
+    out[:num_actual_tokens] = torch.where(own_block != 0, slots, -1)
     return out
 
 
