@@ -3,16 +3,16 @@
 The `/v1/systemone` endpoint answers a set of typed questions about a state and
 returns a probability for every allowed answer.
 
-The endpoint is off unless the server starts with
-`--enable-structured-decisions`. With the flag, startup fails for a model that
-does not support structured decisions, and with `--logprobs-mode raw_logits` or
-`processed_logits`, since `label_mass` needs log probabilities.
+The endpoint is available by default on generation models. Models without a
+supported read strategy return 501. Supported architectures require
+`--logprobs-mode raw_logprobs` or `processed_logprobs`, since `label_mass` needs
+log probabilities.
 
 ## How it works
 
 1. Each question is one read. The user message is the state, followed by the
-   question and its options, labeled `A`, `B`, `C`, ... in order, and
-   "Answer with the letter of one option only."
+   question and its options with the type's labels, and an instruction to
+   answer with one label.
 2. The read is the reply's first token. Each label must be one token there,
    or the request returns 400.
 3. The read returns the logprobs of that question's label tokens. Softmax over
@@ -31,8 +31,11 @@ question prefills only its own text, then reads one token.
 | type | criteria | answer |
 | --- | --- | --- |
 | `choice` | map of option name to a description or `null` | `choice`, `probabilities` by option name, `confidence` |
+| `noul` | `null`, or an object with optional `true` and `false` descriptions | `noul` (probability of yes), `probabilities`, `confidence` |
+| `score` | ordered list of level names | `score` (expected 0-indexed level), `legend`, `probabilities` by level index, `confidence` |
 
-A choice has at least one option. A question id is a non-empty string.
+A choice has at least one option, a score at least two levels. A question id
+is a non-empty string.
 
 ## Example
 
@@ -51,6 +54,16 @@ curl -s http://localhost:8000/v1/systemone \
           "shipping": "deliveries",
           "security": "account access"
         }
+      },
+      "urgent": {
+        "type": "noul",
+        "instructions": "Does the customer need a reply within the hour?",
+        "criteria": {"true": "the account is locked or money is moving"}
+      },
+      "tone": {
+        "type": "score",
+        "instructions": "How upset is the customer?",
+        "criteria": ["calm", "annoyed", "furious"]
       }
     },
     "chat_template_kwargs": {"enable_thinking": false}
@@ -71,11 +84,26 @@ Response, with probabilities that depend on the model:
       "choice": "billing",
       "probabilities": {"billing": 0.97, "shipping": 0.01, "security": 0.02},
       "confidence": 0.90
+    },
+    "urgent": {
+      "type": "noul",
+      "noul": 0.02,
+      "probabilities": {"yes": 0.02, "no": 0.98},
+      "confidence": 0.95
+    },
+    "tone": {
+      "type": "score",
+      "score": 0.6,
+      "legend": {"0": "calm", "1": "annoyed", "2": "furious"},
+      "probabilities": {"0": 0.7, "1": 0.2, "2": 0.1},
+      "confidence": 0.65
     }
   },
-  "usage": {"input_tokens": 142, "output_tokens": 1},
+  "usage": {"input_tokens": 142, "output_tokens": 3},
   "diagnostics": {
-    "team": {"label_mass": 0.93, "argmax_is_label": true}
+    "team": {"label_mass": 0.93, "argmax_is_label": true},
+    "urgent": {"label_mass": 0.98, "argmax_is_label": true},
+    "tone": {"label_mass": 0.91, "argmax_is_label": true}
   }
 }
 ```
@@ -87,8 +115,9 @@ whole vocabulary: its share of the labels times `label_mass`.
 
 ## Labels
 
-Options are labeled `A` to `Z` in the order the request lists them, so a
-`choice` has at most 26 options.
+Labels follow the type: a `choice` labels its options `A` to `Z` in the order
+the request lists them, a `noul` labels its options `yes` and `no`, and a
+`score` labels its levels `0` to `9`, so a level's label is its score.
 
 ## Limits
 
@@ -96,6 +125,7 @@ Options are labeled `A` to `Z` in the order the request lists them, so a
 | --- | --- |
 | questions per request | 64 |
 | options per `choice` | 26 |
+| levels per `score` | 10 |
 
 ## Request fields
 
