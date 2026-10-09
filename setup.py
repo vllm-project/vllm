@@ -13,6 +13,7 @@ import sys
 import sysconfig
 from pathlib import Path
 from shutil import which
+from typing import TypedDict
 
 import torch
 from packaging.version import Version, parse
@@ -205,6 +206,15 @@ class CMakeExtension(Extension):
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
+class CMakeBuildEnv(TypedDict):
+    """Inputs a configured CMake build directory is tied to."""
+
+    python: str
+    torch_dir: str
+    torch_version: str
+    generator: str | None
+
+
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
     did_config: dict[str, bool] = {}
@@ -212,9 +222,8 @@ class cmake_build_ext(build_ext):
     def finalize_options(self) -> None:
         super().finalize_options()
         if self.editable_mode:
-            # setuptools points editable builds at a fresh temporary directory,
-            # which forces a full CMake configure and rebuild on every install.
-            # Reuse the directory a regular (non-editable) build would use.
+            # setuptools uses a throwaway dir for editable builds; reuse the
+            # persistent one regular builds use.
             build = self.get_finalized_command("build")
             plat_specifier = f"{self.plat_name}-{sys.implementation.cache_tag}"
             if is_freethreaded():
@@ -223,13 +232,8 @@ class cmake_build_ext(build_ext):
                 plat_specifier += "-pydebug"
             self.build_temp = os.path.join(build.build_base, f"temp.{plat_specifier}")
 
-    def invalidate_stale_cmake_cache(self, build_env: dict) -> None:
-        """Drop the CMake cache unless it was configured for `build_env`.
-
-        CMake caches paths it discovers (e.g. `Torch_DIR`) and refuses to
-        switch generators, so a build dir reused across venvs, isolated build
-        envs, or torch installs must be reconfigured from scratch.
-        """
+    def invalidate_stale_cmake_cache(self, build_env: CMakeBuildEnv) -> None:
+        """Drop the CMake cache if it was configured for another `build_env`."""
         cache = Path(self.build_temp, "CMakeCache.txt")
         if not cache.exists():
             return
@@ -349,8 +353,9 @@ class cmake_build_ext(build_ext):
         if nvcc_threads:
             cmake_args += [f"-DNVCC_THREADS={nvcc_threads}"]
 
-        if is_ninja_available():
-            build_tool = ["-G", "Ninja"]
+        generator = "Ninja" if is_ninja_available() else None
+        if generator:
+            build_tool = ["-G", generator]
             cmake_args += [
                 "-DCMAKE_JOB_POOL_COMPILE:STRING=compile",
                 f"-DCMAKE_JOB_POOLS:STRING=compile={num_jobs}",
@@ -368,12 +373,12 @@ class cmake_build_ext(build_ext):
         if other_cmake_args:
             cmake_args += other_cmake_args.split()
 
-        build_env = {
-            "python": sys.executable,
-            "torch": os.path.dirname(torch.__file__),
-            "torch_version": torch.__version__,
-            "generator": build_tool,
-        }
+        build_env = CMakeBuildEnv(
+            python=sys.executable,
+            torch_dir=os.path.dirname(torch.__file__),
+            torch_version=torch.__version__,
+            generator=generator,
+        )
         self.invalidate_stale_cmake_cache(build_env)
         subprocess.check_call(
             ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],

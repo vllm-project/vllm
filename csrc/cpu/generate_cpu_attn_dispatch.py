@@ -288,7 +288,7 @@ def main():
     )
 
     header = generate_header_file()
-    # Keep the mtime stable when unchanged so reconfigures don't force rebuilds.
+    # Skip unchanged writes so reconfiguring doesn't force a rebuild.
     if os.path.exists(output_path):
         with open(output_path) as f:
             if f.read() == header:

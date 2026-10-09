@@ -40,11 +40,8 @@ function (run_python OUT EXPR ERR_MSG)
 endfunction()
 
 #
-# Read the key recorded in `STAMP_FILE` by the last successful run of a source
-# generator into `OUT` (empty if missing).  The stamp lives next to the
-# generated sources rather than in the CMake cache, so it stays accurate when
-# several build directories share the source tree and is removed together with
-# the sources (e.g. by `git clean -X`).
+# Read the key a source generator last wrote to `STAMP_FILE` into `OUT`.
+# Kept next to the generated sources so it is shared across build directories.
 #
 function (read_generator_stamp OUT STAMP_FILE)
   set(_KEY "")

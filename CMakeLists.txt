@@ -405,8 +405,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       set(_stable_hdr_staging_dir
         "${CMAKE_CURRENT_BINARY_DIR}/torch_patched_headers_staging")
 
-      # Patch in a staging dir and copy only if different, so reconfiguring
-      # doesn't touch the header and force every stable-ABI source to rebuild.
+      # Copy only if different so reconfiguring doesn't force a rebuild.
       file(MAKE_DIRECTORY "${_stable_hdr_staging_dir}/torch/csrc/stable")
       file(COPY_FILE
         "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
