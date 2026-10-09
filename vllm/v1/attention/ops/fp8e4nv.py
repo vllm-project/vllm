@@ -141,6 +141,61 @@ def _decode_bf16_pack4(x0, x1, x2, x3):
     )
 
 
+@tl.core.extern
+def _fp16x4_to_fp8e4m3x4(arg0, arg1, _semantic=None):
+    u32 = tl.core.dtype("uint32")
+    return tl.core.extern_elementwise(
+        "fp8e4nv",
+        _HELPER_PATH_STR,
+        [arg0, arg1],
+        {(u32, u32): ("fp16x4_to_fp8e4m3x4", u32)},
+        is_pure=True,
+        _semantic=_semantic,
+    )
+
+
+@tl.core.extern
+def _bf16x4_to_fp8e4m3x4(arg0, arg1, _semantic=None):
+    u32 = tl.core.dtype("uint32")
+    return tl.core.extern_elementwise(
+        "fp8e4nv",
+        _HELPER_PATH_STR,
+        [arg0, arg1],
+        {(u32, u32): ("bf16x4_to_fp8e4m3x4", u32)},
+        is_pure=True,
+        _semantic=_semantic,
+    )
+
+
+@triton.jit
+def _encode_pack4(x0, x1, x2, x3):
+    if x0.dtype == tl.float32:
+        b0 = x0.to(tl.uint32, bitcast=True)
+        b1 = x1.to(tl.uint32, bitcast=True)
+        b2 = x2.to(tl.uint32, bitcast=True)
+        b3 = x3.to(tl.uint32, bitcast=True)
+        # Round-to-odd preserves FP32-to-FP8 RNE without double rounding.
+        b0 = (b0 >> 16) | ((b0 & 0xFFFF) != 0).to(tl.uint32)
+        b1 = (b1 >> 16) | ((b1 & 0xFFFF) != 0).to(tl.uint32)
+        b2 = (b2 >> 16) | ((b2 & 0xFFFF) != 0).to(tl.uint32)
+        b3 = (b3 >> 16) | ((b3 & 0xFFFF) != 0).to(tl.uint32)
+    else:
+        b0 = x0.to(tl.uint16, bitcast=True).to(tl.uint32)
+        b1 = x1.to(tl.uint16, bitcast=True).to(tl.uint32)
+        b2 = x2.to(tl.uint16, bitcast=True).to(tl.uint32)
+        b3 = x3.to(tl.uint16, bitcast=True).to(tl.uint32)
+    if x0.dtype == tl.float16:
+        encoded = _fp16x4_to_fp8e4m3x4(b0 | (b1 << 16), b2 | (b3 << 16))
+    else:
+        encoded = _bf16x4_to_fp8e4m3x4(b0 | (b1 << 16), b2 | (b3 << 16))
+    return (
+        encoded.to(tl.uint8),
+        (encoded >> 8).to(tl.uint8),
+        (encoded >> 16).to(tl.uint8),
+        (encoded >> 24).to(tl.uint8),
+    )
+
+
 @triton.jit
 def convert_to_fp8e4m3(x):
     """Encode float -> uint8 fp8e4m3 bytes (saturating RNE)."""
@@ -148,7 +203,9 @@ def convert_to_fp8e4m3(x):
         (x.dtype == tl.float16) or (x.dtype == tl.bfloat16) or (x.dtype == tl.float32),
         "convert_to_fp8e4m3 expects fp16, bf16, or fp32 input",
     )
-    if x.dtype == tl.float32:
+    if x.numel >= 4 * tl.extra.cuda.num_threads():
+        return tl.map_elementwise(_encode_pack4, x, pack=4)[0]
+    elif x.dtype == tl.float32:
         return _fp32x1_to_fp8e4m3(x.to(tl.uint32, bitcast=True))
     elif x.dtype == tl.float16:
         return _fp16x1_to_fp8e4m3(x.to(tl.uint16, bitcast=True))

@@ -116,12 +116,12 @@ def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return out
 
 
-def _run_encode(x: torch.Tensor) -> torch.Tensor:
+def _run_encode(x: torch.Tensor, block: int = 256) -> torch.Tensor:
     """Launch software encoding and return the resulting FP8 bytes."""
     out = torch.empty(x.numel(), dtype=torch.uint8, device="cuda")
     n = x.numel()
-    _encode_kernel[(triton.cdiv(n, 256),)](
-        x, out, n, BLOCK=256, extern_libs=FP8E4NV_EXTERN_LIBS
+    _encode_kernel[(triton.cdiv(n, block),)](
+        x, out, n, BLOCK=block, num_warps=4, extern_libs=FP8E4NV_EXTERN_LIBS
     )
     return out
 
@@ -224,14 +224,15 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int):
     "dtype,min_cap",
     [(torch.float16, 75), (torch.bfloat16, 80), (torch.float32, 75)],
 )
-def test_encode_sampled_edge_cases(dtype: torch.dtype, min_cap: int):
+@pytest.mark.parametrize("block", [64, 128, 256, 512])
+def test_encode_sampled_edge_cases(dtype: torch.dtype, min_cap: int, block: int):
     """RNE encode over a sampled set incl. edge cases, bit-exact vs the saturating
     reference. Runs on SM75-SM88 (reference oracle) and SM89+ (reference lowers to
     native)."""
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
     x = _edge_case_inputs(dtype)
-    actual = _run_encode(x)
+    actual = _run_encode(x, block)
     ref = _saturating_fp8_ref(x)
     torch.testing.assert_close(
         actual.view(torch.uint8),
@@ -344,12 +345,13 @@ def test_decode_nan_and_signed_zero_match_native_on_sm89(dtype: torch.dtype):
     reason="native fp8e4nv cast cross-check requires SM89+",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype):
+@pytest.mark.parametrize("block", [256, 512])
+def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype, block: int):
     """On SM89+, the RNE encode is cross-checked against the native float -> fp8 cvt
     over EVERY one of the 65,536 input bit patterns (normals, subnormals, signed
     zeros, overflow, +-inf, +-NaN -- overflow saturates, NaNs remain NaNs)."""
     x = _all_uint16_as(dtype)
-    actual = _run_encode(x)
+    actual = _run_encode(x, block)
     native = _saturating_fp8_ref(x)  # native hardware cvt on SM89+ (clamped input)
     torch.testing.assert_close(
         actual.view(torch.uint8),
