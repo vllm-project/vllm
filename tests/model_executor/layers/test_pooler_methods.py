@@ -13,19 +13,22 @@ from transformers import PreTrainedConfig
 
 from vllm.config import PoolerConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
+from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.layers.pooler.seqwise.methods import (
     CLSPool,
     LastPool,
     MeanPool,
     get_seq_pooling_method,
 )
-from vllm.model_executor.layers.pooler.special import DispatchPooler
+from vllm.model_executor.layers.pooler.special import BOSEOSFilter, DispatchPooler
+from vllm.model_executor.layers.pooler.tokwise.heads import TokenEmbeddingPoolerHead
 from vllm.model_executor.layers.pooler.tokwise.methods import (
     AllPool,
     StepPool,
     get_tok_pooling_method,
 )
-from vllm.pooling_params import PoolingParams
+from vllm.model_executor.layers.pooler.tokwise.poolers import TokenPooler
+from vllm.pooling_params import LateChunkingParams, PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata, PoolingStates
 
@@ -606,3 +609,153 @@ class TestGetTokPoolingMethod:
     def test_unknown_raises(self):
         with pytest.raises(NotImplementedError, match="UNKNOWN"):
             get_tok_pooling_method("UNKNOWN")
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 7, 10, 2**63 - 1])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("head_dtype", [None, torch.float32])
+def test_late_chunk_pool_matches_fp32_means_before_projection_and_normalization(
+    chunk_size, dtype, head_dtype
+):
+    # Unequal norms expose the incorrect normalize-then-average implementation.
+    hidden = (torch.arange(28).reshape(7, 4) - 10).to(dtype)
+    projector = torch.nn.Linear(4, 3, bias=True).to(head_dtype or dtype)
+    head = TokenEmbeddingPoolerHead(head_dtype, projector, PoolerNormalize())
+    pooler = TokenPooler(TestAllPool._make_all_pool(), head)
+    params = PoolingParams(
+        task="token_embed",
+        late_chunking_params=LateChunkingParams(chunk_size=chunk_size),
+        use_activation=True,
+    )
+    metadata = _make_metadata([7], pooling_params=[params])
+    actual = pooler(hidden, metadata)[0]
+    means = torch.stack(
+        [hidden[a : a + chunk_size].float().mean(0) for a in range(0, 7, chunk_size)]
+    ).to(head_dtype or dtype)
+    expected = torch.nn.functional.normalize(projector(means), p=2, dim=-1)
+    torch.testing.assert_close(actual, expected)
+    assert actual.dtype == (head_dtype or dtype)
+
+
+def test_late_chunk_pool_reduces_before_nonlinear_projector():
+    hidden = torch.tensor([[2.0, 0.0], [0.0, 1.0]])
+    projector = torch.nn.Tanh()
+    head = TokenEmbeddingPoolerHead(projector=projector, activation=PoolerNormalize())
+    params = PoolingParams(
+        task="token_embed",
+        late_chunking_params=LateChunkingParams(chunk_size=2),
+        use_activation=True,
+    )
+    actual = head.forward_chunk(hidden, params)
+    expected = torch.nn.functional.normalize(projector(hidden.mean(0, keepdim=True)))
+    wrong_order = torch.nn.functional.normalize(projector(hidden).mean(0, keepdim=True))
+    torch.testing.assert_close(actual, expected)
+    assert not torch.allclose(actual, wrong_order)
+
+
+def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage():
+    hidden = torch.arange(36, dtype=torch.float32).reshape(9, 4)
+    params = [
+        PoolingParams(
+            task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=2)
+        ),
+        PoolingParams(task="token_embed"),
+        PoolingParams(
+            task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=1)
+        ),
+    ]
+    pooler = TokenPooler(
+        TestAllPool._make_all_pool(async_scheduling=True), TokenEmbeddingPoolerHead()
+    )
+    outputs = pooler(hidden, _make_metadata([3, 4, 2], pooling_params=params))
+    expected = [
+        torch.stack([hidden[:2].mean(0), hidden[2]]),
+        hidden[3:7].clone(),
+        hidden[7:].clone(),
+    ]
+    hidden.fill_(-999)
+    for actual, reference in zip(outputs, expected):
+        torch.testing.assert_close(actual, reference)
+
+
+def test_late_chunk_pool_waits_for_complete_states():
+    pooler = TokenPooler(
+        TestAllPool._make_all_pool(chunked=True), TokenEmbeddingPoolerHead()
+    )
+    params = [
+        PoolingParams(
+            task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=3)
+        )
+    ]
+    first = _make_metadata(
+        [4], pooling_params=params, num_scheduled_tokens=[2], seq_lens=[2]
+    )
+    hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    assert pooler(hidden[:2], first) == [None]
+    last = _make_metadata(
+        [4], pooling_params=params, num_scheduled_tokens=[2], seq_lens=[4]
+    )
+    last.pooling_states = first.pooling_states
+    actual = pooler(hidden[2:], last)[0]
+    torch.testing.assert_close(actual, torch.stack([hidden[:3].mean(0), hidden[3]]))
+    assert not last.pooling_states[0].hidden_states_cache
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 8])
+@pytest.mark.parametrize("embedding_size", [1, 4])
+def test_bos_eos_filter_preserves_chunk_vectors_in_mixed_batch(
+    chunk_size, embedding_size
+):
+    hidden = torch.arange(10 * embedding_size, dtype=torch.float32).reshape(
+        10, embedding_size
+    )
+    pooler = BOSEOSFilter(
+        TokenPooler(TestAllPool._make_all_pool(), TokenEmbeddingPoolerHead()),
+        bos_token_id=101,
+        eos_token_id=102,
+    )
+    metadata = _make_metadata(
+        [5, 5],
+        token_ids=[[101, 1, 2, 3, 102]] * 2,
+        pooling_params=[
+            PoolingParams(
+                task="token_embed", late_chunking_params=LateChunkingParams(chunk_size)
+            ),
+            PoolingParams(task="token_embed"),
+        ],
+    )
+    chunked, ordinary = pooler(hidden, metadata)
+    expected = torch.stack([part.mean(0) for part in hidden[:5].split(chunk_size)])
+    torch.testing.assert_close(chunked, expected)
+    torch.testing.assert_close(ordinary, hidden[6:9].squeeze(-1))
+
+
+def test_bos_eos_filter_waits_for_complete_chunk_vectors():
+    pooler = BOSEOSFilter(
+        TokenPooler(
+            TestAllPool._make_all_pool(chunked=True), TokenEmbeddingPoolerHead()
+        ),
+        bos_token_id=101,
+    )
+    params = [
+        PoolingParams(task="token_embed", late_chunking_params=LateChunkingParams(3))
+    ]
+    first = _make_metadata(
+        [4],
+        token_ids=[[101, 1, 2, 102]],
+        pooling_params=params,
+        num_scheduled_tokens=[2],
+        seq_lens=[2],
+    )
+    hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    assert pooler(hidden[:2], first) == [None]
+    last = _make_metadata(
+        [4],
+        token_ids=[[101, 1, 2, 102]],
+        pooling_params=params,
+        num_scheduled_tokens=[2],
+        seq_lens=[4],
+    )
+    last.pooling_states = first.pooling_states
+    actual = pooler(hidden[2:], last)[0]
+    torch.testing.assert_close(actual, torch.stack([hidden[:3].mean(0), hidden[3]]))

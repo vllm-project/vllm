@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
+import msgspec
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -13,6 +15,8 @@ from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
 from vllm.exceptions import VLLMValidationError
+from vllm.outputs import LateChunk, LateChunkingMetadata
+from vllm.pooling_params import LateChunkingParams
 
 EMBEDDING_MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
@@ -211,3 +215,121 @@ def test_token_classify(pooling_type: str):
         with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "2"])
+def test_late_chunk_size_rejects_non_positive_integers(value):
+    with pytest.raises(VLLMValidationError, match="positive integer"):
+        PoolingParams(late_chunking_params=LateChunkingParams(chunk_size=value))
+
+
+def _late_chunking_model_config():
+    return SimpleNamespace(
+        architecture="NomicBertModel",
+        model_impl="auto",
+        is_matryoshka=False,
+        hf_config=SimpleNamespace(),
+        pooler_config=PoolerConfig(seq_pooling_type="MEAN", tok_pooling_type="ALL"),
+    )
+
+
+def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
+    model_config = _late_chunking_model_config()
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=3)
+    )
+    params.verify(model_config)
+    assert params.skip_reading_prefix_cache is True
+    assert params.use_activation is True
+    # Chunk means must include cached prefixes even when the user opts into reads.
+    explicit_cache_flag = PoolingParams(
+        task="token_embed",
+        late_chunking_params=LateChunkingParams(chunk_size=3),
+        skip_reading_prefix_cache=False,
+    )
+    explicit_cache_flag.verify(model_config)
+    assert explicit_cache_flag.skip_reading_prefix_cache is True
+    params.late_chunking_params.metadata = LateChunkingMetadata(
+        chunk_size=3, input_tokens=3, chunks=[LateChunk((0, 3), (0, 2))]
+    )
+    clone = params.clone()
+    assert clone.late_chunking_params is not None
+    clone.late_chunking_params.chunk_size = 7
+    assert params.late_chunking_params is not None
+    assert params.late_chunking_params.chunk_size == 3
+    clone.late_chunking_params.metadata.chunks.clear()
+    assert len(params.late_chunking_params.metadata.chunks) == 1
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
+        == params
+    )
+    # A message written before the appended field still uses the old default.
+    wire = msgspec.msgpack.decode(msgspec.msgpack.encode(PoolingParams()))
+    assert msgspec.convert(wire[:-1], type=PoolingParams).late_chunking_params is None
+
+
+@pytest.mark.parametrize(
+    "task", ["embed", "classify", "token_classify", "plugin", None]
+)
+def test_late_chunking_rejects_other_tasks(task):
+    with pytest.raises(VLLMValidationError, match="requires token_embed"):
+        PoolingParams(
+            task=task, late_chunking_params=LateChunkingParams(chunk_size=2)
+        ).verify(_late_chunking_model_config())
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"architecture": "BertModel"},
+        {"model_impl": "transformers"},
+        {"is_matryoshka": True},
+        {"seq_pooling_type": "CLS"},
+        {"tok_pooling_type": "STEP"},
+        {"enable_chunked_processing": True},
+        {"num_experts": 8},
+    ],
+)
+def test_late_chunking_does_not_restrict_model_identity(override):
+    model_config = _late_chunking_model_config()
+    for key, value in override.items():
+        target = (
+            model_config.hf_config
+            if key == "num_experts"
+            else model_config.pooler_config
+            if hasattr(model_config.pooler_config, key)
+            else model_config
+        )
+        setattr(target, key, value)
+    PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=2)
+    ).verify(model_config)
+
+
+def test_late_chunking_uses_existing_dimension_validation():
+    config = MockMatryoshkaModelConfig(
+        pooler_config=PoolerConfig(tok_pooling_type="ALL", use_activation=False),
+    )
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(2), dimensions=4
+    )
+    params.verify(config)
+    assert params.dimensions == 4
+    assert params.use_activation is False
+    params.dimensions = config.embedding_size + 1
+    with pytest.raises(VLLMValidationError, match="dimensions in range"):
+        params.verify(config)
+
+
+@pytest.mark.parametrize("from_config", [False, True])
+def test_late_chunking_rejects_token_filtering_after_resolving_defaults(from_config):
+    config = MockModelConfig(pooler_config=PoolerConfig(tok_pooling_type="STEP"))
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(2)
+    )
+    if from_config:
+        config.pooler_config.step_tag_id = 42
+    else:
+        params.step_tag_id = 42
+    with pytest.raises(VLLMValidationError, match="all token rows"):
+        params.verify(config)

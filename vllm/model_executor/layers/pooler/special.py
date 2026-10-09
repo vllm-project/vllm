@@ -198,6 +198,9 @@ class BOSEOSFilter(Pooler):
         for i, (prompt_len, token_ids) in enumerate(
             zip(pooling_metadata.prompt_lens, prompt_token_ids)
         ):
+            # Chunk vectors include special tokens and no longer have token rows.
+            if pooling_metadata.pooling_params[i].late_chunking_params is not None:
+                continue
             pooled_data = pooled_outputs[i]
             assert (
                 isinstance(pooled_data, torch.Tensor)

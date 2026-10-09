@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -79,10 +80,6 @@ def test_rejects_conflicting_pooling_task(processor: PoolingIOProcessor):
 
 
 def test_qwen3_reranker_warns_without_chat_template(monkeypatch):
-    from unittest.mock import MagicMock
-
-    from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcessor
-
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.get_model_cls", lambda *_: MagicMock()
     )
@@ -129,10 +126,6 @@ def test_qwen3_reranker_warns_without_chat_template(monkeypatch):
 
 
 def test_qwen3_vl_reranker_warns_with_vl_template(monkeypatch):
-    from unittest.mock import MagicMock
-
-    from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcessor
-
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.get_model_cls", lambda *_: MagicMock()
     )
@@ -179,10 +172,6 @@ def test_qwen3_vl_reranker_warns_with_vl_template(monkeypatch):
 
 
 def test_qwen3_reranker_no_warning_when_template_provided(monkeypatch):
-    from unittest.mock import MagicMock
-
-    from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcessor
-
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.get_model_cls", lambda *_: MagicMock()
     )
