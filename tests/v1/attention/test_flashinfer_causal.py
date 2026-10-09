@@ -132,3 +132,33 @@ def test_group_plans_use_disjoint_pages_and_symmetric_window():
         assert plan["head_dim_vo"] == 256
     assert groups[0].token_indices.tolist() == [0, 4, 5]
     assert groups[1].token_indices.tolist() == [1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    ["trtllm", "dcp", "sinks", "speculative", "cascade", "full_graph"],
+)
+def test_mixed_causal_rejects_unsupported_dispatch(unsupported):
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    builder = SimpleNamespace(
+        nvfp4_trtllm=unsupported == "trtllm",
+        use_dcp=unsupported == "dcp",
+        has_sinks=unsupported == "sinks",
+        reorder_batch_threshold=2 if unsupported == "speculative" else 1,
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=SimpleNamespace(
+                has_full_cudagraphs=lambda: unsupported == "full_graph"
+            )
+        ),
+    )
+    metadata = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=3,
+        causal=torch.tensor([True, False]),
+    )
+    with pytest.raises(NotImplementedError, match="Mixed causal FlashInfer"):
+        FlashInferMetadataBuilder.build(
+            builder, 16 if unsupported == "cascade" else 0, metadata
+        )
