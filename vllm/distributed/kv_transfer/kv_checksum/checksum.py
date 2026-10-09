@@ -35,6 +35,7 @@ replica: a partial checksum is keyed by ``(replicas, replica_index)`` of the
 layers it covers, so each consumer replica can be checked on its own.
 """
 
+import enum
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -54,6 +55,15 @@ checksummed."""
 
 ReplicaKey = tuple[int, int]
 """``(replicas, replica_index)`` of the layers a partial checksum covers."""
+
+
+class KVChecksumCarrier(enum.Enum):
+    """How a connector carries a request's checksums from its KV producer to
+    its consumer."""
+
+    KV_TRANSFER_PARAMS = enum.auto()
+    """In the kv_transfer_params the producer returns for the request, which
+    reach the consumer with the request."""
 
 
 @dataclass
