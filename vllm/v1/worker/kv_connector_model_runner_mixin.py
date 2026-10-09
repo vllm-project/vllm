@@ -117,6 +117,7 @@ class KVConnectorModelRunnerMixin:
                     transfer_results.finished_recving,
                     transfer_results.failed_recving,
                     scheduler_output.finished_req_ids,
+                    transfer_results.kv_checksums,
                     defer_sends=defer_finalize and get_pp_group().is_last_rank,
                 )
 

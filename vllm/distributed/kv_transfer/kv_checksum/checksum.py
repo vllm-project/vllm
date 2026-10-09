@@ -65,6 +65,13 @@ class KVChecksumCarrier(enum.Enum):
     """In the kv_transfer_params the producer returns for the request, which
     reach the consumer with the request."""
 
+    CONNECTOR = enum.auto()
+    """In the connector's own messages. The producer's scheduler hands them to
+    ``KVConnectorBase_V1.send_kv_checksums`` after ``request_finished``; the
+    consumer's worker connector returns them in
+    ``KVConnectorTransferResults.kv_checksums``, by the time it reports the
+    load finished."""
+
 
 @dataclass
 class KVChecksumBlocks:
@@ -131,6 +138,9 @@ class KVChecksumRecord:
     checksums: dict[str, dict[int, KVChecksumGroup]]
     skipped_groups: frozenset[int]
     fingerprints: dict[int, int]
+    received: dict[str, bytes] = field(default_factory=dict)
+    """Producer checksums this worker's connector received with finished
+    loads (``KVChecksumCarrier.CONNECTOR``), per request."""
 
 
 def num_valid_tokens(position: int, block_size: int, num_tokens: int) -> int:

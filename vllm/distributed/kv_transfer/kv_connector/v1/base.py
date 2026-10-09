@@ -97,6 +97,9 @@ class KVConnectorTransferResults:
     finished_sending: set[str] = field(default_factory=set)
     finished_recving: set[str] = field(default_factory=set)
     failed_recving: set[str] = field(default_factory=set)
+    kv_checksums: dict[str, bytes] = field(default_factory=dict)
+    """Producer KV checksums received for loads in ``finished_recving``, by
+    connectors that carry them (``KVChecksumCarrier.CONNECTOR``)."""
 
 
 class SupportsHMA(ABC):
@@ -667,6 +670,14 @@ class KVConnectorBase_V1(ABC):
 
         """
         return None
+
+    def send_kv_checksums(self, request: "Request", checksums: bytes) -> None:
+        """Send a finished request's KV checksums to its consumer.
+
+        Called after ``request_finished`` for requests whose carrier is
+        ``KVChecksumCarrier.CONNECTOR``.
+        """
+        raise NotImplementedError
 
     def register_finished_partial_tail(
         self,

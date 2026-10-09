@@ -381,6 +381,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             child_results = connector.get_transfer_results(finished_req_ids)
             results.finished_recving.update(child_results.finished_recving)
             results.failed_recving.update(child_results.failed_recving)
+            results.kv_checksums.update(child_results.kv_checksums)
             for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
                 if extra_pending is None:
@@ -597,10 +598,24 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if index is None:
                 return None
             return self._connectors[index].kv_checksum_carrier(request, True)
-        for c in self._connectors:
-            if (carrier := c.kv_checksum_carrier(request, False)) is not None:
-                return carrier
+        if (c := self._kv_checksum_sender(request)) is not None:
+            return c.kv_checksum_carrier(request, False)
         return None
+
+    def send_kv_checksums(self, request: "Request", checksums: bytes) -> None:
+        if (sender := self._kv_checksum_sender(request)) is not None:
+            sender.send_kv_checksums(request, checksums)
+
+    def _kv_checksum_sender(self, request: "Request") -> KVConnectorBase_V1 | None:
+        """The first sub-connector that carries the request's checksums."""
+        return next(
+            (
+                c
+                for c in self._connectors
+                if c.kv_checksum_carrier(request, False) is not None
+            ),
+            None,
+        )
 
     def request_finished(
         self,
