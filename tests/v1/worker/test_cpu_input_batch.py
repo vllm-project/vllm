@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.cpu.input_batch import (
     combine_sampled_and_draft_tokens,
     get_num_sampled_and_rejected,
@@ -10,6 +12,8 @@ from vllm.v1.worker.cpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+
+pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 
 
 def test_prepare_prefill_inputs_cpu() -> None:

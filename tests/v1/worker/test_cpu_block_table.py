@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.cpu.block_table import (
     compute_slot_mappings,
     gather_block_tables,
 )
+
+pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 
 
 def test_gather_block_tables_cpu() -> None:
