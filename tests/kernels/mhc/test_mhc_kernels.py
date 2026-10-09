@@ -51,6 +51,103 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.mark.parametrize("kind", ["random", "cancellation", "scaled"])
+def test_bf16x3_weight_preserves_small_fp32_components(kind):
+    """CPU check: a single BF16 cast loses the cancellation residual."""
+    from vllm.model_executor.kernels.mhc.bf16x3 import split_bf16_mhc_weight
+
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    weight = torch.randn(24, 128, generator=generator, device="cpu")
+    if kind == "cancellation":
+        weight[:, 0::2] = 1 + 2**-10 + 2**-20
+        weight[:, 1::2] = -1
+    elif kind == "scaled":
+        weight *= torch.logspace(-4, 4, 128, device="cpu")
+    original = weight.clone()
+    parts = split_bf16_mhc_weight(weight)
+    reconstructed = sum(part.double() for part in parts)
+    torch.testing.assert_close(reconstructed, weight.double(), rtol=1e-7, atol=0)
+    torch.testing.assert_close(weight, original, rtol=0, atol=0)
+    if kind == "cancellation":
+        torch.testing.assert_close(
+            reconstructed.sum(-1), weight.double().sum(-1), rtol=0, atol=0
+        )
+        assert torch.count_nonzero(parts[0].float().sum(-1)) == 0
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "m,k,splits,block_m",
+    [
+        (0, 5120, 16, 64),
+        (1, 64, 16, 32),
+        (31, 5120, 4, 32),
+        (32, 20480, 16, 64),
+        (33, 20480, 1, 64),
+        (127, 5120, 4, 128),
+        (129, 20480, 16, 64),
+        (4096, 20480, 16, 128),
+    ],
+)
+def test_bf16x3_prenorm_partials_match_fp64(m, k, splits, block_m):
+    """Cover token/K tails, empty splits and offset contiguous allocations."""
+    from vllm.model_executor.kernels.mhc.bf16x3 import (
+        mhc_prenorm_bf16x3,
+        split_bf16_mhc_weight,
+    )
+
+    torch.manual_seed(0)
+    x = torch.randn(m * k + 1, device="cuda", dtype=torch.bfloat16)[1:].view(m, k)
+    weight = torch.randn(24, k, device="cuda", dtype=torch.float32) / k**0.5
+    parts = split_bf16_mhc_weight(weight)
+    storage = torch.full((splits * m * 24 + 2,), float("nan"), device="cuda")
+    mix = storage[1:-1].view(splits, m, 24)
+    sq = torch.empty(splits, m, device="cuda")
+    mhc_prenorm_bf16x3(x, parts, mix, sq, block_m=block_m)
+    torch.testing.assert_close(
+        mix.sum(0).double(), x.double() @ weight.double().T, rtol=5e-5, atol=2e-5
+    )
+    torch.testing.assert_close(
+        sq.sum(0).double(), x.double().square().sum(-1), rtol=2e-6, atol=1e-5
+    )
+    assert torch.isnan(storage[[0, -1]]).all()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_bf16x3_prenorm_graph_reads_changed_inputs_and_weights():
+    from vllm.model_executor.kernels.mhc.bf16x3 import (
+        mhc_prenorm_bf16x3,
+        split_bf16_mhc_weight,
+    )
+
+    torch.manual_seed(1)
+    x = torch.randn(65, 5120, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(24, 5120, device="cuda") / 5120**0.5
+    parts = split_bf16_mhc_weight(weight)
+    mix = torch.empty(16, 65, 24, device="cuda")
+    sq = torch.empty(16, 65, device="cuda")
+    mhc_prenorm_bf16x3(x, parts, mix, sq)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        mhc_prenorm_bf16x3(x, parts, mix, sq)
+    for scale in (0.5, -2.0):
+        x.mul_(scale)
+        weight.mul_(-1)
+        for dst, src in zip(parts, split_bf16_mhc_weight(weight)):
+            dst.copy_(src)
+        graph.replay()
+        torch.testing.assert_close(
+            mix.sum(0).double(),
+            x.double() @ weight.double().T,
+            rtol=5e-5,
+            atol=2e-5,
+        )
+        torch.testing.assert_close(
+            sq.sum(0).double(), x.double().square().sum(-1), rtol=2e-6, atol=1e-5
+        )
+
+
 @pytest.mark.parametrize(
     "tp,ep,hidden,hc,multicast,expected",
     [
