@@ -162,7 +162,10 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
+from vllm.v1.worker.gpu.spec_decode.utils import (
+    DraftTokensHandler,
+    get_drafter_hidden_states,
+)
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import (
     StructuredOutputsWorker,
@@ -578,9 +581,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         encoder_runner = getattr(self.model_state, "encoder_runner", None)
-        if encoder_runner is None:
-            return {}
-        return encoder_runner.get_encoder_timing_stats()
+        return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
 
     def get_kv_cache_spec(self):
         kv_cache_spec = get_kv_cache_spec(self.vllm_config)
@@ -921,7 +922,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 mm_inputs = [], all_false
 
-            spec_hidden_states = self._get_drafter_hidden_states(hidden_states)
+            spec_hidden_states = get_drafter_hidden_states(self.model, hidden_states)
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
@@ -2080,24 +2081,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return None
 
-    def _get_drafter_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Hidden states fed to the drafter.
-
-        Targets such as DeepSeek V4 expose the pre-hc_head residual through
-        get_mtp_target_hidden_states(). The buffer is sized at
-        max_num_batched_tokens and only allocated for drafters that consume
-        target hidden states, so None means "use the regular hidden states".
-        """
-        get_target_hidden_states = getattr(
-            self.model, "get_mtp_target_hidden_states", None
-        )
-        if get_target_hidden_states is None:
-            return hidden_states
-        target_hidden_states = get_target_hidden_states()
-        if target_hidden_states is None:
-            return hidden_states
-        return target_hidden_states[: hidden_states.shape[0]]
-
     @torch.inference_mode()
     @step_eplb_after()
     def sample_tokens(
@@ -2243,7 +2226,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.observe_verification(
                     input_batch.idx_mapping, num_sampled, num_rejected
                 )
-            spec_hidden_states = self._get_drafter_hidden_states(draft_hidden_states)
+            spec_hidden_states = get_drafter_hidden_states(
+                self.model, draft_hidden_states
+            )
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
