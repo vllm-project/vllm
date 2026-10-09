@@ -11,7 +11,9 @@
 # so no registry credentials are required. If the pull fails (e.g. the image
 # isn't published yet), fall back to building the base from docker/Dockerfile.cpu.
 #
-# The zen image is not pushed to a registry.
+# When a registry is provided, the built zen image is pushed (Step 3) so test
+# nodes on other queues (e.g. zen5) can pull it instead of rebuilding. Pulls are
+# anonymous; the push needs AWS credentials on the build agent.
 #
 # See docker/Dockerfile.zen for the build workflow this mirrors.
 set -euo pipefail
@@ -73,3 +75,14 @@ docker build --file docker/Dockerfile.zen \
   --tag "$IMAGE" \
   --target vllm-zen-test \
   --progress plain .
+
+# Step 3: push the zen image so test nodes can pull it instead of rebuilding.
+# Only when a registry is provided (CI); local runs keep the image local.
+# Pushing to public ECR requires AWS credentials on the build agent; pulls are
+# anonymous.
+if [[ -n "${REGISTRY}" ]]; then
+  echo "--- :docker: Pushing Zen image: $IMAGE"
+  aws ecr-public get-login-password --region us-east-1 \
+    | docker login --username AWS --password-stdin "$REGISTRY"
+  docker push "$IMAGE"
+fi
