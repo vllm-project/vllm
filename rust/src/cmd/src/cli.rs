@@ -12,6 +12,7 @@ mod unsupported;
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -268,6 +269,13 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
+    /// The interval (or buffer size) for streaming in terms of token length.
+    /// A smaller value (1) makes streaming smoother by sending each token
+    /// immediately, while a larger value (e.g., 10) reduces host overhead and
+    /// may increase throughput by batching multiple tokens before sending.
+    #[arg(long, default_value_t = NonZeroU32::MIN)]
+    #[serde(default = "default_stream_interval")]
+    pub stream_interval: NonZeroU32,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -501,8 +509,8 @@ impl SharedRuntimeArgs {
         self,
         listen_fd: i32,
         grpc_listen_fd: Option<i32>,
-        input_address: String,
-        output_address: String,
+        input_listener_fd: i32,
+        output_listener_fd: i32,
         coordinator_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
@@ -518,8 +526,8 @@ impl SharedRuntimeArgs {
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index,
                 engine_count,
                 data_parallel_size,
@@ -547,6 +555,7 @@ impl SharedRuntimeArgs {
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
+            stream_interval: self.stream_interval,
             api_server_options,
             cors,
             tls,
@@ -609,6 +618,7 @@ impl SharedRuntimeArgs {
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
+            stream_interval: self.stream_interval,
             api_server_options,
             cors,
             tls,
@@ -644,6 +654,10 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_stream_interval() -> NonZeroU32 {
+    NonZeroU32::MIN
 }
 
 fn default_cors_wildcard() -> JsonStringList {
@@ -697,14 +711,12 @@ pub struct FrontendArgs {
     /// supervisor. When not set, no gRPC server is started.
     #[arg(long)]
     pub grpc_listen_fd: Option<i32>,
-    /// Frontend input ROUTER socket address that the Python engines will
-    /// connect to.
+    /// Inherited frontend input ROUTER listener file descriptor.
     #[arg(long)]
-    pub input_address: String,
-    /// Frontend output PULL socket address that the Python engines will push
-    /// responses to.
+    pub input_listener_fd: i32,
+    /// Inherited frontend output PULL listener file descriptor.
     #[arg(long)]
-    pub output_address: String,
+    pub output_listener_fd: i32,
     /// Optional Python-owned frontend-side DP coordinator socket address for
     /// external coordinator mode in the bootstrapped frontend path, i.e.,
     /// `stats_update_address`.
@@ -733,8 +745,8 @@ impl FrontendArgs {
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
             self.grpc_listen_fd,
-            self.input_address,
-            self.output_address,
+            self.input_listener_fd,
+            self.output_listener_fd,
             self.coordinator_address,
             self.engine_start_index,
             self.engine_count,

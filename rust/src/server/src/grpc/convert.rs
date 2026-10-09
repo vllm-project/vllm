@@ -9,6 +9,7 @@ use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
@@ -84,6 +85,7 @@ pub fn to_text_request(
     };
     let session_id = req.session_id.filter(|s| !s.is_empty());
     let kv_hints = req.kv_hints.map(kv_hints_from_proto);
+    let reasoning_gate = req.engine_reasoning_gate.unwrap_or_default();
 
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
@@ -137,8 +139,15 @@ pub fn to_text_request(
         data_parallel_rank: None,
         session_id,
         kv_hints,
-        reasoning_parser_kwargs: Default::default(),
-        reasoning_ended: None,
+        reasoning_parser_kwargs: ReasoningParserKwargs {
+            chat_template_kwargs: reasoning_gate
+                .chat_template_kwargs
+                .map(|kwargs| {
+                    kwargs.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect()
+                })
+                .unwrap_or_default(),
+        },
+        reasoning_ended: reasoning_gate.reasoning_ended,
         lora_request: None,
         arrival_time: None,
     })
@@ -161,10 +170,7 @@ fn build_sampling_params(
         ..SamplingParams::default()
     };
 
-    // RandomSampling: for every remaining sampling field the protobuf default (`0`)
-    // is treated as "unset" and leaves the resolved value to the lowering
-    // stage, which falls back to the model-provided default or a
-    // neutral/disabled value otherwise.
+    // Preserve explicit values; omitted fields inherit model defaults during lowering.
     if let Some(s) = sampling {
         // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
         // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
@@ -174,15 +180,9 @@ fn build_sampling_params(
                 "num_sequences > 1 is not supported",
             ));
         }
-        if s.top_k != 0 {
-            params.top_k = Some(s.top_k);
-        }
-        if s.top_p != 0.0 {
-            params.top_p = Some(s.top_p);
-        }
-        if s.min_p != 0.0 {
-            params.min_p = Some(s.min_p);
-        }
+        params.top_k = s.top_k;
+        params.top_p = s.top_p;
+        params.min_p = s.min_p;
         params.seed = s.seed;
     }
 
@@ -222,6 +222,7 @@ fn build_sampling_params(
             params.stop_token_ids = Some(s.stop_token_ids.clone());
         }
         params.ignore_eos = s.ignore_eos;
+        params.thinking_token_budget = s.thinking_token_budget;
     }
 
     // ResponseOptions → logprobs
@@ -405,8 +406,8 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         num_output_tokens: finished.usage.output_token_count as u32,
         finish_reason,
         stop_reason,
-        kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
-        ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
+        kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
         num_cached_tokens: Some(finished.usage.cached_token_count as u32),
     })
 }
@@ -621,6 +622,77 @@ mod tests {
     }
 
     #[test]
+    fn grpc_reasoning_controls_reach_engine_request_with_presence_intact() {
+        let chat_template_kwargs =
+            serde_json::json!({"enable_thinking": false, "reasoning_effort": "high"});
+        for (gate, budget) in [
+            (None, None),
+            (
+                Some(pb::EngineReasoningGate {
+                    reasoning_ended: Some(false),
+                    chat_template_kwargs: json_to_proto_struct(&chat_template_kwargs),
+                }),
+                Some(0),
+            ),
+            (
+                Some(pb::EngineReasoningGate {
+                    reasoning_ended: Some(true),
+                    chat_template_kwargs: None,
+                }),
+                Some(128),
+            ),
+            (Some(pb::EngineReasoningGate::default()), Some(-1)),
+        ] {
+            let expected = (
+                serde_json::json!({
+                    "chat_template_kwargs": gate
+                        .as_ref()
+                        .and_then(|gate| gate.chat_template_kwargs.as_ref())
+                        .map_or_else(|| serde_json::json!({}), |_| chat_template_kwargs.clone()),
+                }),
+                gate.as_ref().and_then(|gate| gate.reasoning_ended),
+                budget.filter(|v| *v >= 0).map(|v| v as u64),
+            );
+            let request = pb::GenerateRequest {
+                engine_reasoning_gate: gate,
+                stopping: Some(pb::StoppingCriteria {
+                    thinking_token_budget: budget,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let request = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(request, stream, &["test-model".to_string()])
+                    .expect("reasoning controls accepted");
+                let engine = vllm_text::lower_text_request(
+                    text,
+                    vec![1],
+                    SamplingHints::default(),
+                    SamplingLimits {
+                        max_model_len: 256,
+                        max_logprobs: 20,
+                        model_vocab_size: 512,
+                        tokenizer_vocab_size: 512,
+                    },
+                    &TestTokenizer::new(),
+                )
+                .expect("reasoning controls lower to engine")
+                .generate_request;
+                assert_eq!(
+                    (
+                        serde_json::to_value(engine.reasoning_parser_kwargs).unwrap(),
+                        engine.reasoning_ended,
+                        engine.sampling_params.thinking_token_budget,
+                    ),
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn watermarking_defaults_and_opt_out_survive_protobuf_conversion() {
         for watermarking in [None, Some(true), Some(false)] {
             let request = pb::GenerateRequest {
@@ -787,6 +859,52 @@ mod tests {
                 (params.logprobs, params.logprob_token_ids),
                 (expected_count, expected_ids)
             );
+        }
+    }
+
+    #[test]
+    fn grpc_sampling_preserves_explicit_values_and_model_defaults_through_lowering() {
+        for ((top_k, top_p, min_p), expected) in [
+            ((None, None, None), (8, 0.9, 0.2)),
+            ((Some(0), Some(1.0), Some(0.0)), (0, 1.0, 0.0)),
+            ((Some(50), Some(0.8), Some(0.1)), (50, 0.8, 0.1)),
+        ] {
+            let request = pb::GenerateRequest {
+                temperature: Some(0.7),
+                sampling: Some(pb::RandomSampling {
+                    top_k,
+                    top_p,
+                    min_p,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+                let engine = vllm_text::lower_text_request(
+                    text,
+                    vec![1],
+                    SamplingHints {
+                        default_top_k: Some(8),
+                        default_top_p: Some(0.9),
+                        default_min_p: Some(0.2),
+                        ..Default::default()
+                    },
+                    SamplingLimits {
+                        max_model_len: 256,
+                        max_logprobs: 20,
+                        model_vocab_size: 512,
+                        tokenizer_vocab_size: 512,
+                    },
+                    &TestTokenizer::new(),
+                )
+                .unwrap()
+                .generate_request;
+                let params = engine.sampling_params;
+                assert_eq!((params.top_k, params.top_p, params.min_p), expected);
+            }
         }
     }
 

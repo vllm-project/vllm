@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::{BTreeSet, HashMap};
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
@@ -161,6 +162,11 @@ pub struct EngineCoreSamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// A value of zero returns routing data for the entire prompt.
     pub routed_experts_prompt_start: u32,
+    /// Number of newly generated tokens to batch into each streamed output.
+    /// The first and final outputs are always emitted immediately. Engine-core
+    /// ignores it; [`EngineCoreClient::call`](crate::EngineCoreClient::call)
+    /// batches output deliveries by it.
+    pub stream_interval: Option<NonZeroU32>,
 }
 
 impl EngineCoreSamplingParams {
@@ -195,6 +201,7 @@ impl EngineCoreSamplingParams {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            stream_interval: None,
         }
     }
 }
