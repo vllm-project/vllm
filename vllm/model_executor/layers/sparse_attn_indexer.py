@@ -931,10 +931,6 @@ class SparseAttnIndexer(CustomOp):
                 _PACK_DCP_TOPK_CANDIDATES_KERNEL.register_warmup()
                 _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.register_warmup()
 
-    @property
-    def cp_kv_cache_interleave_size(self) -> int:
-        return self._parallel_config.cp_kv_cache_interleave_size
-
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -993,7 +989,7 @@ class SparseAttnIndexer(CustomOp):
             self.use_fp4_cache,
             self.dcp_rank,
             self.dcp_world_size,
-            self.cp_kv_cache_interleave_size,
+            self._parallel_config.cp_kv_cache_interleave_size,
             False,
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,

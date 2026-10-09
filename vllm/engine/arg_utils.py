@@ -1179,6 +1179,7 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--cp-kv-cache-interleave-size",
+            "--dcp-kv-cache-interleave-size",
             **{
                 **parallel_kwargs["cp_kv_cache_interleave_size"],
                 "default": None,
