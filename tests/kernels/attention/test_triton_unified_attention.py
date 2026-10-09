@@ -224,6 +224,81 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
+@pytest.mark.parametrize("num_query_heads", [4, 5, 6, 7])
+@torch.inference_mode()
+def test_tuned_long_prefill_matches_dense_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    num_query_heads: int,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: True)
+    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: False)
+
+    query_len, kv_len = 512, 1024
+    num_kv_heads, head_size, block_size = 1, 128, 16
+    num_blocks = kv_len // block_size
+    scale = head_size**-0.5
+    device = torch.device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    query = torch.randn(
+        query_len,
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    key_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    value_cache = torch.randn_like(key_cache)
+    output = torch.empty_like(query)
+    cu_seqlens_q = torch.tensor([0, query_len], dtype=torch.int32, device=device)
+    seqused_k = torch.tensor([kv_len], dtype=torch.int32, device=device)
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device)[None]
+
+    assert triton_ua._select_query_block(query_len, num_query_heads) == (
+        64,
+        64 // num_query_heads,
+        True,
+    )
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=query_len,
+        seqused_k=seqused_k,
+        max_seqlen_k=kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        kv_quant_mode=KVQuantMode.NONE,
+    )
+
+    expected = ref_paged_attn(
+        query,
+        key_cache,
+        value_cache,
+        [query_len],
+        [kv_len],
+        block_table,
+        scale,
+    )
+    torch.testing.assert_close(output, expected, atol=1.5e-2, rtol=1e-2)
+
+
 @torch.inference_mode()
 def test_fp8_softmax_preserves_small_probabilities() -> None:
     """Keep exp(-8) contributions that underflow when cast directly to E4M3."""
