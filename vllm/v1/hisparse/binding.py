@@ -147,7 +147,6 @@ def init_hisparse_kv_cache(
         initialize_hisparse_runtime_buffers(
             cache_handles,
             max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
         )
         return kv_caches
     except Exception:
@@ -197,9 +196,6 @@ def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
         )
     )
     release_pinned_state(list(runtimes.values()), registered_pools, shared_region)
-    for cache in cache_handles:
-        cache.mirror_staging_cache = None
-        cache.mirror_staging_slots = None
 
 
 def bind_hisparse_kv_caches(
@@ -284,6 +280,7 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
+            cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
             cache_handle.runtime.shared_host_region = host_pool.shared_region
             cache_handle.runtime.bind_source_cache(
                 source_cache,
