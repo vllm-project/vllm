@@ -156,6 +156,14 @@ vllm serve ... --tool-strict-level function
 
 The floor never relaxes a constraint the request would already receive: tools the client marked `strict: true` keep their schemas at every level. With `tool_choice="auto"`, the grammar does not force a tool call; a plain text response stays valid. `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` disables structural tags entirely and takes precedence over this option.
 
+### Always-On Output Grammar
+
+With the Rust frontend, `--always-constrain-output` (off by default) also constrains requests that carry no tools and no structured-output constraint, as long as the server has a reasoning or tool parser for the model. The output then follows the parser's grammar from the first generated token where the parser supports it: the reasoning section, free answer text, and, for `tool_choice="auto"`, the tool-call envelope as under `--tool-strict-level function`. A request's own `response_format` or structured outputs still take precedence. Grammar compilation and token masking add per-request cost, so measure before enabling it for workloads with long reasoning or per-request tool sets.
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve ... --always-constrain-output
+```
+
 ## Automatic Function Calling
 
 To enable this feature, you should set the following flags:
