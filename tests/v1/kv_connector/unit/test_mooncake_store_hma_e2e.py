@@ -623,11 +623,10 @@ def test_worker_lookup_hits_sub_block_partial_tail():
     """worker.lookup must query sub-block keys when partial hash hits are on.
 
     Regression test: ``lookup`` hard-coded ``fine_grained = False``, so the
-    sub-block keys persisted by ``_sub_block_tail_puts`` were never probed and
-    partial prefix hits silently returned 0 while the store side kept writing
-    them. Here the mamba block (16) exceeds the hash unit (4), so
-    ``enable_partial_hash_hits`` is on and the lookup must find the stored
-    boundary at 8.
+    partial tail's sub-block keys were never probed and partial prefix hits
+    silently returned 0 while the store side kept writing them. Here the
+    mamba block (16) exceeds the hash unit (4), so ``enable_partial_hash_hits``
+    is on and the lookup must find the stored boundary at 8.
     """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(

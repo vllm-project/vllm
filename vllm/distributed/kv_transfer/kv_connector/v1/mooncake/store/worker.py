@@ -570,7 +570,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
-    def _boundary_state_puts(
+    def _mamba_state_puts(
         self, req_meta: ReqMeta, mamba_offloads: list[tuple[int, int, int]]
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
         """Puts for handed-off mamba "align" boundary states.
@@ -618,7 +618,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             )
         return puts
 
-    def _sub_block_tail_puts(
+    def _partial_tail_attention_puts(
         self, req_meta: ReqMeta, tail_blocks_by_group: PartialTail
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
         """Puts for the non-Mamba blocks of the request's sub-block partial
@@ -630,7 +630,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         elsewhere, and the consumer's lookup needs every group at every probed
         boundary. Full blocks are keyed by their block-end hash and the last
         block by the ``proof_end`` sub-hash. Mamba states are written by
-        :meth:`_boundary_state_puts`.
+        :meth:`_mamba_state_puts`.
         """
         hash_block_size = self.coord.hash_block_size
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
@@ -669,7 +669,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         This is every mamba key the connector writes — ``store_mask`` excludes
         mamba groups from the positional normal save, aligned boundaries
-        included (see :meth:`_boundary_state_puts`). The scheduler-resolved
+        included (see :meth:`_mamba_state_puts`). The scheduler-resolved
         partial tail (``ReqMeta.partial_tail``) adds the other groups' blocks
         in the normal save's lcm gap; both go in one batch.
 
@@ -687,9 +687,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         puts = (
             []
             if partial_tail is None
-            else self._sub_block_tail_puts(req_meta, partial_tail)
+            else self._partial_tail_attention_puts(req_meta, partial_tail)
         )
-        puts.extend(self._boundary_state_puts(req_meta, mamba_offloads))
+        puts.extend(self._mamba_state_puts(req_meta, mamba_offloads))
         puts = list({put[0]: put for put in puts}.values())
 
         if not puts:
