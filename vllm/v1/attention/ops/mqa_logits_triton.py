@@ -34,6 +34,7 @@ _E4M3FN_BF16_LUT_CACHE: dict[torch.device, torch.Tensor] = {}
 
 
 def _get_e4m3fn_bf16_lut(device: torch.device) -> torch.Tensor:
+    """Cache the BF16 lookup table used by software E4M3 decoding."""
     lut = _E4M3FN_BF16_LUT_CACHE.get(device)
     if lut is not None:
         return lut
@@ -50,6 +51,7 @@ def _get_e4m3fn_bf16_lut(device: torch.device) -> torch.Tensor:
 
 @triton.jit
 def _decode_e4m3fn_bf16_lut(u, lut_ptr):
+    """Decode FP8 bytes by indexing the device-resident BF16 lookup table."""
     return tl.load(lut_ptr + u.to(tl.uint32))
 
 
@@ -93,6 +95,7 @@ def _fp8_paged_mqa_logits_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
+    """Compute paged FP8 MQA logits with optional software key decoding."""
     token_id = tl.program_id(0)
     block_rk = tl.program_id(1)
 
@@ -309,6 +312,7 @@ def _fp8_mqa_logits_kernel(
     # bf16 q/k inputs: the wrapper pre-decodes FP8 → bf16. At compute-bound
     # prefill this is ~2× the in-kernel LUT (LUT lookups contend with the
     # matmul for ALU/regs). Paged-decode keeps the LUT path.
+    """Compute dense FP8 MQA logits within each query key interval."""
     m = tl.program_id(0)
     n_block = tl.program_id(1)
 
@@ -393,7 +397,9 @@ def fp8_mqa_logits_triton(
 
     """
     k_fp8, k_scales = kv
-    k_scales = k_scales.reshape(-1)
+    k_scales = k_scales.reshape(-1).contiguous()
+    cu_seqlen_ks = cu_seqlen_ks.contiguous()
+    cu_seqlen_ke = cu_seqlen_ke.contiguous()
 
     M, num_heads, head_dim = q.shape
     N = k_fp8.shape[0]

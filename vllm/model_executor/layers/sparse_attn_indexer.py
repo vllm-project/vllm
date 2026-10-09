@@ -545,6 +545,7 @@ def sparse_attn_indexer(
     logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
+    """Update the index cache and select top-k tokens for sparse attention."""
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
@@ -1296,6 +1297,7 @@ class SparseAttnIndexer(CustomOp):
         candidate_write: bool = False,
         cache_layout: str | None = None,
     ):
+        """Configure sparse indexing and register its cache and top-k buffer."""
         super().__init__()
         self.k_cache = k_cache
         self.quant_block_size = quant_block_size

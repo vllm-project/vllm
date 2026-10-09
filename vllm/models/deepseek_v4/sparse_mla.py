@@ -400,6 +400,7 @@ class BuildC128ATopkMetadataKernel(
         slot_mapping_ptr,
         BLOCK_SIZE: tl.constexpr,
     ):
+        """Construct decode and prefill top-k metadata for compressed attention."""
         token_idx = tl.program_id(0)
         position = tl.load(positions_ptr + token_idx)
         num_compressed = (position + 1) // compress_ratio
