@@ -36,10 +36,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.gemma4 import (
-    Gemma4MLP,
-    gemma4_layer_config,
-)
+from vllm.model_executor.models.gemma4 import Gemma4MLP
 from vllm.model_executor.models.gemma4_mm import (
     _SUPPORTED_SOFT_TOKENS,
     Gemma4DummyInputsBuilder,
@@ -244,7 +241,7 @@ class EmbeddingGemma2DecoderLayer(nn.Module):
         prefix: str,
     ):
         super().__init__()
-        lc = gemma4_layer_config(config, idx)
+        lc = config.per_layer_config[idx]
         self.self_attn = EmbeddingGemma2Attention(
             config,
             lc,

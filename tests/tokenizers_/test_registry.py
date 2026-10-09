@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from transformers import AutoConfig
+from transformers import AutoConfig, Qwen3_5MoeConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from vllm.tokenizers import TokenizerLike
@@ -18,7 +18,6 @@ from vllm.tokenizers.registry import (
     get_tokenizer,
     resolve_tokenizer_args,
 )
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 
 class TestTokenizer(TokenizerLike):

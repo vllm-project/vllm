@@ -237,8 +237,6 @@ steps:
   - tests/models/language/generation_ppl_test
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/transformers_utils/configs/qwen3_5.py
-  - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
@@ -2605,7 +2603,6 @@ steps:
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/registry.py
   - vllm/transformers_utils/configs/extract_hidden_states.py
-  - vllm/transformers_utils/configs/qwen3_5.py
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
   - vllm/v1/kv_cache_interface.py
@@ -3914,8 +3911,6 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/transformers_utils/configs/qwen3_5.py
-  - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
@@ -3957,8 +3952,6 @@ steps:
   - vllm/model_executor/models/qwen3_next_mtp.py
   - vllm/model_executor/models/nemotron_h.py
   - vllm/model_executor/models/nemotron_h_mtp.py
-  - vllm/transformers_utils/configs/qwen3_next.py
-  - vllm/transformers_utils/configs/nemotron_h.py
   - vllm/model_executor/model_loader/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/layers/fused_moe/
@@ -4156,7 +4149,6 @@ steps:
   - tests/evals/gsm8k/
   - tests/utils.py
   - vllm/distributed/
-  - vllm/transformers_utils/configs/diffusion_gemma.py
   - vllm/v1/attention/ops/
   - tests/evals/gsm8k/configs/models-small-tp-mi355.txt
   commands:
@@ -5048,8 +5040,6 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/transformers_utils/configs/qwen3_5.py
-  - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py

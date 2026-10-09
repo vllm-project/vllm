@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import Qwen3NextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -29,7 +30,6 @@ from vllm.model_executor.models.qwen3_next import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
 from .utils import (
     AutoWeightsLoader,

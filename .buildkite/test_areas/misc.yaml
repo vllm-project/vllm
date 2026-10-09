@@ -296,7 +296,6 @@ steps:
       - vllm/model_executor/models/qwen3_next.py
       - vllm/model_executor/models/registry.py
       - vllm/transformers_utils/configs/extract_hidden_states.py
-      - vllm/transformers_utils/configs/qwen3_5.py
       - vllm/v1/attention/backends/
       - vllm/v1/attention/selector.py
       - vllm/v1/kv_cache_interface.py

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
+from transformers import Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
@@ -34,7 +35,6 @@ from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
 pytestmark = pytest.mark.skipif(
     current_platform.is_xpu(),
