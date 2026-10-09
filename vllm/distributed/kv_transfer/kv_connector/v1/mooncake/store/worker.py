@@ -627,7 +627,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if not req_meta.boundary_puts or not req_meta.block_hashes:
             return True
         puts = self._boundary_puts(req_meta)
-        puts = list({put[0]: put for put in puts}.values())
 
         if not puts:
             return True

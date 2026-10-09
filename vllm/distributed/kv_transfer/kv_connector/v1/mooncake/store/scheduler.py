@@ -32,7 +32,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
-    partial_hash_hits_enabled,
     resolve_dcp_kv_cache_spec,
     resolve_kv_cache_block_sizes,
 )
@@ -95,10 +94,9 @@ def _partial_tail_non_mamba_puts(
     # hands off its checkpoint state.
     if not mamba_tails and not req_meta.publish_partial_tail:
         return []
-    prompt_tokens = req_meta.num_prompt_tokens or 0
+    prompt_tokens = req_meta.num_prompt_tokens
     completed = req_meta.completed_token_len
-    if not coord.enable_partial_hash_hits or not req_meta.block_hashes:
-        return []
+    assert prompt_tokens is not None and completed is not None
     hash_block_size = coord.hash_block_size
     # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
     # groups carry the eagle flag.
@@ -111,8 +109,6 @@ def _partial_tail_non_mamba_puts(
     num_hashes = len(req_meta.block_hashes)
     if boundary == 0 or boundary // hash_block_size > num_hashes:
         return []
-    if completed is None:
-        completed = boundary
     start = boundary // coord.lcm_block_size * coord.lcm_block_size
     puts: list[BoundaryPut] = []
     for group_id, block_size in enumerate(block_sizes):
@@ -168,11 +164,6 @@ class MooncakeStoreScheduler:
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            store_groups,
-            self._hash_block_size,
-            vllm_config.parallel_config.decode_context_parallel_size,
-        )
         mamba_groups = {
             group_id: group.kv_cache_spec
             for group_id, group in enumerate(store_groups)
@@ -200,6 +191,7 @@ class MooncakeStoreScheduler:
             use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
             dcp_world_size=dcp_size,
         )
+        self.enable_partial_hash_hits = self._store_coord.enable_partial_hash_hits
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size

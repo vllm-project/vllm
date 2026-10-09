@@ -529,6 +529,7 @@ def test_offload_syncs_event_before_put():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
+        completed_token_len=12,
         store_job_id=1,
         boundary_puts=[(1, 7, 8)],
     )
@@ -607,6 +608,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
+        completed_token_len=12,
         boundary_puts=[(1, mamba_cow_block, 8)],
     )
 
@@ -696,6 +698,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
+        completed_token_len=12,
         boundary_puts=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
@@ -802,6 +805,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
+        completed_token_len=12,
         boundary_puts=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))

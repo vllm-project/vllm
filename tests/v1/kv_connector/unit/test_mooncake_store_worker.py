@@ -967,6 +967,7 @@ def _make_partial_tail_send_thread(
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        use_eagle=False,
         eagle_proof_margin_by_group={},
     )
     db = ChunkedTokenDatabase(
@@ -1003,6 +1004,7 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
         can_save=True,
         boundary_puts=[(1, 7, 12)],
         num_prompt_tokens=13,
+        completed_token_len=13,
     )
 
 
@@ -1010,6 +1012,7 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
 def test_partial_tail_offload_rejects_wrong_prompt_boundary(use_eagle):
     store = MagicMock()
     thread = _make_partial_tail_send_thread(store)
+    thread.coord.use_eagle = use_eagle
     thread.coord.eagle_proof_margin_by_group = {0: 4} if use_eagle else {}
     req = _make_partial_tail_req([1, 2, 3])
     req.num_prompt_tokens = 17 if use_eagle else 13
@@ -1032,6 +1035,7 @@ def test_eagle_attention_proof_published_after_checkpoint_handoff():
 
     store.batch_put_from_multi_buffers.side_effect = put
     thread = _make_partial_tail_send_thread(store)
+    thread.coord.use_eagle = True
     thread.coord.eagle_proof_margin_by_group = {0: 4}
     metadata = _make_partial_tail_req([1, 2, 3])
     metadata.num_prompt_tokens = 13
@@ -1202,6 +1206,7 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
         # The scheduler accepted group 1 and omitted group 2 at boundary 12.
         boundary_puts=[(1, 7, 12)],
         num_prompt_tokens=13,
+        completed_token_len=13,
     )
     assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
@@ -1375,6 +1380,7 @@ def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_partial_tail_send_thread(store)
+    thread.coord.use_eagle = use_eagle
     thread.coord.eagle_proof_margin_by_group = {0: 4} if use_eagle else {}
     thread._saved_offset["req-a"] = saved_tokens
 
@@ -1423,6 +1429,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        use_eagle=False,
         eagle_proof_margin_by_group={},
     )
     db_full = ChunkedTokenDatabase(
