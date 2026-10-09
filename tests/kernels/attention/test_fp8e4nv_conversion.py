@@ -255,7 +255,7 @@ def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("block", [64, 128, 256])
+@pytest.mark.parametrize("block", [64, 128, 256, 512])
 def test_decode_partial_per_thread_packs(dtype, block):
     if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
         pytest.skip("BF16 requires SM80+")
