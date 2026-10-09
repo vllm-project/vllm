@@ -145,6 +145,12 @@ Priority is **1 = highest** (tried first).
 
 ### MLA Attention (DeepSeek-style)
 
+The generic Triton sparse-MLA kernel preserves the query's FP16 or BF16 output
+dtype. DeepSeek V4's separate sparse-MLA backend accepts BF16 model activations.
+This omnibus also enables DeepSeek V4 routing on SM8x using software FP8
+conversion and the output-projection fallback; the generic backend accepts
+FP16 and BF16 model activations.
+
 --8<-- "gen:priority-mla"
 
 **Ampere/Hopper (SM 8.x-9.x):**
