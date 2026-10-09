@@ -12,6 +12,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+MiniMaxM3IndexerPrefillBackend = Literal["auto", "fmha", "cute"]
 
 
 @config
@@ -42,6 +43,15 @@ class AttentionConfig:
 
     minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
     """Sparse decode kernel used by the MiniMax M3 MSA backend."""
+
+    minimax_m3_indexer_prefill_backend: MiniMaxM3IndexerPrefillBackend = "auto"
+    """Prefill scorer used by the MiniMax M3 MSA indexer. "auto" selects the
+    dedicated CuTe scorer for FP8 index caches with 128-dimensional heads,
+    1/2/4 index heads per rank, and at least one forced local block on
+    SM100/SM103/SM107, when the installed MSA exposes its score-only API.
+    Other configurations use FMHA OnlyScore. "fmha" forces that fallback;
+    "cute" requires the dedicated scorer and rejects unsupported settings.
+    Decode scoring and native Top16 selection are unchanged."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
