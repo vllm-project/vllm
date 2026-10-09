@@ -400,8 +400,15 @@ def run_multi_api_server(args: argparse.Namespace):
                 deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
             )
 
-        api_server_manager.shutdown(timeout=timeout)
+        # Stop the engines before the API servers. With a positive
+        # shutdown_timeout the engines reject new requests and drain the
+        # in-flight ones, but their outputs only reach the clients while the
+        # API servers that own those requests are still running. Stopping the
+        # API servers first makes each of them close its engine sockets at
+        # once, which fails every in-flight request with EngineDeadError and
+        # leaves the engines draining for nobody.
         if local_engine_manager:
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
+        api_server_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:
             coordinator.shutdown(timeout=to_timeout(shutdown_by))
