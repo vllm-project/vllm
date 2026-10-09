@@ -546,6 +546,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       message(STATUS "Last run machete generate script hash: ${MACHETE_LAST_GEN_HASH}")
 
       if (NOT "${MACHETE_LAST_GEN_HASH}" STREQUAL "${MACHETE_GEN_SCRIPT_HASH}")
+        file(REMOVE ${MACHETE_GEN_STAMP})
         execute_process(
           COMMAND ${CMAKE_COMMAND} -E env
           PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
@@ -678,6 +679,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       message(STATUS "Last run Marlin generate script hash: ${MARLIN_LAST_GEN_HASH_AND_ARCH}")
 
       if (NOT "${MARLIN_LAST_GEN_HASH_AND_ARCH}" STREQUAL "${MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+        file(REMOVE ${MARLIN_GEN_STAMP})
         execute_process(
           COMMAND ${CMAKE_COMMAND} -E env
           PYTHONPATH=$ENV{PYTHONPATH}
@@ -1372,6 +1374,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Last run Marlin MOE generate script hash with arch: ${MOE_MARLIN_LAST_GEN_HASH_AND_ARCH}")
 
     if (NOT "${MOE_MARLIN_LAST_GEN_HASH_AND_ARCH}" STREQUAL "${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+      file(REMOVE ${MOE_MARLIN_GEN_STAMP})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$ENV{PYTHONPATH}

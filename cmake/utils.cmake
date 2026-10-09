@@ -41,7 +41,8 @@ endfunction()
 
 #
 # Read the key a source generator last wrote to `STAMP_FILE` into `OUT`.
-# Kept next to the generated sources so it is shared across build directories.
+# Kept next to the generated sources so it is shared across build directories;
+# remove it before regenerating so an interrupted run is redone.
 #
 function (read_generator_stamp OUT STAMP_FILE)
   set(_KEY "")
