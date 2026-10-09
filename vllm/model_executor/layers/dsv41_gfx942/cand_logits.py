@@ -12,7 +12,7 @@ more positions than the top-k reads.
 
 _cand_logits_kernel computes only the candidate logits and writes the compact
 row directly. Position i of row r holds the logit of column
-8 * cand[r][i // 8] + i % 8 and that column as its id. It holds -inf and id
+``8 * cand[r][i // 8] + i % 8`` and that column as its id. It holds -inf and id
 -1 when the block entry is -1 or the column is at or past the row's end.
 This is what gatherCandidates writes.
 

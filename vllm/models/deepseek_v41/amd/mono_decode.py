@@ -201,6 +201,8 @@ def _copy_942_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
     ffn = layer.ffn
     _capture_plain_experts(ffn.experts.routed_experts)
     sh = ffn.shared_experts
+    # _create refuses layers without a shared expert.
+    assert sh is not None
     linears = [sh.gate_up_proj, sh.down_proj]
     if not ffn_only:
         linears += [getattr(layer.attn, name) for name in ATTN_LINEARS_942]

@@ -1340,7 +1340,7 @@ def mid_word_942(d, row, part, i):
 def ug_mid_store_942(c, d, q8, code, part, i, row, live):
     """gfx942 ug epilogue: thread i's FP8 value ``q8`` of group ``part`` into
     MID, 4 threads a word: values i, i + 2, i + 4, i + 6 of an 8-value chunk
-    (``mid_word_942``), and the group's code into MIDS ([pick row][inter / 32]
+    (``mid_word_942``), and the group's code into MIDS (``[pick row][inter / 32]``
     i32)."""
     lane = c["lane"]
     nb = [
