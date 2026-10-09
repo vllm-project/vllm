@@ -844,6 +844,47 @@ steps:
   commands:
   - pytest -v -s tool_parsers
 
+- label: ":computer: (CPU) Distributed"
+  key: cpu-distributed
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+  - vllm/utils/network_utils.py
+  - tests/distributed/test_expert_placement.py
+  - tests/distributed/test_file_store.py
+  - tests/distributed/test_kvlayout.py
+  - tests/distributed/test_kv_cache_events.py
+  - tests/distributed/test_mq_connect_ip.py
+  - tests/distributed/test_pipeline_partition.py
+  - tests/distributed/aux_output_connector/test_store.py
+  device: cpu-small
+  commands:
+  - pytest -v -s distributed/test_expert_placement.py distributed/test_file_store.py distributed/test_kvlayout.py distributed/test_kv_cache_events.py distributed/test_mq_connect_ip.py distributed/test_pipeline_partition.py distributed/aux_output_connector/test_store.py
+
+- label: ":computer: (CPU) Platforms, CLI, Tools"
+  key: cpu-platforms-cli-tools
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/platforms/
+  - vllm/config/
+  - vllm/entrypoints/cli/
+  - tools/pre_commit/validate_config.py
+  - tests/platforms/test_cpu.py
+  - tests/entrypoints/cli/test_serve.py
+  - tests/tools/test_config_validator.py
+  device: cpu-small
+  commands:
+  - pytest -v -s entrypoints/cli/test_serve.py
+  - pytest -v -s tools/test_config_validator.py
+  # test_cpu.py needs VLLM_TARGET_DEVICE=cpu; the CPU image sets it globally,
+  # but be explicit.
+  - VLLM_TARGET_DEVICE=cpu pytest -v -s platforms/test_cpu.py
+
 # Disabled until the pytest plugins installation is locked.
 # - label: ":nvidia: (A100) Batch Invariance"
 #   key: batch-invariance-a100

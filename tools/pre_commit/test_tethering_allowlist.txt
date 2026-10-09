@@ -18,26 +18,16 @@
 
 # tests/distributed/ - multi-GPU / multi-node suites, launched via torchrun or a
 # custom runner rather than a directory-level pytest invocation.
-tests/distributed/aux_output_connector/test_store.py  # added by #45635 (2026-09-21), no job collects this path
 tests/distributed/test_dcp_a2a.py  # multi-GPU DCP all-to-all; no dir-level pytest job
 tests/distributed/test_eplb_events.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_eplb_fused_moe_layer.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_eplb_fused_moe_layer_dep_nvfp4.py  # multi-GPU EPLB nvfp4; no dir-level pytest job
 tests/distributed/test_eplb_quant_scale_consistency.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_expert_parallel.py  # multi-GPU expert parallel; no dir-level pytest job
-tests/distributed/test_expert_placement.py  # multi-GPU expert placement; no dir-level pytest job
-tests/distributed/test_file_store.py  # no distributed.yaml job collects this path
 tests/distributed/test_flashinfer_pcie_ipc_all_reduce.py  # multi-GPU PCIe IPC all-reduce (#53576); no job
 tests/distributed/test_kimi_linear_context_parallel.py  # multi-GPU context parallel; no dir-level pytest job
-tests/distributed/test_kv_cache_events.py  # needs multi-proc KV-events setup; no job
-tests/distributed/test_kvlayout.py  # no distributed.yaml job collects this path
-tests/distributed/test_mq_connect_ip.py  # no distributed.yaml job collects this path
-tests/distributed/test_pipeline_partition.py  # no distributed.yaml job collects this path
 tests/distributed/test_split_group.py  # no distributed.yaml job collects this path
 tests/distributed/test_weight_transfer_nccl_uid.py  # sibling test_weight_transfer.py is tethered; not added to that job (#53784)
-
-# tests/entrypoints/cli/
-tests/entrypoints/cli/test_serve.py  # added by #53124 (2026-09-15); no job collects tests/entrypoints/cli/
 
 # tests/kernels/
 tests/kernels/test_shuffle_rows.py  # explicitly --ignore'd in kernels.yaml with no follow-up job
@@ -52,11 +42,6 @@ tests/v1/ec_connector/integration/test_epd_correctness.py  # run_epd_correctness
 tests/v1/ec_connector/integration/test_nixl_failure.py  # 2-GPU + NIXL E/PD integration test (#55290); no Buildkite job collects ec_connector/integration/
 tests/v1/kv_connector/nixl_integration/test_disagg_accuracy.py  # run by intel_jobs/misc_intel.yaml's run_xpu_disagg_accuracy_test.sh, which names it via $EXP_ROOT (the script's own dir) - not statically resolvable
 
-# tests/platforms/
-tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platforms/
-
-# tests/tools/
-tests/tools/test_config_validator.py  # logic covered by the validate-config pre-commit hook; no test_areas job
 
 # Temporary gaps from disabling jobs until their transitive dependencies are locked.
 tests/evals/qwen4_exp/test_accuracy.py  # CI jobs disabled pending locked evalscope transitive dependencies
