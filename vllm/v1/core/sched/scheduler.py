@@ -1485,14 +1485,10 @@ class Scheduler(SchedulerInterface):
 
                 # Determine if we need to allocate cross-attention blocks.
                 num_encoder_tokens = 0
-                if (
-                    self.is_encoder_decoder
-                    and request.has_encoder_inputs
-                    and encoder_inputs_to_schedule
-                ):
+                if self.is_encoder_decoder and request.has_encoder_inputs:
                     num_encoder_tokens = sum(
                         request.get_num_encoder_embeds(i)
-                        for i in encoder_inputs_to_schedule
+                        for i in range(len(request.mm_features))
                     )
 
                 reserved_blocks = 0
@@ -2258,44 +2254,39 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
-            if not self.is_encoder_decoder:
-                # We are not using the encoder cache for encoder-decoder models,
-                # yet.
-                if item_identifier in mm_hashes_to_schedule:
-                    scheduled_num_encoder_embeds = mm_hashes_to_schedule[
-                        item_identifier
-                    ]
-                    if self._reject_on_encoder_cache_embed_mismatch(
-                        request,
-                        i,
-                        item_identifier,
-                        scheduled_num_encoder_embeds,
-                        num_encoder_embeds,
-                    ):
-                        return [], 0, encoder_compute_budget, [], []
-                    # The same encoder input has already been scheduled in the
-                    # current step.
-                    duplicate_encoder_inputs.append(i)
-                    continue
-
-                cached_num_encoder_embeds = (
-                    self.encoder_cache_manager.get_cached_num_encoder_embeds(request, i)
-                )
-                if cached_num_encoder_embeds is not None and (
-                    self._reject_on_encoder_cache_embed_mismatch(
-                        request,
-                        i,
-                        item_identifier,
-                        cached_num_encoder_embeds,
-                        num_encoder_embeds,
-                    )
+            if item_identifier in mm_hashes_to_schedule:
+                scheduled_num_encoder_embeds = mm_hashes_to_schedule[item_identifier]
+                if self._reject_on_encoder_cache_embed_mismatch(
+                    request,
+                    i,
+                    item_identifier,
+                    scheduled_num_encoder_embeds,
+                    num_encoder_embeds,
                 ):
                     return [], 0, encoder_compute_budget, [], []
+                # The same encoder input has already been scheduled in the
+                # current step.
+                duplicate_encoder_inputs.append(i)
+                continue
 
-                if self.encoder_cache_manager.check_and_update_cache(request, i):
-                    # The encoder input is already computed and cached from a
-                    # previous step.
-                    continue
+            cached_num_encoder_embeds = (
+                self.encoder_cache_manager.get_cached_num_encoder_embeds(request, i)
+            )
+            if cached_num_encoder_embeds is not None and (
+                self._reject_on_encoder_cache_embed_mismatch(
+                    request,
+                    i,
+                    item_identifier,
+                    cached_num_encoder_embeds,
+                    num_encoder_embeds,
+                )
+            ):
+                return [], 0, encoder_compute_budget, [], []
+
+            if self.encoder_cache_manager.check_and_update_cache(request, i):
+                # The encoder input is already computed and cached from a
+                # previous step.
+                continue
 
             start_idx_rel = max(0, num_computed_tokens - start_pos)
             end_idx_rel = min(num_encoder_tokens, encoder_window_end - start_pos)
