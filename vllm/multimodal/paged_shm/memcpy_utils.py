@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-CPU↔CPU memcpy primitives for paged shared memory.
+"""CPU↔CPU memcpy primitives for paged shared memory.
 
 Used by ``PagedShmStorage`` for the CPU-side paths:
 
@@ -21,8 +20,8 @@ Heuristic — enable multi-threading only when the host looks like a server:
   - more than 32 logical cores, or
   - more than 512 GiB of physical memory.
 
-Parameters:
-
+Parameters
+----------
   - Block size: 1 MiB in the common case (``PagedShmStorage`` blocks),
     but the code adapts to whatever the caller passes.
   - Sub-chunk size: 8 KiB — the knee of the sub-chunk sweep. The actual
@@ -33,6 +32,7 @@ Parameters:
 
 Fallback: without numba, a pure-numpy serial loop and no sub-chunking
 (one segment per block).
+
 """
 
 from __future__ import annotations
@@ -88,6 +88,7 @@ _MAX_COPY_THREADS: Final[int] = 8
 # Topology detection (cheap, done once at import)
 # ---------------------------------------------------------------------------
 
+
 def _detect_logical_cores() -> int:
     return os.cpu_count() or 1
 
@@ -130,6 +131,7 @@ def _detect_memory_bytes() -> int:
 # Heuristic: enable multi-threaded copy?
 # ---------------------------------------------------------------------------
 
+
 def _auto_detect_mt(cores: int, numa: int, mem_bytes: int) -> bool:
     # Multiple NUMA nodes: almost certainly a server; a single thread cannot
     # saturate cross-node bandwidth.
@@ -153,9 +155,7 @@ _MEM: Final[int] = _detect_memory_bytes()
 # Without numba there is no thread pool to drive; always single-threaded.
 _USE_MT: Final[bool] = _HAS_NUMBA and _auto_detect_mt(_CORES, _NUMA, _MEM)
 
-_COPY_THREADS: Final[int] = (
-    min(_CORES, _MAX_COPY_THREADS) if _USE_MT else 1
-)
+_COPY_THREADS: Final[int] = min(_CORES, _MAX_COPY_THREADS) if _USE_MT else 1
 
 
 def use_multithread() -> bool:
@@ -207,11 +207,11 @@ if _HAS_NUMBA:
 
     @njit(nogil=True, parallel=True, cache=True)
     def _copy_segments_kernel(
-        src: np.ndarray,          # 1-D uint8
-        dst: np.ndarray,          # 1-D uint8
+        src: np.ndarray,  # 1-D uint8
+        dst: np.ndarray,  # 1-D uint8
         src_offsets: np.ndarray,  # intp
         dst_offsets: np.ndarray,  # intp
-        sizes: np.ndarray,        # intp
+        sizes: np.ndarray,  # intp
     ) -> None:
         n = sizes.shape[0]
         for i in prange(n):
@@ -225,9 +225,9 @@ if _HAS_NUMBA:
 # Segment construction
 # ---------------------------------------------------------------------------
 
+
 def _pick_subchunk(block_size: int) -> int:
-    """
-    Segment size for the per-transfer decomposition.
+    """Segment size for the per-transfer decomposition.
 
     - With numba: ``gcd(block_size, SUBCHUNK_BYTES)``. This is always a
       power of two (since ``SUBCHUNK_BYTES`` is), divides ``block_size``
@@ -254,8 +254,7 @@ def _build_offsets(
     block_size: int,
     subchunk_bytes: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Decompose a logical ``size``-byte transfer across ``blocks`` (each
+    """Decompose a logical ``size``-byte transfer across ``blocks`` (each
     ``block_size`` bytes), further sliced into ``subchunk_bytes`` pieces
     that never cross a block boundary.
 
@@ -306,6 +305,7 @@ def _build_offsets(
 # Serial numpy fallback
 # ---------------------------------------------------------------------------
 
+
 def _copy_segments_serial(
     src: np.ndarray,
     dst: np.ndarray,
@@ -349,6 +349,7 @@ def _dispatch(n_threads: int | None) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def _check_args(contig: np.ndarray, flat: np.ndarray) -> None:
     if contig.dtype != np.uint8 or flat.dtype != np.uint8:
         raise TypeError("paged_shm memcpy requires uint8 arrays")
@@ -366,8 +367,7 @@ def copy_contig_to_blocks(
     *,
     n_threads: int | None = None,
 ) -> None:
-    """
-    Scatter ``src`` (``src.shape[0]`` bytes) into the given ``blocks`` of
+    """Scatter ``src`` (``src.shape[0]`` bytes) into the given ``blocks`` of
     ``flat``.
 
     Args:
@@ -378,6 +378,7 @@ def copy_contig_to_blocks(
         block_size: size of each block in bytes.
         n_threads: override the heuristic thread count; ``None`` uses
                    :func:`get_copy_threads`. Ignored without numba.
+
     """
     size = int(src.shape[0])
     if size == 0:
@@ -385,9 +386,7 @@ def copy_contig_to_blocks(
     _check_args(src, flat)
 
     subchunk = _pick_subchunk(block_size)
-    contig_off, flat_off, sizes = _build_offsets(
-        blocks, size, block_size, subchunk
-    )
+    contig_off, flat_off, sizes = _build_offsets(blocks, size, block_size, subchunk)
 
     if _HAS_NUMBA:
         _dispatch(n_threads)
@@ -404,8 +403,7 @@ def copy_blocks_to_contig(
     *,
     n_threads: int | None = None,
 ) -> None:
-    """
-    Gather ``dst.shape[0]`` bytes from the given ``blocks`` of ``flat`` into
+    """Gather ``dst.shape[0]`` bytes from the given ``blocks`` of ``flat`` into
     ``dst``.
 
     Args:
@@ -415,6 +413,7 @@ def copy_blocks_to_contig(
         block_size: size of each block in bytes.
         n_threads: override the heuristic thread count; ``None`` uses
                    :func:`get_copy_threads`. Ignored without numba.
+
     """
     size = int(dst.shape[0])
     if size == 0:
@@ -422,9 +421,7 @@ def copy_blocks_to_contig(
     _check_args(dst, flat)
 
     subchunk = _pick_subchunk(block_size)
-    contig_off, flat_off, sizes = _build_offsets(
-        blocks, size, block_size, subchunk
-    )
+    contig_off, flat_off, sizes = _build_offsets(blocks, size, block_size, subchunk)
 
     if _HAS_NUMBA:
         _dispatch(n_threads)
@@ -437,9 +434,9 @@ def copy_blocks_to_contig(
 # JIT warm-up
 # ---------------------------------------------------------------------------
 
+
 def warmup() -> None:
-    """
-    Force JIT compilation with tiny arrays so the first real copy is fast.
+    """Force JIT compilation with tiny arrays so the first real copy is fast.
 
     Call this once during process startup (e.g. from
     ``PagedShmStorage.__init__``). With ``cache=True`` the compiled artifact

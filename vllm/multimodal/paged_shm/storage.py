@@ -208,9 +208,7 @@ class PagedShmStorage:
         """Write CPU data (as contiguous uint8 numpy array) into blocks."""
         size = data_np.shape[0]
         self._validate_blocks(size, blocks)
-        copy_contig_to_blocks(
-            data_np, self._shm_flat, blocks, self.block_size
-        )
+        copy_contig_to_blocks(data_np, self._shm_flat, blocks, self.block_size)
 
     def _write_gpu(self, data: torch.Tensor, blocks: list[int]) -> None:
         """Write GPU tensor data into blocks via batched GPU->CPU transfer."""
@@ -255,9 +253,7 @@ class PagedShmStorage:
         """Read data from blocks and return as a contiguous numpy array (CPU)."""
         self._validate_blocks(size, blocks)
         out = np.empty(size, dtype=np.uint8)
-        copy_blocks_to_contig(
-            self._shm_flat, out, blocks, self.block_size
-        )
+        copy_blocks_to_contig(self._shm_flat, out, blocks, self.block_size)
         return out
 
     def read_to_tensor(
@@ -292,9 +288,7 @@ class PagedShmStorage:
 
         # ``out.numpy()`` shares memory with the tensor, so the numba kernel
         # writes directly into the destination tensor's storage.
-        copy_blocks_to_contig(
-            self._shm_flat, out.numpy(), blocks, self.block_size
-        )
+        copy_blocks_to_contig(self._shm_flat, out.numpy(), blocks, self.block_size)
         return out
 
     def read_to_device(

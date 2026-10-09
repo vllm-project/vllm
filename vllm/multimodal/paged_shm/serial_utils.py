@@ -42,7 +42,7 @@ import numpy as np
 import torch
 from msgspec import msgpack
 
-from vllm.multimodal.cache import (
+from vllm.multimodal.cache.base import (
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheOutItem,
 )

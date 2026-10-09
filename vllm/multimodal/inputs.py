@@ -238,8 +238,8 @@ def nested_tensors_equal(
 
     If `check_dtype` is `True`, the tensors must have the same dtype.
     """
-    check_dtype_func = (
-        lambda a, b, check_dtype: a.dtype == b.dtype if check_dtype else True
+    check_dtype_func = lambda a, b, check_dtype: (
+        a.dtype == b.dtype if check_dtype else True
     )
     if isinstance(a, torch.Tensor):
         return (

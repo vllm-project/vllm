@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import configure_logging_from_args, init_logger
+from vllm.multimodal.paged_shm.server import maybe_start_paged_shm_server
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext

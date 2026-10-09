@@ -25,7 +25,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.multimodal.cache import (
+from vllm.multimodal.cache.base import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
     MultiModalCacheMissError,
