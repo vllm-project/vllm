@@ -330,6 +330,17 @@ class ResponsesRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
+        ),
+    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
