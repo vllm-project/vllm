@@ -600,6 +600,74 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         torch.testing.assert_close(compiled(inputs), output, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepSeek V4 needs CUDA")
+@pytest.mark.parametrize("linear_backend", ["marlin", "triton"])
+def test_deepseek_v4_o_proj_with_non_deep_gemm_wo_a(
+    dist_init, default_vllm_config, linear_backend
+):
+    """A wo_a laid out by a non-DeepGEMM backend goes through the BF16 o_proj."""
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
+        compute_fp8_einsum_recipe,
+        deep_gemm_fp8_o_proj,
+        maybe_dequant_wo_a,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    default_vllm_config.kernel_config.linear_backend = linear_backend
+    with torch.device("cuda"):
+        wo_a = ColumnParallelLinear(
+            512,
+            256,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=Fp8Config(
+                is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
+            ),
+            return_bias=False,
+        )
+    wo_a.is_bmm = True
+    wo_a.bmm_batch_size = 2
+    weight = torch.randn(256, 512, device="cuda").to(torch.float8_e4m3fn)
+    scale = torch.rand(2, 4, device="cuda") + 0.5
+    wo_a.weight.data.copy_(weight)
+    wo_a.weight_scale_inv.data.copy_(scale)
+    wo_a.quant_method.process_weights_after_loading(wo_a)
+    maybe_dequant_wo_a(wo_a)
+
+    num_tokens = 7
+    x = torch.randn(num_tokens, 2, 512, device="cuda", dtype=torch.bfloat16)
+    # cos = 1, sin = 0 makes the inverse RoPE an identity.
+    cache = torch.cat(
+        (
+            torch.ones(num_tokens, 32, device="cuda"),
+            torch.zeros(num_tokens, 32, device="cuda"),
+        ),
+        dim=1,
+    )
+    recipe, tma_aligned_scales = compute_fp8_einsum_recipe()
+    projected = deep_gemm_fp8_o_proj(
+        x,
+        torch.arange(num_tokens, device="cuda"),
+        cache,
+        wo_a,
+        torch.nn.Identity(),
+        n_groups=2,
+        heads_per_group=1,
+        nope_dim=448,
+        rope_dim=64,
+        o_lora_rank=128,
+        einsum_recipe=recipe,
+        tma_aligned_scales=tma_aligned_scales,
+    )
+    reference_weight = (
+        weight.float().view(2, 128, 4, 128) * scale[:, None, :, None]
+    ).view(2, 128, 512)
+    reference = torch.einsum("tgk,grk->tgr", x.float(), reference_weight)
+    error = (projected.float() - reference.flatten(1)).norm() / reference.norm()
+    assert error < 0.01
+
+
 def test_prepare_gated_trtllm_fp8_moe_weights_pads_each_projection(monkeypatch):
     monkeypatch.setattr(
         flashinfer_utils,

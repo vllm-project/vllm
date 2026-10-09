@@ -7,8 +7,10 @@ import torch.nn as nn
 
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
     kFp8Dynamic128Sym,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
 )
@@ -101,6 +103,24 @@ def deep_gemm_fp8_o_proj(
             out=z.transpose(0, 1),
         )
     return wo_b(z.flatten(1))
+
+
+def maybe_dequant_wo_a(wo_a: nn.Module) -> None:
+    """Fall back to a BF16 ``wo_a`` when ``fp8_einsum`` cannot read its weight.
+
+    ``deep_gemm_fp8_o_proj`` reads ``wo_a.weight`` directly. Only the DeepGEMM
+    linear kernels leave it as the grouped ``[g, r, d]`` FP8 tensor that
+    ``fp8_einsum`` expects; other linear backends (e.g. ``--linear-backend
+    marlin``) lay it out for their own GEMM. Dequantize those once after
+    loading so the BF16 bmm path can use them.
+    """
+    weight = wo_a.weight
+    if weight.dtype == torch.bfloat16 or (
+        weight.dtype == torch.float8_e4m3fn and weight.dim() == 3
+    ):
+        return
+    weight = get_and_maybe_dequant_weights(wo_a, out_dtype=torch.bfloat16)
+    replace_parameter(wo_a, "weight", weight.contiguous())
 
 
 # TRTLLM-gen's DSv4 RopeQuant epilogue (flashinfer-ai/flashinfer#4918) has one
