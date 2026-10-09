@@ -17,8 +17,9 @@ Every FSDP rank builds an ``M2NTrainerWeightTransferEngine`` and calls
 ``send_weights()``; all ranks run every reshard, and only rank 0 drives the
 inference side through its ``RayVLLMWeightSyncClient``.
 
-Requires the ``nccl-extensions`` package (NCCL 2.30.5+). The backend verifies
-that PyNccl and ``libnccl_m2n.so`` resolve through the same NCCL runtime.
+Requires the ``nccl-extensions`` package (NCCL 2.30.5+) and a
+``VLLM_NCCL_SO_PATH`` pointing at the same ``libnccl.so`` that
+``libnccl_m2n.so`` was linked against.
 
 This example was written for 4xH100.
 """

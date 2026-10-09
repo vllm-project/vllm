@@ -16,6 +16,7 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -52,8 +53,9 @@ DESTINATION_SHARD_AXIS = 1
 MAX_SOURCE_SHARDS = 16
 MAX_DEST_SHARDS = 64
 
-# Increment when the JSON init payload changes incompatibly.
-M2N_WIRE_SCHEMA_VERSION = 2
+# Increment when the JSON init payload changes incompatibly. M2N peers must
+# agree on this before any rank constructs a NCCL communicator.
+M2N_WIRE_SCHEMA_VERSION = 3
 
 _NCCL_RESHARD_ENV_PREFIX = "NCCL_RESHARD_"
 _NCCL_RESHARD_DIAGNOSTIC_ENV_VARS = frozenset(
@@ -62,6 +64,15 @@ _NCCL_RESHARD_DIAGNOSTIC_ENV_VARS = frozenset(
         "NCCL_RESHARD_SPLIT_KERNEL_TRACE",
     }
 )
+
+
+class M2NDestinationMode(str, Enum):
+    """How one logical checkpoint tensor is installed on a worker."""
+
+    IN_PLACE = "in_place"
+    SHARDED_STAGING = "sharded_staging"
+    FULL_FALLBACK = "full_fallback"
+
 
 # Wire dtypes `ncclReshard` accepts. Notably excludes fp4 and any packed
 # sub-byte type, so quantized checkpoints are out of scope for now.
@@ -99,7 +110,12 @@ _IMPORT_HINT = (
 
 @dataclass(frozen=True)
 class M2NNcclRuntime:
-    """The process-wide NCCL DSO selected for both PyNccl and M2N."""
+    """The process-wide NCCL DSO selected for both PyNccl and M2N.
+
+    A communicator pointer is only valid in the NCCL instance that created it.
+    Keeping the promoted ``CDLL`` alive also preserves that instance's global
+    cuMem/IMEX state for M2N's symmetric-window calls.
+    """
 
     library_path: str
     library_handle: int
@@ -108,7 +124,15 @@ class M2NNcclRuntime:
 
 @functools.cache
 def prepare_m2n_nccl_runtime() -> M2NNcclRuntime:
-    """Resolve and globally promote the NCCL DSO used by ``nccl.m2n``."""
+    """Resolve and globally promote the NCCL DSO used by ``nccl.m2n``.
+
+    ``nccl4py`` and ``nccl-extensions`` resolve NCCL through cuda.pathfinder,
+    while vLLM's PyNccl wrapper normally opens ``VLLM_NCCL_SO_PATH`` itself.
+    Two byte-identical files are still two independent DSOs, with independent
+    NCCL process globals. Resolve once through the M2N loader's mechanism,
+    promote that exact object to ``RTLD_GLOBAL``, and then give its path to
+    PyNccl explicitly.
+    """
     try:
         from cuda.pathfinder import load_nvidia_dynamic_lib
     except ImportError as exc:
@@ -123,7 +147,10 @@ def prepare_m2n_nccl_runtime() -> M2NNcclRuntime:
             "cuda.pathfinder found NCCL but could not resolve its absolute path; "
             "preload the NCCL linked by libnccl_m2n.so before starting Python"
         )
-    library = ctypes.CDLL(library_path, mode=os.RTLD_NOW | os.RTLD_GLOBAL)
+    library = ctypes.CDLL(
+        library_path,
+        mode=os.RTLD_NOW | os.RTLD_GLOBAL,
+    )
     loaded_handle = int(loaded._handle_uint)
     promoted_handle = int(library._handle)
     if promoted_handle != loaded_handle:
@@ -222,7 +249,14 @@ def _symbol_address(library: Any, symbol: str) -> int:
 def validate_m2n_nccl_library_binding(
     runtime: M2NNcclRuntime, m2n_library_path: str
 ) -> None:
-    """Attest that M2N's NCCL calls resolve through the PyNccl runtime."""
+    """Attest that M2N's NCCL calls resolve through the PyNccl runtime.
+
+    Torch may map a byte-identical private NCCL DSO even when the canonical
+    NCCL was preloaded. That is safe as long as no communicator pointer crosses
+    into it. Compare a symbol resolved through ``libnccl_m2n``'s dependency
+    scope with the same symbol in the runtime used to construct PyNccl.
+
+    """
     m2n_library = _load_m2n_library(os.path.realpath(m2n_library_path))
     symbol = "ncclCommWindowRegister"
     runtime_address = _symbol_address(runtime.library, symbol)
@@ -447,10 +481,13 @@ class M2NParamMeta(ParamMeta):
     """
 
     source_layout: M2NLayout
+    allow_full_fallback: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_layout, M2NLayout):
             raise TypeError("source_layout must be an M2NLayout")
+        if not isinstance(self.allow_full_fallback, bool):
+            raise TypeError("allow_full_fallback must be a bool")
 
 
 @dataclass(frozen=True)
@@ -462,6 +499,7 @@ class M2NWireParam:
     shape: tuple[int, ...]
     src_mesh_dims: tuple[int, int]
     src_placements: Placements | None
+    allow_full_fallback: bool = True
 
     def __post_init__(self) -> None:
         shape = tuple(self.shape)
@@ -470,9 +508,9 @@ class M2NWireParam:
         object.__setattr__(self, "shape", shape)
         object.__setattr__(self, "src_mesh_dims", dims)
         object.__setattr__(self, "src_placements", placements)
-        if not isinstance(self.name, str) or not self.name:
+        if not self.name:
             raise ValueError("M2N wire parameter name must not be empty")
-        if not isinstance(self.dtype_name, str) or not self.dtype_name:
+        if not self.dtype_name:
             raise ValueError(f"parameter '{self.name}' has an empty wire dtype name")
         if not shape or any(
             not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0
@@ -480,6 +518,10 @@ class M2NWireParam:
         ):
             raise ValueError(
                 f"parameter '{self.name}' shape must contain positive integers"
+            )
+        if not isinstance(self.allow_full_fallback, bool):
+            raise TypeError(
+                f"parameter '{self.name}' allow_full_fallback must be a bool"
             )
         M2NMesh(cast(tuple[int, int], dims), 0)
         if placements is not None:
@@ -497,6 +539,7 @@ class M2NWireParam:
             "shape",
             "src_mesh_dims",
             "src_placements",
+            "allow_full_fallback",
         }
         missing = fields - value.keys()
         extra = value.keys() - fields
@@ -519,6 +562,7 @@ class M2NWireParam:
             "src_placements": (
                 None if self.src_placements is None else list(self.src_placements)
             ),
+            "allow_full_fallback": self.allow_full_fallback,
         }
 
 
@@ -541,7 +585,13 @@ def check_source_plan_agreement(
     expected_digest: str | None = None,
     local_error: str | None = None,
 ) -> str:
-    """Verify every participant entered with the same source plan."""
+    """Verify every trainer and worker entered with the same source plan.
+
+    This runs on the stateless control group before constructing the NCCL
+    communicator. Each rank contributes a JSON-safe error/digest envelope, not
+    the full plan, because large MoE models can contain tens of thousands of
+    logical manifest entries.
+    """
     prepared_error = local_error
     digest: str | None = None
     declared: str | None = expected_digest
@@ -555,15 +605,13 @@ def check_source_plan_agreement(
             prepared_error = f"{type(exc).__name__}: {exc}"
     elif not isinstance(prepared_error, str) or not prepared_error:
         prepared_error = "TypeError: local source error must be a non-empty string"
-
-    gathered = group.all_gather_obj(
-        {
-            "phase": "source",
-            "digest": digest,
-            "declared_digest": declared,
-            "error": prepared_error,
-        }
-    )
+    envelope = {
+        "phase": "source",
+        "digest": digest,
+        "declared_digest": declared,
+        "error": prepared_error,
+    }
+    gathered = group.all_gather_obj(envelope)
     errors: list[str] = []
     expected_fields = {"phase", "digest", "declared_digest", "error"}
     if len(gathered) != group.world_size:
@@ -619,7 +667,8 @@ def check_source_plan_agreement(
 
 
 def check_runtime_ready_agreement(
-    group: "StatelessProcessGroup", local_error: str | None
+    group: "StatelessProcessGroup",
+    local_error: str | None,
 ) -> None:
     """Require every rank to prepare local resources before NCCL init."""
     prepared_error = local_error
@@ -627,22 +676,23 @@ def check_runtime_ready_agreement(
         not isinstance(prepared_error, str) or not prepared_error
     ):
         prepared_error = "TypeError: local runtime error must be a non-empty string"
-    gathered = group.all_gather_obj({"phase": "runtime_ready", "error": prepared_error})
+    envelope = {"phase": "runtime_ready", "error": prepared_error}
+    gathered = group.all_gather_obj(envelope)
     errors: list[str] = []
     if len(gathered) != group.world_size:
         errors.append(
             "control-plane all-gather returned "
             f"{len(gathered)} records for world size {group.world_size}"
         )
-    for rank, item in enumerate(gathered):
+    for rank, other in enumerate(gathered):
         if (
-            not isinstance(item, Mapping)
-            or set(item) != {"phase", "error"}
-            or item.get("phase") != "runtime_ready"
+            not isinstance(other, Mapping)
+            or set(other) != {"phase", "error"}
+            or other.get("phase") != "runtime_ready"
         ):
             errors.append(f"rank {rank}: invalid runtime readiness envelope")
             continue
-        error = item.get("error")
+        error = other.get("error")
         if error is not None:
             if not isinstance(error, str) or not error:
                 errors.append(f"rank {rank}: invalid runtime readiness error")
@@ -690,17 +740,15 @@ def check_data_plane_agreement(
             prepared_error = f"{type(exc).__name__}: {exc}"
     elif not isinstance(prepared_error, str) or not prepared_error:
         prepared_error = "TypeError: local data-plane error must be non-empty"
-
-    gathered = group.all_gather_obj(
-        {
-            "phase": "data_plane",
-            "mode": "uid" if unique_id_bytes is not None else "tcp",
-            "uid_digest": uid_digest,
-            "max_cta": max_cta,
-            "reshard_env": _nccl_reshard_environment(),
-            "error": prepared_error,
-        }
-    )
+    envelope = {
+        "phase": "data_plane",
+        "mode": "uid" if unique_id_bytes is not None else "tcp",
+        "uid_digest": uid_digest,
+        "max_cta": max_cta,
+        "reshard_env": _nccl_reshard_environment(),
+        "error": prepared_error,
+    }
+    gathered = group.all_gather_obj(envelope)
     expected_fields = {
         "phase",
         "mode",
@@ -840,53 +888,6 @@ def to_mesh(m2n: Any, mesh: M2NMesh) -> Any:
 def to_placements(m2n: Any, placements: Placements) -> list[Any]:
     return [
         m2n.Replicate() if code == REPLICATE else m2n.Shard(code) for code in placements
-    ]
-
-
-def publish_destination_placements(
-    comm: "PyNcclCommunicator",
-    first_worker_rank: int,
-    placements: "Sequence[Placements | None] | None",
-    num_parameters: int,
-) -> list[Placements | None]:
-    """Share the worker-side destination plan with every rank in the group.
-
-    The trainer must issue each reshard with the same destination the workers
-    use, but once destinations are per-parameter they depend on the inference
-    model, which only the workers can see. The first worker publishes them here,
-    over the shared NCCL communicator; trainer ranks pass `None` and receive
-    them, and the other workers pass their own so a disagreement is caught
-    rather than deadlocking later.
-
-    Only placements travel: the destination *mesh* is still derived from the
-    rank split, identically on both sides. Use the NCCL communicator directly
-    because unique-id rendezvous deliberately has no bootstrap process group.
-    """
-    replicated_sentinel = REPLICATE - 1
-    encoded = torch.full(
-        (num_parameters, MESH_NDIMS),
-        replicated_sentinel,
-        dtype=torch.int8,
-        device=comm.device,
-    )
-    if comm.rank == first_worker_rank:
-        if placements is None or len(placements) != num_parameters:
-            raise ValueError(
-                f"publishing rank needs {num_parameters} destination placements"
-            )
-        rows = [
-            [replicated_sentinel] * MESH_NDIMS if placement is REPLICATED else placement
-            for placement in placements
-        ]
-        if rows:
-            encoded.copy_(torch.tensor(rows, dtype=torch.int8, device=comm.device))
-
-    comm.broadcast(encoded, src=first_worker_rank)
-    return [
-        REPLICATED
-        if all(code == replicated_sentinel for code in row)
-        else cast(Placements, tuple(row))
-        for row in encoded.tolist()
     ]
 
 

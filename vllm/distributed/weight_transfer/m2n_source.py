@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Trainer-side weight sources for the NCCL M2N backend.
 
-m2n plans a transfer from both sides' layouts, so the trainer has to say how it
+M2N plans a transfer from both sides' layouts, so the trainer has to say how it
 holds each parameter — which the base `WeightSource` / `ParamMeta` pair does not
-express. This module supplies the m2n flavor of both, and the DTensor-backed
-implementation that covers the common trainer. Each parameter owns its source
-mesh and placements because dense and expert weights can use different
-factorizations over the same trainer ranks.
+express. Each parameter owns its source mesh and placements because dense and
+expert weights can use different factorizations over the same trainer ranks.
 """
 
 from collections.abc import Callable, Iterator, Sequence
@@ -65,6 +63,7 @@ class M2NManifestEntry:
     global_shape: tuple[int, ...]
     source_layout: M2NLayout
     local_tensor: Callable[[], torch.Tensor]
+    allow_full_fallback: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "global_shape", tuple(self.global_shape))
@@ -82,6 +81,10 @@ class M2NManifestEntry:
             raise TypeError(
                 f"manifest entry '{self.key}' local_tensor must be callable"
             )
+        if not isinstance(self.allow_full_fallback, bool):
+            raise TypeError(
+                f"manifest entry '{self.key}' allow_full_fallback must be a bool"
+            )
 
     @property
     def metadata(self) -> M2NParamMeta:
@@ -91,11 +94,19 @@ class M2NManifestEntry:
             self.dtype,
             self.global_shape,
             self.source_layout,
+            self.allow_full_fallback,
         )
 
 
 class ManifestM2NWeightSource(M2NWeightSource):
-    """An ordered M2N source backed by lazy, rank-local manifest entries."""
+    """An ordered M2N source backed by lazy, rank-local manifest entries.
+
+    The provider callable is invoked on every iteration, so it can return a
+    current parameter view or perform rank-local conversion and LoRA merging.
+    Callable identities and tensors remain local and never enter the wire plan.
+    Callbacks run synchronously and must honor `M2NWeightSource.__iter__`'s
+    current-stream readiness contract.
+    """
 
     def __init__(self, entries: Sequence[M2NManifestEntry]) -> None:
         self._entries = tuple(entries)
@@ -127,8 +138,13 @@ def _placement_code(placement: Any) -> int:
 def mesh_from_tensor(tensor: torch.Tensor, num_trainer_ranks: int) -> M2NMesh:
     """The mesh a parameter lives on, as an `M2NMesh`.
 
-    Tensors without DeviceMesh metadata are treated as replicated. Implicitly
-    sharded tensors require a custom source with an explicit layout.
+    This adapter treats tensors without DeviceMesh metadata as replicated.
+    Implicitly sharded tensors, such as Megatron parameters, require a custom
+    `M2NWeightSource` with an explicit source layout.
+
+    Megatron integrations must use `ManifestM2NWeightSource` or another custom
+    `M2NWeightSource` that explicitly supplies TP/EP layouts. Megatron parameters
+    must not be passed to `DTensorModuleSource`.
     """
     device_mesh = getattr(tensor, "device_mesh", None)
     if device_mesh is None:
