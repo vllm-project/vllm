@@ -455,7 +455,7 @@ class MonoDecodeLayer:
         w13, w13_s, w2, w2_s = e.mono942
         sgu, sgu_s = linear_copy(sh.gate_up_proj.weight, sh.gate_up_proj.weight_scale)
         sw2, sw2_s = linear_copy(sh.down_proj.weight, sh.down_proj.weight_scale)
-        return MonoLayerWeights(
+        weights = MonoLayerWeights(
             attn=None if self.ffn_only else self._attn_weights_942(layer.attn),
             hc_attn_fn=layer.hc_attn_fn,
             hc_attn_scale=layer.hc_attn_scale,
@@ -476,6 +476,8 @@ class MonoDecodeLayer:
             sw2=sw2,
             sw2_s=sw2_s,
         )
+        weights.check_942(f.n_routed_experts)
+        return weights
 
     @staticmethod
     def _attn_weights_942(a):

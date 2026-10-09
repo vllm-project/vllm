@@ -154,6 +154,29 @@ class MonoLayerWeights:
         }
         _check_tensors(self, "MoE", want)
 
+    def check_942(self, experts: int) -> None:
+        """The MoE's tensors on gfx942, TP4, which are the copies that
+        ``weights942`` makes. The routed experts have their real intermediate
+        width without the loader's padding, as FP4 bytes in ``fp4_tile_major``
+        order and E8M0 codes a row each. The shared expert is FNUZ bytes from
+        ``linear_copy``, with K padded to a multiple of 128. ``experts`` is 384
+        for the target layers and 128 for the DSpark draft layers."""
+        d, u8 = MoeDims(4), torch.uint8
+        inter, kp = d.inter_real, -(-d.sh_inter // 128) * 128
+        want = {
+            "gate_w": ((experts, HIDDEN), torch.bfloat16),
+            "bias": ((experts,), torch.float32),
+            "w13": ((experts, 2 * inter, HIDDEN // 2), u8),
+            "w13_s": ((experts, 2 * inter, HIDDEN // 32), u8),
+            "w2": ((experts, HIDDEN, inter // 2), u8),
+            "w2_s": ((experts, HIDDEN, inter // 32), u8),
+            "sgu": ((2 * d.sh_inter, HIDDEN), u8),
+            "sgu_s": ((2 * d.sh_inter // 32, HIDDEN // 32), u8),
+            "sw2": ((HIDDEN, kp), u8),
+            "sw2_s": ((HIDDEN // 32, kp // 32), u8),
+        }
+        _check_tensors(self, "MoE", want)
+
 
 class DSV41MonoLayer:
     """The mono decode runner of one TP rank (``group``: its TP group, for the
