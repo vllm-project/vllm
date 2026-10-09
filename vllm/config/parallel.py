@@ -763,6 +763,7 @@ class ParallelConfig:
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
+                "nixl_ep_v2",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
