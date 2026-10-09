@@ -64,17 +64,6 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 logger = init_logger(__name__)
 
 
-class _RequestFinalized:
-    """Sentinel returned by safe_prepare_write when the requesting request has
-    already been finalized. Distinct from None (allocation failure) so callers
-    can handle the two cases differently without recording a failure metric."""
-
-    __slots__ = ()
-
-
-REQUEST_FINALIZED = _RequestFinalized()
-
-
 @dataclass
 class PendingPromotion:
     """Accumulator for chunks awaiting submit_load() for one (tier, request)."""
@@ -107,6 +96,15 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     accessing primary. This avoids confusion when reading TieringOffloadingManager
     code (e.g. calling prepare_load inside a cascade/store path would be misleading).
     """
+
+    class _RequestFinalized:
+        """Sentinel returned by safe_prepare_write when the request has already
+        been finalized. Distinct from None (allocation failure) so callers can
+        handle the two cases differently without recording a failure metric."""
+
+        __slots__ = ()
+
+    REQUEST_FINALIZED = _RequestFinalized()
 
     def __init__(
         self,
@@ -197,7 +195,9 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> "PrepareStoreOutput | None | _RequestFinalized":
+    ) -> (
+        "PrepareStoreOutput | None | CPUPrimaryTierOffloadingManager._RequestFinalized"
+    ):
         """prepare_write that gracefully handles a finalized request.
 
         Called from _promotion_allocation, which runs on an FS worker thread
@@ -214,7 +214,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         """
         state = self._get_request_cache_access(req_context)
         if state.finished:
-            return REQUEST_FINALIZED
+            return CPUPrimaryTierOffloadingManager.REQUEST_FINALIZED
         return self.prepare_write(keys, req_context)
 
     def get_kv_memoryview(self) -> memoryview:
@@ -650,7 +650,9 @@ class TieringOffloadingManager(OffloadingManager):
             offload_keys, req_context
         )
 
-        if isinstance(primary_write_result, _RequestFinalized):
+        if isinstance(
+            primary_write_result, CPUPrimaryTierOffloadingManager._RequestFinalized
+        ):
             # Request finished before the promotion could allocate; skip
             # silently — this is not an allocation failure.
             return None
