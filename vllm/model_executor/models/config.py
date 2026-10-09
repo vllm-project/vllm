@@ -861,6 +861,22 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 model_config.override_generation_config["max_new_tokens"] = None
             return
 
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError("Nemotron diffusion requires PP=1.")
+        # Top-k logprobs are kept per canvas position until the block is
+        # emitted, in buffers sized by max_logprobs.
+        if model_config.max_logprobs == -1:
+            raise ValueError(
+                "Nemotron masked diffusion requires --max-logprobs >= 0; "
+                "full-vocabulary logprobs (-1) are not supported."
+            )
+        validator = (
+            "vllm.model_executor.models.nemotron_dllm:NemotronDiffusionRequestValidator"
+        )
+        processors = list(model_config.logits_processors or ())
+        if validator not in processors:
+            model_config.logits_processors = [*processors, validator]
+
         attention_config = vllm_config.attention_config
         if attention_config.backend == AttentionBackendEnum.FLASHINFER:
             raise ValueError(
