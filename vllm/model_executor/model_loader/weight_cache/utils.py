@@ -62,30 +62,10 @@ def build_warmup_runner(
     is_draft: bool,
     model_config: "ModelConfig",
 ) -> "GPUModelRunner":
-    """Runner for the daemon's warmup dummy runs, without a model yet.
-
-    The caller attaches the daemon's cached model
-    (``runner.load_model(model=...)``) after checking for a model-based
-    drafter the daemon cannot warm up.
-
-    The tuned table is keyed by ``vllm_config.compute_hash()`` at kernel
-    warmup time, so the daemon's config must match a `vllm serve` engine's
-    bit-for-bit at that moment: the launcher builds it with
-    ``UsageContext.OPENAI_API_SERVER`` (batch defaults), and fields the
-    engine only resolves during KV-cache init (``block_size``/
-    ``mamba_block_size``/``kv_cache_layout``) are normalized away at
-    key-computation time
-    (``flashinfer_autotune_cache._normalize_cache_config_for_hash``); they do
-    not shape the tuned ops.
-    """
+    """Create a model runner for the daemon's warmup dummy runs."""
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
     if is_draft:
-        # The draft model is what this daemon holds: tune it as the runner's
-        # own model, not as another model's drafter. replace() is a shallow
-        # copy, so the runner's config shares compilation_config with the
-        # config the model was built under -- the layers' static registries
-        # stay visible.
         vllm_config = replace(
             vllm_config, model_config=model_config, speculative_config=None
         )
