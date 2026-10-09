@@ -140,6 +140,23 @@ def _worker_parallel_launch(
             torch.distributed.destroy_process_group()
 
 
+def destroy_nixl_ep_v2_buffer() -> None:
+    """Destroy the process's nixl_ep_v2 buffer, so the next config builds one.
+
+    The destroy is collective: every EP rank must call this, in the same order.
+    """
+    from vllm.distributed.device_communicators.all2all import (
+        NixlEPV2All2AllManager,
+    )
+
+    torch.accelerator.synchronize()
+    with NixlEPV2All2AllManager._lock:
+        state = NixlEPV2All2AllManager._state
+        if state is not None:
+            state.buffer.destroy()
+            NixlEPV2All2AllManager._state = None
+
+
 def parallel_launch_with_config(
     world_size: int,
     worker: Callable[Concatenate[ProcessGroupInfo, VllmConfig, Any, P], None],
