@@ -109,6 +109,9 @@ if not HAS_TRITON:
     gpu_buffer_utils.StagedWriteTensor.apply_write = (
         cpu_buffer_utils._staged_write_tensor_apply_write
     )
+    gpu_buffer_utils.FusedStagedWriter.apply = (
+        cpu_buffer_utils._fused_staged_writer_apply
+    )
 
 if HAS_TRITON:
     tl.debug_barrier = noop
