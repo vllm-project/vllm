@@ -55,6 +55,11 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.attention.attention import (
+    get_attention_context,
+    unified_attention_with_output,
+)
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -81,10 +86,17 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.platforms import current_platform
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.muse_glimmer import MuseGlimmerProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 
 from .interfaces import (
     EagleModelMixin,
@@ -1110,6 +1122,80 @@ class MuseGlimmerMLP(nn.Module):
         return x
 
 
+def _muse_aiter_qk_rope_cache_impl(
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    v_out: torch.Tensor,
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    zero_weight: torch.Tensor,
+    q_scale: float,
+    eps: float,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (
+        fused_qkv_split_qk_norm_rope_cache,
+    )
+
+    layer_name = _resolve_layer_name(layer_name)
+    _, attn_layer, kv_cache, slot_mapping = get_attention_context(layer_name)
+    if slot_mapping is None:
+        # Profiling has no cache slots, but attention still consumes these tensors.
+        q_out.zero_()
+        k_out.zero_()
+        v_out.zero_()
+    else:
+        key_cache, value_cache = attn_layer.impl._split_kv_cache(kv_cache)
+        cos, sin = cos_sin_cache.chunk(2, dim=-1)
+        fused_qkv_split_qk_norm_rope_cache(
+            qkv,
+            zero_weight,
+            zero_weight,
+            cos,
+            sin,
+            positions,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            q_out.shape[1],
+            k_out.shape[1],
+            q_out.shape[2],
+            is_neox=True,
+            eps=eps,
+            q_scale=q_scale,
+            kv_cache_layout="NHD",
+            q_out=q_out,
+            k_out=k_out,
+            v_out=v_out,
+        )
+    return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
+
+
+def _muse_aiter_qk_rope_cache_fake(
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    v_out: torch.Tensor,
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    zero_weight: torch.Tensor,
+    q_scale: float,
+    eps: float,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
+
+
+if current_platform.is_rocm():
+    direct_register_custom_op(
+        op_name="muse_aiter_qk_rope_cache",
+        op_func=_muse_aiter_qk_rope_cache_impl,
+        mutates_args=["q_out", "k_out", "v_out"],
+        fake_impl=_muse_aiter_qk_rope_cache_fake,
+    )
+
+
 class MuseGlimmerAttention(nn.Module):
     def __init__(
         self,
@@ -1207,6 +1293,31 @@ class MuseGlimmerAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
+        self.use_aiter_qk_rope_cache = False
+        if current_platform.is_rocm() and self.use_qk_norm and self.use_rope:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            self.use_aiter_qk_rope_cache = (
+                self.attn.get_attn_backend().__name__ == "AiterFlashAttentionBackend"
+                and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+                and self.attn.kv_cache_dtype == "auto"
+                and self.head_dim == 128
+            )
+            if self.use_aiter_qk_rope_cache:
+                self.register_buffer(
+                    "aiter_qk_zero_weight",
+                    torch.zeros(self.head_dim, dtype=torch.bfloat16),
+                    persistent=False,
+                )
+                self.reuse_aiter_cos_sin_cache = (
+                    getattr(self.rotary_emb, "cos_sin_cache_bf16", None) is not None
+                )
+                if not self.reuse_aiter_cos_sin_cache:
+                    self.register_buffer(
+                        "aiter_cos_sin_cache",
+                        self.rotary_emb.cos_sin_cache.to(torch.bfloat16),
+                        persistent=False,
+                    )
 
     def forward(
         self,
@@ -1214,6 +1325,65 @@ class MuseGlimmerAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        if self.use_aiter_qk_rope_cache and qkv.dtype == torch.bfloat16:
+            q = torch.empty(
+                (qkv.shape[0], self.num_heads, self.head_dim),
+                dtype=qkv.dtype,
+                device=qkv.device,
+            )
+            k = torch.empty(
+                (qkv.shape[0], self.num_kv_heads, self.head_dim),
+                dtype=qkv.dtype,
+                device=qkv.device,
+            )
+            v = torch.empty_like(k)
+            encoded = _encode_layer_name(self.attn.layer_name)
+            cos_sin_cache = (
+                self.rotary_emb.cos_sin_cache_bf16
+                if self.reuse_aiter_cos_sin_cache
+                else self.aiter_cos_sin_cache
+            )
+            dummy = torch.ops.vllm.muse_aiter_qk_rope_cache(
+                q,
+                k,
+                v,
+                qkv,
+                positions,
+                cos_sin_cache,
+                self.aiter_qk_zero_weight,
+                self.scale_query_by,
+                self.config.rms_norm_eps,
+                encoded,
+            )
+            attn_output = torch.empty(
+                (qkv.shape[0], self.num_heads, self.head_dim),
+                dtype=qkv.dtype,
+                device=qkv.device,
+            )
+            if self.attn.use_direct_call:
+                unified_attention_with_output(
+                    q, k, v, attn_output, self.attn.layer_name,
+                    kv_cache_dummy_dep=dummy,
+                )
+            else:
+                torch.ops.vllm.unified_attention_with_output(
+                    q, k, v, attn_output, encoded,
+                    kv_cache_dummy_dep=dummy,
+                )
+            attn_output = attn_output.reshape(-1, self.q_size)
+        else:
+            attn_output = self._forward_unfused(qkv, positions)
+
+        if self.use_output_gate:
+            gate, _ = self.output_gate_proj(hidden_states)
+            attn_output = torch.sigmoid(gate) * attn_output
+
+        output, _ = self.o_proj(attn_output)
+        return output
+
+    def _forward_unfused(
+        self, qkv: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.use_qk_norm:
@@ -1228,15 +1398,7 @@ class MuseGlimmerAttention(nn.Module):
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
 
-        attn_output = self.attn(q, k, v)
-
-        if self.use_output_gate:
-            # Gate reads the layer input hidden states (not the attn output).
-            gate, _ = self.output_gate_proj(hidden_states)
-            attn_output = torch.sigmoid(gate) * attn_output
-
-        output, _ = self.o_proj(attn_output)
-        return output
+        return self.attn(q, k, v)
 
 
 class MuseGlimmerDecoderLayer(nn.Module):
@@ -1263,37 +1425,86 @@ class MuseGlimmerDecoderLayer(nn.Module):
         )
         # Sandwich norms with baked +1 offset. Pre-norms use rms_norm_eps; the
         # post-norms use the (typically smaller) post_norm_eps.
-        self.input_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, weight_offset=1
-        )
-        self.post_attention_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.post_norm_eps, weight_offset=1
-        )
-        self.pre_feedforward_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, weight_offset=1
-        )
-        self.post_feedforward_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.post_norm_eps, weight_offset=1
-        )
+        self.use_amd_fused_norm = current_platform.is_rocm()
+        self.use_aiter_sandwich_norm = False
+        if self.use_amd_fused_norm:
+            from vllm._aiter_ops import is_aiter_found_and_supported
+            from vllm.platforms.rocm import on_gfx950
+
+            self.use_aiter_sandwich_norm = (
+                on_gfx950() and is_aiter_found_and_supported()
+            )
+            if self.use_aiter_sandwich_norm:
+                from aiter.ops.triton.normalization.fused_rmsnorm_add_rmsnorm import (
+                    fused_rmsnorm_add_rmsnorm,
+                )
+
+                self.fused_rmsnorm_add_rmsnorm = fused_rmsnorm_add_rmsnorm
+
+        def make_sandwich_norm(eps: float) -> nn.Module:
+            if self.use_amd_fused_norm:
+                return GemmaRMSNorm(config.hidden_size, eps=eps)
+            return MuseGlimmerRMSNorm(config.hidden_size, eps=eps, weight_offset=1)
+
+        self.input_layernorm = make_sandwich_norm(config.rms_norm_eps)
+        self.post_attention_layernorm = make_sandwich_norm(config.post_norm_eps)
+        self.pre_feedforward_layernorm = make_sandwich_norm(config.rms_norm_eps)
+        self.post_feedforward_layernorm = make_sandwich_norm(config.post_norm_eps)
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        next_input_layernorm: GemmaRMSNorm | None = None,
+        input_pre_normalized: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Gemma2-style sandwich, replicated explicitly (matches HF MuseGlimmer).
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        use_aiter_sandwich_norm = (
+            self.use_aiter_sandwich_norm and hidden_states.dtype == torch.bfloat16
+        )
+        if not input_pre_normalized:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        if use_aiter_sandwich_norm:
+            residual_out = torch.empty_like(hidden_states)
+            hidden_states = self.fused_rmsnorm_add_rmsnorm(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm.weight,
+                self.pre_feedforward_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
+                self.pre_feedforward_layernorm.variance_epsilon,
+                residual_out,
+            )
+            residual = residual_out
+        elif self.use_amd_fused_norm:
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states, residual = self.pre_feedforward_layernorm(
+                hidden_states, residual
+            )
+        else:
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = residual + hidden_states
+            residual = hidden_states
+            hidden_states = self.pre_feedforward_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        if use_aiter_sandwich_norm and next_input_layernorm is not None:
+            residual_out = torch.empty_like(hidden_states)
+            hidden_states = self.fused_rmsnorm_add_rmsnorm(
+                hidden_states,
+                residual,
+                self.post_feedforward_layernorm.weight,
+                next_input_layernorm.weight,
+                self.post_feedforward_layernorm.variance_epsilon,
+                next_input_layernorm.variance_epsilon,
+                residual_out,
+            )
+            residual = residual_out
+        else:
+            hidden_states = self.post_feedforward_layernorm(hidden_states)
+            hidden_states = residual + hidden_states
         return hidden_states, residual
 
 
@@ -1351,13 +1562,33 @@ class MuseGlimmerModel(nn.Module, EagleModelMixin):
         aux_hidden_states = self._maybe_add_hidden_state(
             [], self.start_layer, hidden_states, None
         )
+        input_pre_normalized = False
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            next_input_layernorm = None
+            if (
+                layer.use_aiter_sandwich_norm
+                and hidden_states.dtype == torch.bfloat16
+                and layer_idx + 1 < self.end_layer
+            ):
+                next_input_layernorm = self.layers[
+                    layer_idx + 1
+                ].input_layernorm
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                next_input_layernorm,
+                input_pre_normalized,
+            )
+            input_pre_normalized = next_input_layernorm is not None
             self._maybe_add_hidden_state(
-                aux_hidden_states, layer_idx + 1, hidden_states, None
+                aux_hidden_states,
+                layer_idx + 1,
+                residual if input_pre_normalized else hidden_states,
+                None,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

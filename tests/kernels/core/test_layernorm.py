@@ -258,3 +258,31 @@ def test_gemma_rms_norm_mixed_input_weight_dtype(default_vllm_config) -> None:
 
     assert out.dtype == x.dtype
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("eps", [1e-5, 1e-8])
+@torch.inference_mode()
+def test_gemma_rms_norm_fused_residual_matches_muse_sandwich(
+    eps: float, default_vllm_config
+) -> None:
+    if torch.version.hip is None:
+        pytest.skip("Muse fusion uses the ROCm AITER implementation")
+
+    device = CUDA_DEVICES[0]
+    hidden_size = 6656
+    x = torch.randn(32, hidden_size, dtype=torch.bfloat16, device=device)
+    residual = torch.randn_like(x)
+    layer = GemmaRMSNorm(hidden_size, eps=eps).to(device=device)
+    layer.weight.data.normal_(mean=0.0, std=0.1)
+
+    expected_residual = x + residual
+    fp32 = expected_residual.float()
+    expected = (
+        fp32
+        * torch.rsqrt(fp32.square().mean(-1, keepdim=True) + eps)
+        * (layer.weight.float() + 1.0)
+    ).to(x.dtype)
+
+    output, fused_residual = layer(x, residual)
+    torch.testing.assert_close(fused_residual, expected_residual)
+    torch.testing.assert_close(output, expected, atol=1e-2, rtol=1e-2)

@@ -85,6 +85,26 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
+class MuseGlimmerAttentionConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            return
+
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        if (
+            rocm_aiter_ops.is_mha_enabled()
+            and attention_config.backend is None
+            and not attention_config.backend_per_kind
+        ):
+            attention_config.backend = AttentionBackendEnum.ROCM_AITER_FA
+
+
 class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1083,6 +1103,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MuseGlimmerForCausalLM": MuseGlimmerAttentionConfig,
+    "MuseGlimmerForConditionalGeneration": MuseGlimmerAttentionConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
