@@ -837,11 +837,12 @@ def test_fmha_sm100_indexer_matches_reference(q_lens, prefix_lens, index_dtype):
         "expect_cute",
     ),
     [
-        pytest.param("auto", torch.float8_e4m3fn, 1, 0, 1, True, id="auto-cute-h1"),
+        pytest.param(None, torch.float8_e4m3fn, 1, 0, 1, True, id="default-cute-h1"),
         pytest.param("cute", torch.float8_e4m3fn, 2, 1, 2, True, id="cute-h2"),
-        pytest.param("cute", torch.float8_e4m3fn, 4, 2, 1, True, id="cute-h4"),
+        pytest.param("auto", torch.float8_e4m3fn, 4, 2, 1, True, id="auto-cute-h4"),
         pytest.param("fmha", torch.float8_e4m3fn, 4, 2, 1, False, id="fmha-override"),
         pytest.param("auto", torch.bfloat16, 4, 0, 1, False, id="bf16-fallback"),
+        pytest.param("fmha", torch.bfloat16, 4, 0, 1, False, id="fmha-bf16"),
         pytest.param("auto", torch.float8_e4m3fn, 2, 0, 0, False, id="tail-fallback"),
         pytest.param("cute", torch.bfloat16, 4, 0, 1, None, id="cute-rejects-bf16"),
         pytest.param("cute", torch.float8_e4m3fn, 2, 0, 0, None, id="cute-reject-tail"),
@@ -886,7 +887,10 @@ def test_msa_indexer_impl_matches_triton(
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=512
     )
-    vllm_config.attention_config.minimax_m3_indexer_prefill_backend = prefill_backend
+    if prefill_backend is not None:
+        vllm_config.attention_config.minimax_m3_indexer_prefill_backend = (
+            prefill_backend
+        )
     vllm_config.model_config.hf_config.sparse_attention_config = {
         "sparse_num_index_heads": num_idx_heads,
         "sparse_init_block": init_blocks,
@@ -986,6 +990,16 @@ def test_msa_indexer_impl_matches_triton(
     msa_metadata = attn_metadata[msa_impl.index_cache.prefix]
     assert isinstance(msa_metadata, MiniMaxM3IndexerMSAMetadata)
     assert (msa_metadata.prefill_cute is not None) == expect_cute
+
+    # A mixed-dtype query must be rejected before either scorer reads the cache.
+    other_dtype = (
+        torch.bfloat16 if index_dtype == torch.float8_e4m3fn else torch.float8_e4m3fn
+    )
+    with (
+        set_forward_context(attn_metadata, vllm_config),
+        pytest.raises(ValueError, match="requires matching Q and K cache dtypes"),
+    ):
+        msa_impl(index_q.to(other_dtype))
 
     # Reuse one plan/arena for two layers with opposite score rankings.
     for _ in range(2):

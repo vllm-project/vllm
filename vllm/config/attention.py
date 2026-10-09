@@ -45,12 +45,16 @@ class AttentionConfig:
     """Sparse decode kernel used by the MiniMax M3 MSA backend."""
 
     minimax_m3_indexer_prefill_backend: MiniMaxM3IndexerPrefillBackend = "auto"
-    """Prefill scorer used by the MiniMax M3 MSA indexer. "auto" selects the
-    dedicated CuTe scorer for FP8 index caches with 128-dimensional heads,
-    1/2/4 index heads per rank, and at least one forced local block on
-    SM100/SM103/SM107, when the installed MSA exposes its score-only API.
-    Other configurations use FMHA OnlyScore. "fmha" forces that fallback;
-    "cute" requires the dedicated scorer and rejects unsupported settings.
+    """Prefill scorer used by the MiniMax M3 MSA indexer. The default "auto"
+    selects CuTe for supported FP8 indexer Q/K and FMHA OnlyScore for BF16.
+    Indexer Q follows `indexer_kv_dtype`, independently of main-attention Q.
+    Selection is resolved at initialization, without query/KV-length heuristics.
+
+    CuTe requires SM100/SM103/SM107, FP8 E4M3, head dimension/page size 128,
+    1/2/4 index heads per rank, at least one forced local block, and MSA's
+    score-only API. Other configurations use FMHA in "auto" mode.
+    "fmha" forces FMHA at the configured indexer precision; "cute" requires
+    CuTe and rejects unsupported settings. Neither override changes precision.
     Decode scoring and native Top16 selection are unchanged."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
@@ -94,7 +98,8 @@ class AttentionConfig:
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
-    support in the backend."""
+    support in the backend. MiniMax M3 also emits indexer Q in this dtype;
+    main-attention Q precision is configured independently."""
 
     indexer_sparse_logits: bool = False
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
