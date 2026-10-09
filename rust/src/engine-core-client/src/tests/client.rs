@@ -267,6 +267,19 @@ async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, u32) {
     rmp_serde::from_slice(&frames[1]).expect("decode START_DP_WAVE payload")
 }
 
+async fn send_start_wave(push: &mut PushSocket, engine_index: u32, wave: u32) {
+    send_outputs(
+        push,
+        DpControlOutput {
+            engine_index,
+            timestamp: 0.0,
+            control: DpControlMessage::StartWave(wave),
+        }
+        .into(),
+    )
+    .await;
+}
+
 async fn connect_client_with_ipc(
     config: EngineCoreClientConfig,
     ipc: &IpcNamespace,
@@ -411,12 +424,6 @@ async fn recv_xpub_subscription(xpub: &mut XPubSocket) {
     let frames = recv_xpub_message(xpub).await;
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].as_ref(), b"\x01");
-}
-
-async fn recv_external_coordinator_wakeup(xpub: &mut XPubSocket) -> (u32, u32) {
-    let frames = recv_xpub_message(xpub).await;
-    assert_eq!(frames.len(), 1);
-    rmp_serde::from_slice(&frames[0]).expect("decode external coordinator wakeup")
 }
 
 async fn send_external_coordinator_publish<T: serde::Serialize>(
@@ -611,14 +618,16 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
                 engine.coordinator.take().expect("coordinator sockets should be present");
             let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
-            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (0, 0));
-
+            // An idle engine handed a request starts the wave itself.
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-1");
             assert_eq!(request.current_wave, 0);
+            send_start_wave(&mut coordinator.output_push, 0, 0).await;
+
+            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!((wave, exclude_engine), (0, 0));
 
             assert!(
                 timeout(
@@ -655,14 +664,15 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             )
             .await;
 
-            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (1, 0));
-
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-3");
             assert_eq!(request.current_wave, 1);
+            send_start_wave(&mut coordinator.output_push, 0, 1).await;
+
+            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!((wave, exclude_engine), (1, 0));
 
             send_outputs(
                 &mut data_socket.push,
@@ -878,9 +888,6 @@ async fn coordinator_accepts_stats_only_outputs() {
         let mut coordinator =
             engine.coordinator.take().expect("coordinator sockets should be present");
         let data_socket = engine.data_sockets.first_mut().expect("data socket");
-
-        let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-        assert_eq!((wave, exclude_engine), (0, 0));
 
         send_outputs(
             &mut coordinator.output_push,
@@ -3227,7 +3234,7 @@ async fn bootstrapped_external_coordinator_connects_and_subscribes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_one_wakeup() {
+async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_no_wakeup() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let input_address = ipc.input_endpoint();
@@ -3268,18 +3275,11 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
 
     let mut stream = client.call(sample_request()).await.unwrap();
 
-    let wakeup = timeout(
-        Duration::from_secs(1),
-        recv_external_coordinator_wakeup(&mut stats_socket),
-    )
-    .await
-    .unwrap();
-    assert_eq!(wakeup, (0, 7));
-
+    // The engine that receives the request starts the wave, not the frontend.
     assert!(
         timeout(
             Duration::from_millis(200),
-            recv_external_coordinator_wakeup(&mut stats_socket)
+            recv_xpub_message(&mut stats_socket)
         )
         .await
         .is_err()
@@ -3291,81 +3291,6 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
     assert_eq!(request.request_id, "req-1");
     assert_eq!(request.current_wave, 7);
     assert!(client.is_healthy());
-
-    send_outputs(
-        &mut push,
-        RequestBatchOutputs {
-            outputs: vec![request_output(
-                "req-1",
-                vec![],
-                Some(EngineCoreFinishReason::Length),
-            )],
-            finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
-            ..Default::default()
-        }
-        .into(),
-    )
-    .await;
-
-    let final_output = timeout(Duration::from_secs(1), stream.next()).await.unwrap();
-    assert!(final_output.is_some());
-
-    client.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
-    init_tracing();
-    let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
-    let coordinator_address = ipc.endpoint("stats.sock");
-
-    let mut stats_socket = XPubSocket::new();
-    stats_socket.bind(&coordinator_address).await.unwrap();
-
-    let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
-        let coordinator_address = coordinator_address.clone();
-        async move {
-            EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
-                1,
-                Duration::from_secs(2),
-                0,
-                Some(CoordinatorMode::External {
-                    address: coordinator_address,
-                }),
-            ))
-            .await
-            .unwrap()
-        }
-    });
-
-    let (mut dealer, mut push) =
-        setup_bootstrapped_mock_engine(input_address, output_address, &[0x00, 0x00]).await;
-    let client = client_task.await.unwrap();
-    recv_xpub_subscription(&mut stats_socket).await;
-
-    send_external_coordinator_publish(&mut stats_socket, &(Value::Nil, 5_u32, true)).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let mut stream = client.call(sample_request()).await.unwrap();
-
-    assert!(
-        timeout(
-            Duration::from_millis(200),
-            recv_external_coordinator_wakeup(&mut stats_socket)
-        )
-        .await
-        .is_err()
-    );
-
-    let add = recv_engine_message(&mut dealer).await;
-    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
-    assert_eq!(request.current_wave, 5);
 
     send_outputs(
         &mut push,
