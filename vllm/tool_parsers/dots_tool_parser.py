@@ -19,11 +19,16 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    _extract_tool_info,
+    is_complete_json,
+    partial_tag_overlap,
+)
 
 logger = init_logger(__name__)
 
@@ -139,19 +144,28 @@ class DotsToolParser(ToolParser):
                     return resolved
         return None
 
+    def _get_tools(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest | None,
+    ) -> list[Tool]:
+        return getattr(request, "tools", None) or self.tools or []
+
     @staticmethod
     def _tool_schema(
         name: str,
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[Tool] | None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         for tool in tools or []:
-            if tool.function.name != name:
+            try:
+                tool_name, schema = _extract_tool_info(tool)
+            except TypeError:
                 continue
-            schema = tool.function.parameters
+            if tool_name != name:
+                continue
             if not isinstance(schema, dict):
                 break
             properties = schema.get("properties", {})
-            defs = schema.get("$defs", {})
+            defs = schema.get("$defs", schema.get("definitions", {}))
             return (
                 properties if isinstance(properties, dict) else {},
                 defs if isinstance(defs, dict) else {},
@@ -161,7 +175,7 @@ class DotsToolParser(ToolParser):
     def _parse_xml_invoke(
         self,
         match: re.Match[str],
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[Tool] | None,
     ) -> dict[str, Any]:
         name = self._extract_name(match.group("name"))
         properties, defs = self._tool_schema(name, tools)
@@ -182,7 +196,7 @@ class DotsToolParser(ToolParser):
     def _parse_block(
         self,
         content: str,
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[Tool] | None,
     ) -> list[dict[str, Any]]:
         content = content.strip()
         if content.startswith("<invoke"):
@@ -198,14 +212,22 @@ class DotsToolParser(ToolParser):
 
     @staticmethod
     def _known_tool_names(
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[Tool] | None,
     ) -> set[str]:
-        return {tool.function.name for tool in tools or []}
+        names: set[str] = set()
+        for tool in tools or []:
+            try:
+                name, _ = _extract_tool_info(tool)
+                if name:
+                    names.add(name)
+            except TypeError:
+                continue
+        return names
 
     def _validated_call(
         self,
         parsed: dict[str, Any],
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[Tool] | None,
     ) -> tuple[str, dict[str, Any]] | None:
         name = parsed.get("name")
         if not isinstance(name, str) or name not in self._known_tool_names(tools):
@@ -218,7 +240,7 @@ class DotsToolParser(ToolParser):
     def extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> ExtractedToolCallInformation:
         marker_index = model_output.find(self.tool_call_start_token)
         if marker_index == -1:
@@ -228,11 +250,12 @@ class DotsToolParser(ToolParser):
                 content=model_output,
             )
 
+        tools = self._get_tools(request)
         tool_calls: list[ToolCall] = []
         for block in self._block_regex.finditer(model_output):
             try:
-                for parsed in self._parse_block(block.group(1), request.tools):
-                    validated = self._validated_call(parsed, request.tools)
+                for parsed in self._parse_block(block.group(1), tools):
+                    validated = self._validated_call(parsed, tools)
                     if validated is None:
                         continue
                     name, arguments = validated
@@ -281,7 +304,7 @@ class DotsToolParser(ToolParser):
 
     def _stream_complete_json_body(
         self,
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[Tool] | None,
         tool_calls: list[DeltaToolCall],
     ) -> None:
         content = self._buffer[len(self.tool_call_start_token) :].strip()
@@ -334,7 +357,7 @@ class DotsToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> DeltaMessage | None:
         del current_text, previous_token_ids, current_token_ids, delta_token_ids
         if not previous_text:
@@ -347,6 +370,7 @@ class DotsToolParser(ToolParser):
         self._buffer += delta_text
         normal_parts: list[str] = []
         tool_calls: list[DeltaToolCall] = []
+        tools = self._get_tools(request)
 
         while self._buffer:
             marker_index = self._buffer.find(self.tool_call_start_token)
@@ -373,13 +397,13 @@ class DotsToolParser(ToolParser):
                 self.tool_call_end_token, len(self.tool_call_start_token)
             )
             if end_index == -1:
-                self._stream_complete_json_body(request.tools, tool_calls)
+                self._stream_complete_json_body(tools, tool_calls)
                 break
 
             content = self._buffer[len(self.tool_call_start_token) : end_index]
             self._buffer = self._buffer[end_index + len(self.tool_call_end_token) :]
             try:
-                parsed_calls = self._parse_block(content, request.tools)
+                parsed_calls = self._parse_block(content, tools)
                 if not parsed_calls:
                     raise ValueError("Dots tool-call block contains no invoke")
 
@@ -387,7 +411,7 @@ class DotsToolParser(ToolParser):
                 valid_calls = [
                     validated
                     for parsed in parsed_calls
-                    if (validated := self._validated_call(parsed, request.tools))
+                    if (validated := self._validated_call(parsed, tools))
                     is not None
                 ]
                 if self.current_tool_name_sent and valid_calls:
