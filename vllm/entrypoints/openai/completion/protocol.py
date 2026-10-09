@@ -493,6 +493,17 @@ class CompletionRequest(OpenAIBaseModel):
             )
 
         if (
+            data.get("use_beam_search")
+            and data.get("echo")
+            and data.get("logprobs") is not None
+        ):
+            raise VLLMValidationError(
+                "`echo` with `logprobs` is not supported with beam search "
+                "because beam search does not compute prompt logprobs.",
+                parameter="echo",
+            )
+
+        if (
             data.get("logprob_token_ids")
             and data.get("echo")
             and data.get("max_tokens") == 0
