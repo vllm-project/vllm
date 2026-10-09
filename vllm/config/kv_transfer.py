@@ -94,6 +94,13 @@ class KVTransferConfig:
     """Checksum transferred KV blocks on the producer and verify them on the
     consumer once loaded. Must be set on both sides."""
 
+    kv_checksum_fail_closed: bool = False
+    """Fail a KV load whose checksums mismatch or cannot be verified, as a KV
+    load failure handled by kv_load_failure_policy. Otherwise such loads are
+    only logged, and their blocks are used and prefix-cached as usual. Enable
+    KV checksums on producers first: loads without checksums are
+    unverified."""
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

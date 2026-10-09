@@ -36,6 +36,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumCarrier
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -586,6 +587,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    def kv_checksum_carrier(
+        self, request: "Request", receiving: bool
+    ) -> "KVChecksumCarrier | None":
+        if receiving:
+            # The connector chosen to load the request.
+            index = self._requests_to_connector.get(request.request_id)
+            if index is None:
+                return None
+            return self._connectors[index].kv_checksum_carrier(request, True)
+        for c in self._connectors:
+            if (carrier := c.kv_checksum_carrier(request, False)) is not None:
+                return carrier
+        return None
 
     def request_finished(
         self,
