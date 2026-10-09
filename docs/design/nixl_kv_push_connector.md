@@ -137,7 +137,7 @@ when a ``PUSH_REG`` arrives we look up ``_push_finished_blocks``, and
 when finished blocks arrive we look up ``_pending_d_registrations``.
 Both lookups match on the per-dispatch ``transfer_id`` the router sets in the
 ``kv_transfer_params`` of both requests (D sends it in ``PUSH_REG``).
-If either side has none, they fall back
+If either side has none, they fall back (deprecated, to be removed)
 to comparing the ids after stripping the trailing per-engine random
 suffix (via ``get_base_request_id``). The fallback exists because the
 proxy hands the same ``X-Request-Id`` to both legs, so P and D wrap it

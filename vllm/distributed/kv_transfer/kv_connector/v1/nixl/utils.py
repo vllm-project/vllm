@@ -78,6 +78,8 @@ def get_transfer_id(kv_transfer_params: dict[str, Any]) -> TransferId | None:
         return transfer_id
     logger.warning_once(
         "No valid transfer_id in kv_transfer_params; pairing P and D by base "
-        "request id, which can pair the wrong requests if ids repeat."
+        "request id, which can pair the wrong requests if ids repeat. This "
+        "fallback is deprecated and will be removed in a future release. "
+        "Please use a router that sets transfer_id for NIXL push mode."
     )
     return None
