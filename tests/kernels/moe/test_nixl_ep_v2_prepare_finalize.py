@@ -26,10 +26,11 @@ def _nixl_ep_v2_layout_worker(
     vllm_config: VllmConfig,
     cpu_group,
     use_cudagraph: bool,
-    use_fp8: bool,
+    quant: str | None,
     skewed: bool,
     expand: bool,
 ) -> None:
+    from tests.kernels.quantization.nvfp4_utils import dequantize_nvfp4_to_dtype
     from vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep_v2 import (
         NixlEPV2PrepareAndFinalize,
     )
@@ -60,7 +61,7 @@ def _nixl_ep_v2_layout_worker(
             num_max_tokens_per_rank=16,
             hidden=hidden,
             num_topk=topk,
-            use_fp8_dispatch=use_fp8,
+            use_fp8_dispatch=quant == "fp8",
             num_local_experts=num_local_experts,
         )
     )
@@ -72,11 +73,18 @@ def _nixl_ep_v2_layout_worker(
         use_cudagraph=use_cudagraph,
         expand=expand,
     )
-    quant_config = (
-        FusedMoEQuantConfig.make(current_platform.fp8_dtype(), block_shape=[128, 128])
-        if use_fp8
-        else FusedMoEQuantConfig.make()
-    )
+    # NVFP4 with a fixed global scale and linear scale factors, so the test
+    # can dequantize them.
+    gscale = torch.tensor([448.0 * 6.0 / 8.0], device=device)
+    quant_config = {
+        None: FusedMoEQuantConfig.make(),
+        "fp8": FusedMoEQuantConfig.make(
+            current_platform.fp8_dtype(), block_shape=[128, 128]
+        ),
+        "nvfp4": FusedMoEQuantConfig.make(
+            "nvfp4", a1_gscale=gscale, is_scale_swizzled=False
+        ),
+    }[quant]
     a1 = torch.randn(num_tokens[rank], hidden, dtype=torch.bfloat16, device=device)
     topk_ids = all_ids[rank].long().to(device)
     topk_weights = torch.rand(num_tokens[rank], topk, device=device)
@@ -95,10 +103,15 @@ def _nixl_ep_v2_layout_worker(
             False,
             quant_config,
         )
-        x = x.float()
-        if use_fp8:  # dequantize the 128-wide blocks
-            x = x.view(len(x), hidden // 128, 128) * x_scale.unsqueeze(-1)
+        if quant == "fp8":  # dequantize the 128-wide blocks
+            x = x.float().view(len(x), hidden // 128, 128) * x_scale.unsqueeze(-1)
             x = x.view(len(x), hidden)
+        elif quant == "nvfp4" and len(x):  # quantized after receive
+            assert x.dtype == torch.uint8 and x.size(1) == hidden // 2
+            x = dequantize_nvfp4_to_dtype(
+                x, x_scale, gscale, torch.float32, device, is_sf_linear_layout=True
+            )
+        x = x.float()
         local = (ids >= rank * num_local_experts) & (
             ids < (rank + 1) * num_local_experts
         )
@@ -120,6 +133,7 @@ def _nixl_ep_v2_layout_worker(
             assert meta.expert_num_tokens is None
             assert int(meta.psum_recv_per_rank[-1]) == num_recv_tokens
             assert (ids[num_recv_tokens:] == -1).all()
+            x[num_recv_tokens:] = 0  # uninitialized padding rows
             assert int(local[:num_recv_tokens].sum()) == num_recv_slots
             assert ((ids == -1) | local).all()
         else:
@@ -134,45 +148,51 @@ def _nixl_ep_v2_layout_worker(
     # The dispatch committed the manager's active SM count.
     assert buffer.get_topology()[1] == mgr.max_sms_used()
 
-    if use_fp8:
+    if quant == "fp8":
         q, scale = moe_kernel_quantize_input(
             a1, None, current_platform.fp8_dtype(), False, [128, 128], False
         )
         a1 = q.float().view(len(q), hidden // 128, 128) * scale.unsqueeze(-1)
         a1 = a1.view(len(q), hidden)
+    elif quant == "nvfp4":
+        q, scale = moe_kernel_quantize_input(a1, gscale, "nvfp4", False, None, False)
+        a1 = dequantize_nvfp4_to_dtype(
+            q, scale, gscale, torch.float32, device, is_sf_linear_layout=True
+        )
     expected = (a1.float() * topk_weights.sum(dim=1, keepdim=True)).to(torch.bfloat16)
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize("skewed", [False, True])
-@pytest.mark.parametrize("use_fp8", [False, True])
+@pytest.mark.parametrize("quant", [None, "fp8", "nvfp4"])
 @pytest.mark.parametrize("use_cudagraph", [False, True])
 def test_nixl_ep_v2_prepare_finalize(
-    use_cudagraph: bool, use_fp8: bool, skewed: bool
+    use_cudagraph: bool, quant: str | None, skewed: bool
 ) -> None:
     """Dispatch and combine round-trip tokens in both receive layouts.
 
     Args:
         use_cudagraph: Take the padded layout instead of the exact one.
-        use_fp8: Dispatch block-FP8 activations instead of BF16.
+        quant: None for BF16; "fp8" dispatches block-FP8 activations;
+            "nvfp4" dispatches BF16 and quantizes the received rows.
         skewed: Route every token to rank 0, so rank 1 receives no rows.
 
     """
-    _launch_nixl_ep_v2_layout(None, use_cudagraph, use_fp8, skewed, expand=False)
+    _launch_nixl_ep_v2_layout(None, use_cudagraph, quant, skewed, expand=False)
 
 
 @pytest.mark.parametrize("skewed", [False, True])
-@pytest.mark.parametrize("use_fp8", [False, True])
-def test_nixl_ep_v2_prepare_finalize_expand(use_fp8: bool, skewed: bool) -> None:
+@pytest.mark.parametrize("quant", [None, "fp8", "nvfp4"])
+def test_nixl_ep_v2_prepare_finalize_expand(quant: str | None, skewed: bool) -> None:
     """Dispatch and combine round-trip tokens in the worst-case expanded
     layout that VLLM_NIXL_EP_V2_EXPAND selects under CUDA graphs.
 
     Args:
-        use_fp8: As in test_nixl_ep_v2_prepare_finalize.
+        quant: As in test_nixl_ep_v2_prepare_finalize.
         skewed: Route every token to rank 0, so rank 1 receives no rows.
 
     """
-    _launch_nixl_ep_v2_layout(None, True, use_fp8, skewed, expand=True)
+    _launch_nixl_ep_v2_layout(None, True, quant, skewed, expand=True)
 
 
 def test_nixl_ep_v2_prepare_finalize_knobs() -> None:
@@ -183,13 +203,13 @@ def test_nixl_ep_v2_prepare_finalize_knobs() -> None:
         "VLLM_NIXL_EP_V2_PREFER_OVERLAP": "0",
         "VLLM_NIXL_EP_V2_ALLOW_MULTIPLE_REDUCTION": "0",
     }
-    _launch_nixl_ep_v2_layout(env, False, False, False, expand=False)
+    _launch_nixl_ep_v2_layout(env, False, None, False, expand=False)
 
 
 def _launch_nixl_ep_v2_layout(
     env: dict[str, str] | None,
     use_cudagraph: bool,
-    use_fp8: bool,
+    quant: str | None,
     skewed: bool,
     expand: bool,
 ) -> None:
@@ -197,6 +217,8 @@ def _launch_nixl_ep_v2_layout(
         pytest.skip("Requires NIXL EP v2 (nixl.runtime.ep)")
     if current_platform.device_count() < 2:
         pytest.skip("Requires 2 GPUs")
+    if quant == "nvfp4" and not current_platform.has_device_capability(100):
+        pytest.skip("NVFP4 quantization requires SM100+")
 
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(
@@ -212,7 +234,7 @@ def _launch_nixl_ep_v2_layout(
         vllm_config,
         env,
         use_cudagraph,
-        use_fp8,
+        quant,
         skewed,
         expand,
     )

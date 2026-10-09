@@ -157,7 +157,7 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_high_throughput":      {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
     "nixl_ep":                     {None, "fp8_blocked", "modelopt_fp8"},
-    "nixl_ep_v2":                  {None, "fp8_blocked"},
+    "nixl_ep_v2":                  {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
 }
 
 # Map from backend -> (DP/EP support, DP support, TP support, SP support)
