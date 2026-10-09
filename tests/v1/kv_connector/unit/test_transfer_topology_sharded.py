@@ -137,3 +137,45 @@ def test_engine_info_fields_have_backward_compatible_defaults() -> None:
     assert registered.remote_pp_rank == 0
     assert registered.start_layer == 0
     assert registered.end_layer == 0
+
+
+def test_target_rank_membership_does_not_build_remote_rank_list() -> None:
+    topology = _make_topology(tp_rank=0, tp_size=1)
+
+    assert topology.is_handshake_target_rank(4_999_999, 5_000_000)
+    assert not topology.is_handshake_target_rank(5_000_000, 5_000_000)
+
+
+@pytest.mark.parametrize(
+    ("local_rank", "local_size", "remote_size"),
+    [(0, 1, 4), (1, 4, 2), (3, 4, 8)],
+)
+def test_target_rank_membership_matches_rank_list(
+    local_rank: int, local_size: int, remote_size: int
+) -> None:
+    topology = _make_topology(tp_rank=local_rank, tp_size=local_size)
+    expected = topology.handshake_target_ranks(remote_size)
+
+    assert [
+        rank
+        for rank in range(remote_size)
+        if topology.is_handshake_target_rank(rank, remote_size)
+    ] == expected
+
+
+@pytest.mark.parametrize(
+    ("local_rank", "local_dcp", "remote_tp", "remote_dcp"),
+    [(0, 2, 8, 4), (5, 4, 8, 2)],
+)
+def test_sharded_target_rank_membership_matches_rank_list(
+    local_rank: int, local_dcp: int, remote_tp: int, remote_dcp: int
+) -> None:
+    topology = _make_topology(tp_rank=local_rank, tp_size=8)
+    topology.dcp_size = local_dcp
+    expected = topology.handshake_target_ranks(remote_tp, remote_dcp)
+
+    assert [
+        rank
+        for rank in range(remote_tp)
+        if topology.is_handshake_target_rank(rank, remote_tp, remote_dcp)
+    ] == expected
