@@ -239,10 +239,11 @@ class cmake_build_ext(build_ext):
             return
         try:
             stamp = Path(self.build_temp, "vllm_build_env.json").read_text()
-            if json.loads(stamp) == build_env:
-                return
+            configured_env = json.loads(stamp)
         except (OSError, ValueError):
-            pass
+            configured_env = None
+        if configured_env == build_env:
+            return
         logger.warning("Build environment changed; reconfiguring CMake.")
         cache.unlink()
         shutil.rmtree(Path(self.build_temp, "CMakeFiles"), ignore_errors=True)
