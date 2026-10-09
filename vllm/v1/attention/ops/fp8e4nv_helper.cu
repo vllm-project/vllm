@@ -8,8 +8,8 @@
 using u32 = unsigned int;
 using u64 = unsigned long long;
 
-extern "C" __attribute__((device, always_inline)) u64
-fp8e4m3x4_to_fp16x4(u32 input) {
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u64 fp8e4m3x4_to_fp16x4_impl(u32 input) {
   u32 out01;
   u32 out23;
   asm(R"ptx({
@@ -45,8 +45,6 @@ fp8e4m3x4_to_fp16x4(u32 input) {
     prmt.b32 sub0, sublut, subhi, m0;
     setp.ge.u32 p_norm0, mag0, 8;
     selp.u32 o0, norm0, sub0, p_norm0;
-    setp.eq.u32 p_norm0, mag0, 0x7f;
-    selp.u32 o0, 0x7e00, o0, p_norm0;
     or.b32 o0, o0, sign0;
 
     // lane 1
@@ -60,8 +58,6 @@ fp8e4m3x4_to_fp16x4(u32 input) {
     prmt.b32 sub1, sublut, subhi, m1;
     setp.ge.u32 p_norm1, mag1, 8;
     selp.u32 o1, norm1, sub1, p_norm1;
-    setp.eq.u32 p_norm1, mag1, 0x7f;
-    selp.u32 o1, 0x7e00, o1, p_norm1;
     or.b32 o1, o1, sign1;
 
     // lane 2
@@ -75,8 +71,6 @@ fp8e4m3x4_to_fp16x4(u32 input) {
     prmt.b32 sub2, sublut, subhi, m2;
     setp.ge.u32 p_norm2, mag2, 8;
     selp.u32 o2, norm2, sub2, p_norm2;
-    setp.eq.u32 p_norm2, mag2, 0x7f;
-    selp.u32 o2, 0x7e00, o2, p_norm2;
     or.b32 o2, o2, sign2;
 
     // lane 3
@@ -90,8 +84,6 @@ fp8e4m3x4_to_fp16x4(u32 input) {
     prmt.b32 sub3, sublut, subhi, m3;
     setp.ge.u32 p_norm3, mag3, 8;
     selp.u32 o3, norm3, sub3, p_norm3;
-    setp.eq.u32 p_norm3, mag3, 0x7f;
-    selp.u32 o3, 0x7e00, o3, p_norm3;
     or.b32 o3, o3, sign3;
 
     shl.b32 o1, o1, 16;
@@ -103,11 +95,22 @@ fp8e4m3x4_to_fp16x4(u32 input) {
   })ptx"
       : "=r"(out01), "=r"(out23)
       : "r"(input));
-  return static_cast<u64>(out01) | (static_cast<u64>(out23) << 32);
+  u64 output = static_cast<u64>(out01) | (static_cast<u64>(out23) << 32);
+  if constexpr (HandleNaN) {
+#pragma unroll
+    for (int lane = 0; lane < 4; ++lane) {
+      if (((input >> (lane * 8)) & 0x7f) == 0x7f) {
+        output = (output & ~(static_cast<u64>(0x7fff) << (lane * 16))) |
+                 (static_cast<u64>(0x7e00) << (lane * 16));
+      }
+    }
+  }
+  return output;
 }
 
-extern "C" __attribute__((device, always_inline)) u32
-fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u32
+fp16x4_to_fp8e4m3x4_impl(u32 input01, u32 input23) {
   u32 output;
   asm(R"ptx({
     .reg .u16 b<4>;
@@ -174,8 +177,6 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o0, norm0, sub0, p_norm0;
     setp.ge.u32 p_hi0, a0, 0x5f41;
     selp.u32 o0, 0x7e, o0, p_hi0;
-    setp.gt.u32 p_hi0, a0, 0x7c00;
-    selp.u32 o0, 0x7f, o0, p_hi0;
     or.b32 o0, o0, sgn0;
 
     // lane 1
@@ -219,8 +220,6 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o1, norm1, sub1, p_norm1;
     setp.ge.u32 p_hi1, a1, 0x5f41;
     selp.u32 o1, 0x7e, o1, p_hi1;
-    setp.gt.u32 p_hi1, a1, 0x7c00;
-    selp.u32 o1, 0x7f, o1, p_hi1;
     or.b32 o1, o1, sgn1;
 
     // lane 2
@@ -264,8 +263,6 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o2, norm2, sub2, p_norm2;
     setp.ge.u32 p_hi2, a2, 0x5f41;
     selp.u32 o2, 0x7e, o2, p_hi2;
-    setp.gt.u32 p_hi2, a2, 0x7c00;
-    selp.u32 o2, 0x7f, o2, p_hi2;
     or.b32 o2, o2, sgn2;
 
     // lane 3
@@ -309,8 +306,6 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o3, norm3, sub3, p_norm3;
     setp.ge.u32 p_hi3, a3, 0x5f41;
     selp.u32 o3, 0x7e, o3, p_hi3;
-    setp.gt.u32 p_hi3, a3, 0x7c00;
-    selp.u32 o3, 0x7f, o3, p_hi3;
     or.b32 o3, o3, sgn3;
 
     shl.b32 o1, o1, 8;
@@ -322,11 +317,22 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
   })ptx"
       : "=r"(output)
       : "r"(input01), "r"(input23));
+  if constexpr (HandleNaN) {
+#pragma unroll
+    for (int lane = 0; lane < 4; ++lane) {
+      const u32 bits =
+          ((lane < 2 ? input01 : input23) >> ((lane % 2) * 16)) & 0x7fff;
+      if (bits > 0x7c00) {
+        output |= 0x7fU << (lane * 8);
+      }
+    }
+  }
   return output;
 }
 
-extern "C" __attribute__((device, always_inline)) u32
-bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u32
+bf16x4_to_fp8e4m3x4_impl(u32 input01, u32 input23) {
   u32 output;
   asm(R"ptx({
     .reg .u16 b<4>;
@@ -390,8 +396,6 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o0, norm0, sub0, p_norm0;
     setp.ge.u32 p_hi0, a0, 0x43e0;
     selp.u32 o0, 0x7e, o0, p_hi0;
-    setp.gt.u32 p_hi0, a0, 0x7f80;
-    selp.u32 o0, 0x7f, o0, p_hi0;
     or.b32 o0, o0, sgn0;
 
     and.b32  a1, raw1, 0x7fff;
@@ -432,8 +436,6 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o1, norm1, sub1, p_norm1;
     setp.ge.u32 p_hi1, a1, 0x43e0;
     selp.u32 o1, 0x7e, o1, p_hi1;
-    setp.gt.u32 p_hi1, a1, 0x7f80;
-    selp.u32 o1, 0x7f, o1, p_hi1;
     or.b32 o1, o1, sgn1;
 
     and.b32  a2, raw2, 0x7fff;
@@ -474,8 +476,6 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o2, norm2, sub2, p_norm2;
     setp.ge.u32 p_hi2, a2, 0x43e0;
     selp.u32 o2, 0x7e, o2, p_hi2;
-    setp.gt.u32 p_hi2, a2, 0x7f80;
-    selp.u32 o2, 0x7f, o2, p_hi2;
     or.b32 o2, o2, sgn2;
 
     and.b32  a3, raw3, 0x7fff;
@@ -516,8 +516,6 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o3, norm3, sub3, p_norm3;
     setp.ge.u32 p_hi3, a3, 0x43e0;
     selp.u32 o3, 0x7e, o3, p_hi3;
-    setp.gt.u32 p_hi3, a3, 0x7f80;
-    selp.u32 o3, 0x7f, o3, p_hi3;
     or.b32 o3, o3, sgn3;
 
     shl.b32 o1, o1, 8;
@@ -529,11 +527,21 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
   })ptx"
       : "=r"(output)
       : "r"(input01), "r"(input23));
+  if constexpr (HandleNaN) {
+#pragma unroll
+    for (int lane = 0; lane < 4; ++lane) {
+      const u32 bits =
+          ((lane < 2 ? input01 : input23) >> ((lane % 2) * 16)) & 0x7fff;
+      if (bits > 0x7f80) {
+        output |= 0x7fU << (lane * 8);
+      }
+    }
+  }
   return output;
 }
 
-extern "C" __attribute__((device, always_inline)) u64
-fp8e4m3x4_to_bf16x4(u32 input) {
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u64 fp8e4m3x4_to_bf16x4_impl(u32 input) {
   u32 out01;
   u32 out23;
   asm(R"ptx({
@@ -575,8 +583,6 @@ fp8e4m3x4_to_bf16x4(u32 input) {
     or.b32 sub0, hi0, lo0;
     setp.ge.u32 p_norm0, mag0, 8;
     selp.u32 o0, norm0, sub0, p_norm0;
-    setp.eq.u32 p_norm0, mag0, 0x7f;
-    selp.u32 o0, 0x7fc0, o0, p_norm0;
     or.b32 o0, o0, sign0;
 
 
@@ -594,8 +600,6 @@ fp8e4m3x4_to_bf16x4(u32 input) {
     or.b32 sub1, hi1, lo1;
     setp.ge.u32 p_norm1, mag1, 8;
     selp.u32 o1, norm1, sub1, p_norm1;
-    setp.eq.u32 p_norm1, mag1, 0x7f;
-    selp.u32 o1, 0x7fc0, o1, p_norm1;
     or.b32 o1, o1, sign1;
 
 
@@ -613,8 +617,6 @@ fp8e4m3x4_to_bf16x4(u32 input) {
     or.b32 sub2, hi2, lo2;
     setp.ge.u32 p_norm2, mag2, 8;
     selp.u32 o2, norm2, sub2, p_norm2;
-    setp.eq.u32 p_norm2, mag2, 0x7f;
-    selp.u32 o2, 0x7fc0, o2, p_norm2;
     or.b32 o2, o2, sign2;
 
 
@@ -632,8 +634,6 @@ fp8e4m3x4_to_bf16x4(u32 input) {
     or.b32 sub3, hi3, lo3;
     setp.ge.u32 p_norm3, mag3, 8;
     selp.u32 o3, norm3, sub3, p_norm3;
-    setp.eq.u32 p_norm3, mag3, 0x7f;
-    selp.u32 o3, 0x7fc0, o3, p_norm3;
     or.b32 o3, o3, sign3;
 
     shl.b32 o1, o1, 16;
@@ -645,7 +645,17 @@ fp8e4m3x4_to_bf16x4(u32 input) {
   })ptx"
       : "=r"(out01), "=r"(out23)
       : "r"(input));
-  return static_cast<u64>(out01) | (static_cast<u64>(out23) << 32);
+  u64 output = static_cast<u64>(out01) | (static_cast<u64>(out23) << 32);
+  if constexpr (HandleNaN) {
+#pragma unroll
+    for (int lane = 0; lane < 4; ++lane) {
+      if (((input >> (lane * 8)) & 0x7f) == 0x7f) {
+        output = (output & ~(static_cast<u64>(0x7fff) << (lane * 16))) |
+                 (static_cast<u64>(0x7fc0) << (lane * 16));
+      }
+    }
+  }
+  return output;
 }
 
 using u8 = unsigned char;
@@ -658,29 +668,111 @@ __attribute__((device, always_inline)) u8 convert_lane0_with_pack4(u16 input) {
   return static_cast<u8>(Convert(static_cast<u32>(input), 0));
 }
 
-extern "C" __attribute__((device, always_inline)) u8
-fp16x1_to_fp8e4m3(u16 input) {
-  return convert_lane0_with_pack4<fp16x4_to_fp8e4m3x4>(input);
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u8 fp16x1_to_fp8e4m3_impl(u16 input) {
+  return convert_lane0_with_pack4<fp16x4_to_fp8e4m3x4_impl<HandleNaN>>(input);
 }
 
-extern "C" __attribute__((device, always_inline)) u8
-bf16x1_to_fp8e4m3(u16 input) {
-  return convert_lane0_with_pack4<bf16x4_to_fp8e4m3x4>(input);
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u8 bf16x1_to_fp8e4m3_impl(u16 input) {
+  return convert_lane0_with_pack4<bf16x4_to_fp8e4m3x4_impl<HandleNaN>>(input);
 }
 
-extern "C" __attribute__((device, always_inline)) u8
-fp32x1_to_fp8e4m3(u32 input) {
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u8 fp32x1_to_fp8e4m3_impl(u32 input) {
   // Round-to-odd at BF16 precision preserves the exact subsequent FP8 RNE
   // result while avoiding a double-rounding error.
   const u16 bf16_round_to_odd =
       static_cast<u16>((input >> 16) | ((input & 0xffff) != 0));
-  return convert_lane0_with_pack4<bf16x4_to_fp8e4m3x4>(bf16_round_to_odd);
+  return convert_lane0_with_pack4<bf16x4_to_fp8e4m3x4_impl<HandleNaN>>(
+      bf16_round_to_odd);
+}
+
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u32 fp8e4m3x1_to_fp32x1_impl(u8 input) {
+  // Every finite E4M3 value is exactly representable as BF16. Decode its low
+  // lane as BF16 bits, then place those bits directly in the FP32 high word.
+  const u64 decoded =
+      fp8e4m3x4_to_bf16x4_impl<HandleNaN>(static_cast<u32>(input));
+  return static_cast<u32>(static_cast<u16>(decoded)) << 16;
+}
+
+extern "C" __attribute__((device, always_inline)) u64
+fp8e4m3x4_to_fp16x4(u32 input) {
+  return fp8e4m3x4_to_fp16x4_impl<false>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u64
+fp8e4m3x4_to_fp16x4_nan(u32 input) {
+  return fp8e4m3x4_to_fp16x4_impl<true>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u32
+fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
+  return fp16x4_to_fp8e4m3x4_impl<false>(input01, input23);
+}
+
+extern "C" __attribute__((device, always_inline)) u32
+fp16x4_to_fp8e4m3x4_nan(u32 input01, u32 input23) {
+  return fp16x4_to_fp8e4m3x4_impl<true>(input01, input23);
+}
+
+extern "C" __attribute__((device, always_inline)) u32
+bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
+  return bf16x4_to_fp8e4m3x4_impl<false>(input01, input23);
+}
+
+extern "C" __attribute__((device, always_inline)) u32
+bf16x4_to_fp8e4m3x4_nan(u32 input01, u32 input23) {
+  return bf16x4_to_fp8e4m3x4_impl<true>(input01, input23);
+}
+
+extern "C" __attribute__((device, always_inline)) u64
+fp8e4m3x4_to_bf16x4(u32 input) {
+  return fp8e4m3x4_to_bf16x4_impl<false>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u64
+fp8e4m3x4_to_bf16x4_nan(u32 input) {
+  return fp8e4m3x4_to_bf16x4_impl<true>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u8
+fp16x1_to_fp8e4m3(u16 input) {
+  return fp16x1_to_fp8e4m3_impl<false>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u8
+fp16x1_to_fp8e4m3_nan(u16 input) {
+  return fp16x1_to_fp8e4m3_impl<true>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u8
+bf16x1_to_fp8e4m3(u16 input) {
+  return bf16x1_to_fp8e4m3_impl<false>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u8
+bf16x1_to_fp8e4m3_nan(u16 input) {
+  return bf16x1_to_fp8e4m3_impl<true>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u8
+fp32x1_to_fp8e4m3(u32 input) {
+  return fp32x1_to_fp8e4m3_impl<false>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u8
+fp32x1_to_fp8e4m3_nan(u32 input) {
+  return fp32x1_to_fp8e4m3_impl<true>(input);
 }
 
 extern "C" __attribute__((device, always_inline)) u32
 fp8e4m3x1_to_fp32x1(u8 input) {
-  // Every finite E4M3 value is exactly representable as BF16. Decode its low
-  // lane as BF16 bits, then place those bits directly in the FP32 high word.
-  const u64 decoded = fp8e4m3x4_to_bf16x4(static_cast<u32>(input));
-  return static_cast<u32>(static_cast<u16>(decoded)) << 16;
+  return fp8e4m3x1_to_fp32x1_impl<false>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u32
+fp8e4m3x1_to_fp32x1_nan(u8 input) {
+  return fp8e4m3x1_to_fp32x1_impl<true>(input);
 }

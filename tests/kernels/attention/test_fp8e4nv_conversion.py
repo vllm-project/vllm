@@ -8,7 +8,7 @@ on dtype; encode is round-to-nearest-even, and decode is exact.
 Oracle (per the test plan):
   * SM75-SM88: compare against a PyTorch reference. The reference SATURATES
     overflow (and +-inf) to the fp8 representable max (+-448), preserving
-    NaNs as signed E4M3 NaN bytes.
+    signed E4M3 NaNs only with HANDLE_NAN enabled.
   * SM89+: the same sampled set, plus a FULL barrage over every one of the 65,536
     fp16/bf16 bit patterns, cross-checked against the native hardware fp8 cast
     (which the saturating reference lowers to once the input is clamped in range).
@@ -50,22 +50,25 @@ def _decode_kernel(
     IS_FP16: tl.constexpr,
     IS_FP32: tl.constexpr,
     BLOCK: tl.constexpr,
+    HANDLE_NAN: tl.constexpr = False,
 ):
     """Decode FP8 test inputs into the selected floating-point dtype."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0)
     dt = tl.float16 if IS_FP16 else tl.float32 if IS_FP32 else tl.bfloat16
-    tl.store(out_ptr + offs, convert_from_fp8e4m3(x, dt), mask=mask)
+    tl.store(out_ptr + offs, convert_from_fp8e4m3(x, dt, HANDLE_NAN), mask=mask)
 
 
 @triton.jit
-def _encode_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+def _encode_kernel(
+    x_ptr, out_ptr, n, BLOCK: tl.constexpr, HANDLE_NAN: tl.constexpr = False
+):
     """Encode floating-point test inputs into FP8 bytes."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
-    tl.store(out_ptr + offs, convert_to_fp8e4m3(x), mask=mask)
+    tl.store(out_ptr + offs, convert_to_fp8e4m3(x, HANDLE_NAN), mask=mask)
 
 
 def _finite_fp8_bytes() -> torch.Tensor:
@@ -74,7 +77,9 @@ def _finite_fp8_bytes() -> torch.Tensor:
     return torch.tensor(vals, dtype=torch.uint8, device="cuda")
 
 
-def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+def _run_decode(
+    x_u8: torch.Tensor, dtype: torch.dtype, handle_nan: bool = False
+) -> torch.Tensor:
     """Launch software decoding and return its output tensor."""
     out = torch.empty(x_u8.numel(), dtype=dtype, device="cuda")
     n = x_u8.numel()
@@ -82,6 +87,7 @@ def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         x_u8,
         out,
         n,
+        HANDLE_NAN=handle_nan,
         IS_FP16=(dtype == torch.float16),
         IS_FP32=(dtype == torch.float32),
         BLOCK=256,
@@ -91,12 +97,20 @@ def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return out
 
 
-def _run_encode(x: torch.Tensor) -> torch.Tensor:
+def _run_encode(
+    x: torch.Tensor, block: int = 256, handle_nan: bool = False
+) -> torch.Tensor:
     """Launch software encoding and return the resulting FP8 bytes."""
     out = torch.empty(x.numel(), dtype=torch.uint8, device="cuda")
     n = x.numel()
-    _encode_kernel[(triton.cdiv(n, 256),)](
-        x, out, n, BLOCK=256, extern_libs=FP8E4NV_EXTERN_LIBS
+    _encode_kernel[(triton.cdiv(n, block),)](
+        x,
+        out,
+        n,
+        BLOCK=block,
+        num_warps=4,
+        HANDLE_NAN=handle_nan,
+        extern_libs=FP8E4NV_EXTERN_LIBS,
     )
     return out
 
@@ -171,7 +185,8 @@ def _all_uint16_as(dtype: torch.dtype) -> torch.Tensor:
     "dtype,min_cap",
     [(torch.float16, 75), (torch.bfloat16, 80), (torch.float32, 75)],
 )
-def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int):
+@pytest.mark.parametrize("handle_nan", [False, True])
+def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int, handle_nan: bool):
     """fp8 -> {fp16, bf16, fp32} is exact for every finite byte (incl. denorms).
 
     The decode input domain is only 256 bytes, so 'all finite bytes' is already
@@ -181,13 +196,13 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int):
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
     nan_bytes = torch.tensor([0x7F, 0xFF], dtype=torch.uint8, device="cuda")
-    decoded_nan = _run_decode(nan_bytes, dtype)
+    decoded_nan = _run_decode(nan_bytes, dtype, handle_nan=True)
     assert torch.isnan(decoded_nan).all()
     assert torch.equal(
         torch.signbit(decoded_nan), torch.tensor([False, True], device="cuda")
     )
     x_u8 = _finite_fp8_bytes()
-    actual = _run_decode(x_u8, dtype)
+    actual = _run_decode(x_u8, dtype, handle_nan=handle_nan)
     expected = x_u8.view(FP8_DTYPE).to(dtype)
     torch.testing.assert_close(
         actual.view(torch.uint8), expected.view(torch.uint8), atol=0.0, rtol=0.0
@@ -199,14 +214,20 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int):
     "dtype,min_cap",
     [(torch.float16, 75), (torch.bfloat16, 80), (torch.float32, 75)],
 )
-def test_encode_sampled_edge_cases(dtype: torch.dtype, min_cap: int):
+@pytest.mark.parametrize("block", [64, 128, 256, 512])
+@pytest.mark.parametrize("handle_nan", [False, True])
+def test_encode_sampled_edge_cases(
+    dtype: torch.dtype, min_cap: int, block: int, handle_nan: bool
+):
     """RNE encode over a sampled set incl. edge cases, bit-exact vs the saturating
     reference. Runs on SM75-SM88 (reference oracle) and SM89+ (reference lowers to
     native)."""
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
     x = _edge_case_inputs(dtype)
-    actual = _run_encode(x)
+    if not handle_nan:
+        x = x[~x.isnan()]
+    actual = _run_encode(x, block, handle_nan)
     ref = _saturating_fp8_ref(x)
     torch.testing.assert_close(
         actual.view(torch.uint8),
@@ -244,12 +265,19 @@ def test_encode_fp32_avoids_16bit_double_rounding(
     reason="native fp8e4nv cast cross-check requires SM89+",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype):
+@pytest.mark.parametrize("block", [256, 512])
+@pytest.mark.parametrize("handle_nan", [False, True])
+def test_encode_full_barrage_matches_native_on_sm89(
+    dtype: torch.dtype, block: int, handle_nan: bool
+):
     """On SM89+, the RNE encode is cross-checked against the native float -> fp8 cvt
     over EVERY one of the 65,536 input bit patterns (normals, subnormals, signed
-    zeros, overflow, +-inf, +-NaN -- overflow saturates, NaNs remain NaNs)."""
+    zeros, overflow, +-inf, +-NaN -- overflow saturates, NaNs remain NaNs
+    when handling is enabled)."""
     x = _all_uint16_as(dtype)
-    actual = _run_encode(x)
+    if not handle_nan:
+        x = x[~x.isnan()]
+    actual = _run_encode(x, block, handle_nan)
     native = _saturating_fp8_ref(x)  # native hardware cvt on SM89+ (clamped input)
     torch.testing.assert_close(
         actual.view(torch.uint8),
@@ -261,10 +289,13 @@ def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block", [64, 128, 256, 512])
-def test_decode_partial_per_thread_packs(dtype, block):
+@pytest.mark.parametrize("handle_nan", [False, True])
+def test_decode_partial_per_thread_packs(dtype, block, handle_nan):
     if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
         pytest.skip("BF16 requires SM80+")
     raw = torch.arange(block, dtype=torch.int32, device="cuda").to(torch.uint8)
+    if not handle_nan:
+        raw = torch.where((raw & 0x7F) == 0x7F, 0, raw)
     out = torch.empty(block, dtype=dtype, device="cuda")
     _decode_kernel[(1,)](
         raw,
@@ -273,6 +304,7 @@ def test_decode_partial_per_thread_packs(dtype, block):
         IS_FP16=(dtype == torch.float16),
         IS_FP32=False,
         BLOCK=block,
+        HANDLE_NAN=handle_nan,
         num_warps=4,
         extern_libs=FP8E4NV_EXTERN_LIBS,
     )
