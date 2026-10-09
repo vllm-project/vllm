@@ -39,7 +39,6 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
 )
-from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -54,25 +53,6 @@ def _apply_rope_input_validation(x, freqs_cis):
     assert freqs_cis.dtype == torch.complex64, freqs_cis.dtype
 
 
-def get_rope_shape_decorate(func):
-    _get_rope_shape_first_call_flag = set()
-
-    def wrapper(org, interpolation_mode, shape):
-        key = (org.requires_grad, torch.is_grad_enabled(), interpolation_mode)
-        if key not in _get_rope_shape_first_call_flag:
-            _get_rope_shape_first_call_flag.add(key)
-            _ = func(org, interpolation_mode, shape=(64, 64))
-        return func(org, interpolation_mode, shape)
-
-    return wrapper
-
-
-@get_rope_shape_decorate
-@torch.compile(
-    dynamic=True,
-    backend=current_platform.simple_compile_backend,
-    disable=current_platform.simple_compile_backend == "tpu",
-)
 def get_rope_shape(org, interpolation_mode, shape):
     return (
         F.interpolate(
