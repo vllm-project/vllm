@@ -40,6 +40,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _swizzle_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    is_rocm_gfx1250 as _is_rocm_gfx1250,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mx_scale_kwargs as _mx_scale_kwargs,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -311,7 +314,9 @@ def backend_to_kernel_cls(
             AiterExperts,
         )
 
-        return [AiterW4A4ExpertsMonolithic, AiterExperts]
+        if _is_rocm_gfx1250():
+            return [AiterW4A4ExpertsMonolithic, AiterExperts]
+        return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
@@ -431,8 +436,13 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
+        if _is_rocm_gfx1250():
+            return [
+                Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+                Mxfp4MoeBackend.AITER_MXFP4_BF16,
+                Mxfp4MoeBackend.EMULATION,
+            ]
         return [
-            Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.EMULATION,
         ]
@@ -792,11 +802,17 @@ def select_deepseek_v4_mxfp4_moe_backend(
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
-        priority_backends = [
-            Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-            Mxfp4MoeBackend.AITER_MXFP4_BF16,
-            Mxfp4MoeBackend.TRITON_UNFUSED,
-        ]
+        if _is_rocm_gfx1250():
+            priority_backends = [
+                Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+                Mxfp4MoeBackend.AITER_MXFP4_BF16,
+                Mxfp4MoeBackend.TRITON_UNFUSED,
+            ]
+        else:
+            priority_backends = [
+                Mxfp4MoeBackend.AITER_MXFP4_BF16,
+                Mxfp4MoeBackend.TRITON_UNFUSED,
+            ]
     else:
         priority_backends = _get_priority_backends()
 

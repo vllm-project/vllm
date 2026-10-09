@@ -13,12 +13,16 @@ from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_
 logger = init_logger(__name__)
 
 
-def should_use_gfx1250_mx_scale_swizzle() -> bool:
+def is_rocm_gfx1250() -> bool:
     if not current_platform.is_rocm():
         return False
     from vllm.platforms.rocm import on_gfx1250
 
     return on_gfx1250()
+
+
+def should_use_gfx1250_mx_scale_swizzle() -> bool:
+    return is_rocm_gfx1250()
 
 
 def should_use_cdna4_mx_scale_swizzle() -> bool:
