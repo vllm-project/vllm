@@ -51,24 +51,38 @@ def _decode_kernel(
     IS_FP32: tl.constexpr,
     BLOCK: tl.constexpr,
     HANDLE_NAN: tl.constexpr = False,
+    FORCE_SOFTWARE_CONVERSION: tl.constexpr = True,
 ):
     """Decode FP8 test inputs into the selected floating-point dtype."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0)
     dt = tl.float16 if IS_FP16 else tl.float32 if IS_FP32 else tl.bfloat16
-    tl.store(out_ptr + offs, convert_from_fp8e4m3(x, dt, HANDLE_NAN), mask=mask)
+    tl.store(
+        out_ptr + offs,
+        convert_from_fp8e4m3(x, dt, HANDLE_NAN, FORCE_SOFTWARE_CONVERSION),
+        mask=mask,
+    )
 
 
 @triton.jit
 def _encode_kernel(
-    x_ptr, out_ptr, n, BLOCK: tl.constexpr, HANDLE_NAN: tl.constexpr = False
+    x_ptr,
+    out_ptr,
+    n,
+    BLOCK: tl.constexpr,
+    HANDLE_NAN: tl.constexpr = False,
+    FORCE_SOFTWARE_CONVERSION: tl.constexpr = True,
 ):
     """Encode floating-point test inputs into FP8 bytes."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
-    tl.store(out_ptr + offs, convert_to_fp8e4m3(x, HANDLE_NAN), mask=mask)
+    tl.store(
+        out_ptr + offs,
+        convert_to_fp8e4m3(x, HANDLE_NAN, FORCE_SOFTWARE_CONVERSION),
+        mask=mask,
+    )
 
 
 def _finite_fp8_bytes() -> torch.Tensor:
@@ -345,3 +359,42 @@ def test_packaged_bitcode_matches_cuda_source(tmp_path):
         check=True,
     )
     assert rebuilt.read_bytes() == helper.read_bytes()
+
+
+@pytest.mark.parametrize("direction", ["encode", "decode"])
+@pytest.mark.parametrize("arch", [75, 80, 89, 90])
+@pytest.mark.parametrize("force", [False, True])
+def test_software_conversion_requires_explicit_override_on_native_targets(
+    direction: str, arch: int, force: bool
+):
+    """Older targets work by default; native targets diagnose accidental use."""
+    from triton.backends.compiler import GPUTarget
+    from triton.compiler import ASTSource
+
+    signature = {
+        "x_ptr": "*fp16" if direction == "encode" else "*u8",
+        "out_ptr": "*u8" if direction == "encode" else "*fp16",
+        "n": "i32",
+    }
+    constants = {"BLOCK": 128, "HANDLE_NAN": False, "FORCE_SOFTWARE_CONVERSION": force}
+    kernel = _encode_kernel if direction == "encode" else _decode_kernel
+    if direction == "decode":
+        constants.update(IS_FP16=True, IS_FP32=False)
+    source = ASTSource(kernel, signature, constants)
+    options = {
+        "arch": f"sm{arch}",
+        "num_warps": 4,
+        "extern_libs": FP8E4NV_EXTERN_LIBS,
+    }
+    if arch >= 89 and not force:
+        with pytest.raises(triton.CompilationError) as exc:
+            triton.compile(source, target=GPUTarget("cuda", arch, 32), options=options)
+        cause = exc.value
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        assert isinstance(cause, ValueError)
+        assert f"Triton is compiling for sm{arch}" in str(cause)
+        assert "Use native conversion" in str(cause)
+        assert "FORCE_SOFTWARE_CONVERSION=True" in str(cause)
+    else:
+        triton.compile(source, target=GPUTarget("cuda", arch, 32), options=options)
