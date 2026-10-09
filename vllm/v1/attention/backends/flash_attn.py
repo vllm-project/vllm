@@ -16,7 +16,6 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
-    float_kv_cache_dtype_mismatch_reason,
     is_quantized_kv_cache,
 )
 from vllm.v1.attention.backend import (
@@ -465,9 +464,6 @@ class FlashAttentionBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        mismatch = float_kv_cache_dtype_mismatch_reason(kv_cache_dtype, dtype)
-        if mismatch is not None:
-            return mismatch
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         if (

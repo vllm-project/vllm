@@ -57,7 +57,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
-    float_kv_cache_dtype_mismatch_reason,
     get_dtype_size,
     is_quantized_kv_cache,
     is_strictly_contiguous,
@@ -553,9 +552,6 @@ class FlashInferBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        mismatch = float_kv_cache_dtype_mismatch_reason(kv_cache_dtype, dtype)
-        if mismatch is not None:
-            return mismatch
         if (
             kv_cache_dtype is not None
             and kv_cache_dtype.startswith("nvfp4")
