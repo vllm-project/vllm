@@ -65,36 +65,39 @@ SM_SCALE = HEAD_DIM**-0.5
         "decode_query_len",
         "num_q_heads",
         "num_kv_heads",
+        "is_sm103",
         "expected",
     ),
     [
-        pytest.param(2, 4, 64, 4, False, id="tp1-below-min-batch"),
-        pytest.param(4, 4, 64, 4, True, id="tp1-min-batch"),
-        pytest.param(4, 4, 32, 2, False, id="tp2-below-min-batch"),
-        pytest.param(8, 4, 32, 2, True, id="tp2-min-batch"),
-        pytest.param(8, 4, 16, 1, False, id="tp4-below-min-batch"),
-        pytest.param(16, 4, 16, 1, True, id="tp4-min-batch"),
-        pytest.param(4, 1, 64, 4, False, id="regular-decode-keeps-old-floor"),
-        pytest.param(16, 1, 64, 4, True, id="regular-decode-min-batch"),
-        pytest.param(16, 2, 64, 4, True, id="tp1-query-len-2"),
-        pytest.param(16, 2, 16, 1, True, id="tp4-query-len-2"),
-        pytest.param(16, 32, 64, 4, True, id="query-len-upper-bound"),
-        pytest.param(16, 0, 64, 4, False, id="query-len-zero"),
-        pytest.param(16, 33, 64, 4, False, id="query-len-above-bound"),
+        pytest.param(15, 1, 64, 4, True, False, id="qlen1-below-row-floor"),
+        pytest.param(16, 1, 64, 4, True, True, id="qlen1-at-row-floor"),
+        pytest.param(10, 3, 32, 2, True, False, id="qlen3-below-row-floor"),
+        pytest.param(11, 3, 32, 2, True, True, id="qlen3-at-row-floor"),
+        pytest.param(3, 4, 64, 4, True, False, id="qlen4-below-row-floor"),
+        pytest.param(4, 4, 64, 4, True, True, id="qlen4-at-row-floor"),
+        pytest.param(7, 8, 16, 1, True, False, id="qlen8-below-row-floor"),
+        pytest.param(8, 8, 16, 1, True, True, id="qlen8-at-row-floor"),
+        pytest.param(15, 9, 64, 4, True, False, id="unmeasured-query-length"),
+        pytest.param(15, 4, 8, 1, True, False, id="unmeasured-heads"),
+        pytest.param(15, 4, 64, 4, False, False, id="sm100-keeps-old-floor"),
+        pytest.param(16, 32, 64, 4, True, True, id="query-len-upper-bound"),
+        pytest.param(16, 0, 64, 4, True, False, id="query-len-zero"),
+        pytest.param(16, 33, 64, 4, True, False, id="query-len-above-bound"),
     ],
 )
 def test_msa_cutlass_decode_static_dispatch(
     batch_size: int,
     decode_query_len: int,
-    expected: bool,
     num_q_heads: int,
     num_kv_heads: int,
+    is_sm103: bool,
+    expected: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         current_platform,
         "is_device_capability",
-        lambda capability: capability == (10, 3),
+        lambda capability: is_sm103 and capability == (10, 3),
     )
     assert (
         should_prepare_decode_metadata(
@@ -106,51 +109,6 @@ def test_msa_cutlass_decode_static_dispatch(
             kv_cache_dtype="fp8_e4m3",
             page_size=BLOCK_SIZE,
             topk_blocks=TOPK,
-        )
-        is expected
-    )
-
-
-def test_msa_cutlass_decode_static_dispatch_keeps_sm100_floor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        current_platform,
-        "is_device_capability",
-        lambda _: False,
-    )
-    kwargs = {
-        "decode_backend": "cutlass",
-        "num_q_heads": 64,
-        "num_kv_heads": 4,
-        "kv_cache_dtype": "fp8_e4m3",
-        "page_size": BLOCK_SIZE,
-        "topk_blocks": TOPK,
-    }
-    assert not should_prepare_decode_metadata(8, DEFAULT_QUERY_LEN, **kwargs)
-    assert should_prepare_decode_metadata(16, DEFAULT_QUERY_LEN, **kwargs)
-
-
-@pytest.mark.parametrize(
-    ("min_batch_size", "batch_size", "expected"),
-    [(8, 4, False), (8, 8, True), (16, 8, False), (16, 16, True)],
-)
-def test_msa_cutlass_decode_static_dispatch_honors_batch_override(
-    min_batch_size: int,
-    batch_size: int,
-    expected: bool,
-) -> None:
-    assert (
-        should_prepare_decode_metadata(
-            batch_size,
-            DEFAULT_QUERY_LEN,
-            decode_backend="cutlass",
-            num_q_heads=64,
-            num_kv_heads=4,
-            kv_cache_dtype="fp8_e4m3",
-            page_size=BLOCK_SIZE,
-            topk_blocks=TOPK,
-            min_batch_size=min_batch_size,
         )
         is expected
     )

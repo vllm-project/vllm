@@ -78,45 +78,6 @@ def test_p2p_resource_limit_defaults_and_override(
     assert envs.VLLM_P2P_IDLE_TIMEOUT_S == 60
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        (None, None),
-        ("auto", None),
-        ("4", 4),
-        ("8", 8),
-        ("16", 16),
-        ("off", 16),
-        ("0", 16),
-    ],
-)
-def test_minimax_m3_msa_cutlass_min_batch(
-    monkeypatch: pytest.MonkeyPatch,
-    value: str | None,
-    expected: int | None,
-) -> None:
-    if value is None:
-        monkeypatch.delenv("VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH", value)
-
-    env_func = environment_variables["VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH"]
-    assert env_func() == expected
-
-
-@pytest.mark.parametrize("value", ["-1", "invalid"])
-def test_minimax_m3_msa_cutlass_min_batch_invalid_falls_back(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    value: str,
-) -> None:
-    monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH", value)
-
-    env_func = environment_variables["VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH"]
-    assert env_func() == 16
-    assert "falling back to 16" in caplog.text
-
-
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
