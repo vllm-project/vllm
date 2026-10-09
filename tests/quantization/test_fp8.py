@@ -600,6 +600,81 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         torch.testing.assert_close(compiled(inputs), output, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
+@pytest.mark.parametrize("linear_backend", ["auto", "marlin", "triton"])
+def test_fp8_block_bmm_projects_under_linear_backend(
+    dist_init, default_vllm_config, linear_backend
+):
+    """A block FP8 is_bmm layer (DeepSeek-V4 wo_a) keeps the layout the
+    grouped O-projection reads, whatever --linear-backend picks for linears."""
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
+        compute_fp8_einsum_recipe,
+        deep_gemm_fp8_o_proj,
+    )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepSeek-V4 FP8 O-projection requires DeepGEMM")
+
+    default_vllm_config.model_config = SimpleNamespace(
+        dtype=torch.bfloat16, hf_text_config=SimpleNamespace()
+    )
+    default_vllm_config.kernel_config.linear_backend = linear_backend
+    n_groups, rank, k, num_tokens = 2, 128, 512, 7
+    with set_default_torch_dtype(torch.bfloat16), torch.device("cuda"):
+        linear = ColumnParallelLinear(
+            k,
+            n_groups * rank,
+            bias=False,
+            quant_config=Fp8Config(weight_block_size=[128, 128]),
+            return_bias=False,
+        )
+    linear.is_bmm = True
+    linear.bmm_batch_size = n_groups
+    weight = torch.randn(n_groups * rank, k, device="cuda").to(torch.float8_e4m3fn)
+    # Powers of two, so DeepGEMM's UE8M0 requantization leaves them unchanged.
+    scales = torch.exp2(
+        torch.randint(-3, 4, (n_groups * rank // 128, k // 128), device="cuda").float()
+    )
+    linear.weight.data.copy_(weight)
+    linear.weight_scale_inv.data.copy_(scales)
+    linear.quant_method.process_weights_after_loading(linear)
+
+    x = torch.randn(num_tokens, n_groups, k, device="cuda", dtype=torch.bfloat16)
+    # cos = 1 and sin = 0, so the inverse RoPE is the identity.
+    cache = torch.cat(
+        (
+            torch.ones(num_tokens, 32, device="cuda"),
+            torch.zeros(num_tokens, 32, device="cuda"),
+        ),
+        dim=1,
+    )
+    recipe, tma_aligned_scales = compute_fp8_einsum_recipe()
+    projected = deep_gemm_fp8_o_proj(
+        x,
+        torch.arange(num_tokens, device="cuda"),
+        cache,
+        linear,
+        torch.nn.Identity(),
+        n_groups=n_groups,
+        heads_per_group=1,
+        nope_dim=448,
+        rope_dim=64,
+        o_lora_rank=rank,
+        einsum_recipe=recipe,
+        tma_aligned_scales=tma_aligned_scales,
+    )
+    dequant = weight.float() * scales.repeat_interleave(128, 0).repeat_interleave(
+        128, 1
+    )
+    reference = torch.einsum(
+        "tgk,grk->tgr", x.float(), dequant.view(n_groups, rank, k)
+    ).flatten(1)
+    assert (projected.float() - reference).norm() / reference.norm() < 0.06
+
+
 def test_prepare_gated_trtllm_fp8_moe_weights_pads_each_projection(monkeypatch):
     monkeypatch.setattr(
         flashinfer_utils,
