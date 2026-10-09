@@ -84,6 +84,13 @@ def st_wt(base_i64, index, val, nbytes):
     )
 
 
+def st_plain(base_i64, index, val, nbytes):
+    """Plain store: stays in the XCD's L2 until a release writes it back."""
+    _llvm.StoreOp(
+        val.ir_value(), comm_ops._ptr_plus(base_i64, index, nbytes), alignment=nbytes
+    )
+
+
 def l1_invalidate():
     """Drop this CU's L1 (the lines another XCD wrote through to memory)."""
     _llvm.InlineAsmOp(None, [], "buffer_inv sc0", "", has_side_effects=True)

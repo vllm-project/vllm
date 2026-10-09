@@ -295,7 +295,7 @@ def compile_mono_moe(
                     )  # fmt: skip
                     rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
                     rmark(12)
-                    raise_flag(wave, a_routed, routed_at, False)
+                    raise_flag(wave, a_routed, routed_at, True)
                     rmark(1)
                 mark(t, 2)
                 t = grab(wave, lane, lds_base, a_ticket, S_TOPK)

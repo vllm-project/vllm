@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Routing stages: biased sigmoid top-k of one token, and the expert sort.
 
-Both write every output at device scope (``st_wt``), so the routed flag that
-follows them needs no L2 writeback and a gemm tile on another XCD only drops
-its L1 before reading them.
+Top-k writes at device scope (``st_wt``) because the sort may run on another
+XCD. The sort's scattered rows are plain stores (device-scope ones cost ~6 us
+at M=64); the routed flag after them releases, and a gemm tile on another XCD
+only drops its L1 before reading them.
 """
 
 import flydsl.compiler as flyc
@@ -24,6 +25,7 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     popc64,
     rcp,
     route_mark,
+    st_plain,
     st_wt,
     wave_kth_key,
 )
@@ -342,27 +344,27 @@ def sort_routes(
             row = base * fx.Int32(BM) + old
             tok = r // fx.Int32(TOPK)
             slot = r - tok * fx.Int32(TOPK)
-            st_wt(arg_stids, row, tok | (slot << fx.Int32(24)), 4)
-            st_wt(arg_mind, row, tok, 4)
-            st_wt(arg_sw, row, ws[k], 4)
+            st_plain(arg_stids, row, tok | (slot << fx.Int32(24)), 4)
+            st_plain(arg_mind, row, tok, 4)
+            st_plain(arg_sw, row, ws[k], 4)
             if old == fx.Int32(0):
                 ce = fx.Int32(cnt[e])
                 for m in range_constexpr(NMAP):
                     if ce > fx.Int32(m * BM):
-                        st_wt(arg_eids, base + fx.Int32(m), e, 4)
+                        st_plain(arg_eids, base + fx.Int32(m), e, 4)
                         left = ce - fx.Int32(m * BM)
                         bfill[base + fx.Int32(m)] = (left < fx.Int32(BM)).select(
                             left, fx.Int32(BM)
                         )
     if tid == fx.Int32(0):
-        st_wt(arg_cumsum, fx.Int32(0), total * fx.Int32(BM), 4)
-        st_wt(arg_cumsum, fx.Int32(1), i32_M, 4)
+        st_plain(arg_cumsum, fx.Int32(0), total * fx.Int32(BM), 4)
+        st_plain(arg_cumsum, fx.Int32(1), i32_M, 4)
     gpu.barrier()
     tmark(11)
 
     for rr in range(tid, total * fx.Int32(BM), fx.Int32(THREADS)):
         b = rr >> fx.Int32(BM.bit_length() - 1)
         if (rr & fx.Int32(BM - 1)) >= fx.Int32(bfill[b]):
-            st_wt(arg_stids, rr, i32_M, 4)
-            st_wt(arg_mind, rr, i32_M, 4)
-            st_wt(arg_sw, rr, fx.Float32(0.0), 4)
+            st_plain(arg_stids, rr, i32_M, 4)
+            st_plain(arg_mind, rr, i32_M, 4)
+            st_plain(arg_sw, rr, fx.Float32(0.0), 4)
