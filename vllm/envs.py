@@ -155,6 +155,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_MONO_DECODE: bool = False
+    VLLM_ROCM_MONO_SHADOW: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1386,6 +1388,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
+    ),
+    # Run the eligible layers of decode steps on the model's mono decode
+    # kernels: persistent launches a layer, the TP all-reduces in-kernel
+    # (DeepSeek-V4.1 on CDNA4 and CDNA3). On gfx942 it also turns on the
+    # gfx942 decode helpers of the sparse indexer, the top-k packing, the
+    # SWA decode metadata and DSpark's Markov sampling. By default is disabled.
+    "VLLM_ROCM_MONO_DECODE": lambda: (
+        os.getenv("VLLM_ROCM_MONO_DECODE", "False").lower() in ("true", "1")
+    ),
+    # With VLLM_ROCM_MONO_DECODE, also run vLLM's own layer after each mono
+    # layer on the same inputs, log how far apart the outputs are, and carry
+    # on with vLLM's outputs. Needs eager decode steps. By default is disabled.
+    "VLLM_ROCM_MONO_SHADOW": lambda: (
+        os.getenv("VLLM_ROCM_MONO_SHADOW", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.

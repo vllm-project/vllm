@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -58,6 +59,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
+from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.sequence import IntermediateTensors
@@ -255,6 +257,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
+        # Decode steps of an eligible layer may run as the mono decode layer.
+        self.mono = MonoDecodeLayer.create(self, vllm_config)
+        if self.mono is not None and self.mono.ffn_only:
+            # A decode step hands wo_b's TP partial to the FFN launch; forward
+            # reduces it on the others.
+            self.attn.wo_b.reduce_results = False
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -273,6 +281,21 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.mono is not None:
+            out = self.mono(
+                self,
+                x,
+                positions,
+                residual,
+                post_mix,
+                res_mix,
+                pre_mix,
+                input_ids=input_ids,
+                engram_hashes=engram_hashes,
+                engram_mask=engram_mask,
+            )
+            if out is not None:
+                return out
         # Layer 0's attention seam projects the 2-D embedding with the folded
         # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
         # The fused kernel only takes the latter, so that seam keeps the
@@ -287,9 +310,19 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
+                # When layer 0 is a whole mono layer (gfx942), the
+                # entry seam projects the expanded residual with the
+                # unfolded hc_attn_fn, as K1 does, instead of the embedding
+                # with the folded copy. The hc copies are equal, so the
+                # products are the same and only their order of addition
+                # changes, and pre_mix None still selects copy 0 as the
+                # layer input. The AITER op mhc_pre_delayed_aiter takes this
+                # form. The folded form has no AITER kernel on gfx942 and runs
+                # the eager reference instead, about 120 small kernels a step.
+                unfolded = self.mono is not None and self.mono.window
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
-                    self.hc_attn_fn_broadcast,
+                    self.hc_attn_fn if unfolded else self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
                     self.hc_attn_base,
                     self.rms_norm_eps,
@@ -297,7 +330,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_eps,
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
-                    x=x,
+                    x=None if unfolded else x,
                 )
             else:
                 residual = x
@@ -371,6 +404,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.attn(positions, x, None)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
+        elif self.mono is not None and self.mono.ffn_only:
+            out = self.mono.ffn(self, x, residual, post_mix, res_mix, attn_pre)
+            if out is not None:
+                return out
+            x = tensor_model_parallel_all_reduce(x)
 
         residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
             residual,

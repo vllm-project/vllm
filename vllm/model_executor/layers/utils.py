@@ -344,7 +344,14 @@ def rocm_unquantized_gemm_impl(
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         # Note: Only build that view inside the branches that consume it.
-        if (m == 1 or m > 8) and 0 < n <= 5:
+        # On gfx942 wvSplitK with 5 rows reads the DSpark draft's
+        # 32320 x 5120 lm_head shard at 1.1 TB/s (297 us), against 73 us
+        # with 4 rows and 91 us on hipBLASLt. So on gfx942, 5 rows go to the
+        # torch GEMM below.
+        from vllm.platforms.rocm import on_gfx942
+
+        max_skinny_rows = 4 if on_gfx942() else 5
+        if (m == 1 or m > 8) and 0 < n <= max_skinny_rows:
             x_view = x.reshape(-1, x.size(-1)).contiguous()
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)

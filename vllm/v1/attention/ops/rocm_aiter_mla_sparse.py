@@ -14,6 +14,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.dsv41_gfx942 import topk as gfx942_topk
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
@@ -1200,7 +1201,17 @@ def rocm_aiter_sparse_attn_indexer(
     has_decode = layer_attn_metadata.num_decodes > 0
     has_prefill = layer_attn_metadata.num_prefills > 0
     num_decode_tokens = layer_attn_metadata.num_decode_tokens
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    # On gfx942 with VLLM_ROCM_MONO_DECODE=1, a step of only decode rows,
+    # none of them padded, skips this fill. The decode top-k below, the gfx942
+    # extension's or vLLM's, then writes all topk_tokens entries of each of
+    # the step's rows, -1 included.
+    if not gfx942_topk.skip_decode_fill(
+        has_prefill,
+        num_decode_tokens,
+        hidden_states.shape[0],
+        layer_attn_metadata.decode,
+    ):
+        topk_indices_buffer[: hidden_states.shape[0]] = -1
 
     # during speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens.
@@ -1328,6 +1339,37 @@ def rocm_aiter_sparse_attn_indexer(
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
 
+        # On gfx942 with VLLM_ROCM_MONO_DECODE=1, layers 24 to 36 compute
+        # only the logits of their candidate blocks, straight into compact
+        # rows, and take their top 512 from those rows. The logits are
+        # bit-identical to the dense call's below, and the top-512 sets
+        # are the same (tests/kernels/test_dsv41_gfx942_cand_logits.py). At
+        # 128k context the dense call scores 8 times more positions than
+        # the top-k reads. The hook only takes calls whose dense logits
+        # would come from AITER's gfx942 Gluon kernel, whose arithmetic it
+        # copies.
+        if (
+            candidate_blocks is not None
+            and not candidate_write
+            and gfx942_topk.candidate_logits_top_k(
+                padded_q_fp8_decode_tokens,
+                kv_cache,
+                weights,
+                decode_metadata.seq_lens,
+                decode_metadata.block_table,
+                candidate_blocks,
+                candidate_block_size,
+                topk_indices_buffer[:num_padded_tokens, :topk_tokens],
+                topk_tokens,
+                _ON_GFX942
+                and kv_cache.shape[1] > 1
+                and not _indexer_k_is_c4a_block_flat(compress_ratio)
+                and rocm_aiter_ops.is_enabled(),
+                decode_metadata.requires_padding,
+            )
+        ):
+            return topk_indices_buffer
+
         logits = rocm_fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,
@@ -1339,32 +1381,69 @@ def rocm_aiter_sparse_attn_indexer(
             compress_ratio=compress_ratio,
         )
 
+        candidates_done = False
         if candidate_blocks is not None:
             from vllm.model_executor.layers.sparse_attn_indexer import (
                 _select_candidate_blocks,
             )
 
             num_rows = logits.shape[0]
-            visible = decode_metadata.seq_lens.reshape(-1)
-            if visible.numel() != num_rows:
-                visible = visible.repeat_interleave(next_n)
-            visible = visible[:num_rows].to(torch.int64)
-            row_starts = torch.zeros_like(visible)
             decode_candidates = candidate_blocks[:num_rows]
+
+            def row_bounds() -> tuple[torch.Tensor, torch.Tensor]:
+                # The zero row starts and the int64 row ends of vLLM's
+                # candidate kernels. Only the branches below that run those
+                # kernels make them, so a layer whose call the gfx942
+                # extension takes saves these two launches.
+                visible = decode_metadata.seq_lens.reshape(-1)
+                if visible.numel() != num_rows:
+                    visible = visible.repeat_interleave(next_n)
+                visible = visible[:num_rows].to(torch.int64)
+                return torch.zeros_like(visible), visible
+
             if candidate_write:
-                _select_candidate_blocks(
+                # On gfx942 with VLLM_ROCM_MONO_DECODE=1 the gfx942
+                # extension writes layer 20's candidate blocks in one launch.
+                # They are the blocks that vLLM's selection writes, in
+                # another order (tests/kernels/test_dsv41_gfx942_topk.py).
+                if not gfx942_topk.select_candidates(
                     logits,
-                    row_starts,
-                    visible,
-                    decode_candidates.shape[1],
+                    next_n,
+                    decode_metadata.seq_lens,
                     candidate_block_size,
                     decode_candidates,
-                )
+                ):
+                    row_starts, row_ends = row_bounds()
+                    _select_candidate_blocks(
+                        logits,
+                        row_starts,
+                        row_ends,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                    )
+            elif gfx942_topk.candidate_top_k(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                decode_candidates,
+                candidate_block_size,
+                topk_indices_buffer[:num_padded_tokens, :topk_tokens],
+                topk_tokens,
+            ):
+                # On gfx942 with VLLM_ROCM_MONO_DECODE=1 the gfx942 extension
+                # wrote each row's top 512 among its candidate blocks. Those
+                # are the columns that the mask and the top-k below choose
+                # (tests/kernels/test_dsv41_gfx942_topk.py), so both are
+                # skipped. The mask writes -inf to about 7 of every 8 logits
+                # of a 128k row, and the top-k then reads the whole row.
+                candidates_done = True
             else:
+                row_starts, row_ends = row_bounds()
                 _apply_candidate_mask_strided(
                     logits,
                     row_starts,
-                    visible,
+                    row_ends,
                     decode_candidates,
                     candidate_block_size,
                 )
@@ -1378,7 +1457,9 @@ def rocm_aiter_sparse_attn_indexer(
             max_compressed_seq_len = max_model_len
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
-        if rocm_aiter_ops.is_indexer_top_k_supported(
+        if candidates_done:
+            pass
+        elif rocm_aiter_ops.is_indexer_top_k_supported(
             is_prefill=False,
             compress_ratio=compress_ratio,
             num_rows=num_rows,
@@ -1395,6 +1476,17 @@ def rocm_aiter_sparse_attn_indexer(
                 topk_indices,
                 topk_tokens,
             )
+        elif gfx942_topk.decode_top_k(
+            logits, next_n, decode_metadata.seq_lens, topk_indices, topk_tokens
+        ):
+            # On gfx942 the kernel below takes its generic path, which adds
+            # every -inf logit to one shared-memory histogram bin with an
+            # atomic. After the DSpark candidate mask most of a row is -inf,
+            # and the call takes 100 us at 128k context. With
+            # VLLM_ROCM_MONO_DECODE=1 the gfx942 extension's top-512 runs
+            # instead. It gives the same index sets, except for ties at the
+            # cut (tests/kernels/test_dsv41_gfx942_topk.py).
+            pass
         else:
             torch.ops._C.top_k_per_row_decode(
                 logits,
