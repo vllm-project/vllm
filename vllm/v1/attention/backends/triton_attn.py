@@ -331,6 +331,10 @@ class TritonAttentionBackend(AttentionBackend):
         "int4_per_token_head",
         "int8_per_token_head",
         "fp8_per_token_head",
+        "turboquant_3bit_nc",
+        "turboquant_k3v4_nc",
+        "turboquant_k8v4",
+        "turboquant_4bit_nc"
     ]
 
     @staticmethod
