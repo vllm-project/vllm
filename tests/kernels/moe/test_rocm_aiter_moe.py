@@ -28,6 +28,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.kernels.moe.utils import _interleave_gate_up_rows
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
@@ -304,14 +305,6 @@ def _make_moe_case(
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
     }
-
-
-def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
-    """Reorder contiguous ``[gate; up]`` rows into gpt-oss interleaved order."""
-    e, two_i = t.shape[0], t.shape[1]
-    i, rest = two_i // 2, t.shape[2:]
-    perm = (0, 2, 1, *range(3, 3 + len(rest)))
-    return t.view(e, 2, i, *rest).permute(*perm).contiguous().view(e, two_i, *rest)
 
 
 def _make_aiter_mxfp4_moe_case(
