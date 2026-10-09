@@ -55,7 +55,6 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
-    write_unified_block_size,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -333,8 +332,22 @@ class EngineCore:
 
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        write_unified_block_size(vllm_config, scheduler_kv_cache_config)
-        if scheduler_kv_cache_config.kv_cache_groups:
+        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+        if kv_cache_groups:
+            # Exclude groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail, a 1-block/req scratch buffer with block_size=kpool):
+            # their small block_size would otherwise drag the global block_size
+            # below the real allocator block size and desync it from mamba.
+            participating = [
+                g.kv_cache_spec.block_size
+                for g in kv_cache_groups
+                if g.kv_cache_spec.prefix_cacheable
+            ]
+            vllm_config.cache_config.block_size = min(
+                participating
+                if participating
+                else [g.kv_cache_spec.block_size for g in kv_cache_groups]
+            )
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
         vllm_config.validate_block_size()

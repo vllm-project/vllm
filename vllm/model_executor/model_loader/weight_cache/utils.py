@@ -7,10 +7,17 @@ draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from vllm.config import SpeculativeConfig
+import torch
+
+from vllm.config import SpeculativeConfig, VllmConfig, replace, set_current_vllm_config
 from vllm.model_executor.models.interfaces import SupportsEagleBase
+from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 # Speculative methods whose draft model the daemon caches in its own group.
 # Other drafts keep loading from disk in the engine.
@@ -46,3 +53,43 @@ def format_daemon_role(is_draft: bool) -> str:
 def format_socket_role_suffix(is_draft: bool) -> str:
     """Socket-name suffix keeping the draft group distinct from the target."""
     return "_draft" if is_draft else ""
+
+
+def build_warmup_runner(
+    vllm_config: VllmConfig,
+    local_rank: int,
+    *,
+    is_draft: bool,
+    model_config: "ModelConfig",
+) -> "GPUModelRunner":
+    """Runner for the daemon's warmup dummy runs, without a model yet.
+
+    The caller attaches the daemon's cached model
+    (``runner.load_model(model=...)``) after checking for a model-based
+    drafter the daemon cannot warm up.
+
+    The tuned table is keyed by ``vllm_config.compute_hash()`` at kernel
+    warmup time, so the daemon's config must match a `vllm serve` engine's
+    bit-for-bit at that moment: the launcher builds it with
+    ``UsageContext.OPENAI_API_SERVER`` (batch defaults), and fields the
+    engine only resolves during KV-cache init (``block_size``/
+    ``mamba_block_size``/``kv_cache_layout``) are normalized away at
+    key-computation time
+    (``flashinfer_autotune_cache._normalize_cache_config_for_hash``); they do
+    not shape the tuned ops.
+    """
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    if is_draft:
+        # The draft model is what this daemon holds: tune it as the runner's
+        # own model, not as another model's drafter. replace() is a shallow
+        # copy, so the runner's config shares compilation_config with the
+        # config the model was built under -- the layers' static registries
+        # stay visible.
+        vllm_config = replace(
+            vllm_config, model_config=model_config, speculative_config=None
+        )
+    device = torch.device(current_platform.device_type, local_rank)
+    with set_current_vllm_config(vllm_config):
+        runner = GPUModelRunner(vllm_config, device)
+    return runner

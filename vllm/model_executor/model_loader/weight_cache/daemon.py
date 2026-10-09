@@ -99,10 +99,6 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.model_executor.model_loader.weight_cache.autotune import (
-    build_tuning_runner,
-    replicate_engine_cache_config,
-)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
@@ -116,6 +112,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     verify_peer_is_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
+    build_warmup_runner,
     export_model_attrs,
     format_daemon_role,
     is_draft_model_cacheable,
@@ -257,7 +254,7 @@ class WeightCacheDaemon:
         ):
             return
         try:
-            runner = build_tuning_runner(
+            runner = build_warmup_runner(
                 vllm_config,
                 self.local_rank,
                 is_draft=self.is_draft,
@@ -265,7 +262,6 @@ class WeightCacheDaemon:
             )
             assert self.model is not None, "warmup ran before load_model"
             runner.load_model(model=self.model)
-            replicate_engine_cache_config(vllm_config, runner)
             flashinfer_autotune(runner)
             logger.info(
                 "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "

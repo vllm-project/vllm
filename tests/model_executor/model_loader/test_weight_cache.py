@@ -576,7 +576,7 @@ def test_warmup_is_a_noop_when_flashinfer_autotune_is_off(monkeypatch):
 
     monkeypatch.setattr(
         daemon_mod,
-        "build_tuning_runner",
+        "build_warmup_runner",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("runner built")),
     )
     daemon.warmup()  # no runner built, no raise

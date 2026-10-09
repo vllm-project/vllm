@@ -362,3 +362,25 @@ def test_rejected_cache_retunes_every_rank_in_its_tuning_group(autotune_run, pp,
     rerun.assert_collectives_match()
     assert set(rerun.profile_groups) == set(range(tp))
     assert {rank for rank, _, _ in rerun.saves} == set(range(tp))
+
+
+def test_autotune_cache_key_ignores_startup_resolved_cache_fields():
+    """block_size/mamba_block_size/kv_cache_layout only resolve at engine
+    KV-init time; they must not feed the autotune cache key, or nothing can
+    compute the key before startup (the daemon tunes before any KV init)."""
+    from vllm.config.cache import CacheConfig
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        _normalize_cache_config_for_hash,
+    )
+
+    fresh = CacheConfig()
+    # Simulate the engine's KV-init write-backs (hybrid model values).
+    mutated = CacheConfig()
+    mutated.block_size = 512
+    mutated.mamba_block_size = 512
+    mutated.kv_cache_layout = "LBHNC"
+
+    normalized = _normalize_cache_config_for_hash(mutated)
+    assert normalized.compute_hash() == fresh.compute_hash()
+    # Factory state is returned untouched.
+    assert _normalize_cache_config_for_hash(fresh) is fresh

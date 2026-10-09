@@ -2469,25 +2469,6 @@ def get_kv_cache_capacity(
     return int(max_concurrency * max_model_len), max_concurrency
 
 
-def write_unified_block_size(
-    vllm_config: VllmConfig, scheduler_kv_cache_config: KVCacheConfig
-) -> None:
-    """Write the unified block size of the KV cache groups to the cache config."""
-    kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
-    if not kv_cache_groups:
-        return
-    participating = [
-        g.kv_cache_spec.block_size
-        for g in kv_cache_groups
-        if g.kv_cache_spec.prefix_cacheable
-    ]
-    vllm_config.cache_config.block_size = min(
-        participating
-        if participating
-        else [g.kv_cache_spec.block_size for g in kv_cache_groups]
-    )
-
-
 def update_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> None:
