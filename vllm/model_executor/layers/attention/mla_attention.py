@@ -310,6 +310,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
     from vllm.v1.attention.backends.mla.index_group import (
         SparseMLAIndexGroupBuilder,
     )
@@ -463,6 +464,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         non_causal_multi_token_decode: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
+        rotary_emb: "RotaryEmbedding | None" = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -480,6 +482,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.layer_name = prefix
         self.indexer = indexer
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
+        # Stored for a platform decode epilogue under a name subclasses do not
+        # already use. The default path does not read it.
+        self._epilogue_rotary_emb = rotary_emb
+        self._rope_positions: torch.Tensor | None = None
         self.sliding_window = sliding_window
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -794,6 +800,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             kv_c_normed = kv_c_normed[:num_rows]
             k_pe = k_pe[:num_rows]
+        kv_c_normed, k_pe, slot_mapping = self._prepare_kv_cache_update(
+            kv_c_normed, k_pe, slot_mapping, attn_metadata
+        )
+        # An epilogue may drop every row and write those slots itself.
+        if slot_mapping.numel() == 0:
+            return
         self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,
@@ -802,6 +814,61 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype,
             k_scale,
         )
+
+    def _prepare_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        attn_metadata: "MLACommonMetadata | None",
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the tensors written by ``do_kv_cache_update``.
+
+        The default returns its inputs unchanged. An override may drop rows it
+        will write later from ``_form_decode_q`` and may read
+        ``self._rope_positions``.
+        """
+        del attn_metadata
+        return kv_c_normed, k_pe, slot_mapping
+
+    def _prepare_mha_inputs(
+        self,
+        q: torch.Tensor,
+        k_pe: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the prefill query and key passed to ``forward_mha``.
+
+        The default returns its inputs unchanged. An override may read
+        ``self._rope_positions``.
+        """
+        return q, k_pe
+
+    def _form_decode_q(
+        self,
+        mqa_ql_nope: torch.Tensor,
+        mqa_q_pe: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+        num_mqa_tokens: int,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Form the decode query after the absorb BMM.
+
+        The default is the existing concat and does not write the cache.
+        Overrides receive the latent KV, cache, and ``num_mqa_tokens`` so a
+        platform epilogue can replace this without editing ``forward_impl``.
+        ``self._rope_positions`` and ``self._epilogue_rotary_emb`` are available there.
+        """
+        del k_c_normed, k_pe, kv_cache, attn_metadata, num_mqa_tokens
+        fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
+        if fp8_attention and self.impl.supports_quant_query_input:
+            assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+            assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+            return self._decode_concat_quant_fp8_op(
+                mqa_ql_nope, mqa_q_pe, self._q_scale
+            )
+        return (mqa_ql_nope, mqa_q_pe)
 
     def prepare_kv_cache_update(
         self, attn_metadata: "MLACommonMetadata | None"
@@ -817,7 +884,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Assigned on every call, including None, so a previous forward cannot
+        # leave a stale tensor for the compiled KV-update op to read.
+        # CUDA-graph replay sees new values only while this object stays the
+        # persistent buffer the runner updates in place (InputBuffers.positions,
+        # captured as input_buffers.positions[:num_tokens]). Replacing the
+        # tensor freezes the captured pointer.
+        self._rope_positions = positions
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata_raw = forward_context.attn_metadata
@@ -831,6 +906,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
+            # Same replay rule as _rope_positions: forward_context.slot_mapping
+            # is the persistent buffer the runner updates in place. Replacing
+            # that tensor freezes the captured pointer.
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
@@ -999,10 +1077,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mha_output = output
                 mha_output_scale = None
 
+            mha_q, mha_k_pe = self._prepare_mha_inputs(
+                q[num_mqa_tokens:], k_pe[num_mqa_tokens:]
+            )
             self.impl.forward_mha(  # type: ignore[attr-defined]
-                q[num_mqa_tokens:],
+                mha_q,
                 k_c_normed[num_mqa_tokens:],
-                k_pe[num_mqa_tokens:],
+                mha_k_pe,
                 kv_cache,
                 attn_metadata,
                 self._k_scale,
@@ -1087,14 +1168,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
-            if fp8_attention and self.impl.supports_quant_query_input:
-                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
-                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
-                mqa_q = self._decode_concat_quant_fp8_op(
-                    mqa_ql_nope, mqa_q_pe, self._q_scale
-                )
-            else:
-                mqa_q = (mqa_ql_nope, mqa_q_pe)
+            mqa_q = self._form_decode_q(
+                mqa_ql_nope,
+                mqa_q_pe,
+                k_c_normed,
+                k_pe,
+                kv_cache,
+                attn_metadata,
+                num_mqa_tokens,
+            )
             # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
             if self.impl.dcp_world_size > 1:
                 assert self.dcp_manager is not None

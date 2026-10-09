@@ -16,19 +16,23 @@ from vllm.platforms import current_platform
 # TPU plugins import the shared ``common`` modules through this package, but
 # register their own model classes. Do not eagerly import a GPU implementation.
 if TYPE_CHECKING:
+    from .nvidia.dspark_mla import K3DSparkForCausalLM
     from .nvidia.model import KimiK3ForConditionalGeneration, KimiLinearForCausalLM
     from .nvidia.mtp import KimiK3MTP
 elif current_platform.device_type == "tpu":
     pass
 elif current_platform.is_rocm():
+    from .amd.dspark_mla import K3DSparkForCausalLM  # type: ignore[assignment]
     from .amd.linear import KimiLinearForCausalLM  # type: ignore[assignment]
     from .amd.model import KimiK3ForConditionalGeneration  # type: ignore[assignment]
     from .amd.mtp import KimiK3MTP  # type: ignore[assignment]
 else:
+    from .nvidia.dspark_mla import K3DSparkForCausalLM
     from .nvidia.model import KimiK3ForConditionalGeneration, KimiLinearForCausalLM
     from .nvidia.mtp import KimiK3MTP
 
 __all__ = [
+    "K3DSparkForCausalLM",
     "KimiK3ForConditionalGeneration",
     "KimiK3MTP",
     "KimiLinearForCausalLM",
