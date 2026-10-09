@@ -253,6 +253,13 @@ so the number of streams that fit in KV is `num_gpu_blocks / Σ blocks_per_strea
     Narrowing the window trades a little transcription fidelity for KV headroom, so
     measure on your audio.
 
+!!! warning
+    Keep the decoder (text) window at 1024 or more if punctuation and casing matter.
+    On long read speech, a 256 or 512 text window can drop punctuation and capitals
+    for minutes at a time (up to ~3 min in our tests); from 1024 up the model recovers
+    within ~50 s, as with the default window. Word accuracy barely changes, and the
+    audio window has no effect on this.
+
 !!! note
     Narrowing the window also shrinks the encoder cache budget, so a server configured
     this way rejects long **one-shot** clips on `/v1/audio/transcriptions` with a 400
