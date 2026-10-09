@@ -95,6 +95,25 @@ def _make_outputs(inputs):
     )
 
 
+def _run_impl(inputs, outputs) -> None:
+    prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
+        inputs[0],
+        inputs[1],
+        inputs[2],
+        inputs[3],
+        inputs[4],
+        inputs[5],
+        inputs[6],
+        "layer",
+        1.0e-6,
+        NUM_QUERY_HEADS,
+        NUM_KV_HEADS,
+        HEAD_DIM,
+        ROTARY_DIM,
+        *outputs,
+    )
+
+
 def test_fused_qk_norm_rope_gate_fp8_quant_translates_attention_metadata(monkeypatch):
     inputs = _make_inputs()
     expected_outputs = _make_outputs(inputs)
@@ -141,24 +160,8 @@ def test_fused_qk_norm_rope_gate_fp8_quant_translates_attention_metadata(monkeyp
     )
 
     actual_outputs = _make_outputs(inputs)
-    result = prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
-        inputs[0],
-        inputs[1],
-        inputs[2],
-        inputs[3],
-        inputs[4],
-        inputs[5],
-        inputs[6],
-        "layer",
-        1.0e-6,
-        NUM_QUERY_HEADS,
-        NUM_KV_HEADS,
-        HEAD_DIM,
-        ROTARY_DIM,
-        *actual_outputs,
-    )
+    _run_impl(inputs, actual_outputs)
 
-    assert result is None
     for actual, expected in zip(actual_outputs, expected_outputs):
         torch.testing.assert_close(actual, expected)
     assert recorded_kwargs is not None
@@ -210,30 +213,12 @@ def test_fused_qk_norm_rope_gate_fp8_quant_without_metadata_is_cuda_graph_safe(
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(capture_stream):
-        prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
-            *inputs,
-            "layer",
-            1.0e-6,
-            NUM_QUERY_HEADS,
-            NUM_KV_HEADS,
-            HEAD_DIM,
-            ROTARY_DIM,
-            *outputs,
-        )
+        _run_impl(inputs, outputs)
     capture_stream.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=capture_stream):
-        prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
-            *inputs,
-            "layer",
-            1.0e-6,
-            NUM_QUERY_HEADS,
-            NUM_KV_HEADS,
-            HEAD_DIM,
-            ROTARY_DIM,
-            *outputs,
-        )
+        _run_impl(inputs, outputs)
     graph.replay()
     torch.accelerator.synchronize()
 
@@ -296,24 +281,8 @@ def test_fused_qk_norm_rope_gate_fp8_quant_pure_decode_uses_bf16_fallback(monkey
     )
 
     outputs = _make_outputs(inputs)
-    result = prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
-        inputs[0],
-        inputs[1],
-        inputs[2],
-        inputs[3],
-        inputs[4],
-        inputs[5],
-        inputs[6],
-        "layer",
-        1.0e-6,
-        NUM_QUERY_HEADS,
-        NUM_KV_HEADS,
-        HEAD_DIM,
-        ROTARY_DIM,
-        *outputs,
-    )
+    _run_impl(inputs, outputs)
 
-    assert result is None
     torch.testing.assert_close(outputs[0], expected_query)
     torch.testing.assert_close(outputs[1], expected_key)
     torch.testing.assert_close(outputs[2], expected_gate)
