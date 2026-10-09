@@ -702,7 +702,7 @@ class VllmConfig:
             and model_config.enable_sleep_mode
             and model_config.sleep_mode_backend == "cumem"
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and current_platform.is_cuda()
+            and current_platform.is_cuda_alike()
         )
 
     @property
