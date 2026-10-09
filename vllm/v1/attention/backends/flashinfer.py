@@ -5,7 +5,7 @@
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import numpy as np
 import torch
@@ -1377,7 +1377,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         for mode, requests, tokens, pages in causal_group_indices(
             causal_cpu, qo_indptr_cpu, kv_indptr_cpu
         ):
-            wrapper = self._get_prefill_wrapper(causal=mode)
+            # build() excludes DCP and sinks before this native-only path.
+            wrapper = cast(
+                BatchPrefillWithPagedKVCacheWrapper,
+                self._get_prefill_wrapper(causal=mode),
+            )
             group_qo_indptr = torch.zeros(requests.numel() + 1, dtype=torch.int32)
             group_kv_indptr = torch.zeros_like(group_qo_indptr)
             torch.cumsum(qo_lens[requests], dim=0, out=group_qo_indptr[1:])
@@ -1877,6 +1881,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     kv_lens_prefill_cpu = kv_lens_prefill_cpu.pin_memory()
                 if causal_flags is not None:
                     assert paged_kv_indices is not None
+                    # Diffusion phase flags live on GPU. FlashInfer's host
+                    # planner needs their values to partition request pointers
+                    # and select each wrapper's causal mode/custom mask.
                     with gpu_sync_allowed():
                         causal_cpu = causal_flags[:num_reqs].cpu()
                     causal_groups = self._plan_causal_groups(

@@ -30,8 +30,8 @@ def test_partition_preserves_query_and_page_order(flags, flag_dtype):
     all_pages = []
     for mode, requests, tokens, pages in groups:
         assert requests.tolist() == [i for i, flag in enumerate(flags) if flag == mode]
-        expected_tokens = []
-        expected_pages = []
+        expected_tokens: list[int] = []
+        expected_pages: list[int] = []
         for i in requests.tolist():
             expected_tokens.extend(range(query_indptr[i], query_indptr[i + 1]))
             expected_pages.extend(range(kv_indptr[i], kv_indptr[i + 1]))
