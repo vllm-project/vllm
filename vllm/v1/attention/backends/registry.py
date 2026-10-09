@@ -72,6 +72,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     TRITON_FLASHINFER = (
         "vllm.v1.attention.backends.triton_flashinfer.TritonFlashInferBackend"
     )
+    TRITON_FLASHINFER_DIFFKV = (
+        "vllm.v1.attention.backends.triton_flashinfer_diffkv."
+        "TritonFlashInferDiffKVBackend"
+    )
     FLASHINFER_MLA = (
         "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
     )
