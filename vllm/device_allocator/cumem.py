@@ -98,7 +98,7 @@ class CuMemAllocator:
     offloaded to CPU memory, and the rest of the tensors will be discarded.
     When we call `wake_up`, all tensors that are previously offloaded
     will be loaded back to GPU memory, and the rest of the tensors will
-    have empty memory.
+    have empty memory (zeroed on ROCm).
 
     Why it needs to be a singleton?
     When allocated tensors are garbage collected, PyTorch will call
@@ -331,7 +331,7 @@ class CuMemAllocator:
     def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
-        memory, and the rest of the data will have empty memory.
+        memory, and the rest will have empty memory (zeroed on ROCm).
 
         Args:
             tags: The deferrable tags (weights, kv_cache) to load back to GPU
@@ -358,6 +358,10 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+                elif current_platform.is_rocm():
+                    # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
+                    libcudart.cudaMemset(ptr, 0, handle[1])
+                    torch.accelerator.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

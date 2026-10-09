@@ -788,7 +788,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             return hidden_states
         assert residual is not None and comb is not None
         completed = self._aux_post_op(hidden_states, residual, post, comb)
-        return hc_contract(completed, self.config.mhc_num_residual_streams)
+        return hc_contract(completed, self.config.hc_mult)
 
     def forward(
         self,
