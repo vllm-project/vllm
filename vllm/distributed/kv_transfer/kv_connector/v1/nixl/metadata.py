@@ -12,7 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.logger import init_logger
-from vllm.v1.core.hidden_state_record import get_record_producer_pp_size
+from vllm.v1.core.hidden_state_record import get_hidden_state_handoff_compat
 
 logger = init_logger(__name__)
 
@@ -98,6 +98,9 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
     compatibility_hash: str
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
+    # P/D hidden-state handoff: 0 when off, else the prefiller's pipeline-
+    # parallel size. Checked before the hash, for a clear error.
+    hidden_state_handoff: int = 0
 
 
 def _get_speculative_compatibility_factors(
@@ -203,11 +206,7 @@ def compute_nixl_compatibility_hash(
         # The hidden-state record rides in the KV blocks past the prompt, and
         # it changes where both sides stop the prefill. Its layers depend on
         # the prefiller's pipeline-parallel size, which both sides must agree on.
-        "hidden_state_handoff": (
-            vllm_config.kv_transfer_config is not None
-            and vllm_config.kv_transfer_config.hidden_state_handoff
-            and get_record_producer_pp_size(vllm_config)
-        ),
+        "hidden_state_handoff": get_hidden_state_handoff_compat(vllm_config),
     }
 
     compat_hash = hash_factors(factors)

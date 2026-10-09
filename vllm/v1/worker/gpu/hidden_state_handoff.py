@@ -87,34 +87,11 @@ def _check_record_layout(
         )
 
 
-def check_hidden_state_handoff_supported(vllm_config: VllmConfig) -> None:
-    parallel_config = vllm_config.parallel_config
-    unsupported = {
-        # A prefiller keeps the records on its last stage (NIXL supports PP
-        # only there).
-        "pipeline parallelism on the decoder": (
-            parallel_config.pipeline_parallel_size > 1
-            and vllm_config.kv_transfer_config is not None
-            and not vllm_config.kv_transfer_config.is_kv_producer
-        ),
-        "context parallelism": (
-            parallel_config.decode_context_parallel_size > 1
-            or parallel_config.prefill_context_parallel_size > 1
-        ),
-        "pooling models": vllm_config.model_config.runner_type == "pooling",
-    }
-    if names := [name for name, on in unsupported.items() if on]:
-        raise NotImplementedError(
-            f"P/D hidden-state handoff does not support {', '.join(names)} yet."
-        )
-
-
 class HiddenStateHandoff:
     """Writes records on P and samples (and drafts) from them on D."""
 
     def __init__(self, runner: "GPUModelRunner", kv_caches: dict[str, torch.Tensor]):
         vllm_config = runner.vllm_config
-        check_hidden_state_handoff_supported(vllm_config)
         self.model = runner.model
         self.kv_cache_config = kv_cache_config = runner.kv_cache_config
         self.block_tables = runner.block_tables
