@@ -897,6 +897,10 @@ class MooncakeConnectorScheduler:
         # GDN is represented as a MambaSpec in vLLM. This Mooncake MambaSpec
         # path is currently tested with GDN; Mamba2 is not validated yet.
         self._has_mamba = kv_cache_config.has_mamba_layers
+        self._bounded_replay = any(
+            g.kv_cache_spec.prefix_replay_tokens > 0
+            for g in kv_cache_config.kv_cache_groups
+        )
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -941,8 +945,10 @@ class MooncakeConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
-        if self._has_mamba and num_prompt_tokens > 1:
+        always recomputes the last token and must start from h(N-1), and for
+        DSV41 SWA bounded replay, whose window is not replayed after a P/D load
+        and must be laid out for that token."""
+        if (self._has_mamba or self._bounded_replay) and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
 
@@ -958,6 +964,9 @@ class MooncakeConnectorScheduler:
             params is not None
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
+            # A request that skips reading the prefix cache (prompt logprobs)
+            # loads nothing on the decoder, which recomputes its whole prompt.
+            and not request.get_skip_reading_prefix_cache()
         ):
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()
@@ -973,7 +982,11 @@ class MooncakeConnectorScheduler:
 
     def on_new_request(self, request: "Request") -> None:
         params = request.kv_transfer_params
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
+        if (
+            params is not None
+            and params.get("do_remote_decode")
+            and (self._has_mamba or self._bounded_replay)
+        ):
             self._truncate_mamba_request_for_prefill(request)
 
     def get_num_new_matched_tokens(
@@ -2425,9 +2438,30 @@ class MooncakeConnectorWorker:
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
+        max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+            async with httpx.AsyncClient(
+                timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+            ) as client:
+                retry_delay = 0.1
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        response = await client.get(url)
+                        break
+                    except httpx.RequestError as e:
+                        if attempt == max_attempts:
+                            raise
+                        logger.warning(
+                            "Bootstrap query to %s failed on attempt %d/%d "
+                            "(%s: %s); retrying in %.1f seconds",
+                            remote_bootstrap_addr,
+                            attempt,
+                            max_attempts,
+                            type(e).__name__,
+                            e,
+                            retry_delay,
+                        )
+                        await asyncio.sleep(retry_delay)
                 response.raise_for_status()
                 data: dict = response.json()
                 for _, dp_entry in data.items():
@@ -2442,8 +2476,9 @@ class MooncakeConnectorWorker:
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
         except Exception as e:
             logger.error(
-                "Failed to connect to bootstrap server %s: %s",
+                "Failed to connect to bootstrap server %s (%s): %s",
                 remote_bootstrap_addr,
+                type(e).__name__,
                 e,
             )
 

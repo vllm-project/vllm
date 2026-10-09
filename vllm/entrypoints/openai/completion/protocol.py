@@ -197,6 +197,18 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
+        ),
+    )
+
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -478,6 +490,17 @@ class CompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "`logprob_token_ids` is not supported with beam search.",
                 parameter="logprob_token_ids",
+            )
+
+        if (
+            data.get("use_beam_search")
+            and data.get("echo")
+            and data.get("logprobs") is not None
+        ):
+            raise VLLMValidationError(
+                "`echo` with `logprobs` is not supported with beam search "
+                "because beam search does not compute prompt logprobs.",
+                parameter="echo",
             )
 
         if (

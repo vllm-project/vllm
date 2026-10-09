@@ -26,6 +26,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Unit"
   device: h200_35gb
   key: entrypoints-unit-tests
+  automatic_shard: true
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -168,6 +169,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Responses API)"
   device: h200_35gb
   key: entrypoints-integration-responses-api
+  automatic_shard: true
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -188,6 +190,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Speech to Text)"
   device: h200_35gb
   key: entrypoints-integration-speech_to_text
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -231,6 +234,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)"
   device: h200_35gb
   key: entrypoints-integration-pooling
+  automatic_shard: true
   timeout_in_minutes: 75
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
