@@ -4,6 +4,7 @@
 import torch
 
 from vllm.v1.worker.cpu.input_batch import (
+    combine_sampled_and_draft_tokens,
     get_num_sampled_and_rejected,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
@@ -66,6 +67,62 @@ def test_prepare_pos_seq_lens_cpu() -> None:
     assert seq_lens.tolist() == [5, 9, 11, 0, 0, 0]
     assert positions_storage[0].item() == -1
     assert seq_lens_storage[[0, 7]].tolist() == [-1, -1]
+
+
+def test_combine_sampled_and_draft_tokens_cpu_basic() -> None:
+    input_ids = torch.tensor([10, 11, 12, -1], dtype=torch.int32)
+    idx_mapping = torch.tensor([3, 1], dtype=torch.int32)
+    last_sampled_tokens = torch.tensor([[40], [41], [42], [43]])
+    query_start_loc = torch.tensor([0, 3, 4], dtype=torch.int32)
+    seq_lens = torch.tensor([5, 6], dtype=torch.int32)
+    prefill_len = torch.tensor([0, 5, 0, 5], dtype=torch.int32)
+    draft_tokens = torch.empty((4, 0), dtype=torch.int64)
+    cu_num_logits = torch.tensor([0, 1, 2], dtype=torch.int32)
+
+    logits_indices = combine_sampled_and_draft_tokens(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        num_logits=2,
+    )
+
+    assert input_ids.tolist() == [10, 11, 12, 41]
+    assert logits_indices.tolist() == [2, 3]
+
+
+def test_combine_sampled_and_draft_tokens_cpu_with_drafts() -> None:
+    input_ids_storage = torch.arange(99, 108, dtype=torch.int32)
+    input_ids = input_ids_storage[1:8]
+    idx_mapping = torch.tensor([3, 0], dtype=torch.int32)
+    last_sampled_tokens = torch.tensor([[50], [150], [250], [350]])
+    query_start_loc = torch.tensor([0, 3, 7], dtype=torch.int32)
+    seq_lens = torch.tensor([10, 6], dtype=torch.int32)
+    prefill_len = torch.tensor([5, 0, 0, 5], dtype=torch.int32)
+    draft_tokens_storage = torch.full((4, 4), -1, dtype=torch.int64)
+    draft_tokens = draft_tokens_storage[:, 1:3]
+    draft_tokens.copy_(torch.tensor([[11, 12], [111, 112], [211, 212], [311, 312]]))
+    cu_num_logits = torch.tensor([0, 3, 6], dtype=torch.int32)
+
+    logits_indices = combine_sampled_and_draft_tokens(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        num_logits=6,
+    )
+
+    assert input_ids.tolist() == [350, 311, 312, 103, 104, 11, 12]
+    assert logits_indices.tolist() == [0, 1, 2, 4, 5, 6]
+    assert input_ids_storage[[0, 8]].tolist() == [99, 107]
 
 
 def test_get_num_sampled_and_rejected_cpu() -> None:

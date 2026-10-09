@@ -44,6 +44,35 @@ def prepare_pos_seq_lens(
     )
 
 
+def combine_sampled_and_draft_tokens(
+    input_ids: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefill_len: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_logits: int,
+    num_new_sampled_tokens: int = 1,
+) -> torch.Tensor:
+    assert num_new_sampled_tokens in (0, 1), (
+        f"num_new_sampled_tokens must be 0 or 1, got {num_new_sampled_tokens}"
+    )
+    return ops.combine_sampled_and_draft_tokens_cpu(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        num_logits,
+        num_new_sampled_tokens,
+    )
+
+
 def get_num_sampled_and_rejected(
     num_sampled: torch.Tensor,
     seq_lens: torch.Tensor,
