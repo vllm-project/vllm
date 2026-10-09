@@ -76,6 +76,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.core.hidden_state_record import get_hidden_state_handoff_compat
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -1110,6 +1111,10 @@ class NixlBaseConnectorWorker:
                     got_metadata_time - start_time,
                 )
 
+                if self.enforce_compat_hash:
+                    self._check_hidden_state_handoff_compat(
+                        handshake_payload.hidden_state_handoff
+                    )
                 # Check compatibility hash BEFORE decoding agent metadata
                 assert self.compat_hash is not None
                 if (
@@ -1908,6 +1913,27 @@ class NixlBaseConnectorWorker:
         self.xfer_handshake_metadata = NixlHandshakePayload(
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
+            hidden_state_handoff=get_hidden_state_handoff_compat(self.vllm_config),
+        )
+
+    def _check_hidden_state_handoff_compat(self, remote: int) -> None:
+        """The P/D hidden-state handoff (0: off, else the prefiller's PP size)
+        must agree on both sides; it is on by default where supported."""
+        local = get_hidden_state_handoff_compat(self.vllm_config)
+        if remote == local:
+            return
+
+        def describe(value: int) -> str:
+            return "off" if not value else f"on (prefiller PP size {value})"
+
+        raise RuntimeError(
+            "NIXL handshake: the P/D hidden-state handoff is "
+            f"{describe(local)} here but {describe(remote)} on the remote. "
+            "Configure both sides the same through kv_connector_extra_config: "
+            '"hidden_state_handoff" (on by default where supported; set it to '
+            "false on both sides where one side does not support it), and on "
+            'the decoder, "hidden_state_handoff_producer_pp_size" for a '
+            "prefiller with pipeline parallelism."
         )
 
     def _ple_page_len(self) -> int:

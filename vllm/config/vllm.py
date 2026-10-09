@@ -2187,6 +2187,10 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
+        # P/D hidden-state handoff: on by default where supported.
+        from vllm.v1.core.hidden_state_record import resolve_hidden_state_handoff
+
+        resolve_hidden_state_handoff(self)
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime

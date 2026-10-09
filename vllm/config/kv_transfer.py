@@ -138,6 +138,15 @@ class KVTransferConfig:
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
 
+    @property
+    def hidden_state_handoff(self) -> bool:
+        """P/D: the prefiller computes the whole prompt and hands the decoder
+        the last prompt position's hidden state with the KV cache, instead of
+        the decoder recomputing the last prompt token. Prototype, opt-in via
+        ``kv_connector_extra_config={"hidden_state_handoff": true}``; prefiller
+        and decoder must agree."""
+        return bool(self.get_from_extra_config("hidden_state_handoff", False))
+
     def has_connector(self, connector_name: str) -> bool:
         """Whether ``connector_name`` is configured, directly or in MultiConnector."""
         if self.kv_connector == connector_name:

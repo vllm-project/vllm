@@ -207,6 +207,10 @@ class Request:
         # DeepSeek-V4.1 only: SWA bounded replay. The request holds no
         # sliding-window KV below this position; 0 when nothing replays.
         self.replay_start = 0
+        # P/D hidden-state handoff: the remote load delivered every prompt
+        # token plus the last prompt position's hidden state, so the next step
+        # samples from that record instead of computing the last prompt token.
+        self.sample_from_hidden_state_record = False
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted

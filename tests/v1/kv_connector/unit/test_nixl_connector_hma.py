@@ -1026,6 +1026,8 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_consumer",
+        # The hidden-state handoff would also hand over its record's slots.
+        kv_connector_extra_config={"hidden_state_handoff": False},
     )
     block_size = 16
     llm_kwargs = {

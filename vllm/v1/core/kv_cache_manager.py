@@ -881,6 +881,19 @@ class KVCacheManager:
                 blocks = mgr.req_to_blocks[request_id]
                 mgr.new_block_ids.extend(blk.block_id for blk in blocks[start_idx:])
 
+    def skip_zeroing_blocks(
+        self, request_id: str, group_id: int, start_token: int
+    ) -> None:
+        """Drop group ``group_id``'s blocks of the request from start_token
+        onwards from the pending zeroing, e.g. blocks an async KV load writes
+        (zeroing them would race the load)."""
+        mgr = self.coordinator.single_type_managers[group_id]
+        if not mgr.records_new_block_ids:
+            return
+        blocks = mgr.req_to_blocks[request_id][start_token // mgr.block_size :]
+        skip = {blk.block_id for blk in blocks}
+        mgr.new_block_ids = [i for i in mgr.new_block_ids if i not in skip]
+
     def take_kv_cache_block_copies(
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:

@@ -35,6 +35,10 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
+from vllm.v1.core.hidden_state_record import (
+    get_record_carrier_group,
+    get_record_tail_tokens,
+)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -303,6 +307,18 @@ class Scheduler(SchedulerInterface):
             f"Prefix replay windows should agree: {sorted(replay_windows)}"
         )
         self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
+        # P/D hidden-state handoff: the cache group whose blocks carry the
+        # record, in the token slots just past the prompt.
+        self.hidden_state_record_group_id: int | None = None
+        self.hidden_state_record_tail_tokens = 0
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.hidden_state_handoff:
+            self.hidden_state_record_group_id = get_record_carrier_group(
+                kv_cache_config
+            )
+            self.hidden_state_record_tail_tokens = get_record_tail_tokens(
+                vllm_config, kv_cache_config
+            )
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
@@ -610,6 +626,8 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # P/D hidden-state handoff: requests sampling from a transferred record.
+        hidden_state_record_req_ids: set[str] = set()
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
         # Whether any scheduled request has a synchronous connector KV load.
@@ -767,7 +785,9 @@ class Scheduler(SchedulerInterface):
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
+                        num_lookahead_tokens=max(
+                            self.num_lookahead_tokens, self._record_tail_tokens(request)
+                        ),
                     )
 
                     if new_blocks is not None:
@@ -1126,6 +1146,9 @@ class Scheduler(SchedulerInterface):
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
+                        # A sample-only step (hidden-state handoff) has no
+                        # forward pass to verify placeholder drafts in.
+                        and not request.sample_from_hidden_state_record
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
@@ -1158,8 +1181,11 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
 
-                    # Apply Mamba alignment before encoder caps.
-                    if self.need_mamba_block_aligned_split:
+                    # Apply Mamba alignment before encoder caps. A sample-only
+                    # step (hidden-state handoff) runs no forward pass, so
+                    # neither alignment nor encoder inputs apply to it.
+                    sample_only = request.sample_from_hidden_state_record
+                    if self.need_mamba_block_aligned_split and not sample_only:
                         num_new_tokens = self._mamba_block_aligned_split(
                             request,
                             num_new_tokens,
@@ -1182,7 +1208,7 @@ class Scheduler(SchedulerInterface):
                             pad_spec_decode = False
 
                     # Schedule encoder inputs.
-                    if request.has_encoder_inputs:
+                    if request.has_encoder_inputs and not sample_only:
                         (
                             encoder_inputs_to_schedule,
                             num_new_tokens,
@@ -1213,6 +1239,11 @@ class Scheduler(SchedulerInterface):
                 limit_lookahead_tokens = load_kv_async and self.num_lookahead_tokens > 0
                 effective_lookahead_tokens = (
                     0 if limit_lookahead_tokens else self.num_lookahead_tokens
+                )
+                # P/D hidden-state handoff: the record's slots past the prompt,
+                # which P hands over with the prompt's blocks.
+                effective_lookahead_tokens = max(
+                    effective_lookahead_tokens, self._record_tail_tokens(request)
                 )
 
                 # Determine if we need to allocate cross-attention blocks.
@@ -1269,6 +1300,16 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                if load_kv_async and self._record_tail_tokens(request):
+                    # The load writes the hidden-state record into the slots
+                    # past the prompt; don't zero their blocks under it.
+                    assert self.hidden_state_record_group_id is not None
+                    self.kv_cache_manager.skip_zeroing_blocks(
+                        request_id,
+                        self.hidden_state_record_group_id,
+                        num_computed_tokens,
+                    )
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -1357,6 +1398,10 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)
+                if request.sample_from_hidden_state_record:
+                    assert num_new_tokens == 1
+                    hidden_state_record_req_ids.add(request_id)
+                    request.sample_from_hidden_state_record = False
                 if pad_spec_decode:
                     assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [
@@ -1519,6 +1564,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            hidden_state_record_req_ids=hidden_state_record_req_ids or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -3031,7 +3077,10 @@ class Scheduler(SchedulerInterface):
 
         block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
             request_id=request.request_id,
-            num_computed_tokens=request.num_computed_tokens,
+            # P/D hidden-state handoff: P also hands over the record's slots
+            # just past the prompt (see vllm.v1.core.hidden_state_record).
+            num_computed_tokens=request.num_computed_tokens
+            + self._record_tail_tokens(request),
         )
         partial_tail_delay = False
         if finished_partial_tails:
@@ -3169,7 +3218,10 @@ class Scheduler(SchedulerInterface):
         # DSV41 SWA bounded replay recomputes the tail of a hit loaded without
         # its window, or of a failed load, which may have lost it; the replay
         # covers the last token. Otherwise a full prompt hit re-computes that
-        # token so the next one can be sampled.
+        # token so the next one can be sampled, unless the load carried the P/D
+        # hidden-state record: the last token is then still scheduled, but
+        # only as a sample-only step that takes its hidden state from the
+        # record and runs no forward pass.
         num_replay_tokens = self._mark_prefix_replay(
             request,
             request.num_computed_tokens,
@@ -3180,7 +3232,24 @@ class Scheduler(SchedulerInterface):
             request.num_computed_tokens -= num_replay_tokens
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
+            # The record came in the carrier group's blocks past the prompt.
+            request.sample_from_hidden_state_record = (
+                not load_failed
+                and self.hidden_state_record_group_id is not None
+                and self.hidden_state_record_group_id
+                in self.connector.get_loaded_kv_cache_group_ids(request)
+            )
         self.finished_recving_kv_req_ids.remove(request.request_id)
+
+    def _record_tail_tokens(self, request: Request) -> int:
+        """P/D hidden-state handoff: the token slots past the prompt that a P/D
+        request reserves for the record (P writes it, D loads it there)."""
+        params = request.kv_transfer_params
+        if not self.hidden_state_record_tail_tokens or not params:
+            return 0
+        if params.get("do_remote_decode") or params.get("do_remote_prefill"):
+            return self.hidden_state_record_tail_tokens
+        return 0
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
