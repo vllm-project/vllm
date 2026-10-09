@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -501,7 +501,7 @@ def generate_report(
     recommended_concurrency = (concurrency.get("recommended") or {}).get(
         "max_concurrency"
     )
-    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     styles = """
 :root { color-scheme: light; --ink: #17324d; --blue: #146c94;
