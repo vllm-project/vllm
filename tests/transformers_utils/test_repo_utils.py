@@ -12,6 +12,7 @@ from huggingface_hub import _CACHED_NO_EXIST
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     get_hf_file_to_dict,
+    get_non_weight_snapshot_path,
     is_mistral_model_repo,
     list_filtered_repo_files,
     with_retry,
@@ -196,3 +197,24 @@ def test_with_retry_does_not_retry_fatal_errors():
         with_retry(func, "Error", fatal_errors=(FileNotFoundError,))
 
     func.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "expected"),
+    [("/snapshots/abc", "/snapshots/abc"), (OSError("offline"), "some/repo")],
+)
+def test_get_non_weight_snapshot_path(side_effect: object, expected: str):
+    """Hub repos resolve to a local snapshot, falling back to the repo ID."""
+    get_non_weight_snapshot_path.cache_clear()
+    mock_snapshot = MagicMock(side_effect=[side_effect])
+    with patch("vllm.transformers_utils.repo_utils.hf_api") as mock_api:
+        mock_api.return_value.snapshot_download = mock_snapshot
+        assert get_non_weight_snapshot_path("some/repo") == expected
+    assert "*.safetensors" in mock_snapshot.call_args.kwargs["ignore_patterns"]
+
+
+def test_get_non_weight_snapshot_path_local(tmp_path: Path):
+    get_non_weight_snapshot_path.cache_clear()
+    with patch("vllm.transformers_utils.repo_utils.hf_api") as mock_api:
+        assert get_non_weight_snapshot_path(str(tmp_path)) == str(tmp_path)
+    mock_api.assert_not_called()
