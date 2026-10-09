@@ -1091,11 +1091,9 @@ class MambaSpec(KVCacheSpec):
         if vllm_config.cache_config.mamba_cache_mode == "align":
             checkpoint_blocks = 0
             if vllm_config.cache_config.enable_mamba_decode_checkpoint:
-                # Retained private states plus one destination per in-flight
-                # step, outside the position-indexed table.
-                checkpoint_blocks = (
-                    2 if vllm_config.num_speculative_tokens else 1
-                ) + vllm_config.max_concurrent_batches
+                # Retained private states outside the position-indexed table.
+                # In-flight snapshots are skipped when blocks run short.
+                checkpoint_blocks = 2 if vllm_config.num_speculative_tokens else 1
             return self.page_size_bytes * (
                 2
                 + self.num_speculative_blocks

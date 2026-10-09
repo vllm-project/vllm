@@ -559,15 +559,19 @@ class KVCacheManager:
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
         checkpoint_unit = self.decode_checkpoint_unit
+        # Without speculation every in-flight token is accepted, so a boundary
+        # an in-flight step crosses already has its snapshot.
+        snapshotted_tokens = (
+            total_computed_tokens
+            if num_new_tokens == 1 and num_lookahead_tokens == 0
+            else total_computed_tokens - request.num_in_flight_tokens
+        )
         needs_decode_checkpoint = (
             checkpoint_unit > 0
             and not delay_cache_blocks
             and total_computed_tokens >= prefill_end
             and num_tokens_main_model // checkpoint_unit * checkpoint_unit
-            > max(
-                request.num_prompt_tokens,
-                total_computed_tokens - request.num_in_flight_tokens,
-            )
+            > max(request.num_prompt_tokens, snapshotted_tokens)
         )
         num_tokens_need_slot = min(
             num_tokens_main_model + num_lookahead_tokens, self.max_model_len
@@ -604,11 +608,17 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        if needs_decode_checkpoint:
-            required_blocks += len(self.decode_checkpoint_managers)
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
             return None
+        # The private snapshot is optional: take it only while a free block
+        # remains per active request, so it neither fails nor starves a step.
+        needs_decode_checkpoint = needs_decode_checkpoint and (
+            required_blocks
+            + len(self.decode_checkpoint_managers)
+            + len(self.decode_checkpoint_managers[0].req_to_blocks)
+            <= available_blocks
+        )
 
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks

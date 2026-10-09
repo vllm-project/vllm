@@ -491,6 +491,7 @@ class KVCacheCoordinator(ABC):
                                 num_tokens=boundary,
                                 kv_cache_group_id=manager.kv_cache_group_id,
                                 block_size=manager.block_size,
+                                keep_existing_hashes=True,
                             )
             for manager in managers:
                 manager.finalize_decode_checkpoints(request, boundary)
@@ -552,6 +553,7 @@ class KVCacheCoordinator(ABC):
                 num_tokens=proof_tokens,
                 kv_cache_group_id=group_id,
                 block_size=manager.block_size,
+                keep_existing_hashes=True,
             )
         return True
 

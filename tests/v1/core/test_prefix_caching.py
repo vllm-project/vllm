@@ -5114,6 +5114,84 @@ def test_in_flight_decode_snapshot_waits_for_deferred_free():
     assert manager.block_pool.get_num_free_blocks() == 99
 
 
+def _decode_one_token(manager, request, computed):
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 1) is not None
+    checkpoint = (manager.take_decode_checkpoints({request.request_id: 1}) or {}).get(
+        request.request_id
+    )
+    request.num_computed_tokens = computed
+    request.append_output_token_ids(computed)
+    manager.update_decode_checkpoint_candidates(request, checkpoint)
+
+
+def test_decode_checkpoint_keeps_prompt_tail_entry():
+    """A short reply publishes inside the prompt's tail block; regenerating the
+    prompt must still find the prompt-tail entry."""
+    manager, _ = _make_decode_checkpoint_manager(
+        block_size=8, hash_block_size=2, fine_grained=True
+    )
+    request = make_request("producer", list(range(5)), 2, sha256)
+    manager.allocate_slots(request, 5)
+    request.num_computed_tokens = 5
+    request.append_output_token_ids(5)
+    for computed in range(6, 8):
+        _decode_one_token(manager, request, computed)
+    manager.finalize_decode_checkpoints(request, keep=True)
+    manager.free(request)
+
+    pool = manager.block_pool
+    assert pool.get_cached_block(request.block_hashes[1], [0]) is not None
+    assert pool.get_cached_block(request.block_hashes[2], [0]) is not None
+
+
+def test_decode_checkpoint_snapshot_is_skipped_when_blocks_run_short():
+    """The private snapshot is optional; it must not fail a step that fits."""
+    manager, _ = _make_decode_checkpoint_manager(
+        block_size=8, hash_block_size=4, fine_grained=True
+    )
+    request = make_request("producer", list(range(4)), 4, sha256)
+    manager.allocate_slots(request, 4)
+    request.num_computed_tokens = 4
+    request.append_output_token_ids(4)
+    for computed in range(5, 8):
+        _decode_one_token(manager, request, computed)
+
+    pool = manager.block_pool
+    held = pool.get_new_blocks(pool.get_num_free_blocks())
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 1) is not None
+    assert manager.take_decode_checkpoints({request.request_id: 1}) is None
+    pool.free_blocks(held)
+    manager.free(request)
+
+
+def test_non_spec_decode_snapshot_not_reallocated_for_in_flight_step():
+    """An in-flight non-speculative step that crosses a boundary already owns its
+    snapshot, so scheduling the next step must not allocate another."""
+    manager, _ = _make_decode_checkpoint_manager(
+        block_size=8, hash_block_size=4, fine_grained=True
+    )
+    request = make_request("producer", list(range(4)), 4, sha256)
+    manager.allocate_slots(request, 4)
+    request.num_computed_tokens = 4
+    request.append_output_token_ids(4)
+    for computed in range(5, 12):
+        _decode_one_token(manager, request, computed)
+
+    # Async scheduling: the step reaching boundary 12 is still in flight.
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 1) is not None
+    assert manager.take_decode_checkpoints({request.request_id: 1}) is not None
+    request.num_computed_tokens = 12
+    request.num_in_flight_tokens = 1
+    request.append_output_token_ids(12)
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 1) is not None
+    assert manager.take_decode_checkpoints({request.request_id: 1}) is None
+    manager.free(request)
+
+
 @pytest.mark.parametrize("keep", [True, False])
 def test_mamba_decode_checkpoints_publish_latest_on_finish(keep):
     """The latest materialized decode state becomes reusable after finish."""

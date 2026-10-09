@@ -2086,6 +2086,7 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        decode_checkpoints = scheduler_output.mamba_decode_checkpoints
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2097,7 +2098,7 @@ class Scheduler(SchedulerInterface):
                     output_is_stale = True
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
-            checkpoint = (scheduler_output.mamba_decode_checkpoints or {}).get(req_id)
+            checkpoint = decode_checkpoints.get(req_id) if decode_checkpoints else None
             if checkpoint is not None and (
                 output_is_stale
                 or req_id in failed_kv_load_req_ids
