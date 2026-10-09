@@ -268,6 +268,7 @@ class DequantizeAndGatherKCacheKernel(
         n_quant_blocks: tl.constexpr,  # 7 real blocks
         use_fnuz: tl.constexpr = False,
     ):
+        """Gather paged cache rows and dequantize their FP8 portions into BF16."""
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
         num_workers = tl.num_programs(1)
@@ -372,6 +373,7 @@ class DequantizeAndGatherKCacheKernel(
         offset: int,
         **compile_key_fields: bool,
     ) -> CompileKey:
+        """Specialize the gather kernel for the padded cache-block layout."""
         token_stride = 576
         scale_stride = 8
         unpadded = cache_block_size * (token_stride + scale_stride)
@@ -440,6 +442,7 @@ class DequantizeAndGatherKCacheKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        """Construct synthetic cache and block-table inputs for kernel warmup."""
         int32_ptr = TritonWarmupTensor(torch.int32)
         return dict(
             out=TritonWarmupTensor(
@@ -476,6 +479,7 @@ class DequantizeAndGatherKCacheKernel(
         *,
         use_fnuz: bool = False,
     ) -> LaunchSpec:
+        """Build the gather launch using the actual cache and block-table strides."""
         num_reqs = seq_lens.shape[0]
         return (num_reqs, self.NUM_WORKERS), dict(
             out_stride0=out.stride(0),

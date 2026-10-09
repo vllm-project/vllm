@@ -1422,6 +1422,7 @@ def test_dequantize_and_gather_k_cache(
 
 @pytest.mark.parametrize("num_reqs", [1, 2, 4, 8, 16, 32, 64, 128, 256])
 def test_dequantize_and_gather_k_cache_triton(num_reqs: int):
+    """Verify cache gathering respects a noncontiguous block-table view."""
     block_size = 256
     head_dim = 512
     nope_dim = 448
