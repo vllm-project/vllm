@@ -27,6 +27,7 @@ from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 
 NUM_HEADS = 16
 KV_LORA_RANK = 512
+QK_ROPE_HEAD_DIM = 64
 HEAD_SIZE = 576
 NUM_TOKENS = 2
 TOPK_TOKENS = 4
@@ -98,6 +99,7 @@ def _build_impl(indexer, topk_indices_buffer):
         topk_indices_buffer=topk_indices_buffer,
         indexer=indexer,
         kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
     )
 
 
@@ -120,7 +122,7 @@ def _patch_forward_deps(monkeypatch, impl, remap_calls):
     monkeypatch.setattr(
         type(impl),
         "_forward_mla",
-        lambda self, layer, q, kv_cache, attn_metadata: attn_out,
+        lambda self, layer, q, kv_cache, attn_metadata: (attn_out, None),
     )
     return attn_out
 
