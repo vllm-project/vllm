@@ -300,7 +300,9 @@ def _sync_dp(
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
     reduced[3] = -1  # max_query_len, -1 means None
     reduced[4] = int(allow_ubatching)
-    reduced[5] = 8  # num_reqs
+    reduced[5] = torch.tensor(
+        [n // q if q else 8 for n, q in zip(num_tokens_per_rank, uniform_token_counts)]
+    )
 
     with (
         patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
@@ -311,10 +313,10 @@ def _sync_dp(
             desired_batch_desc=BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
                 num_tokens=num_tokens_per_rank[0],
-                num_reqs=8,
+                num_reqs=int(reduced[5, 0]),
             ),
             num_tokens=num_tokens_per_rank[0],
-            num_reqs=8,
+            num_reqs=int(reduced[5, 0]),
             uniform_token_count=uniform_token_counts[0] or None,
             dp_size=dp_size,
             dp_rank=0,
@@ -949,8 +951,9 @@ def test_microbatched_graphs_are_only_offered_to_uniform_batches():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
-def test_microbatched_graph_needs_every_rank_to_reach_the_split():
-    """Fall back to eager on all ranks if any rank cannot reach the captured split."""
+@pytest.mark.parametrize("min_num_tokens", [33, 64])
+def test_microbatched_graph_needs_every_rank_to_reach_the_split(min_num_tokens: int):
+    """Fall back to eager on all ranks if any rank has an empty trailing microbatch."""
     manager = _make_cudagraph_manager([64, 128])
     uniform = [1, 1]
 
@@ -958,8 +961,8 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.FULL
     assert desc.num_ubatches == 2
 
-    # Rank 1 pads the group up to a 128-token graph, but rank 0 only reaches 33.
-    desc, dp_sync = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
+    # Rank 1 selects a 128-token graph; rank 0 has an empty trailing microbatch.
+    desc, dp_sync = _sync_dp([min_num_tokens, 128], uniform, cudagraph_manager=manager)
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync is not None and dp_sync.eager
