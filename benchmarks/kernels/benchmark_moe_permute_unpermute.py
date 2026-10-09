@@ -56,13 +56,9 @@ def benchmark_permute(
         qhidden_states, input_gating, topk, False
     )
     scratch = MoEPermuteScratch(
-        max_num_tokens=num_tokens,
-        topk=topk,
         num_experts=num_experts,
         num_local_experts=num_experts,
         device=qhidden_states.device,
-        hidden_size=hidden_size,
-        hidden_dtype=qhidden_states.dtype,
     )
 
     def prepare(i: int):
@@ -135,13 +131,9 @@ def benchmark_unpermute(
         qhidden_states, input_gating, topk, False
     )
     scratch = MoEPermuteScratch(
-        max_num_tokens=num_tokens,
-        topk=topk,
         num_experts=num_experts,
         num_local_experts=num_experts,
         device=qhidden_states.device,
-        hidden_size=hidden_size,
-        hidden_dtype=qhidden_states.dtype,
     )
 
     def prepare():

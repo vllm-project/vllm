@@ -227,8 +227,10 @@ def test_circular_mapping_matches_generic_for_short_requests(prompt_len):
 
 
 def test_circular_mapping_preserves_padding_and_empty_batch():
-    own_blocks = [5, 9]
-    per_req = [list(range(10)), list(range(12))]
+    # The last request is a padding request on the null block, which owns no
+    # tail block and must never be written.
+    own_blocks = [5, 9, 0]
+    per_req = [list(range(10)), list(range(12)), [0, 1]]
     padded_len = sum(len(p) for p in per_req) + 8
     positions, qsl, slot_mapping, num_actual, num_reqs = make_batch(
         per_req, padded_len=padded_len
@@ -237,7 +239,8 @@ def test_circular_mapping_preserves_padding_and_empty_batch():
 
     out = circular_tail_slots(slot_mapping, bt, qsl, positions, num_actual, num_reqs)
     assert out.shape == slot_mapping.shape
-    assert torch.equal(out[num_actual:], torch.full_like(out[num_actual:], -1))
+    pad_start = int(qsl[-2])
+    assert torch.equal(out[pad_start:], torch.full_like(out[pad_start:], -1))
 
     empty = circular_tail_slots(slot_mapping, bt, qsl, positions[:0], 0, num_reqs)
     assert torch.equal(empty, slot_mapping)
@@ -430,25 +433,27 @@ def test_interleaved_decode_pollution_legacy_vs_circular():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 @pytest.mark.parametrize(
-    "per_req,num_actual,padded_len",
+    "per_req,own_blocks,num_actual,padded_len",
     [
-        ([list(range(10)), list(range(12))], 22, 22),
-        ([list(range(10)), list(range(12))], 22, 30),
-        ([[3, 4], [0], [7, 8, 9]], 6, 8),
-        ([[5]], 1, 1),
+        ([list(range(10)), list(range(12))], [5, 6], 22, 22),
+        ([list(range(10)), list(range(12))], [5, 6], 22, 30),
+        ([[3, 4], [0], [7, 8, 9]], [5, 0, 7], 6, 8),
+        ([[5]], [5], 1, 1),
+        ([[0], [0]], [0, 0], 2, 4),  # dummy run: every row on the null block
     ],
 )
-def test_triton_mapping_matches_cpu(per_req, num_actual, padded_len):
+def test_triton_mapping_matches_cpu(per_req, own_blocks, num_actual, padded_len):
     """The CUDA (Triton) path must match the CPU torch reference, including
     tokens between the last request boundary and num_actual_tokens (mapped to
-    the last request) and untouched padding beyond num_actual."""
+    the last request), untouched padding beyond num_actual, and PAD for
+    requests on the null block."""
     positions, qsl, slot_mapping, _, num_reqs = make_batch(
         per_req, padded_len=padded_len
     )
     # Replace the all--1 placeholder slots with sentinel values to check the
     # padding range is copied through untouched.
     slot_mapping = torch.arange(padded_len, dtype=torch.int64) + 1000
-    bt = make_tail_block_table(list(range(5, 5 + num_reqs)))
+    bt = make_tail_block_table(own_blocks)
 
     ref = circular_tail_slots(slot_mapping, bt, qsl, positions, num_actual, num_reqs)
     got = circular_tail_slots(
@@ -460,6 +465,9 @@ def test_triton_mapping_matches_cpu(per_req, num_actual, padded_len):
         num_reqs,
     )
     torch.testing.assert_close(got.cpu(), ref)
+    for req, blk in enumerate(own_blocks):
+        if blk == 0:
+            assert (got[int(qsl[req]) : int(qsl[req + 1])] == -1).all()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
