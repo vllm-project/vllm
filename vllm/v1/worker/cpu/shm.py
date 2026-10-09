@@ -108,6 +108,9 @@ if not HAS_TRITON:
     gpu_block_table.BlockTables.gather_block_tables = (
         cpu_block_table.gather_block_tables
     )
+    gpu_block_table.BlockTables.compute_slot_mappings = (
+        cpu_block_table.compute_slot_mappings
+    )
     gpu_input_batch.prepare_prefill_inputs = cpu_input_batch.prepare_prefill_inputs
     gpu_input_batch.prepare_pos_seq_lens = cpu_input_batch.prepare_pos_seq_lens
     gpu_input_batch.combine_sampled_and_draft_tokens = (

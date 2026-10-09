@@ -1965,6 +1965,38 @@ def gather_block_table_cpu(
     )
 
 
+def compute_slot_mapping_cpu(
+    block_table: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    kv_block_size: int,
+    kernel_block_size: int,
+    mapping_enabled: bool,
+    dcp_sharded: bool,
+    cp_size: int,
+    cp_rank: int,
+    cp_interleave: int,
+    pad_slot_id: int,
+) -> None:
+    torch.ops._C.compute_slot_mapping_cpu(
+        block_table,
+        slot_mapping,
+        idx_mapping,
+        query_start_loc,
+        positions,
+        kv_block_size,
+        kernel_block_size,
+        mapping_enabled,
+        dcp_sharded,
+        cp_size,
+        cp_rank,
+        cp_interleave,
+        pad_slot_id,
+    )
+
+
 def prepare_prefill_inputs_cpu(
     input_ids: torch.Tensor,
     next_prefill_tokens: torch.Tensor,
