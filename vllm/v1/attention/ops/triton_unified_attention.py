@@ -309,12 +309,6 @@ def kernel_unified_attention(
     )
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
 
-    if FP8_SOFTWARE_CONV:
-        tl.static_assert(
-            TILE_SIZE % 4 == 0,
-            "software FP8 conversion requires TILE_SIZE to be a multiple of four",
-        )
-
     if USE_TD:
         tl.static_assert(
             BLOCK_SIZE % TILE_SIZE == 0,
