@@ -25,6 +25,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
     DirectRankRegion,
     ReplicatedRegion,
     SharedOffloadRegion,
+    TensorViewRegion,
 )
 
 
@@ -169,7 +170,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         return current_platform.is_cuda_alike() and not current_platform.is_rocm()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        mmap_region: SharedOffloadRegion | None = None
+        mmap_region: TensorViewRegion | None = None
         try:
             # num_chunks == 0 would size the region to zero bytes, which cannot
             # be mmap'd; fall back to the tensor path (empty tensors) as before.

@@ -27,7 +27,10 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    SharedOffloadRegion,
+    TensorViewRegion,
+)
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
     swap_blocks_batch,
@@ -805,7 +808,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         kv_caches: CanonicalKVCaches,
         blocks_per_chunk: int,
         num_cpu_chunks: int,
-        mmap_region: SharedOffloadRegion | None = None,
+        mmap_region: TensorViewRegion | None = None,
         canonical_layout: bool = False,
     ):
         assert not canonical_layout or mmap_region is not None

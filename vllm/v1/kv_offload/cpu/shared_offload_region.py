@@ -203,10 +203,6 @@ class SharedOffloadRegion(ABC):
         return None
 
     @abstractmethod
-    def get_view(self, *args: int) -> torch.Tensor | memoryview:
-        """Return this region's logical view."""
-
-    @abstractmethod
     def populate(self) -> None:
         """Pre-fault this region according to its layout."""
 
@@ -285,7 +281,23 @@ class SharedOffloadRegion(ABC):
             self._creator = False
 
 
-class DirectRankRegion(SharedOffloadRegion):
+class TensorViewRegion(SharedOffloadRegion, ABC):
+    """Shared region whose logical views are tensor-sized slices."""
+
+    @abstractmethod
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
+        """Return the next tensor view in this region's layout."""
+
+
+class MemoryViewRegion(SharedOffloadRegion, ABC):
+    """Shared region exposed as one complete row-major memoryview."""
+
+    @abstractmethod
+    def get_view(self) -> memoryview:
+        """Return the complete zero-copy memoryview."""
+
+
+class DirectRankRegion(TensorViewRegion):
     """Shared region with one private strided slot per rank."""
 
     def __init__(
@@ -311,9 +323,7 @@ class DirectRankRegion(SharedOffloadRegion):
             creator_memory_check=creator_memory_check,
         )
 
-    def get_view(  # type: ignore[override]
-        self, tensor_page_size: int
-    ) -> torch.Tensor:
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
         new_offset = self._worker_offset + tensor_page_size
         assert new_offset <= self._worker_area_end, (
             f"Worker offset {new_offset} exceeds worker area end "
@@ -347,7 +357,7 @@ class DirectRankRegion(SharedOffloadRegion):
         pin_mmap_region(self)
 
 
-class ReplicatedRegion(SharedOffloadRegion):
+class ReplicatedRegion(TensorViewRegion):
     """Shared region containing one worker-visible replicated copy."""
 
     def __init__(
@@ -372,9 +382,7 @@ class ReplicatedRegion(SharedOffloadRegion):
             creator_memory_check=creator_memory_check,
         )
 
-    def get_view(  # type: ignore[override]
-        self, tensor_page_size: int
-    ) -> torch.Tensor:
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
         new_offset = self._worker_offset + tensor_page_size
         assert new_offset <= self._worker_area_end, (
             f"Replicated offset {new_offset} exceeds worker area end "
@@ -407,10 +415,10 @@ class ReplicatedRegion(SharedOffloadRegion):
         pin_mmap_region(self)
 
 
-class GlobalRegion(SharedOffloadRegion):
+class GlobalRegion(MemoryViewRegion):
     """Shared region exposed as a complete row-major CPU memoryview."""
 
-    def get_view(self) -> memoryview:  # type: ignore[override]
+    def get_view(self) -> memoryview:
         kv_tensor = self.base_tensor.view(self.num_chunks, self._row_stride)
         np_arr = kv_tensor.numpy()
         assert np_arr.ctypes.data == self.base_tensor.data_ptr(), (
@@ -427,7 +435,7 @@ class GlobalRegion(SharedOffloadRegion):
         return
 
 
-class CanonicalRegion(SharedOffloadRegion):
+class CanonicalRegion(TensorViewRegion):
     """Shared region exposing canonical tensor views."""
 
     def __init__(
@@ -452,9 +460,7 @@ class CanonicalRegion(SharedOffloadRegion):
             creator_memory_check=creator_memory_check,
         )
 
-    def get_view(  # type: ignore[override]
-        self, tensor_page_size: int
-    ) -> torch.Tensor:
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
         new_offset = self._canonical_offset + tensor_page_size
         assert new_offset <= self._row_stride
         view = torch.as_strided(
@@ -484,7 +490,7 @@ class CanonicalRegion(SharedOffloadRegion):
         pin_mmap_region(self)
 
 
-class HiSparseRegion(SharedOffloadRegion):
+class HiSparseRegion(TensorViewRegion):
     """Shared HiSparse host pool with creator-only population and custom pinning."""
 
     def __init__(
@@ -515,9 +521,7 @@ class HiSparseRegion(SharedOffloadRegion):
                 ((0, self.total_size_bytes),), "HiSparse creator region"
             )
 
-    def get_view(  # type: ignore[override]
-        self, tensor_page_size: int
-    ) -> torch.Tensor:
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
         new_offset = self._canonical_offset + tensor_page_size
         assert new_offset <= self._row_stride
         view = torch.as_strided(

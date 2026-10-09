@@ -45,7 +45,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import MemoryViewRegion
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
@@ -95,7 +95,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     def __init__(
         self,
         num_chunks: int,
-        mmap_region: SharedOffloadRegion,
+        mmap_region: MemoryViewRegion,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,

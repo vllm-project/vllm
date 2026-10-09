@@ -72,8 +72,10 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
     CanonicalRegion,
     DirectRankRegion,
     GlobalRegion,
+    MemoryViewRegion,
     ReplicatedRegion,
     SharedOffloadRegion,
+    TensorViewRegion,
 )
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
@@ -320,7 +322,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 tier_cfg["backpressure"] = merged
 
         # Scheduler-side mmap (rank=None); kept for cleanup
-        self._scheduler_mmap: SharedOffloadRegion | None = None
+        self._scheduler_mmap: MemoryViewRegion | None = None
 
         # Set by create_worker when canonical_layout is enabled: True when
         # every layer's canonical bytes are parallelism-agnostic (portable),
@@ -350,7 +352,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     "store_threshold is not supported for TieringOffloadingSpec"
                 )
 
-            scheduler_mmap: SharedOffloadRegion | None = None
+            scheduler_mmap: MemoryViewRegion | None = None
             primary_tier: CPUPrimaryTierOffloadingManager | None = None
             secondary_tiers = []
             try:
@@ -448,7 +450,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Fold the global physical device index into the replica-local
             # [0, world_size) slot range.
             rank = torch.accelerator.current_device_index() % world_size
-        worker_mmap: SharedOffloadRegion
+        worker_mmap: TensorViewRegion
         try:
             if self.config.canonical_layout:
                 worker_mmap = CanonicalRegion(
