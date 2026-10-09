@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from typing import Any
 
 import pytest
 
@@ -8,6 +10,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -110,3 +113,25 @@ class TestStep3ToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+    def test_parameter_value_with_angle_bracket(
+        self, tool_parser: Any, streaming: bool
+    ):
+        model_output = (
+            "<｜tool_calls_begin｜><｜tool_call_begin｜>function<｜tool_sep｜>"
+            '<steptml:invoke name="run_query">'
+            '<steptml:parameter name="sql">SELECT * FROM t WHERE a < 5'
+            "</steptml:parameter>"
+            '<steptml:parameter name="html"><b>hi</b></steptml:parameter>'
+            "</steptml:invoke><｜tool_call_end｜><｜tool_calls_end｜>"
+        )
+        _, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=streaming
+        )
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "run_query"
+        assert json.loads(tool_calls[0].function.arguments) == {
+            "sql": "SELECT * FROM t WHERE a < 5",
+            "html": "<b>hi</b>",
+        }
