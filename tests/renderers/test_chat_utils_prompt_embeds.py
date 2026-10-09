@@ -27,6 +27,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_async,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EmbedsPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import (
     _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR,
@@ -155,14 +156,18 @@ def test_parse_chat_messages_openai_format():
     )
     # The middle content part is rewritten to a single placeholder-token
     # sentinel.
-    texts = [p["text"] for p in conv[0]["content"]]
+    parts = conv[0]["content"]
+    assert isinstance(parts, list)
+    texts = [p["text"] for p in parts]
     assert texts == [
         "Hello ",
         PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
         " world",
     ]
     assert mm_data is not None and "prompt_embeds" in mm_data
-    assert torch.equal(mm_data["prompt_embeds"][0], t)
+    embeds = mm_data["prompt_embeds"]
+    assert isinstance(embeds, list)
+    assert torch.equal(embeds[0], t)
 
 
 # Each layout entry is one content part:
@@ -334,7 +339,9 @@ def test_parse_chat_messages_allows_placeholder_in_text_when_feature_disabled():
     conv, mm_data, _ = parse_chat_messages(messages, mc, content_format="openai")
     assert mm_data is None or "prompt_embeds" not in mm_data
     # Text reaches the rendered conversation unchanged.
-    texts = [p["text"] for p in conv[0]["content"]]
+    parts = conv[0]["content"]
+    assert isinstance(parts, list)
+    texts = [p["text"] for p in parts]
     assert PROMPT_EMBEDS_PLACEHOLDER_TOKEN in "".join(texts)
 
 
@@ -600,7 +607,7 @@ def test_truncation_keeps_the_mixed_mask_aligned_with_the_prompt():
     positions = [(num_head, embed_len)]
     embeds, mask = _build_mixed_prompt_embeds(token_ids, tensors, positions)
 
-    prompt = {
+    prompt: EmbedsPrompt = {
         "prompt_token_ids": token_ids,
         "prompt_embeds": embeds,
         "prompt_is_token_ids": mask,

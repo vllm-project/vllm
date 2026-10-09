@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import unittest
+from typing import TypedDict
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -33,6 +34,15 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
 STOP_TOKEN = 128001
+
+
+class CachedState(TypedDict):
+    """The subset of `CachedRequestState` the model runner is simulated to cache."""
+
+    req_id: str
+    prompt_token_ids: list[int]
+    output_token_ids: list[int]
+    num_computed_tokens: int
 
 
 class DummyRequest(Request):
@@ -105,6 +115,7 @@ class TestStreamingScheduler(unittest.TestCase):
                 scheduled = scheduler.schedule()
 
                 continuation = DummyRequest("session", prompt_token_ids=[4, 5])
+                assert continuation.sampling_params is not None
                 assert continuation.sampling_params.logprobs is None
                 if continuation_queued:
                     scheduler.add_request(continuation)
@@ -190,6 +201,7 @@ class TestStreamingScheduler(unittest.TestCase):
         update = StreamingUpdate.from_request(new_request)
         scheduler._update_request_as_session(session, update)
 
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 10
         assert session.max_tokens == 10
 
@@ -204,6 +216,7 @@ class TestStreamingScheduler(unittest.TestCase):
         update2 = StreamingUpdate.from_request(new_request2)
         scheduler._update_request_as_session(session, update2)
 
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 4
         assert session.max_tokens == 4
 
@@ -227,6 +240,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 10
         assert session.status == RequestStatus.WAITING
 
@@ -490,7 +504,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # This simulates gpu_model_runner.py:706-720 CachedRequestState creation
         # The model runner makes a copy of prompt_token_ids when creating
         # CachedRequestState
-        cached_state_cycle1 = {
+        cached_state_cycle1: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
                 new_req_data_cycle1.prompt_token_ids
@@ -648,7 +662,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # The model runner makes a copy of prompt_token_ids when creating
         # CachedRequestState
         new_req_data_cycle3 = scheduler_output_cycle3.scheduled_new_reqs[0]
-        cached_state_cycle3 = {
+        cached_state_cycle3: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
                 new_req_data_cycle3.prompt_token_ids

@@ -1039,6 +1039,8 @@ def test_filter_reused_manager():
     # lookup() does not count towards store admission
     assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
+    # store_threshold > 1 means the reuse tracker is enabled, so counts exists.
+    assert manager.counts is not None
     assert not manager.counts
 
     # 1st offer of [1, 2] -> tracked at count 1, not eligible yet
@@ -1133,7 +1135,7 @@ def test_store_threshold_does_not_hide_ready_reuse():
     assert output.evicted_keys == [head]
 
 
-def test_evictable_cache_chunk_count():
+def test_evictable_cache_chunk_count(monkeypatch):
     """Verifies _num_evictable_cache_chunks is maintained correctly through the
     full store/load lifecycle, eviction, failed stores, concurrent loads,
     reset_cache, and the early-exit fast path in prepare_store.
@@ -1206,7 +1208,7 @@ def test_evictable_cache_chunk_count():
         evict_called = True
         return original_evict(*args, **kwargs)
 
-    manager._policy.evict = spy_evict  # type: ignore[method-assign]
+    monkeypatch.setattr(manager._policy, "evict", spy_evict)
     # cache state [10', 11', 12', x] <- cannot evict anything
     assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is None
     assert not evict_called, (

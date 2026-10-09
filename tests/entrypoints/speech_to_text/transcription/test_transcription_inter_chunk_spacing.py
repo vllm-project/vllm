@@ -26,7 +26,10 @@ from vllm.entrypoints.speech_to_text.base.serving import (
     SpeechToTextBaseServing,
     asr_inter_chunk_separator,
 )
-from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+    TranscriptionResponse,
+)
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
@@ -209,7 +212,8 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
     serving.streaming_post_processor_cls = (
         _StubTranscriptionModel.get_streaming_post_processor_cls()
     )
-    serving.task_type = "transcribe"
+    # task_type is Final on the real class; this instance is built with __new__.
+    serving.task_type = "transcribe"  # type: ignore[misc]
     request = SimpleNamespace(
         model="stub-model",
         stream_include_usage=False,
@@ -249,7 +253,8 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
     serving.streaming_post_processor_cls = (
         _StubTranscriptionModel.get_streaming_post_processor_cls()
     )
-    serving.task_type = "transcribe"
+    # task_type is Final on the real class; this instance is built with __new__.
+    serving.task_type = "transcribe"  # type: ignore[misc]
     request = SimpleNamespace(
         model="stub-model",
         stream_include_usage=False,
@@ -288,11 +293,14 @@ async def test_transcription_stream_generator_strips_qwen3_asr_prefix_per_chunk(
 
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
-    serving.model_cls = Qwen3ASRForConditionalGeneration
+    # The interface protocols' optional members (NotImplementedError bodies,
+    # bare annotations) make mypy deem every real model class abstract.
+    serving.model_cls = Qwen3ASRForConditionalGeneration  # type: ignore[type-abstract]
     serving.streaming_post_processor_cls = (
         Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()
     )
-    serving.task_type = "transcribe"
+    # task_type is Final on the real class; this instance is built with __new__.
+    serving.task_type = "transcribe"  # type: ignore[misc]
     request = SimpleNamespace(
         model="stub-qwen3-asr",
         stream_include_usage=False,
@@ -366,6 +374,7 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
             b"\x00\x00", req_en, raw_request=None
         )
         assert not isinstance(out_en, ErrorResponse)
+        assert isinstance(out_en, TranscriptionResponse)
         assert out_en.text == "hello world"
 
         async def gen_nihao() -> AsyncGenerator[RequestOutput, None]:
@@ -387,4 +396,5 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
             b"\x00\x00", req_zh, raw_request=None
         )
         assert not isinstance(out_zh, ErrorResponse)
+        assert isinstance(out_zh, TranscriptionResponse)
         assert out_zh.text == "你好世界"

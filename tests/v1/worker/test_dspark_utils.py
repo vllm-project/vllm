@@ -105,7 +105,7 @@ def test_attention_uses_draft_dcp_setting_inside_target_process_group(
 ):
     import vllm.config as config_module
     from vllm.distributed import parallel_state
-    from vllm.v1.attention.backend import AttentionImplBase
+    from vllm.v1.attention.backend import AttentionImplBase, AttentionMetadata
 
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=configured_dcp)
@@ -117,7 +117,7 @@ def test_attention_uses_draft_dcp_setting_inside_target_process_group(
     monkeypatch.setattr(
         parallel_state, "_DCP", SimpleNamespace(world_size=4, rank_in_group=2)
     )
-    impl = AttentionImplBase()
+    impl: AttentionImplBase[AttentionMetadata] = AttentionImplBase()
     assert impl.dcp_world_size == configured_dcp
     assert impl.dcp_rank == (0 if configured_dcp == 1 else 2)
 
