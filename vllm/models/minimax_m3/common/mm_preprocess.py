@@ -3,8 +3,9 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
+import numpy as np
 import numpy.typing as npt
 import torch
 from transformers import BatchFeature
@@ -475,6 +476,12 @@ class MiniMaxM3VLMultiModalProcessor(
     video_processor="MiniMaxM3VLVideoProcessor",
 )
 class MiniMaxM3VideoBackend(VideoBackend):
+    # Samples at ``fps`` over the whole video (``num_frames`` is not used), so
+    # without a bound the frame count grows with duration: a one-hour video at
+    # the default 1 fps decodes 3,600 frames. Cap it at the video processor's
+    # declared ``max_frames``; ``max_frames`` in media_io_kwargs can lower it.
+    _MAX_FRAMES: ClassVar[int] = MiniMaxM3VLVideoProcessor.max_frames
+
     @classmethod
     def load_bytes(
         cls,
@@ -504,6 +511,12 @@ class MiniMaxM3VideoBackend(VideoBackend):
         target: VideoTargetMetadata,
         **kwargs,
     ) -> list[int]:
+        max_frames = kwargs.get("max_frames", cls._MAX_FRAMES)
+        is_int = isinstance(max_frames, int) and not isinstance(max_frames, bool)
+        if not is_int or max_frames <= 0:
+            raise ValueError(f"max_frames must be a positive integer, got {max_frames}")
+        max_frames = min(max_frames, cls._MAX_FRAMES)
+
         total_frames = source.total_frames_num
         video_fps = source.original_fps
         fps = target.fps
@@ -528,4 +541,10 @@ class MiniMaxM3VideoBackend(VideoBackend):
             prev_kept_ts = target_frame / video_fps
         if not indices:
             indices = [0]
+
+        if len(indices) > max_frames:
+            # Keep frames evenly spread over the fps-sampled ones, so the
+            # timestamps still span the whole video.
+            keep = np.linspace(0, len(indices) - 1, max_frames).round().astype(int)
+            indices = [indices[i] for i in keep]
         return indices
