@@ -652,6 +652,17 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 <sup>Q</sup> `Qwen*-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen*`, which leads to slightly different results compared to the official Hugging Face repository examples.
 
 !!! note
+    `Qwen3.5` and `Qwen3.6` checkpoints store the Gated DeltaNet linear attention
+    weights in different dtypes, but their configs are identical in every field
+    vLLM could use to tell the two series apart. vLLM therefore keeps
+    `linear_attn.A_log` in FP32 for both series, since upcasting the BF16 values
+    is lossless and the fused CUDA GDN decoder only accepts FP32, and allocates
+    `linear_attn.norm.weight` with the model dtype. To preserve the FP32
+    `norm.weight` of a Qwen3.5 checkpoint instead of casting it to the model
+    dtype, pass `--hf-overrides '{"text_config": {"real_model_type": "qwen3_5"}}'`
+    (drop the `text_config` wrapper for text-only checkpoints).
+
+!!! note
     For `Dots3NoteForCausalLM`, the vision and audio towers are only loaded when the
     corresponding modality is enabled via `--limit-mm-per-prompt`. Video inputs are
     decoded into frames and audio, so they require both towers. The checkpoint also

@@ -552,6 +552,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.dt_bias = nn.Parameter(
             torch.ones(self.num_v_heads // self.tp_size),
         )
+
+        # A_log is always FP32, even though Qwen3.6 stores it in BF16. Upcasting
+        # the BF16 values is lossless, and the fused CUDA GDN decoder rejects
+        # anything but an FP32 A_log, so the runtime dtype is pinned here rather
+        # than derived from the checkpoint series.
         self.A_log = nn.Parameter(
             torch.empty(
                 divide(self.num_v_heads, self.tp_size),
@@ -569,6 +574,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             f"unsupported {output_gate_type=}"
         )
 
+        # Qwen3.5 stores norm.weight in FP32 and Qwen3.6 in BF16, so allocating
+        # the model dtype truncates the FP32 norm of Qwen3.5. The optional
+        # text_config.real_model_type override selects the matching dtype.
+        # Verified against https://huggingface.co/Qwen/Qwen3.5-27B
+        norm_dtype = torch.get_default_dtype()
+        if self._is_real_model_type_qwen3_5(config):
+            norm_dtype = torch.float32
+
         self.norm = RMSNormGated(
             self.head_v_dim,
             eps=self.layer_norm_epsilon,
@@ -576,6 +589,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             norm_before_gate=True,
             activation=output_gate_type,
             device=current_platform.current_device(),
+            dtype=norm_dtype,
         )
 
         self.out_proj = RowParallelLinear(
@@ -647,6 +661,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
+
+    # real_model_type is an optional text_config field that selects the GDN
+    # norm dtype. The official Qwen3.5 and Qwen3.6 configs do not set it, so it
+    # stays unset unless the user opts in by editing config.json or by passing
+    # --hf-overrides '{"text_config": {"real_model_type": "qwen3_5"}}'.
+    def _is_real_model_type_qwen3_5(self, config: Qwen3NextConfig) -> bool:
+        return getattr(config, "real_model_type", None) == "qwen3_5"
 
     def create_qkvz_proj(
         self,
