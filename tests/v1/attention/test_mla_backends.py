@@ -1152,7 +1152,6 @@ def test_tokenspeed_mla_decode_contract(
     impl.output_scale = 1.0
     impl._min_split_kv = min_split_kv
     impl._max_decode_tokens = num_decode_tokens
-    impl._decode_kwargs = {"min_split_kv": min_split_kv} if min_split_kv > 1 else {}
     workspace = torch.empty(1, dtype=torch.int8)
     monkeypatch.setattr(
         tokenspeed_mla_module, "_get_workspace", lambda *args: workspace
@@ -1192,10 +1191,7 @@ def test_tokenspeed_mla_decode_contract(
 
     assert decode_call is not None
     assert decode_call["workspace_buffer"] is workspace
-    if min_split_kv > 1:
-        assert decode_call["min_split_kv"] == min_split_kv
-    else:
-        assert "min_split_kv" not in decode_call
+    assert decode_call["min_split_kv"] == min_split_kv
     assert decode_call["query"].shape == (
         num_decodes,
         tokens_per_decode,
@@ -1325,7 +1321,6 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(
         impl.output_scale = None
         impl._min_split_kv = 1
         impl._max_decode_tokens = query.shape[1]
-        impl._decode_kwargs = {}
         metadata = SimpleNamespace(
             num_decodes=1,
             num_decode_tokens=query.shape[1],

@@ -232,10 +232,8 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         config = get_current_vllm_config()
         self._min_split_kv = config.attention_config.tokenspeed_mla_min_split_kv
-        self._decode_kwargs: dict[str, int] = {}
         self._max_decode_tokens = 0
         if self._min_split_kv > 1:
-            self._decode_kwargs["min_split_kv"] = self._min_split_kv
             spec = config.speculative_config
             query_len = 1 + (spec.num_speculative_tokens if spec else 0)
             self._max_decode_tokens = max(
@@ -349,7 +347,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             cp_world=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_interleave_size=self._parallel_config.cp_kv_cache_interleave_size,
-            **self._decode_kwargs,
+            min_split_kv=self._min_split_kv,
         )
         if return_lse:
             o, lse = kernel_out
