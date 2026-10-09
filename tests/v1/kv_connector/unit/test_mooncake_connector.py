@@ -1111,6 +1111,46 @@ def test_scheduler_request_finished():
     assert "id-1" in scheduler_connector._reqs_not_processed
 
 
+def test_scheduler_ships_kv_checksums_with_finished_blocks():
+    """KV checksums sent after request_finished ride the metadata that hands
+    the request's finished blocks to the workers; those of an aborted
+    request are dropped."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    scheduler = create_scheduler(vllm_config)
+    connector = scheduler.get_kv_connector()
+    for request_id, status in (
+        (1, RequestStatus.FINISHED_LENGTH_CAPPED),
+        (2, RequestStatus.FINISHED_ABORTED),
+    ):
+        request = create_request(request_id=request_id, do_remote_decode=True)
+        request.kv_transfer_params["transfer_id"] = request.request_id
+        request.status = status
+        connector.request_finished_all_groups(request, ([10, 11],))
+        connector.send_kv_checksums(request, b"checksums")
+
+    meta = connector.build_connector_meta(MagicMock())
+    assert meta.kv_checksums == {"id-1": b"checksums"}
+
+
+@pytest.mark.asyncio
+async def test_record_send_reqs_attaches_kv_checksums():
+    """The producer worker keeps a finished request's KV checksums with the
+    blocks it sends."""
+    worker = SimpleNamespace(reqs_need_send={})
+    meta = MooncakeConnectorMetadata()
+    meta.reqs_to_send = {"p-req": ("xfer", [])}
+    await MooncakeConnectorWorker.record_send_reqs(worker, meta)
+    meta.reqs_to_send = {"p-req": ("xfer", [[10, 11]])}
+    meta.kv_checksums = {"p-req": b"checksums"}
+    await MooncakeConnectorWorker.record_send_reqs(worker, meta)
+
+    send_meta = worker.reqs_need_send["xfer"]
+    assert send_meta.ready.is_set()
+    assert send_meta.kv_checksums == b"checksums"
+
+
 @contextlib.contextmanager
 def patch_worker_dependencies():
     """Helper to mock all distributed and network dependencies for Worker tests."""
@@ -1427,6 +1467,7 @@ async def test_kv_producer(monkeypatch):
             transfer_id=transfer_id,
             local_block_ids=[[10, 11]],
             ready=asyncio.Event(),
+            kv_checksums=b"checksums",
         )
         prefill_worker.reqs_need_send[transfer_id] = send_meta
         send_meta.ready.set()
@@ -1479,6 +1520,8 @@ async def test_kv_producer(monkeypatch):
             response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
             assert response.status == MooncakeXferResponseStatus.FINISH
             assert response.ok_reqs == ["d-req-1"]
+            # The KV checksums travel with the response reporting the KV sent.
+            assert response.kv_checksums == {"d-req-1": b"checksums"}
 
             # Verify internal state cleanup
             assert transfer_id not in prefill_worker.reqs_need_send
@@ -1633,7 +1676,9 @@ async def test_kv_consumuer(monkeypatch):
 
         # Mock the response from the producer.
         mock_response = MooncakeXferResponse(
-            status=MooncakeXferResponseStatus.FINISH, ok_reqs=["d-req-1"]
+            status=MooncakeXferResponseStatus.FINISH,
+            ok_reqs=["d-req-1"],
+            kv_checksums={"d-req-1": b"checksums"},
         )
         encoded_response = decode_worker._encoder.encode(mock_response)
         mocks["mock_socket_object"].recv.return_value = encoded_response
@@ -1663,6 +1708,10 @@ async def test_kv_consumuer(monkeypatch):
 
         # Verify internal state is updated correctly.
         assert "d-req-1" in decode_worker.finished_recving_reqs
+        # The finished load is reported with the producer's KV checksums.
+        results = decode_worker.get_transfer_results()
+        assert results.finished_recving == {"d-req-1"}
+        assert results.kv_checksums == {"d-req-1": b"checksums"}
 
         # Clean up
         decode_worker.shutdown()
