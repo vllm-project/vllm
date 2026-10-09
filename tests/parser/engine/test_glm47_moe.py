@@ -235,6 +235,7 @@ class TestStreamedToolArguments:
     def test_no_value_extender_unless_open_value_is_last(self, raw_args):
         assert _glm47_arg_value_extender(raw_args) is None
 
+
 class TestStrayToolCallTag:
     """A stray ``<tool_call>`` the model emits mid-prose must not swallow
     the remainder of the stream (vllm-project/vllm#60703)."""
@@ -307,6 +308,33 @@ class TestStrayToolCallTag:
         assert result.tools_called is True
         assert result.tool_calls[-1].function.name == "get_weather"
         assert json.loads(result.tool_calls[-1].function.arguments) == {
+            "city": "Tokyo",
+        }
+
+    def test_phantom_dropped_when_request_has_tools(self, mock_request):
+        """With a populated tools list, validate_tool_names drops the
+        phantom: exactly one call must come back, not a prose-named extra."""
+        tool = ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        )
+        mock_request.tools = [tool]
+        parser = Glm47MoeParser(
+            make_mock_tokenizer(VOCAB),
+            tools=[tool],
+            chat_template_kwargs={"thinking": False},
+        )
+        result = parser.extract_tool_calls(self.STRAY_THEN_REAL, mock_request)
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
             "city": "Tokyo",
         }
 
