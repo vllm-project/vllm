@@ -1188,9 +1188,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
         trust_remote_code=True,
+        revision="refs/pr/10",
         max_transformers_version="4.57",
         transformers_version_reason={
-            "vllm": "Tokenizer cannot be initialised in Transformers v5."
+            "hf": "Remote modeling code is not compatible with Transformers v5."
         },
     ),
     "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
