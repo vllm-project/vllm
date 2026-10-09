@@ -123,6 +123,7 @@ class XPUPlatform(Platform):
         "mxfp8",
         "fp8_per_tensor",
         "fp8_per_block",
+        "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
         "modelopt",
