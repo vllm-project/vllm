@@ -33,6 +33,11 @@ def max_m_blocks(m: int, topk: int) -> int:
     return m * topk
 
 
+def sh_rows(m_max: int) -> int:
+    """Rows of the shared expert's buffers: whole m-blocks covering M_MAX."""
+    return (m_max + BM - 1) // BM * BM
+
+
 def sh_pairs(sh_inter: int) -> int:
     """Shared-expert gate/up column pairs: 16 gate and the matching 16 up columns."""
     return sh_inter // 16
@@ -58,7 +63,7 @@ def ws_layout(
     """Byte offsets of the workspace buffers and the total size.
 
     sh_part holds the shared expert's gate/up K-split partials (fp32, one slice
-    per wave of each K split, BM rows), sh_h its bf16 activation.
+    per wave of each K split, sh_rows(m_max) rows), sh_h its bf16 activation.
     """
     max_sorted = m_max * topk * BM
     sizes = dict(
@@ -72,8 +77,8 @@ def ws_layout(
         inter_scale=max(
             max_sorted * 64, max_sorted // BM * kas_per_chunk_dw_for(inter) * 4
         ),
-        sh_part=sh_ks * N_WAVES * BM * sh_pairs(sh_inter) * 32 * 4,
-        sh_h=BM * sh_inter * 2,
+        sh_part=sh_ks * N_WAVES * sh_rows(m_max) * sh_pairs(sh_inter) * 32 * 4,
+        sh_h=sh_rows(m_max) * sh_inter * 2,
     )
     offs, total = {}, 0
     for k, size in sizes.items():

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared-expert stages (bf16, unquantized): h = situ(x Wg^T, x Wu^T), y = h Wd^T,
-rows < M <= BM, as vLLM's KimiMLP computes it.
+rows < M <= M_MAX, as vLLM's KimiMLP computes it. Rows go in m-blocks of BM:
+each weight fragment is loaded once per ticket and used for every m-block.
 
 Both GEMMs use mfma_f32_16x16x32_bf16 straight from global memory: lane l feeds
 row l % 16 and K elements (l / 16) * 8 .. + 8 of A and of B (B row = weight
@@ -18,7 +19,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
 from vllm.models.kimi_k3.amd.mono.common.ops import l1_invalidate, st_wt
-from vllm.models.kimi_k3.amd.mono.common.plan import BM, N_WAVES, sh_pairs
+from vllm.models.kimi_k3.amd.mono.common.plan import BM, N_WAVES, sh_pairs, sh_rows
 from vllm.models.kimi_k3.amd.mono.common.sync import bump, count, wait_ge
 
 
@@ -52,6 +53,7 @@ def shared_gate_up(
     a_pairs,
     a_pairs_done,
     *,
+    M_MAX,
     SH_HIDDEN,
     SH_INTER,
     SH_KS,
@@ -75,6 +77,8 @@ def shared_gate_up(
     KW = KC // N_WAVES
     N_SLICES = SH_KS * N_WAVES
     NP = sh_pairs(SH_INTER)
+    N_MB = sh_rows(M_MAX) // BM
+    ROWS = N_MB * BM
     p = u // fx.Int32(SH_KS)
     ks = u - p * fx.Int32(SH_KS)
     row = lane % fx.Int32(16)
@@ -88,24 +92,30 @@ def shared_gate_up(
     g_dw = (p * fx.Int32(16) + row) * fx.Int32(SH_HIDDEN // 2) + k_dw
     u_dw = g_dw + fx.Int32(SH_INTER * SH_HIDDEN // 2)
     steps = KW // 32
-    acc_g = _zero_f32x4()
-    acc_u = _zero_f32x4()
     av = [_bf16x8(x_rsrc, x_dw + fx.Int32(s * 16)) for s in range_constexpr(steps)]
     gv = [_bf16x8(w_rsrc, g_dw + fx.Int32(s * 16)) for s in range_constexpr(steps)]
     uv = [_bf16x8(w_rsrc, u_dw + fx.Int32(s * 16)) for s in range_constexpr(steps)]
-    for s in range_constexpr(steps):
-        acc_g = _mfma_bf16(av[s], gv[s], acc_g)
-        acc_u = _mfma_bf16(av[s], uv[s], acc_u)
-
-    slice_row0 = (ks * fx.Int32(N_WAVES) + wave) * fx.Int32(BM)
-    for r in range_constexpr(4):
-        m = kq * fx.Int32(4) + fx.Int32(r)
-        off = ((slice_row0 + m) * fx.Int32(NP) + p) * fx.Int32(32) + row
-        vg = fx.Float32(fx.Vector(acc_g)[r])
-        vu = fx.Float32(fx.Vector(acc_u)[r])
-        if m < i32_M:
-            st_wt(arg_part, off, vg, 4)
-            st_wt(arg_part, off + fx.Int32(16), vu, 4)
+    slice_row0 = (ks * fx.Int32(N_WAVES) + wave) * fx.Int32(ROWS)
+    for mb in range_constexpr(N_MB):
+        if const_expr(mb > 0):
+            mb_dw = fx.Int32(mb * BM * SH_HIDDEN // 2)
+            av = [
+                _bf16x8(x_rsrc, x_dw + mb_dw + fx.Int32(s * 16))
+                for s in range_constexpr(steps)
+            ]
+        acc_g = _zero_f32x4()
+        acc_u = _zero_f32x4()
+        for s in range_constexpr(steps):
+            acc_g = _mfma_bf16(av[s], gv[s], acc_g)
+            acc_u = _mfma_bf16(av[s], uv[s], acc_u)
+        for r in range_constexpr(4):
+            m = fx.Int32(mb * BM) + kq * fx.Int32(4) + fx.Int32(r)
+            off = ((slice_row0 + m) * fx.Int32(NP) + p) * fx.Int32(32) + row
+            vg = fx.Float32(fx.Vector(acc_g)[r])
+            vu = fx.Float32(fx.Vector(acc_u)[r])
+            if m < i32_M:
+                st_wt(arg_part, off, vg, 4)
+                st_wt(arg_part, off + fx.Int32(16), vu, 4)
     rocdl.s_waitcnt(vmcnt=0)
     n = count(
         wave,
@@ -119,35 +129,38 @@ def shared_gate_up(
         if wave == fx.Int32(0):
             l1_invalidate()
         gpu.barrier()
-        m = tid // fx.Int32(16)
         c = p * fx.Int32(16) + tid % fx.Int32(16)
-        if m < i32_M:
-            part = global_typed_ptr(arg_part, T.f32)
-            g = fx.Float32(0.0)
-            up = fx.Float32(0.0)
-            for sl in range_constexpr(N_SLICES):
-                off = ((fx.Int32(sl * BM) + m) * fx.Int32(NP) + p) * fx.Int32(
-                    32
-                ) + tid % fx.Int32(16)
-                g = g + fx.Float32(part[off])
-                up = up + fx.Float32(part[off + fx.Int32(16)])
-            g = g.to(fx.BFloat16).to(fx.Float32)
-            up = up.to(fx.BFloat16).to(fx.Float32)
-            gate = (
-                fx.Float32(beta) * tanh_f32(g * fx.Float32(1.0 / beta)) * sigmoid_f32(g)
-            )
-            if const_expr(linear_beta > 0):
-                up = fx.Float32(linear_beta) * tanh_f32(
-                    up * fx.Float32(1.0 / linear_beta)
+        part = global_typed_ptr(arg_part, T.f32)
+        h_rsrc = buffer_ops.create_buffer_resource_from_addr(
+            fx.Int64(arg_h), num_records_bytes=ROWS * SH_INTER * 2
+        )
+        for mb in range_constexpr(N_MB):
+            m = fx.Int32(mb * BM) + tid // fx.Int32(16)
+            if m < i32_M:
+                g = fx.Float32(0.0)
+                up = fx.Float32(0.0)
+                for sl in range_constexpr(N_SLICES):
+                    off = ((fx.Int32(sl * ROWS) + m) * fx.Int32(NP) + p) * fx.Int32(
+                        32
+                    ) + tid % fx.Int32(16)
+                    g = g + fx.Float32(part[off])
+                    up = up + fx.Float32(part[off + fx.Int32(16)])
+                g = g.to(fx.BFloat16).to(fx.Float32)
+                up = up.to(fx.BFloat16).to(fx.Float32)
+                gate = (
+                    fx.Float32(beta)
+                    * tanh_f32(g * fx.Float32(1.0 / beta))
+                    * sigmoid_f32(g)
                 )
-            h_rsrc = buffer_ops.create_buffer_resource_from_addr(
-                fx.Int64(arg_h), num_records_bytes=BM * SH_INTER * 2
-            )
-            buffer_ops.buffer_store(
-                _raw((gate * up).to(fx.BFloat16)),
-                h_rsrc,
-                _raw(m * fx.Int32(SH_INTER) + c),
-            )
+                if const_expr(linear_beta > 0):
+                    up = fx.Float32(linear_beta) * tanh_f32(
+                        up * fx.Float32(1.0 / linear_beta)
+                    )
+                buffer_ops.buffer_store(
+                    _raw((gate * up).to(fx.BFloat16)),
+                    h_rsrc,
+                    _raw(m * fx.Int32(SH_INTER) + c),
+                )
         rocdl.s_waitcnt(vmcnt=0)
         bump(wave, lane, a_pairs_done)
 
@@ -163,13 +176,16 @@ def shared_down(
     arg_out,
     a_pairs_done,
     *,
+    M_MAX,
     SH_HIDDEN,
     SH_INTER,
     SH_DN_BN,
     SPIN,
 ):
     """Ticket nb: output columns nb * SH_DN_BN .. + SH_DN_BN, 16 per wave per
-    pass, full K, once every gate/up pair is done."""
+    pass, full K, once every gate/up pair is done. Each weight fragment feeds
+    every m-block."""
+    N_MB = sh_rows(M_MAX) // BM
     wait_ge(wave, a_pairs_done, sh_pairs(SH_INTER), False, SPIN)
     row = lane % fx.Int32(16)
     kq = lane // fx.Int32(16)
@@ -186,18 +202,21 @@ def shared_down(
     for sub in range_constexpr(SH_DN_BN // (16 * N_WAVES)):
         n0 = nb * fx.Int32(SH_DN_BN) + (fx.Int32(sub * N_WAVES) + wave) * fx.Int32(16)
         w_dw = (n0 + row) * fx.Int32(SH_INTER // 2) + kq * fx.Int32(4)
-        acc = _zero_f32x4()
+        acc = [_zero_f32x4() for _ in range_constexpr(N_MB)]
         for s in range_constexpr(SH_INTER // 32):
-            acc = _mfma_bf16(
-                _bf16x8(h_rsrc, h_dw + fx.Int32(s * 16)),
-                _bf16x8(w_rsrc, w_dw + fx.Int32(s * 16)),
-                acc,
-            )
-        for r in range_constexpr(4):
-            m = kq * fx.Int32(4) + fx.Int32(r)
-            buffer_ops.buffer_store(
-                _raw(fx.Float32(fx.Vector(acc)[r]).to(fx.BFloat16)),
-                o_rsrc,
-                _raw(m * fx.Int32(SH_HIDDEN) + n0 + row),
-                mask=_raw(m < i32_M),
-            )
+            wv = _bf16x8(w_rsrc, w_dw + fx.Int32(s * 16))
+            for mb in range_constexpr(N_MB):
+                acc[mb] = _mfma_bf16(
+                    _bf16x8(h_rsrc, h_dw + fx.Int32(mb * BM * SH_INTER // 2 + s * 16)),
+                    wv,
+                    acc[mb],
+                )
+        for mb in range_constexpr(N_MB):
+            for r in range_constexpr(4):
+                m = fx.Int32(mb * BM) + kq * fx.Int32(4) + fx.Int32(r)
+                buffer_ops.buffer_store(
+                    _raw(fx.Float32(fx.Vector(acc[mb])[r]).to(fx.BFloat16)),
+                    o_rsrc,
+                    _raw(m * fx.Int32(SH_HIDDEN) + n0 + row),
+                    mask=_raw(m < i32_M),
+                )

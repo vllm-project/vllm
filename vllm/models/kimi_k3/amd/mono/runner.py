@@ -26,9 +26,10 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
 )
 from vllm.models.kimi_k3.amd.mono.layer import compile_mono_moe
 
-# The shared expert's tiles cover one m-block, so the launch takes up to BM
-# tokens; the control words and the workspace are sized for that.
-M_MAX = BM
+# Calls of up to M_MAX tokens take the launch. Each is compiled, and gets its
+# workspace, for its token count rounded up to a whole m-block (_bucket), so
+# the shared expert loops over no more m-blocks than the call has.
+M_MAX = 4 * BM
 G1_BN = 128
 # gemm1 switches to this tile width once routing yields many m-blocks.
 G1_BN_WIDE = 256
@@ -39,13 +40,17 @@ SH_KS = 4
 SH_DN_BN = 64
 
 
+def _bucket(m: int) -> int:
+    return (m + BM - 1) // BM * BM
+
+
 @functools.cache
-def _launcher(ne, topk, hidden, inter, beta, linear_beta, sh, trace=False):
+def _launcher(m_max, ne, topk, hidden, inter, beta, linear_beta, sh, trace=False):
     """sh: (hidden, inter, beta, linear_beta) of the shared expert."""
     g2_bn = G2_BN if hidden % G2_BN == 0 else 256
     g1_wide = G1_BN_WIDE if (2 * inter) % G1_BN_WIDE == 0 else 0
     return compile_mono_moe(
-        M_MAX=M_MAX, NE=ne, TOPK=topk, D_HIDDEN=hidden, D_INTER=inter,
+        M_MAX=m_max, NE=ne, TOPK=topk, D_HIDDEN=hidden, D_INTER=inter,
         G1_BN=G1_BN, G2_BN=g2_bn, G1_BN_WIDE=g1_wide, situ_beta=beta,
         situ_linear_beta=linear_beta, SH_HIDDEN=sh[0], SH_INTER=sh[1],
         sh_beta=sh[2], sh_linear_beta=sh[3], SH_KS=SH_KS, SH_DN_BN=SH_DN_BN,
@@ -54,7 +59,7 @@ def _launcher(ne, topk, hidden, inter, beta, linear_beta, sh, trace=False):
 
 
 class Workspace:
-    """Per-device buffers sized for M_MAX tokens.
+    """Per-device buffers sized for m_max tokens.
 
     The control words must start at zero; the kernel's last workgroup returns
     them to zero, so one zero fill at allocation covers every later launch.
@@ -62,21 +67,22 @@ class Workspace:
     two streams at once need a workspace each.
     """
 
-    def __init__(self, device, topk, inter, sh_inter):
-        offs, total = ws_layout(M_MAX, topk, inter, sh_inter, SH_KS)
+    def __init__(self, device, topk, inter, sh_inter, m_max=M_MAX):
+        offs, total = ws_layout(m_max, topk, inter, sh_inter, SH_KS)
+        self.m_max = m_max
         self.buf = torch.zeros(total, dtype=torch.uint8, device=device)
-        self.ctrl = self.buf[: ctrl_words(M_MAX, topk, sh_inter) * 4].view(torch.int32)
+        self.ctrl = self.buf[: ctrl_words(m_max, topk, sh_inter) * 4].view(torch.int32)
         assert offs["ctrl"] == 0
 
 
 _WORKSPACES: dict[tuple, Workspace] = {}
 
 
-def _workspace(device, topk, inter, sh_inter):
-    key = (device, topk, inter, sh_inter)
+def _workspace(device, topk, inter, sh_inter, m_max):
+    key = (device, topk, inter, sh_inter, m_max)
     ws = _WORKSPACES.get(key)
     if ws is None:
-        ws = _WORKSPACES[key] = Workspace(device, topk, inter, sh_inter)
+        ws = _WORKSPACES[key] = Workspace(device, topk, inter, sh_inter, m_max)
     return ws
 
 
@@ -166,11 +172,13 @@ def mono_moe(
         topk_weights = torch.empty((m, topk), dtype=torch.float32, device=device)
     if topk_ids is None:
         topk_ids = torch.empty((m, topk), dtype=torch.int32, device=device)
+    m_max = _bucket(m)
     launch = _launcher(
-        ne, topk, hidden, inter, float(situ_beta), float(situ_linear_beta),
+        m_max, ne, topk, hidden, inter, float(situ_beta), float(situ_linear_beta),
         (sh_hidden, sh_inter, float(shared_beta), lb), trace is not None,
     )  # fmt: skip
-    ws = workspace or _workspace(device, topk, inter, sh_inter)
+    ws = workspace or _workspace(device, topk, inter, sh_inter, m_max)
+    assert ws.m_max == m_max
     meta = launch.work_meta
     work = m + meta["SH_T"] + max_m_blocks(m, topk) * (meta["NNB1"] + meta["NNB2"])
     if grid is None:

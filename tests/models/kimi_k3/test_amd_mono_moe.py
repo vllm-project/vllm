@@ -140,7 +140,7 @@ def test_supported_sizes(weights):
 
 
 @pytest.mark.parametrize("pool", [64, 0])
-@pytest.mark.parametrize("m", [1, 2, 3, 4, 8, 13, 16])
+@pytest.mark.parametrize("m", [1, 2, 3, 4, 8, 13, 16, 17, 24, 32, 33, 48, 63, 64])
 def test_mono_moe(weights, m, pool):
     w1, w2, w1s, w2s, w_gu, w_dn = weights
     logits, x, sx, bias = make_inputs(m, pool, seed=100 + m)

@@ -117,10 +117,11 @@ def compile_mono_moe(
     hidden SH_HIDDEN) runs as SH_INTER / 16 * SH_KS gate/up tickets after
     the top-k ones, so they run while routing holds the other workgroups back,
     and SH_HIDDEN / SH_DN_BN down tickets after gemm1, where gate/up is long
-    done. sh_linear_beta <= 0 passes up through unclipped. M_MAX must be <= BM:
-    the shared expert's tiles cover one m-block.
+    done. sh_linear_beta <= 0 passes up through unclipped. The shared tiles
+    loop over the ceil(M_MAX / BM) m-blocks, so compile M_MAX no larger than the
+    calls need.
     """
-    assert NE % N_WAVES == 0 and TOPK <= 64 and M_MAX <= BM
+    assert NE % N_WAVES == 0 and TOPK <= 64
     assert SH_INTER % 32 == 0 and SH_HIDDEN % (SH_KS * N_WAVES * 32) == 0
     assert SH_DN_BN % (16 * N_WAVES) == 0 and SH_HIDDEN % SH_DN_BN == 0
     SH_GU_T = sh_pairs(SH_INTER) * SH_KS
@@ -180,7 +181,7 @@ def compile_mono_moe(
         NE=NE, TOPK=TOPK, M_MAX=M_MAX, TRACE=TRACE, L_CNT=L_CNT, L_BMAP=L_BMAP,
         L_BFILL=L_BFILL,
     )  # fmt: skip
-    sh_kw = dict(SH_HIDDEN=SH_HIDDEN, SH_INTER=SH_INTER)
+    sh_kw = dict(M_MAX=M_MAX, SH_HIDDEN=SH_HIDDEN, SH_INTER=SH_INTER)
     W_SH_PAIR = sh_pair_word(M_MAX, TOPK)
     W_SH_DONE = sh_done_word(M_MAX, TOPK, SH_INTER)
     ws_offs = ws_layout(M_MAX, TOPK, D_INTER, SH_INTER, SH_KS)[0]
