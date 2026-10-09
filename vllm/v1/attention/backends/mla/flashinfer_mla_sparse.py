@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer sparse MLA attention backend."""
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -30,6 +31,8 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
+    flat_kv_row_view,
     prepare_sparse_mla_safe_lengths,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
@@ -66,6 +69,13 @@ class _FlashInferMLASparseBackendBase(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        # The kernels read the rows as pages of their kernel block size.
+        (page,) = cls.get_supported_kernel_block_sizes(spec)
+        assert isinstance(page, MultipleOf)
+        return align_blocks_to_rows(spec, page.base)
+
 
 class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
     """FlashInfer sparse MLA backend using the TRTLLM-gen launcher."""
@@ -81,7 +91,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [32, 64]
+        return [MultipleOf(32)]
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -168,7 +178,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64, 256]
+        return [MultipleOf(64)]
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -570,7 +580,13 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-        kv_cache = kv_cache.view(q.dtype)
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_cache.view(q.dtype), block_size
+        )
+        # Block sizes and strides have been aligned to 32 rows.
+        kv_cache = kv_rows.view(
+            -1, math.gcd(block_stride_rows, block_size, 64), kv_rows.shape[-1]
+        )
 
         # Single-token sparse decode. trtllm-gen requires the q_len_per_request
         # dim, but the sparse attention mask is fully per-token (each query token

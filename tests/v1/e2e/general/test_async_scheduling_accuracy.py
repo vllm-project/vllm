@@ -271,9 +271,9 @@ def run_tests(
                 context = f"config=[{config}], params={params}"
                 if spec_config.get("max_model_len") is None:
                     # Keep the original acceptance-quality floor per batch.
-                    relative_drop = (
-                        0.10 if current_platform.is_rocm() and test_preemption else 0.05
-                    )
+                    # Preemption recomputes requests and loses n-gram drafts,
+                    # so allow a larger drop there.
+                    relative_drop = 0.10 if test_preemption else 0.05
                     assert actual >= baseline * (1 - relative_drop), (
                         f"{context}: acceptance={actual}, baseline={baseline}"
                     )

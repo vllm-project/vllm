@@ -29,7 +29,10 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
     FlashInferMLASparseTRTLLMMetadataBuilder,
 )
-from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
+    flat_kv_row_view,
+)
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
@@ -45,7 +48,11 @@ class FlashAttnMLASparseBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64]
+        return [MultipleOf(64)]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        return align_blocks_to_rows(spec)
 
     @staticmethod
     def get_name() -> str:
@@ -274,7 +281,7 @@ class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64]
+        return [MultipleOf(64)]
 
     @staticmethod
     def get_name() -> str:
