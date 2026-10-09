@@ -288,11 +288,16 @@ async def test_per_request_metrics_on_final_usage_chunk(client: openai.AsyncOpen
         extra_body={"min_tokens": 1},
     )
 
-    usage_chunks = [chunk async for chunk in stream if chunk.usage is not None]
-    assert len(usage_chunks) == 1
-    usage_chunk = usage_chunks[0]
+    chunks = [chunk async for chunk in stream]
+    assert len(chunks) > 1
+    for chunk in chunks[:-1]:
+        assert chunk.usage is None
+        assert "metrics" not in (chunk.model_extra or {})
+
+    usage_chunk = chunks[-1]
+    assert usage_chunk.usage is not None
     assert usage_chunk.choices == []
-    metrics = usage_chunk.model_extra.get("metrics")
+    metrics = (usage_chunk.model_extra or {}).get("metrics")
     assert isinstance(metrics, dict)
     assert metrics["time_to_first_token_ms"] >= 0
     assert metrics["generation_time_ms"] >= 0

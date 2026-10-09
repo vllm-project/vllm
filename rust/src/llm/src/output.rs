@@ -240,6 +240,7 @@ impl GenerateOutput {
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
+        self.timestamps = next.timestamps;
     }
 }
 
