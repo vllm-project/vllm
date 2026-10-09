@@ -8,6 +8,7 @@ from torch import nn
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.model_loader import get_model_loader, register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -119,16 +120,20 @@ def _track(model: nn.Module, loaded: set[str], quantized: bool) -> str:
 
 
 def test_weights_track_reports_missing_quantized_weights():
-    # Quantized checkpoints may only omit KV-cache scales and online-quant params.
+    # Quantized checkpoints may only omit KV-cache scales, fbgemm_fp8's
+    # input_scale_ub and online-quant params.
     online = _QuantMethod()
     online.uses_meta_device = True
     model = nn.Module()
     model.proj = _layer(_QuantMethod(), weight=(4, 4), weight_scale_inv=(1, 1))
+    model.unquantized = _layer(UnquantizedLinearMethod(), weight=(4, 4), bias=(4,))
+    model.fbgemm = _layer(_QuantMethod(), weight=(4, 4), input_scale_ub=())
     model.attn = _layer(_QuantMethod(), k_scale=(), v_scale=())
     model.online = _layer(online, weight=(4, 4))
-    error = _track(model, {"proj.weight"}, quantized=True)
-    assert "proj.weight_scale_inv" in error
-    assert "attn" not in error and "online" not in error
+    loaded = {"proj.weight", "unquantized.weight", "fbgemm.weight"}
+    error = _track(model, loaded, quantized=True)
+    assert "proj.weight_scale_inv" in error and "unquantized.bias" in error
+    assert "fbgemm" not in error and "attn" not in error and "online" not in error
 
 
 def test_weights_track_keeps_unquantized_models_unchanged():

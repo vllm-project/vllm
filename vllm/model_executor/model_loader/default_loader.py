@@ -46,8 +46,15 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# KV-cache scales registered by BaseKVCacheMethod; most checkpoints omit them.
-_KV_CACHE_SCALE_NAMES = ("q_scale", "k_scale", "v_scale", "prob_scale")
+# Parameters a serialized checkpoint may omit: the KV-cache scales registered by
+# BaseKVCacheMethod, and fbgemm_fp8's input_scale_ub, built from its config.
+_CHECKPOINT_OPTIONAL_PARAMS = (
+    "q_scale",
+    "k_scale",
+    "v_scale",
+    "prob_scale",
+    "input_scale_ub",
+)
 
 
 class DefaultModelLoader(BaseModelLoader):
@@ -523,12 +530,12 @@ class DefaultModelLoader(BaseModelLoader):
                 if has_online_quant or has_postprocess_quant:
                     for param_name, _ in module.named_parameters():
                         # A serialized quantized checkpoint must still carry
-                        # everything except the KV-cache scales.
+                        # everything except _CHECKPOINT_OPTIONAL_PARAMS.
                         if (
                             quantized
                             and not has_online_quant
                             and param_name.rsplit(".", 1)[-1]
-                            not in _KV_CACHE_SCALE_NAMES
+                            not in _CHECKPOINT_OPTIONAL_PARAMS
                         ):
                             continue
                         full_name = f"{name}.{param_name}" if name else param_name
