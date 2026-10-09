@@ -953,7 +953,13 @@ class Platform:
         """
         from math import lcm
 
-        from vllm.config.vllm import set_current_vllm_config
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
         from vllm.model_executor.layers.mamba.abstract import (
             get_mamba_prefill_checkpoint_alignment,
         )
@@ -963,6 +969,7 @@ class Platform:
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
         from vllm.v1.kv_cache_interface import (
+            AttentionSpec,
             FullAttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
@@ -982,6 +989,19 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
+            # Packed MLA row widths depend on the layer's impl (e.g. fp8_ds_mla).
+            # Platforms that register no layers keep the head_size estimate.
+            mla_spec = next(
+                (
+                    layer.get_kv_cache_spec(vllm_config)
+                    for layer in get_layers_from_vllm_config(
+                        vllm_config,
+                        AttentionLayerBase,  # type: ignore[type-abstract]
+                    ).values()
+                    if layer.get_attn_backend().is_mla()
+                ),
+                None,
+            )
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -989,6 +1009,11 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                state_content_bytes=(
+                    mla_spec.state_content_bytes
+                    if isinstance(mla_spec, AttentionSpec)
+                    else None
+                ),
             ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")

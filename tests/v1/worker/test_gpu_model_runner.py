@@ -30,6 +30,7 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.models import ModelRegistry
@@ -55,6 +56,7 @@ from vllm.v1.attention.backends.registry import (
 from vllm.v1.core.kv_cache_planning import estimate_max_model_len
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -608,7 +610,7 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
 @pytest.mark.parametrize(
     ("backends", "mamba_page_size_padded"),
     [
-        ([_mock_backend([64])], 4352 * 512),
+        ([_mock_backend([64])], 3328 * 656),
         # KPOOL_TAIL supports only BLHNC, which packs Mamba states unpadded.
         ([_mock_backend([64]), KpoolTailBackend], None),
     ],
@@ -624,17 +626,23 @@ def test_hybrid_mla_block_alignment(monkeypatch, backends, mamba_page_size_padde
     monkeypatch.setattr(
         ModelRegistry, "resolve_model_cls", lambda *args, **kwargs: (model_cls, None)
     )
-    vllm_config = VllmConfig(cache_config=CacheConfig(cache_dtype="fp8"))
+    vllm_config = VllmConfig(cache_config=CacheConfig(cache_dtype="fp8_ds_mla"))
     vllm_config.model_config = SimpleNamespace(
         use_mla=True,
         architecture=None,
         get_num_kv_heads=lambda parallel_config: 1,
         get_head_size=lambda: 512,
     )
+    mla_layer = Mock(spec=AttentionLayerBase)
+    mla_layer.get_attn_backend.return_value.is_mla.return_value = True
+    mla_layer.get_kv_cache_spec.return_value = Mock(
+        spec=AttentionSpec, state_content_bytes=656
+    )
+    vllm_config.compilation_config.static_forward_context["mla"] = mla_layer
 
     Platform._align_hybrid_block_size(vllm_config, backends[0])
 
-    assert vllm_config.cache_config.block_size == 4352
+    assert vllm_config.cache_config.block_size == 3328
     assert vllm_config.cache_config.mamba_page_size_padded == mamba_page_size_padded
 
 
