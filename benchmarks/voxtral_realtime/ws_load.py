@@ -156,7 +156,7 @@ async def run_one(
             )
             try:
                 await asyncio.wait_for(recv_task, timeout=120)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 res["error"] = res["error"] or "timeout waiting for transcription.done"
                 done.set()
                 recv_task.cancel()
