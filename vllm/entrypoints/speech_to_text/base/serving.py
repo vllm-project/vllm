@@ -26,7 +26,6 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.entrypoints.whisper import generate_chunk_with_gzip_fallback
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
@@ -163,6 +162,19 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
     def shutdown(self) -> None:
         self._preprocess_executor.shutdown(wait=False)
+
+    def _engine_generate(
+        self,
+        request,
+        engine_input,
+        sampling_params,
+        request_id: str,
+        **generate_kwargs,
+    ):
+        """Hook for transcription gzip fallback; translation keeps this path."""
+        return self.engine_client.generate(
+            engine_input, sampling_params, request_id, **generate_kwargs
+        )
 
     def _decode_and_chunk_speech(
         self,
@@ -533,14 +545,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             request_id if len(engine_inputs) == 1 else f"{request_id}-{idx}"
             for idx in range(len(engine_inputs))
         ]
-        req_t = getattr(request, "temperature", None)
-        use_gzip_fallback = (
-            "whisper" in getattr(self.model_cls, "__name__", "").lower()
-            and not bool(getattr(request, "stream", False))
-            and (req_t is None or float(req_t) == 0.0)
-        )
-        tok = getattr(self, "tokenizer", None)
-        whisper_vocab_size = int(getattr(tok, "vocab_size", None) or 51865)
         list_result_generator = []
         try:
             for request_id_item, engine_input in zip(engine_request_ids, engine_inputs):
@@ -565,19 +569,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                     )
-                elif use_gzip_fallback:
-                    generator = generate_chunk_with_gzip_fallback(
-                        self.engine_client.generate,
-                        engine_input,
-                        sampling_params,
-                        request_id_item,
-                        vocab_size=whisper_vocab_size,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                    )
                 else:
-                    # Voxtral / Qwen ASR / stream / T>0: original engine path.
-                    generator = self.engine_client.generate(
+                    generator = self._engine_generate(
+                        request,
                         engine_input,
                         sampling_params,
                         request_id_item,

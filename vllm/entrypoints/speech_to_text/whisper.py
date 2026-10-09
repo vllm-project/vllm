@@ -1,21 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""HF Whisper generate_with_fallback, as a mixin around LLM.generate.
+"""HF Whisper generate_with_fallback for STT transcription + optional LLM.
 
 Source: transformers.models.whisper.generation_whisper
   WhisperGenerationMixin.generate, generate_with_fallback, _need_fallback
 
-HF does **not** put this on GenerationMixin.generate. Users call
-WhisperForConditionalGeneration.generate(..., temperature=(0, 0.2, ...),
-compression_ratio_threshold=1.35, logprob_threshold=-1.0). Inner decode is
-super().generate(). Thresholds default to None: one greedy pass, no retry.
+Offline: WhisperGenerationMixin.generate wraps super().generate() (LLM.generate).
+Do not auto-hook the generic LLM class.
 
-vLLM analog: WhisperGenerationMixin.generate wraps super().generate()
-(LLM.generate). Do not auto-hook the generic LLM class. The same gzip /
-logprob ladder is used by /v1/audio/transcriptions when temperature=0
-(OpenAI contract), via generate_chunk_with_gzip_fallback.
+Serving: /v1/audio/transcriptions only (OpenAIServingTranscription). Translation
+and SpeechToTextBaseServing keep engine_client.generate.
 
-    from vllm.entrypoints.whisper import WhisperLLM  # or WhisperGenerationMixin
+    from vllm.entrypoints.speech_to_text.whisper import WhisperLLM
 
     llm = WhisperLLM(model="openai/whisper-large-v3")
     outputs = llm.generate(
@@ -39,15 +35,23 @@ from collections.abc import AsyncGenerator, Sequence
 
 from vllm.sampling_params import SamplingParams
 
-# HF generation_whisper.py docs: 1.35 / -1.0 are common. OpenAI used gzip 2.4.
-COMPRESSION_RATIO_THRESHOLD = 1.35
-LOGPROB_THRESHOLD = -1.0
-TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+# Long-form defaults from HuggingFace
+# ``transformers.models.whisper.generation_whisper``
+# (``generate_with_fallback`` / ``_need_fallback``).
+# OpenAI whisper.cpp used gzip 2.4; we match HF, not that OpenAI constant.
+COMPRESSION_RATIO_THRESHOLD = 1.35  # retry when token-id gzip ratio exceeds this
+LOGPROB_THRESHOLD = -1.0  # retry when mean token logprob is below this
+TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)  # greedy first, then +0.2 up to 1.0
+# Multilingual Whisper tokenizer size (English-only is 51864). Gzip packs
+# each token into ceil(log2(vocab_size)/8) bytes; STT serving may have no
+# tokenizer yet, so this is the fallback width.
+WHISPER_VOCAB_SIZE = 51865
 
 
 def compression_ratio(token_ids: Sequence[int], vocab_size: int) -> float:
     if not token_ids:
         return float("inf")
+    # Bits-per-token / 8 → whole bytes, then +1 so ids always fit.
     width = int(math.log2(max(vocab_size, 2)) / 8) + 1
     raw = b"".join(int(t).to_bytes(width, "little", signed=False) for t in token_ids)
     return len(raw) / max(len(zlib.compress(raw)), 1)
@@ -80,6 +84,26 @@ def needs_fallback(
     )
 
 
+def gzip_vocab_size(tokenizer) -> int:
+    if tokenizer is None:
+        return WHISPER_VOCAB_SIZE
+    return int(getattr(tokenizer, "vocab_size", None) or len(tokenizer))
+
+
+def is_whisper_model(model_cls) -> bool:
+    return "whisper" in getattr(model_cls, "__name__", "").lower()
+
+
+def should_gzip_fallback(model_cls, request) -> bool:
+    """OpenAI T=0 gzip ladder: Whisper transcription, non-streaming only."""
+    if not is_whisper_model(model_cls):
+        return False
+    if bool(getattr(request, "stream", False)):
+        return False
+    t = getattr(request, "temperature", None)
+    return t is None or float(t) == 0.0
+
+
 def _avg_logprob(completion) -> float | None:
     ids = getattr(completion, "token_ids", None) or []
     lp = getattr(completion, "cumulative_logprob", None)
@@ -109,20 +133,18 @@ async def generate_chunk_with_gzip_fallback(
     vocab_size: int,
     **generate_kwargs,
 ) -> AsyncGenerator:
-    """OpenAI/HF temperature ladder on one STT ``engine_client.generate``."""
-    last = None
+    """HF temperature ladder; yield the kept attempt as an engine generator."""
     for t_idx, temperature in enumerate(TEMPERATURES):
         sp = _sampling_params_at_temperature(sampling_params, temperature)
         rid = request_id if t_idx == 0 else f"{request_id}-fb-{t_idx}"
-        final = None
+        buffered = []
         async for output in engine_generate(engine_input, sp, rid, **generate_kwargs):
-            final = output
+            buffered.append(output)
             if getattr(output, "finished", True):
                 break
-        last = final
-        if last is None or not getattr(last, "outputs", None):
+        if not buffered or not getattr(buffered[-1], "outputs", None):
             continue
-        completion = last.outputs[0]
+        completion = buffered[-1].outputs[0]
         retry = needs_fallback(
             list(completion.token_ids),
             vocab_size,
@@ -131,9 +153,9 @@ async def generate_chunk_with_gzip_fallback(
             logprob_threshold=LOGPROB_THRESHOLD,
         )
         if t_idx == len(TEMPERATURES) - 1 or not retry:
-            break
-    if last is not None:
-        yield last
+            for output in buffered:
+                yield output
+            return
 
 
 class WhisperGenerationMixin:
@@ -178,7 +200,7 @@ class WhisperGenerationMixin:
         if not callable(get_tokenizer):
             raise AttributeError("WhisperGenerationMixin requires get_tokenizer()")
         tokenizer = get_tokenizer()
-        vocab_size = int(getattr(tokenizer, "vocab_size", None) or len(tokenizer))
+        vocab_size = gzip_vocab_size(tokenizer)
 
         n = len(prompts_list)
         finals = [None] * n

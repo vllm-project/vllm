@@ -3,41 +3,57 @@
 
 import math
 
-from vllm.entrypoints.whisper import (
+from vllm.entrypoints.speech_to_text.whisper import (
     COMPRESSION_RATIO_THRESHOLD,
     LOGPROB_THRESHOLD,
     TEMPERATURES,
+    WHISPER_VOCAB_SIZE,
     WhisperGenerationMixin,
     compression_ratio,
     needs_fallback,
 )
 
 
+def test_hf_longform_defaults_match_named_constants():
+    # transformers.models.whisper.generation_whisper generate_with_fallback
+    assert COMPRESSION_RATIO_THRESHOLD == 1.35
+    assert LOGPROB_THRESHOLD == -1.0
+    assert TEMPERATURES == (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+    assert WHISPER_VOCAB_SIZE == 51865
+
+
 def test_empty_token_ids_gzip_inf_but_no_retry_without_threshold():
-    assert math.isinf(compression_ratio([], vocab_size=51865))
-    assert needs_fallback([], vocab_size=51865) is False
+    assert math.isinf(compression_ratio([], vocab_size=WHISPER_VOCAB_SIZE))
+    assert needs_fallback([], vocab_size=WHISPER_VOCAB_SIZE) is False
     assert needs_fallback(
-        [], vocab_size=51865, compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD
+        [],
+        vocab_size=WHISPER_VOCAB_SIZE,
+        compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
     )
 
 
 def test_looping_tokens_exceed_gzip_threshold():
     loop = [42, 43, 44] * 80
-    ratio = compression_ratio(loop, vocab_size=51865)
+    ratio = compression_ratio(loop, vocab_size=WHISPER_VOCAB_SIZE)
     assert ratio > COMPRESSION_RATIO_THRESHOLD
     assert needs_fallback(
-        loop, vocab_size=51865, compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD
+        loop,
+        vocab_size=WHISPER_VOCAB_SIZE,
+        compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
     )
-    assert needs_fallback(loop, vocab_size=51865) is False
+    assert needs_fallback(loop, vocab_size=WHISPER_VOCAB_SIZE) is False
 
 
 def test_diverse_tokens_skip_fallback():
     tokens = list(range(1, 40))
-    assert compression_ratio(tokens, vocab_size=51865) <= COMPRESSION_RATIO_THRESHOLD
+    assert (
+        compression_ratio(tokens, vocab_size=WHISPER_VOCAB_SIZE)
+        <= COMPRESSION_RATIO_THRESHOLD
+    )
     assert (
         needs_fallback(
             tokens,
-            vocab_size=51865,
+            vocab_size=WHISPER_VOCAB_SIZE,
             avg_logprob=-0.2,
             compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
             logprob_threshold=LOGPROB_THRESHOLD,
@@ -50,13 +66,13 @@ def test_low_logprob_needs_fallback():
     tokens = list(range(1, 20))
     assert needs_fallback(
         tokens,
-        vocab_size=51865,
+        vocab_size=WHISPER_VOCAB_SIZE,
         avg_logprob=LOGPROB_THRESHOLD - 0.1,
         logprob_threshold=LOGPROB_THRESHOLD,
     )
     assert not needs_fallback(
         tokens,
-        vocab_size=51865,
+        vocab_size=WHISPER_VOCAB_SIZE,
         avg_logprob=LOGPROB_THRESHOLD + 0.1,
         logprob_threshold=LOGPROB_THRESHOLD,
     )
@@ -75,7 +91,7 @@ class _Out:
 
 
 class _Tok:
-    vocab_size = 51865
+    vocab_size = WHISPER_VOCAB_SIZE
 
 
 def _whisper_llm(on_generate):
