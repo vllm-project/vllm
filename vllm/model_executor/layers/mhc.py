@@ -15,11 +15,10 @@ from vllm.utils.import_utils import has_tilelang
 
 logger = init_logger(__name__)
 
-# gfx942 ASM seam. The op's own cutoff is 40 tokens; below 64 the folded
-# post GEMM already in this file is faster, so vLLM does not call it there.
+# AITER's few-token kernel runs below 60 tokens (MHC_SEAM_SMALL_MAX_T).
+# The b40 in the gates binary is not that cutoff. vLLM calls the seam from
+# 64 tokens; that number is not AITER's 60.
 _AITER_SEAM_MIN_TOKENS = 64
-_AITER_SEAM_HC_MULT = 4
-_AITER_SEAM_HIDDEN = 5120
 
 
 def _has_tilelang_mhc() -> bool:
@@ -77,24 +76,74 @@ def _has_aiter_mhc_fused_post_pre_delayed_rms_norm() -> bool:
     return on_gfx950()
 
 
-def _has_aiter_mhc_fused_post_pre_delayed() -> bool:
+def _load_aiter_mhc_seam_probe():
     if not HAS_AITER_MHC or not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx942
-
-    if not on_gfx942():
-        return False
+        return None
     try:
-        from aiter.ops.mhc import mhc_fused_post_pre_delayed
+        from aiter.ops.mhc import mhc_fused_post_pre_delayed_asm_supported
     except Exception:
-        return False
-    return callable(mhc_fused_post_pre_delayed)
+        return None
+    if not callable(mhc_fused_post_pre_delayed_asm_supported):
+        return None
+    return mhc_fused_post_pre_delayed_asm_supported
+
+
+_AITER_MHC_SEAM_PROBE = _load_aiter_mhc_seam_probe()
+
+
+def _has_aiter_mhc_fused_post_pre_delayed(hidden_size: int, hc_mult: int) -> bool:
+    probe = _AITER_MHC_SEAM_PROBE
+    return bool(probe is not None and probe(hidden_size, hc_mult))
+
+
+def warmup_mhc_fused_post_pre_delayed(hidden_size: int, hc_mult: int) -> None:
+    """Compile ``module_mhc_seam_asm``. Both kernels are in that one module."""
+    if not _has_aiter_mhc_fused_post_pre_delayed(hidden_size, hc_mult):
+        return
+    from aiter.ops.mhc import mhc_fused_post_pre_delayed
+
+    device = torch.accelerator.current_accelerator()
+    num_tokens = _AITER_SEAM_MIN_TOKENS
+    hc_mult3 = 2 * hc_mult + hc_mult * hc_mult
+    fn = torch.zeros(
+        (hc_mult3, hc_mult * hidden_size), dtype=torch.float32, device=device
+    )
+    hc_scale = torch.ones((3,), dtype=torch.float32, device=device)
+    hc_base = torch.zeros((hc_mult3,), dtype=torch.float32, device=device)
+    residual = torch.zeros(
+        (num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16, device=device
+    )
+    sublayer_out = torch.zeros(
+        (num_tokens, hidden_size), dtype=torch.bfloat16, device=device
+    )
+    post_layer_mix = torch.zeros(
+        (num_tokens, hc_mult, 1), dtype=torch.float32, device=device
+    )
+    comb_res_mix = torch.zeros(
+        (num_tokens, hc_mult, hc_mult), dtype=torch.float32, device=device
+    )
+    comb_res_mix[..., 0] = 1
+    mhc_fused_post_pre_delayed(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        1e-6,
+        1e-6,
+        1e-6,
+        1.0,
+        20,
+        None,
+        sublayer_out,
+        post_layer_mix,
+        comb_res_mix,
+    )
+    torch.accelerator.synchronize()
 
 
 HAS_AITER_MHC_FUSED = _has_aiter_mhc_fused()
 HAS_AITER_MHC_PRE_NORM = _aiter_mhc_op_accepts_norm("mhc_pre")
 HAS_AITER_MHC_FUSED_NORM = _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
-HAS_AITER_MHC_FUSED_POST_PRE_DELAYED = _has_aiter_mhc_fused_post_pre_delayed()
 HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM = (
     _has_aiter_mhc_fused_post_pre_delayed_rms_norm()
 )
@@ -345,21 +394,16 @@ class MHCPreDelayedOp(CustomOp):
     """
 
     # --8<-- [end:mhc_pre_delayed]
-    # Off unless __init__ opts in. A caller that skips __init__ stays off.
-    _gfx942_seam = False
 
     @classmethod
     def enabled(cls) -> bool:
         return True
 
-    def __init__(self, gfx942_seam: bool = False) -> None:
+    def __init__(self) -> None:
         super().__init__()
         # Built here, not lazily: CustomOp resolves dispatch against the
         # current vLLM config, which is only set during model construction.
         self._post = MHCPostOp()
-        # DeepSeek-V4.1 AMD opts in. The ASM kernel was measured on that
-        # model; another caller keeps the seam below.
-        self._gfx942_seam = gfx942_seam
 
     def _maybe_post(
         self,
@@ -430,21 +474,17 @@ class MHCPreDelayedOp(CustomOp):
         post_layer_mix: torch.Tensor | None = None,
         comb_res_mix: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # gfx942 ASM seam. It does not fold RMSNorm, so a norm_weight stays on
-        # the branches below. Shorter steps stay there too: under 64 tokens the
-        # folded post GEMM is faster than this kernel.
         if (
-            self._gfx942_seam
-            and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED
-            and sublayer_out is not None
+            sublayer_out is not None
             and post_layer_mix is not None
             and comb_res_mix is not None
             and norm_weight is None
             and x is None
             and residual.dim() == 3
-            and residual.shape[-2] == _AITER_SEAM_HC_MULT
-            and residual.shape[-1] == _AITER_SEAM_HIDDEN
             and residual.shape[0] >= _AITER_SEAM_MIN_TOKENS
+            and _has_aiter_mhc_fused_post_pre_delayed(
+                residual.shape[-1], residual.shape[-2]
+            )
         ):
             logger.info_once(
                 "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",

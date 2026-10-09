@@ -249,7 +249,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
-        self.mhc_pre_delayed = MHCPreDelayedOp(gfx942_seam=True)
+        self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
         # Where aiter's fused seam kernel runs (gfx950), it folds the following
         # attn_norm / ffn_norm into its collapse, so the separate norms are
