@@ -196,7 +196,7 @@ class KVCacheManager:
                 for manager in self.coordinator.single_type_managers
                 if isinstance(manager, MambaManager)
             ]
-        self._scheduled_decode_checkpoints: dict[str, tuple[int, tuple[int, ...]]] = {}
+        self._scheduled_decode_checkpoints: dict[str, int] = {}
         # One predicate, read by both sides of the feature, so the scheduler
         # cannot end a chunk at a junction the manager would refuse -- a refused
         # junction costs a forward pass and displaces the block-boundary stop.
@@ -611,14 +611,6 @@ class KVCacheManager:
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
             return None
-        # The private snapshot is optional: take it only while a free block
-        # remains per active request, so it neither fails nor starves a step.
-        needs_decode_checkpoint = needs_decode_checkpoint and (
-            required_blocks
-            + len(self.decode_checkpoint_managers)
-            + len(self.decode_checkpoint_managers[0].req_to_blocks)
-            <= available_blocks
-        )
 
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
@@ -641,13 +633,7 @@ class KVCacheManager:
             num_encoder_tokens,
         )
         if needs_decode_checkpoint:
-            self._scheduled_decode_checkpoints[request.request_id] = (
-                checkpoint_unit,
-                tuple(
-                    manager.allocate_decode_checkpoint(request.request_id)
-                    for manager in self.decode_checkpoint_managers
-                ),
-            )
+            self._scheduled_decode_checkpoints[request.request_id] = checkpoint_unit
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -682,11 +668,32 @@ class KVCacheManager:
     def take_decode_checkpoints(
         self, scheduled_req_ids: dict[str, int]
     ) -> dict[str, tuple[int, tuple[int, ...]]] | None:
-        checkpoints = self._scheduled_decode_checkpoints
+        """Allocate the step's optional private snapshots.
+
+        Runs after the step's required allocations. A snapshot is skipped
+        unless every active request keeps one free block per KV cache group,
+        which covers the block-boundary crossing of its next decode step.
+        """
+        pending = self._scheduled_decode_checkpoints
         self._scheduled_decode_checkpoints = {}
-        return {
-            key: value for key, value in checkpoints.items() if key in scheduled_req_ids
-        } or None
+        if not pending:
+            return None
+        managers = self.decode_checkpoint_managers
+        headroom = len(managers[0].req_to_blocks) * self.num_kv_cache_groups
+        checkpoints = {}
+        for request_id, unit in pending.items():
+            if request_id not in scheduled_req_ids:
+                continue
+            if self.block_pool.get_num_free_blocks() < len(managers) + headroom:
+                break
+            checkpoints[request_id] = (
+                unit,
+                tuple(
+                    manager.allocate_decode_checkpoint(request_id)
+                    for manager in managers
+                ),
+            )
+        return checkpoints or None
 
     def discard_decode_checkpoint(
         self, request_id: str, checkpoint: tuple[int, tuple[int, ...]]

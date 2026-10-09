@@ -4977,14 +4977,17 @@ def _make_decode_checkpoint_manager(
     num_prefill_lookahead=0,
     num_speculative_blocks=0,
     fine_grained=False,
+    num_mamba_groups=1,
 ):
     hash_block_size = hash_block_size or block_size
-    config = _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"])
-    config.kv_cache_groups[0].is_eagle_group = use_eagle
-    config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec,
-        num_speculative_blocks=num_speculative_blocks,
+    config = _make_hybrid_kv_cache_config(
+        block_size, 100, ["full"] + ["mamba_align"] * num_mamba_groups
     )
+    config.kv_cache_groups[0].is_eagle_group = use_eagle
+    for group in config.kv_cache_groups[1:]:
+        group.kv_cache_spec = replace(
+            group.kv_cache_spec, num_speculative_blocks=num_speculative_blocks
+        )
     manager = make_kv_cache_manager(
         config,
         max_model_len=1024,
@@ -5145,25 +5148,41 @@ def test_decode_checkpoint_keeps_prompt_tail_entry():
     assert pool.get_cached_block(request.block_hashes[2], [0]) is not None
 
 
-def test_decode_checkpoint_snapshot_is_skipped_when_blocks_run_short():
-    """The private snapshot is optional; it must not fail a step that fits."""
+@pytest.mark.parametrize("same_step", [True, False])
+def test_decode_checkpoint_snapshot_leaves_blocks_for_running_requests(same_step):
+    """The private snapshot is optional: with several Mamba groups it must not
+    take the blocks another running request needs to cross a block boundary,
+    whether that request runs in the same step or the next one."""
     manager, _ = _make_decode_checkpoint_manager(
-        block_size=8, hash_block_size=4, fine_grained=True
+        block_size=8, hash_block_size=4, fine_grained=True, num_mamba_groups=2
     )
-    request = make_request("producer", list(range(4)), 4, sha256)
-    manager.allocate_slots(request, 4)
-    request.num_computed_tokens = 4
-    request.append_output_token_ids(4)
-    for computed in range(5, 8):
-        _decode_one_token(manager, request, computed)
+    requests = []
+    for request_id, end in (("a", 11), ("b", 16)):
+        request = make_request(request_id, list(range(4)), 4, sha256)
+        manager.allocate_slots(request, 4)
+        request.num_computed_tokens = 4
+        request.append_output_token_ids(4)
+        for computed in range(5, end + 1):
+            _decode_one_token(manager, request, computed)
+        requests.append(request)
+    a, b = requests
+    mamba_manager = manager.coordinator.single_type_managers[1]
+    assert mamba_manager.decode_checkpoint_boundaries("b") == [16]
 
+    # a's next step reaches snapshot boundary 12 (two snapshot blocks); b's
+    # crosses block boundary 16 and needs a block in each of the three groups.
     pool = manager.block_pool
-    held = pool.get_new_blocks(pool.get_num_free_blocks())
+    held = pool.get_new_blocks(pool.get_num_free_blocks() - 4)
     manager.new_step_starts()
-    assert manager.allocate_slots(request, 1) is not None
-    assert manager.take_decode_checkpoints({request.request_id: 1}) is None
+    assert manager.allocate_slots(a, 1) is not None
+    if not same_step:
+        assert manager.take_decode_checkpoints({"a": 1}) is None
+        manager.new_step_starts()
+    assert manager.allocate_slots(b, 1) is not None
+    assert manager.take_decode_checkpoints({"a": 1, "b": 1}) is None
     pool.free_blocks(held)
-    manager.free(request)
+    manager.free(a)
+    manager.free(b)
 
 
 def test_non_spec_decode_snapshot_not_reallocated_for_in_flight_step():
