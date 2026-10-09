@@ -40,6 +40,7 @@ def test_marlin_fp4_unavailable_when_cuda_ops_missing(monkeypatch):
 
     supported, kernel_reason = MarlinNvFp4LinearKernel.is_supported()
     assert not supported
+    assert kernel_reason is not None
     assert "_C::gptq_marlin_repack" in kernel_reason
 
 
