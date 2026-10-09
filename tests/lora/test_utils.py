@@ -106,6 +106,8 @@ def test_parse_fine_tuned_lora_name_invalid():
     fixture = {
         "base_model.weight",
         "base_model.model.weight",
+        "base_model.model.model.layers.9.mlp.down_proj.lora_A.bias",
+        "base_model.model.model.layers.9.mlp.down_proj.lora_B.bias",
     }
     for name in fixture:
         with pytest.raises(ValueError, match="unsupported LoRA weight"):
