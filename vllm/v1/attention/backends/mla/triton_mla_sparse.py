@@ -115,7 +115,10 @@ class TritonMLASparseImpl(XPUMLASparseImpl):
 
 
 class TritonMLASparseBackend(AttentionBackend):
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+    ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "float16",
@@ -182,5 +185,5 @@ class TritonMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        """Require SM80 or newer for this BF16 sparse attention implementation."""
+        """Require SM80 or newer for this sparse attention implementation."""
         return capability.major >= 8
