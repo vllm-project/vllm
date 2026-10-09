@@ -11,9 +11,8 @@ from dataclasses import dataclass
 
 import pytest
 import torch
-from utils import skip_unsupported
+from utils import skip_if_not_cuda
 
-import vllm.envs as envs
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
@@ -102,8 +101,8 @@ def _quantize_experts(
 
 # (n, k, e, topk). small/large mirror MARLIN_MOE_SCENARIOS
 # (tests/kernels/moe/test_moe.py) and exercise the multi-tile K reduction that
-# the batch-invariant ``use_full_k`` path pins. FP4 schemes only diverge without
-# it at the xlarge shape, which approximates a real NVFP4 MoE layer.
+# the batch-invariant ``use_full_k`` path pins. xlarge approximates a real NVFP4
+# MoE layer.
 SHAPES: list[tuple[int, int, int, int]] = [
     (512, 512, 8, 2),
     (1024, 2048, 8, 2),
@@ -111,17 +110,15 @@ SHAPES: list[tuple[int, int, int, int]] = [
 ]
 
 
-@skip_unsupported
+@skip_if_not_cuda
 @pytest.mark.parametrize("scheme", SCHEMES, ids=[s.name for s in SCHEMES])
 @pytest.mark.parametrize("n,k,e,topk", SHAPES, ids=["small", "large", "xlarge"])
 @pytest.mark.parametrize("batch_size", [4, 16, 64, 257])
 def test_marlin_moe_kernel_is_batch_invariant(
     scheme: Scheme, n: int, k: int, e: int, topk: int, batch_size: int
 ):
-    """A token's Marlin MoE output is bitwise identical regardless of batch
+    """Every token's Marlin MoE output is bitwise identical regardless of batch
     size or its position in the batch, and matches a dequantized reference."""
-    assert envs.VLLM_BATCH_INVARIANT
-
     torch.manual_seed(0)
     dtype = scheme.dtype
 
@@ -130,8 +127,8 @@ def test_marlin_moe_kernel_is_batch_invariant(
     w1q = _quantize_experts(w1, scheme.b_type, scheme.group_size)
     w2q = _quantize_experts(w2, scheme.b_type, scheme.group_size)
 
-    token = torch.randn((1, k), device="cuda", dtype=dtype) / 10
-    token_score = torch.randn((1, e), device="cuda", dtype=dtype)
+    tokens = torch.randn((batch_size, k), device="cuda", dtype=dtype) / 10
+    scores = torch.randn((batch_size, e), device="cuda", dtype=dtype)
 
     def run(a: torch.Tensor, score: torch.Tensor) -> torch.Tensor:
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
@@ -155,29 +152,22 @@ def test_marlin_moe_kernel_is_batch_invariant(
         )
 
     with set_current_vllm_config(VllmConfig()):
-        baseline = run(token, token_score)[0]
-        ref_weights, ref_ids, _ = fused_topk(token, token_score, topk, False)
+        alone = torch.cat(
+            [run(tokens[i : i + 1], scores[i : i + 1]) for i in range(batch_size)]
+        )
+        ref_weights, ref_ids, _ = fused_topk(tokens, scores, topk, False)
         ref = torch_experts(
-            token,
+            tokens,
             w1q["w_ref"],
             w2q["w_ref"],
             topk_weight=ref_weights,
             topk_ids=ref_ids,
             global_num_experts=e,
         )
-        torch.testing.assert_close(baseline, ref[0], rtol=0.0, atol=scheme.ref_atol)
+        torch.testing.assert_close(alone, ref, rtol=0.0, atol=scheme.ref_atol)
 
-        filler_a = torch.randn((batch_size - 1, k), device="cuda", dtype=dtype) / 10
-        filler_score = torch.randn((batch_size - 1, e), device="cuda", dtype=dtype)
+        batched = run(tokens, scores)
+        flipped = run(tokens.flip(0), scores.flip(0)).flip(0)
 
-        front = run(
-            torch.cat([token, filler_a], dim=0),
-            torch.cat([token_score, filler_score], dim=0),
-        )[0]
-        back = run(
-            torch.cat([filler_a, token], dim=0),
-            torch.cat([filler_score, token_score], dim=0),
-        )[-1]
-
-    torch.testing.assert_close(front, baseline, rtol=0.0, atol=0.0)
-    torch.testing.assert_close(back, baseline, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(batched, alone, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(flipped, alone, rtol=0.0, atol=0.0)
