@@ -16,21 +16,19 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.logprobs import ArrayLogprobs, FlatLogprobs, create_sample_logprobs
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.logprobs import FlatLogprobs, _Column, create_sample_logprobs
+from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists
 
 
 def _make_processor(
-    num_logprobs: int, array_logprobs: bool = False
+    num_logprobs: int, flat_logprobs: bool = False
 ) -> LogprobsProcessor:
     return LogprobsProcessor(
         tokenizer=None,
-        logprobs=create_sample_logprobs(
-            flat_logprobs=False, array_logprobs=array_logprobs
-        ),
+        logprobs=create_sample_logprobs(flat_logprobs=flat_logprobs),
         prompt_logprobs=None,
         cumulative_logprob=0.0,
         num_logprobs=num_logprobs,
@@ -112,78 +110,69 @@ def _engine_steps(seed: int, width: int, num_steps: int) -> list[LogprobsLists]:
     return steps
 
 
-@pytest.mark.parametrize("num_logprobs,width", [(0, 1), (3, 4), (3, 6)])
-def test_array_logprobs_match_list_logprobs(num_logprobs, width, monkeypatch):
-    """ArrayLogprobs keeps the engine rows but reads like the list path:
+@pytest.mark.parametrize("num_logprobs,width", [(0, 1), (3, 4), (3, 6), (-1, 5)])
+def test_flat_rows_match_list_logprobs(num_logprobs, width, monkeypatch):
+    """FlatLogprobs keeps the engine rows but reads like the list path:
     same positions (first-occurrence keys, last-occurrence values, ranks),
     same cumulative logprob, across storage blocks."""
-    monkeypatch.setattr(ArrayLogprobs, "BLOCK_BYTES", 64)
+    monkeypatch.setattr(_Column, "BLOCK_BYTES", 64)
     expected = _make_processor(num_logprobs)
-    actual = _make_processor(num_logprobs, array_logprobs=True)
+    actual = _make_processor(num_logprobs, flat_logprobs=True)
     for step in _engine_steps(0, width, 40):
         expected._update_sample_logprobs(step)
         actual._update_sample_logprobs(step)
 
-    assert isinstance(actual.logprobs, ArrayLogprobs)
-    assert actual.logprobs.is_regular
+    assert isinstance(actual.logprobs, FlatLogprobs)
     assert list(actual.logprobs) == expected.logprobs
     assert [actual.logprobs[i] for i in range(len(expected.logprobs))] == (
         expected.logprobs
     )
-    assert actual.logprobs[-3:] == expected.logprobs[-3:]
+    assert list(actual.logprobs[-3:]) == expected.logprobs[-3:]
     assert actual.cumulative_logprob == expected.cumulative_logprob
 
-    token_ids, logprobs, ranks = actual.logprobs.arrays()
+    rows = actual.logprobs.rows()
+    assert rows is not None
+    token_ids, logprobs, ranks = rows
     steps = _engine_steps(0, width, 40)
+    slots = width if num_logprobs == -1 else num_logprobs + 1
     assert token_ids.dtype == np.dtype("<i4") and logprobs.dtype == np.dtype("<f4")
     assert token_ids.flags.c_contiguous and logprobs.flags.c_contiguous
     np.testing.assert_array_equal(
-        token_ids,
-        np.concatenate([s.logprob_token_ids[:, : num_logprobs + 1] for s in steps]),
+        token_ids, np.concatenate([s.logprob_token_ids[:, :slots] for s in steps])
     )
     np.testing.assert_array_equal(
-        logprobs, np.concatenate([s.logprobs[:, : num_logprobs + 1] for s in steps])
+        logprobs, np.concatenate([s.logprobs[:, :slots] for s in steps])
     )
     np.testing.assert_array_equal(
         ranks, np.concatenate([s.sampled_token_ranks for s in steps])
     )
 
 
-def test_array_logprobs_irregular_rows_fall_back_to_dicts():
+def test_flat_irregular_rows_have_no_engine_rows():
     """A row narrower than the stored ones (a co-batched request replaced the
-    batch's logprob tensors) is kept as a dict, and arrays() is refused."""
+    batch's logprob tensors) still reads like the list path, but rows() is
+    None."""
     expected = _make_processor(3)
-    actual = _make_processor(3, array_logprobs=True)
+    actual = _make_processor(3, flat_logprobs=True)
     steps = _engine_steps(1, 4, 3) + _engine_steps(2, 2, 2) + _engine_steps(3, 4, 2)
     for step in steps:
         expected._update_sample_logprobs(step)
         actual._update_sample_logprobs(step)
 
-    assert isinstance(actual.logprobs, ArrayLogprobs)
-    assert not actual.logprobs.is_regular
+    assert isinstance(actual.logprobs, FlatLogprobs)
     assert list(actual.logprobs) == expected.logprobs
-    with pytest.raises(ValueError):
-        actual.logprobs.arrays()
+    assert actual.logprobs.rows() is None
 
 
-@pytest.mark.parametrize(
-    "array_logprobs,logprobs,output_kind,expected",
-    [
-        (True, 2, RequestOutputKind.FINAL_ONLY, ArrayLogprobs),
-        (True, 2, RequestOutputKind.DELTA, FlatLogprobs),
-        (True, -1, RequestOutputKind.FINAL_ONLY, FlatLogprobs),
-        (False, 2, RequestOutputKind.FINAL_ONLY, FlatLogprobs),
-    ],
-)
-def test_array_logprobs_only_for_final_only_top_k(
-    array_logprobs, logprobs, output_kind, expected
-):
-    """The private switch applies only to FINAL_ONLY outputs (no DELTA slices
-    to aggregate) with top-k logprobs."""
-    params = SamplingParams(logprobs=logprobs, flat_logprobs=True)
-    params.output_kind = output_kind
-    params._array_logprobs = array_logprobs
+def test_sample_logprobs_skip_detokenize():
+    """_detokenize_logprobs=False keeps no decoded tokens, even with a
+    tokenizer (which would fail here if used)."""
+    params = SamplingParams(logprobs=2, flat_logprobs=True)
+    params._detokenize_logprobs = False
     processor = LogprobsProcessor.from_new_request(
-        tokenizer=None, request=SimpleNamespace(sampling_params=params)
+        tokenizer=object(), request=SimpleNamespace(sampling_params=params)
     )
-    assert type(processor.logprobs) is expected
+    for step in _engine_steps(4, 3, 3):
+        processor._update_sample_logprobs(step)
+    assert isinstance(processor.logprobs, FlatLogprobs)
+    assert set(processor.logprobs.decoded_tokens) == {None}

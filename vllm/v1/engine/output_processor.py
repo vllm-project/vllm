@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
-from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -467,8 +466,7 @@ class RequestState:
             token_ids=token_ids,
             routed_experts=routed_experts,
             sampling_mask=sampling_mask,
-            # ArrayLogprobs reads as a sequence of positions, like the list.
-            logprobs=cast("SampleLogprobs | None", logprobs),
+            logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,

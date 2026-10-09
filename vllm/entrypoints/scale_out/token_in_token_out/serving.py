@@ -43,7 +43,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
-from vllm.logprobs import ArrayLogprobs, Logprob
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -103,14 +103,13 @@ async def build_response_off_loop(entries: int, build: Callable[[], T]) -> T:
     )
 
 
-def _array_logprob_entries(final_res: RequestOutput) -> int:
-    """Logprob entries (positions x slots) kept as engine rows."""
-    total = 0
-    for output in final_res.outputs:
-        rows = output.logprobs
-        if isinstance(rows, ArrayLogprobs) and rows.is_regular:
-            total += len(rows) * (rows.num_slots or 1)
-    return total
+def _flat_logprob_entries(final_res: RequestOutput) -> int:
+    """Logprob entries (positions x candidates) kept as FlatLogprobs."""
+    return sum(
+        output.logprobs.num_entries
+        for output in final_res.outputs
+        if isinstance(output.logprobs, FlatLogprobs)
+    )
 
 
 def _clamp_logprob(logprob: float) -> float:
@@ -382,10 +381,13 @@ class ServingTokens(GenerateBaseServing):
             and request.output_mode == "tokens"
             and sampling_params.logprobs is not None
             and sampling_params.logprobs >= 0
+            and sampling_params.prompt_logprobs is None
         ):
-            # Keep the top-k rows as arrays: the response is rendered from
-            # them without a Python object per entry.
-            sampling_params._array_logprobs = True
+            # Keep the top-k rows as numpy columns without decoded tokens: the
+            # response is rendered from them without a Python object per
+            # entry. Prompt logprobs stay lists, as the response returns them.
+            sampling_params.flat_logprobs = True
+            sampling_params._detokenize_logprobs = False
 
         self._log_inputs(
             request_id,
@@ -456,7 +458,7 @@ class ServingTokens(GenerateBaseServing):
         assert final_res is not None
 
         response, usage, choice_meta = await build_response_off_loop(
-            _array_logprob_entries(final_res),
+            _flat_logprob_entries(final_res),
             functools.partial(
                 self._build_full_response,
                 request,
@@ -524,13 +526,14 @@ class ServingTokens(GenerateBaseServing):
             if sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
                 rendered = None
-                if isinstance(out_logprobs, ArrayLogprobs) and not text_mode:
+                top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
+                if isinstance(out_logprobs, FlatLogprobs) and not text_mode:
                     rendered = render_tokens_logprobs(
                         token_ids, out_logprobs, sampling_params.logprobs
                     )
                     if rendered is None:
                         # Irregular rows: the per-entry path, in one pass.
-                        out_logprobs = list(out_logprobs)
+                        top_logprobs = list(out_logprobs)
                 if rendered is not None:
                     fragments[len(tokens_choices)] = rendered
                 elif text_mode:
@@ -543,7 +546,7 @@ class ServingTokens(GenerateBaseServing):
                 else:
                     logprobs = self._create_tokens_logprobs(
                         token_ids=token_ids,
-                        top_logprobs=out_logprobs,
+                        top_logprobs=top_logprobs,
                         num_output_top_logprobs=sampling_params.logprobs,
                     )
 
