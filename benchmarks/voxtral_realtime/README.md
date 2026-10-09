@@ -9,7 +9,7 @@ quoted in the PR discussion were collected on a single RTX 4090 Laptop 16 GiB.
 - **`ws_load.py`**: drives N concurrent, real-time-paced WebSocket streams
   against a running vLLM server. Records per-stream wall vs audio seconds, the
   final transcript, and frame-to-partial latency.
-  ```
+  ```bash
   python ws_load.py -n 4 --audio clip.wav --out results.json
   python ws_load.py -n 1 --audio clip.wav --loops 7 --out long.json  # long session
   ```
@@ -19,13 +19,13 @@ quoted in the PR discussion were collected on a single RTX 4090 Laptop 16 GiB.
 - **`test_reanchor_math.py`**: standalone numerical check that re-rotating a
   cached key by `R(-D)` and shifting the query position by `-D` leaves the
   attention score unchanged (the correctness basis for RoPE re-anchoring).
-  ```
+  ```bash
   python test_reanchor_math.py
   ```
 
 ## Example: KV-bounded serve on a single 16 GiB GPU
 
-```
+```bash
 vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
   --hf-overrides '{"text_config":{"sliding_window":512},"audio_config":{"sliding_window":256}}' \
   --max-model-len 16384 --no-enable-prefix-caching \

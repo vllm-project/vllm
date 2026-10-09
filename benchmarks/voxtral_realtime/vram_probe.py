@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sample VRAM, EngineCore host RSS, and vLLM KV-cache usage over time.
 
 For long-run endurance tests: a flat VRAM + flat RSS + flat KV-usage proves the
@@ -10,11 +11,12 @@ Usage: vram_probe.py [interval_s] [duration_s]   (Ctrl-C or duration to stop)
 """
 
 import contextlib
-import re
 import subprocess
 import sys
 import time
 import urllib.request
+
+import regex as re
 
 
 def nvidia_vram_mib() -> int:
