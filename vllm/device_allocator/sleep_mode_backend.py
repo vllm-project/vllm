@@ -129,9 +129,9 @@ class CuMemBackend(SleepModeBackend):
 
         self._state = "SUSPENDED"
         allocator = get_mem_allocator_instance()
-        # Runtime state and graph pools are kept at every level; weights only
-        # at level 1.
-        offload_tags: tuple[str, ...] = ("runtime", "cudagraph")
+        # Runtime state is kept at every level, weights only at level 1. Graph
+        # pools are released: every replay rewrites them.
+        offload_tags: tuple[str, ...] = ("runtime",)
         if level == 1:
             offload_tags = ("weights", *offload_tags)
         allocator.sleep(offload_tags=offload_tags)
