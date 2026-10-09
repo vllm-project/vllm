@@ -228,8 +228,7 @@ struct WireEngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     start_wave: Option<u32>,
-    /// Weight-version label of the step that produced these outputs. Decoded to
-    /// match the Python schema; the Rust frontend does not surface it yet.
+    /// Decoded for Python wire compatibility; not exposed by the Rust frontend.
     #[serde(default)]
     weight_version: Option<String>,
 }

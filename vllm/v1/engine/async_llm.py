@@ -855,7 +855,7 @@ class AsyncLLM(EngineClient):
                             outputs_slice,
                             outputs.timestamp,
                             iteration_stats,
-                            outputs.weight_version,
+                            weight_version=outputs.weight_version,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs

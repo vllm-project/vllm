@@ -1736,8 +1736,7 @@ def test_async_pooling_cache_miss_does_not_fail_output_processor():
 @pytest.mark.parametrize(
     "steps,expected",
     [
-        # Same-label steps share a span, a step can return several accepted
-        # tokens, and labels are opaque: A -> B -> A gives three spans.
+        # Merge adjacent equal labels; A -> B -> A remains three spans.
         (
             [("v7", [10, 11]), ("v7", [12]), ("v8", [13, 14]), ("v7", [15])],
             [("v7", 0, 3), ("v8", 3, 5), ("v7", 5, 6)],
@@ -1774,8 +1773,7 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
             assert intermediate is not None
             assert intermediate.outputs[0].weight_versions is None
 
-    # The abort output built by the frontend carries the spans. Unread deltas
-    # are merged into it, and the offsets still cover the whole output.
+    # Unread deltas merge into the abort output without losing spans.
     output_processor.abort_requests(["request-0"], internal=False)
     final = queue.get_nowait()
     assert final is not None and final.finished

@@ -412,8 +412,7 @@ class GenerateChoiceBase(BaseModel):
     # or (b) `enable_return_routed_experts` is off server-side.
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
-    # Weight versions that sampled the output tokens, as contiguous spans over
-    # output-token indexes, in generation order.
+    # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
 
     @field_validator("token_ids")

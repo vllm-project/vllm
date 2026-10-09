@@ -55,6 +55,21 @@ The server returns a 400 for:
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).
 
+## Weight versions
+
+The final output of every choice carries `weight_versions`, the label of the weights that sampled each range of its output tokens. Ranges are half-open over output-token indexes (prompt excluded), contiguous and in generation order, so a request that crossed one weight update gets two:
+
+```json
+"weight_versions": [
+  {"version": "v7", "start": 0, "end": 57},
+  {"version": "v8", "start": 57, "end": 128}
+]
+```
+
+- With `stream: true`, only the last chunk of each choice carries the list, including the last chunk after an abort. Its offsets cover the whole output. Earlier chunks carry `null`.
+- An output with no tokens, such as a request aborted before its first token, gets `[]`.
+- The labels are the ones you set with `/update_weight_version` or `/finish_weight_update`, see [Async Reinforcement Learning](../../training/async_rl.md#weight-versions-in-outputs). vLLM doesn't order or check them, and the label is `"default"` until you set one.
+
 ## Aborting requests
 
 `POST /inference/v1/abort_requests` aborts in-flight requests. It is registered wherever `/inference/v1/generate` is and requires the API key when `--api-key` is set, like `/inference/v1/generate`.

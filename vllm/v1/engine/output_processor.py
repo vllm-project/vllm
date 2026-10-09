@@ -463,18 +463,6 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
-        # Final outputs carry the spans; a zero-token output carries [].
-        weight_versions = None
-        if finished:
-            num_output_tokens = self.detokenizer.num_output_tokens()
-            starts = self.weight_version_starts
-            if starts or num_output_tokens == 0:
-                ends = [start for _, start in starts[1:]] + [num_output_tokens]
-                weight_versions = [
-                    WeightVersionSpan(version, start, end)
-                    for (version, start), end in zip(starts, ends)
-                ]
-
         return CompletionOutput(
             index=self.request_index,
             text=text,
@@ -486,8 +474,24 @@ class RequestState:
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
             spec_decode_metrics=self.spec_decode_metrics if finished else None,
-            weight_versions=weight_versions,
+            weight_versions=self._weight_version_spans() if finished else None,
         )
+
+    def track_weight_version(self, weight_version: str) -> None:
+        """Start a span when the weight version changes."""
+        assert self.detokenizer is not None
+        starts = self.weight_version_starts
+        if not starts or starts[-1][0] != weight_version:
+            starts.append((weight_version, self.detokenizer.num_output_tokens()))
+
+    def _weight_version_spans(self) -> list[WeightVersionSpan] | None:
+        assert self.detokenizer is not None
+        num_tokens = self.detokenizer.num_output_tokens()
+        starts = self.weight_version_starts
+        if not starts and num_tokens:
+            return None  # No label was reported for these tokens.
+        ends = [start for _, start in starts[1:]] + [num_tokens]
+        return [WeightVersionSpan(v, s, e) for (v, s), e in zip(starts, ends)]
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
         return PoolingOutput(data=pooling_output)
@@ -753,17 +757,8 @@ class OutputProcessor:
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
-                # A new span starts where this step's label differs from the
-                # label of the request's previous tokens.
-                starts = req_state.weight_version_starts
-                if (
-                    new_token_ids
-                    and weight_version is not None
-                    and (not starts or starts[-1][0] != weight_version)
-                ):
-                    starts.append(
-                        (weight_version, req_state.detokenizer.num_output_tokens())
-                    )
+                if new_token_ids and weight_version is not None:
+                    req_state.track_weight_version(weight_version)
                 # 2) Detokenize the token ids into text and perform stop checks.
                 num_prev_tokens = req_state.detokenizer.num_output_tokens()
                 stop_string = req_state.detokenizer.update(

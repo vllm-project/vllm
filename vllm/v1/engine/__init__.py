@@ -282,7 +282,7 @@ class EngineCoreOutputs(
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
 
-    # Label of the weights that ran the step these outputs came from.
+    # Weight version used for this step.
     weight_version: str | None = None
 
     def __post_init__(self):

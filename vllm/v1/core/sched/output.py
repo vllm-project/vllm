@@ -311,10 +311,6 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
-    # Label of the weights this step runs with, stamped by EngineCore right
-    # after scheduling. Tokens sampled in this step are attributed to it.
-    weight_version: str | None = None
-
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
