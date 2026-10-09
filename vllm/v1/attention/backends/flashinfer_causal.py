@@ -9,12 +9,13 @@ def causal_group_indices(
     causal: torch.Tensor, qo_indptr: torch.Tensor, kv_indptr: torch.Tensor
 ) -> list[tuple[bool, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Partition CPU request, query-token and KV-page indices by causality."""
-    if causal.device.type != "cpu" or causal.dtype != torch.bool:
-        raise ValueError("causal must be a CPU boolean tensor")
+    if causal.device.type != "cpu" or causal.dtype not in (torch.bool, torch.int32):
+        raise ValueError("causal must be a CPU boolean or int32 tensor")
     if causal.ndim != 1 or causal.numel() != qo_indptr.numel() - 1:
         raise ValueError("causal must contain one flag per request")
     if kv_indptr.numel() != qo_indptr.numel():
         raise ValueError("query and KV indptr must describe the same requests")
+    causal = causal.bool()
     groups = []
     for mode in (True, False):
         requests = (causal == mode).nonzero(as_tuple=True)[0]

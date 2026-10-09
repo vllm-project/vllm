@@ -17,12 +17,15 @@ from vllm.v1.attention.backends.flashinfer_causal import (
 @pytest.mark.parametrize(
     "flags", [[True, False, True], [False, True, False], [True] * 3, [False] * 3]
 )
-def test_partition_preserves_query_and_page_order(flags):
+@pytest.mark.parametrize("flag_dtype", [torch.bool, torch.int32])
+def test_partition_preserves_query_and_page_order(flags, flag_dtype):
     # KV indptr intentionally starts at a nonzero offset, as sliced metadata
     # does; page gathering must index the full batch's page list.
     query_indptr = torch.tensor([0, 1, 4, 6], dtype=torch.int32)
     kv_indptr = torch.tensor([5, 7, 10, 11], dtype=torch.int32)
-    groups = causal_group_indices(torch.tensor(flags), query_indptr, kv_indptr)
+    groups = causal_group_indices(
+        torch.tensor(flags, dtype=flag_dtype), query_indptr, kv_indptr
+    )
     all_tokens = []
     all_pages = []
     for mode, requests, tokens, pages in groups:
@@ -76,7 +79,8 @@ def test_invalid_causal_flags_rejected(flags):
         )
 
 
-def test_group_plans_use_disjoint_pages_and_symmetric_window():
+@pytest.mark.parametrize("flag_dtype", [torch.bool, torch.int32])
+def test_group_plans_use_disjoint_pages_and_symmetric_window(flag_dtype):
     pytest.importorskip("flashinfer")
     from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 
@@ -99,7 +103,7 @@ def test_group_plans_use_disjoint_pages_and_symmetric_window():
     )
     groups = FlashInferMetadataBuilder._plan_causal_groups(
         builder,
-        torch.tensor([True, False, True]),
+        torch.tensor([True, False, True], dtype=flag_dtype),
         torch.tensor([0, 1, 4, 6], dtype=torch.int32),
         torch.tensor([2, 4, 6, 8], dtype=torch.int32),
         torch.tensor([1, 2, 3], dtype=torch.int32),
