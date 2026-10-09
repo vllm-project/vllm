@@ -5,6 +5,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) LM Eval Small Models"
   device: h200_35gb
   key: lm-eval-small-models
+  automatic_shard: true
   timeout_in_minutes: 45
   source_file_dependencies:
   - csrc/

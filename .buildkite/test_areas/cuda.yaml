@@ -33,6 +33,7 @@ steps:
 - label: ":nvidia: (H200 MIG 18GB) CUDAGraph"
   device: h200_18gb
   key: cudagraph
+  automatic_shard: true
   timeout_in_minutes: 45
   source_file_dependencies:
   - tests/v1/cudagraph
