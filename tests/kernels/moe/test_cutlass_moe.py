@@ -37,9 +37,12 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     run_cutlass_moe_fp4,
     run_cutlass_moe_fp8,
     run_cutlass_moe_mxfp4,
+    swizzle_mxfp4_scales,
 )
+from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -292,6 +295,87 @@ def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(quantization: 
         actual = run_moe(padded_input, padded_ids, padded_weights, workspace_value)
         torch.testing.assert_close(actual[0], expected[0], atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(actual[1:], torch.zeros_like(actual[1:]))
+
+
+@torch.inference_mode()
+def test_cutlass_mxfp4_oracle_matches_direct_kernel(monkeypatch, workspace_init):
+    """The MXFP4 oracle selects CUTLASS for W4A4 and swizzles checkpoint
+    scales into the layout the kernel expects."""
+    if not CutlassExpertsMxfp4._supports_current_device():
+        pytest.skip("CUTLASS mxfp4 MoE is not supported on this GPU")
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+
+    set_random_seed(7)
+    e, m, n, k, topk = 8, 33, 256, 512, 2
+    device = torch.device("cuda")
+    w1 = torch.randint(0, 256, (e, 2 * n, k // 2), device=device, dtype=torch.uint8)
+    w2 = torch.randint(0, 256, (e, k, n // 2), device=device, dtype=torch.uint8)
+    w1_scale = torch.randint(118, 124, (e, 2 * n, k // 32), device=device).byte()
+    w2_scale = torch.randint(118, 124, (e, k, n // 32), device=device).byte()
+    a = torch.randn((m, k), device=device, dtype=torch.bfloat16)
+    score = torch.randn((m, e), device=device, dtype=torch.bfloat16)
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+
+    def swizzle(scale: torch.Tensor) -> torch.Tensor:
+        rows, cols = scale.shape[1:]
+        return torch.stack(
+            [swizzle_mxfp4_scales(s, rows, cols * 32).view(rows, cols) for s in scale]
+        )
+
+    expected = torch.empty_like(a)
+    run_cutlass_moe_mxfp4(
+        output=expected,
+        a=a,
+        w1_fp4=w1,
+        w1_blockscale=swizzle(w1_scale),
+        w2_fp4=w2,
+        w2_blockscale=swizzle(w2_scale),
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
+        workspace13=torch.empty((m * topk, max(2 * n, k)), device=device).to(a),
+        workspace2=torch.empty((m * topk, n), device=device).to(a),
+        m=m,
+        n=n,
+        k=k,
+        e=e,
+        device=device,
+        apply_router_weight_on_input=False,
+    )
+
+    moe_config = make_dummy_moe_config(
+        num_experts=e, experts_per_token=topk, hidden_dim=k, intermediate_size=n
+    )
+    with set_current_vllm_config(vllm_config):
+        backend, experts_cls = mxfp4_oracle.select_mxfp4_moe_backend(
+            moe_config, activation_key=kMxfp4Dynamic
+        )
+        assert backend == mxfp4_oracle.Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4
+
+        w13, w2, w13_scale, w2_scale, _, _ = (
+            mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format(
+                backend, torch.nn.Module(), w1, w2, w1_scale, w2_scale
+            )
+        )
+        kernel = mxfp4_oracle.make_mxfp4_moe_kernel(
+            mxfp4_oracle.make_mxfp4_moe_quant_config(backend, w13_scale, w2_scale),
+            moe_config,
+            experts_cls,
+            backend,
+        )
+        actual = kernel.apply(
+            a,
+            w13,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 @dataclasses.dataclass
