@@ -149,6 +149,47 @@ def _capture_plain_experts(experts) -> None:
     qm.process_weights_after_loading = process_weights_after_loading
 
 
+# The attention linears that the gfx942 kernels read as ``linear_copy``
+# copies, as names of the layer's attention module.
+ATTN_LINEARS_942 = ("fused_wqa_wkv", "wq_b", "wo_a", "wo_b")
+
+
+def _copy_linear_at_load(linear) -> None:
+    """gfx942: make the dense MXFP8 linear's ``weights942.linear_copy`` right
+    after vLLM has processed its weights at load. vLLM dequantizes them to
+    bf16 there, and the copy re-encodes them as the gfx942 kernels read
+    them."""
+    qm = linear.quant_method
+    original = qm.process_weights_after_loading
+
+    def process_weights_after_loading(layer):
+        out = original(layer)
+        if layer is linear and not hasattr(layer, "mono942"):
+            from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
+
+            layer.mono942 = linear_copy(layer.weight, layer.weight_scale)
+        return out
+
+    qm.process_weights_after_loading = process_weights_after_loading
+
+
+def _copy_942_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
+    """gfx942: the kernels read their own copies of the layer's weights. Make
+    them when vLLM processes the weights at load, so that they count as model
+    memory when vLLM sizes the KV cache. Made at the first decode step, they
+    counted only because that step is also the CUDA graph memory profile, and
+    with that profile off or with ``enforce_eager`` they would not count. A
+    layer that takes only the FFN launch needs no attention copies."""
+    ffn = layer.ffn
+    _capture_plain_experts(ffn.experts.routed_experts)
+    sh = ffn.shared_experts
+    linears = [sh.gate_up_proj, sh.down_proj]
+    if not ffn_only:
+        linears += [getattr(layer.attn, name) for name in ATTN_LINEARS_942]
+    for linear in linears:
+        _copy_linear_at_load(linear)
+
+
 def _shadow_report(layer_id: int, rows: int, step: int, got: tuple, ref: tuple) -> None:
     """Log, a layer and step of ``rows`` rows, each output's largest difference
     relative to the largest reference value and the relative norm of the
@@ -284,6 +325,15 @@ class MonoDecodeLayer:
     def create(
         layer: "DeepseekV4DecoderLayer", vllm_config
     ) -> "MonoDecodeLayer | None":
+        mono = MonoDecodeLayer._create(layer, vllm_config)
+        if mono is not None and _on_gfx942():
+            _copy_942_at_load(layer, mono.ffn_only)
+        return mono
+
+    @staticmethod
+    def _create(
+        layer: "DeepseekV4DecoderLayer", vllm_config
+    ) -> "MonoDecodeLayer | None":
         if not envs.VLLM_ROCM_MONO_DECODE:
             return None
         from vllm.platforms.rocm import get_cdna_version
@@ -361,8 +411,6 @@ class MonoDecodeLayer:
         if why is not None:
             logger.info_once("DSv4.1 mono decode off for some layers: %s", why)
             return None
-        if gfx942:
-            _capture_plain_experts(ffn.experts.routed_experts)
         if draft:
             # gfx942 only: the DSpark draft layers take the FFN launch, built
             # for the draft's 128 / 3 routing, after vLLM's attention. The
@@ -470,17 +518,16 @@ class MonoDecodeLayer:
 
     def _weights_942(self, layer: "DeepseekV4DecoderLayer"):
         """gfx942: the layer's tensors as the gfx942 kernels read them. The
-        dense MXFP8 linears as ``weights942.linear_copy`` copies, the routed
-        experts as the copies made at load (``_capture_plain_experts``)."""
+        dense MXFP8 linears and the routed experts as the copies made at load
+        (``_copy_942_at_load``)."""
         from vllm.models.deepseek_v41.amd.mono.runner import MonoLayerWeights
-        from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
 
         f = layer.ffn
         e, sh = f.experts.routed_experts, f.shared_experts
         assert sh is not None, "DeepSeek-V4.1 layers have a shared expert"
         w13, w13_s, w2, w2_s = e.mono942
-        sgu, sgu_s = linear_copy(sh.gate_up_proj.weight, sh.gate_up_proj.weight_scale)
-        sw2, sw2_s = linear_copy(sh.down_proj.weight, sh.down_proj.weight_scale)
+        sgu, sgu_s = sh.gate_up_proj.mono942
+        sw2, sw2_s = sh.down_proj.mono942
         weights = MonoLayerWeights(
             attn=None if self.ffn_only else self._attn_weights_942(layer.attn),
             hc_attn_fn=layer.hc_attn_fn,
@@ -509,29 +556,20 @@ class MonoDecodeLayer:
     def _attn_weights_942(a):
         from vllm.models.deepseek_v41.amd.mono.attention.plan import Dims
         from vllm.models.deepseek_v41.amd.mono.runner import AttnWeights
-        from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
 
-        copies = {
-            name: linear_copy(getattr(a, src).weight, getattr(a, src).weight_scale)
-            for name, src in (
-                ("wqkv", "fused_wqa_wkv"),
-                ("wq_b", "wq_b"),
-                ("wo_a", "wo_a"),
-                ("wo_b", "wo_b"),
-            )
-        }
+        wqkv, wq_b, wo_a, wo_b = (getattr(a, name).mono942 for name in ATTN_LINEARS_942)
         attn = AttnWeights(
             layer_id=a.layer_id,
-            wqkv=copies["wqkv"][0],
-            wqkv_scale=copies["wqkv"][1],
+            wqkv=wqkv[0],
+            wqkv_scale=wqkv[1],
             q_norm=a.q_norm.weight,
             kv_norm=a.kv_norm.weight,
-            wq_b=copies["wq_b"][0],
-            wq_b_scale=copies["wq_b"][1],
-            wo_a=copies["wo_a"][0],
-            wo_a_scale=copies["wo_a"][1],
-            wo_b=copies["wo_b"][0],
-            wo_b_scale=copies["wo_b"][1],
+            wq_b=wq_b[0],
+            wq_b_scale=wq_b[1],
+            wo_a=wo_a[0],
+            wo_a_scale=wo_a[1],
+            wo_b=wo_b[0],
+            wo_b_scale=wo_b[1],
             attn_sink=a.attn_sink,
             cos_sin=a.rotary_emb.cos_sin_cache,
             ratio=a.compress_ratio,

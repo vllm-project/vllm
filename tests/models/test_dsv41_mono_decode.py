@@ -175,6 +175,15 @@ def test_other_steps_take_the_original_path(run, case):
     assert out is None and not calls
 
 
+def _linear():
+    """A dense linear whose weights vLLM processes at load."""
+    return SimpleNamespace(
+        weight=object(),
+        weight_scale=object(),
+        quant_method=SimpleNamespace(process_weights_after_loading=lambda layer: None),
+    )
+
+
 def _decoder_layer(engram=None, routing=md.TARGET_ROUTING, **attn):
     attn = (
         dict(
@@ -185,6 +194,7 @@ def _decoder_layer(engram=None, routing=md.TARGET_ROUTING, **attn):
             kv_mxfp8=False,
             kv_cache_dtype="fp8_ds_mla",
         )
+        | {name: _linear() for name in md.ATTN_LINEARS_942}
         | attn
     )
     backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
@@ -196,7 +206,7 @@ def _decoder_layer(engram=None, routing=md.TARGET_ROUTING, **attn):
         experts=SimpleNamespace(
             routed_experts=SimpleNamespace(quant_method=quant_method)
         ),
-        shared_experts=object(),
+        shared_experts=SimpleNamespace(gate_up_proj=_linear(), down_proj=_linear()),
         gate=SimpleNamespace(tid2eid=None),
         n_routed_experts=routing[0],
         n_activated_experts=routing[1],
@@ -421,3 +431,37 @@ def test_gfx942_takes_any_moe_backend(monkeypatch):
     is not an error there."""
     _deployment(monkeypatch, cdna=3, tp=4)
     assert _kind(md.MonoDecodeLayer.create(_other_backend(), _config())) == "whole"
+
+
+@pytest.mark.parametrize(
+    "make, copied",
+    [
+        (_decoder_layer, ("gate_up_proj", "down_proj", *md.ATTN_LINEARS_942)),
+        (
+            lambda: _decoder_layer(layer_id=40, routing=md.DRAFT_ROUTING),
+            ("gate_up_proj", "down_proj"),
+        ),
+    ],
+    ids=["standard", "draft"],
+)
+def test_gfx942_copies_dense_linears_at_load(monkeypatch, make, copied):
+    """On gfx942 the kernels' copies of the dense linears are made when vLLM
+    processes each linear's weights at load, so that vLLM counts them as model
+    memory when it sizes the KV cache. A draft layer runs vLLM's attention, so
+    its attention linears get no copies."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    weights942 = ModuleType("vllm.models.deepseek_v41.amd.mono.weights942")
+    weights942.linear_copy = lambda w, s: ("copy", w, s)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, weights942.__name__, weights942)
+    layer = make()
+    assert md.MonoDecodeLayer.create(layer, _config()) is not None
+    sh = layer.ffn.shared_experts
+    linears = {"gate_up_proj": sh.gate_up_proj, "down_proj": sh.down_proj}
+    linears |= {name: getattr(layer.attn, name) for name in md.ATTN_LINEARS_942}
+    for linear in linears.values():
+        linear.quant_method.process_weights_after_loading(linear)
+    made = {name for name, linear in linears.items() if hasattr(linear, "mono942")}
+    assert made == set(copied)
+    for name in copied:
+        linear = linears[name]
+        assert linear.mono942 == ("copy", linear.weight, linear.weight_scale)
