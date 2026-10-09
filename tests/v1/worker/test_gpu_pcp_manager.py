@@ -47,8 +47,7 @@ def _make_capture_manager(block_table: torch.Tensor):
     block_tables = SimpleNamespace(
         input_block_tables=(block_table,),
         num_kv_cache_groups=1,
-        kernel_block_sizes=(2,),
-        blocks_per_kv_block=(1,),
+        block_sizes=(2,),
     )
     manager = PCPManager(
         pcp_world_size=2,
