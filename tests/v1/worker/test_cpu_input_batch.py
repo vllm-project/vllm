@@ -5,6 +5,7 @@ import torch
 
 from vllm.v1.worker.cpu.input_batch import (
     get_num_sampled_and_rejected,
+    prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
 
@@ -41,6 +42,30 @@ def test_prepare_prefill_inputs_cpu() -> None:
     assert next_prefill_tokens[:, 3].tolist() == [305, 306, 307]
     assert next_prefill_tokens[:, 1].tolist() == [-1, -1, -1]
     assert torch.all(next_prefill_tokens[:, [0, 2, 5]] == -1)
+
+
+def test_prepare_pos_seq_lens_cpu() -> None:
+    positions_storage = torch.full((8,), -1, dtype=torch.int64)
+    positions = positions_storage[1:]
+    seq_lens_storage = torch.full((8,), -1, dtype=torch.int32)
+    seq_lens = seq_lens_storage[1:7]
+
+    idx_mapping = torch.tensor([3, 1, 4], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 3, 5, 6], dtype=torch.int32)
+    num_computed_tokens = torch.tensor([0, 7, 0, 2, 10], dtype=torch.int32)
+
+    prepare_pos_seq_lens(
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        positions,
+        seq_lens,
+    )
+
+    assert positions.tolist() == [2, 3, 4, 7, 8, 10, -1]
+    assert seq_lens.tolist() == [5, 9, 11, 0, 0, 0]
+    assert positions_storage[0].item() == -1
+    assert seq_lens_storage[[0, 7]].tolist() == [-1, -1]
 
 
 def test_get_num_sampled_and_rejected_cpu() -> None:

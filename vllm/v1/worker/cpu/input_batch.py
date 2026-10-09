@@ -28,6 +28,22 @@ def prepare_prefill_inputs(
     )
 
 
+def prepare_pos_seq_lens(
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    pos: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    ops.prepare_pos_seq_lens_cpu(
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        pos,
+        seq_lens,
+    )
+
+
 def get_num_sampled_and_rejected(
     num_sampled: torch.Tensor,
     seq_lens: torch.Tensor,
