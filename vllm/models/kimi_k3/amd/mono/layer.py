@@ -26,6 +26,7 @@ import pathlib
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import communication_ops_utils as comm_ops
+from aiter.ops.flydsl.kernels import mxfp4_gemm1, mxfp4_gemm_common
 from aiter.ops.flydsl.kernels.mxfp4_gemm1 import (
     _bm_constants,
     default_epi_splits,
@@ -68,10 +69,15 @@ G1_BK = 256
 G2_BK = 128
 
 # FlyDSL keys its compile cache on the kernel's source and scalar closure
-# values, not on the stages it calls; the package's sources go into the key.
+# values, not on the stages it calls; the package's sources and the AITER
+# kernel sources it traces go into the key.
 _SOURCES = hashlib.sha256(
     b"".join(
-        p.read_bytes() for p in sorted(pathlib.Path(__file__).parent.rglob("*.py"))
+        p.read_bytes()
+        for p in (
+            *sorted(pathlib.Path(__file__).parent.rglob("*.py")),
+            *(pathlib.Path(m.__file__) for m in (mxfp4_gemm1, mxfp4_gemm_common)),
+        )
     )
 ).hexdigest()[:16]
 

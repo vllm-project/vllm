@@ -40,17 +40,21 @@ routing.
     layer.py          the launch: ticket loop over the stages below
     stages/route.py   top-k of one token, the expert sort
     stages/shared.py  shared expert gate/up K splits, down tiles
-    stages/gemm1.py   AITER's a4w4 stage-1 tile with a write-through epilogue
+    stages/gemm1.py   AITER's a4w4 stage-1 tile, outputs stored write-through
     common/plan.py    geometry, control-word and workspace layout
     common/sync.py    tickets, counters, flags
     common/ops.py     device primitives, trace marks
 
 gemm2 is AITER's a4w4 stage-2 tile, emitted into this launch through its
 dispatcher's composition hook (`compile_gemm2_a4w4_port(_composition=...)`).
-`stages/gemm1.py` is adapted from AITER v0.1.24.post1 (Apache-2.0); the only
-change is `wt_out`. The rest of AITER the launch uses (`buffer_ops`,
-`communication_ops_utils`, `mxfp4_gemm_common`, the gemm1 tile sizing) is
-imported unchanged.
+gemm1 is AITER's a4w4 stage-1 body (`mxfp4_gemm1._gemm1_body`), imported.
+`stages/gemm1.py` only changes how it stores its outputs: while the body is
+traced, its global output views (`_global_scalar_tiles`) and their stores
+(`_scalar_store`) are swapped for device-scope stores, so the intermediate and
+its scales write through the XCD's L2; the swap is undone after the trace and
+fails the compile if the body stops writing its outputs that way. The rest of
+AITER the launch uses (`buffer_ops`, `communication_ops_utils`,
+`mxfp4_gemm_common`, the gemm1 tile sizing) is imported unchanged.
 
 ## The launch
 
