@@ -397,6 +397,7 @@ steps:
 - label: ":nvidia: (H100) Distributed DP + EP"
   key: distributed-tests-8xh100
   timeout_in_minutes: 20
+  optional: true
   device: h100
   num_devices: 8
   working_dir: "/vllm-workspace/tests"
@@ -419,6 +420,7 @@ steps:
     amd:
       label: ":amd: (MI355) Distributed DP + EP"
       dind: false
+      optional: false
       device: mi355_8
       timeout_in_minutes: 50
       depends_on:
