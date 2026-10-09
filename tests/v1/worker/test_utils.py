@@ -1451,7 +1451,8 @@ def test_request_memory_charges_external_weights():
         )
 
 
-def test_propagate_kv_sharing_scales_copies_target_scales():
+@pytest.mark.parametrize("k_scale,v_scale", [(0.25, 2.5), (1.0, 1.0)])
+def test_propagate_kv_sharing_scales_copies_target_scales(k_scale, v_scale):
     # A KV-sharing layer reads the cache its target wrote with the target's
     # k/v scales; quantized-KV checkpoints have no scales for sharing layers
     # (no K/V projections), which left them at the 1.0 default and made
@@ -1466,10 +1467,13 @@ def test_propagate_kv_sharing_scales_copies_target_scales():
             _v_scale_cpu=torch.tensor(v),
             _k_scale_float=k,
             _v_scale_float=v,
+            _q_scale=torch.tensor(0.5),
         )
 
-    target = layer(0.25, 2.5)
+    target = layer(k_scale, v_scale)
     sharing = layer(1.0, 1.0)
+    sharing_k_scale = sharing._k_scale
+    sharing_v_scale = sharing._v_scale
     untouched = layer(1.0, 1.0)
     ctx = {
         "layers.13.attn": target,
@@ -1479,9 +1483,17 @@ def test_propagate_kv_sharing_scales_copies_target_scales():
 
     propagate_kv_sharing_scales(ctx, {"layers.15.attn": "layers.13.attn"})
 
-    assert sharing._k_scale_float == 0.25 and sharing._v_scale_float == 2.5
-    assert sharing._k_scale.item() == 0.25 and sharing._v_scale.item() == 2.5
-    assert sharing._k_scale_cpu.item() == 0.25 and sharing._v_scale_cpu.item() == 2.5
+    assert sharing._k_scale_float == k_scale and sharing._v_scale_float == v_scale
+    assert sharing._k_scale.item() == k_scale and sharing._v_scale.item() == v_scale
+    assert sharing._k_scale_cpu.item() == k_scale
+    assert sharing._v_scale_cpu.item() == v_scale
+    # Preserve registered tensors and each layer's independent query scale.
+    assert sharing._k_scale is sharing_k_scale
+    assert sharing._v_scale is sharing_v_scale
+    assert sharing._k_scale is not target._k_scale
+    assert sharing._v_scale is not target._v_scale
+    assert sharing._q_scale.item() == 0.5
+    assert target._k_scale.item() == k_scale and target._v_scale.item() == v_scale
     assert untouched._k_scale_float == 1.0 and untouched._v_scale.item() == 1.0
     # unknown / unquantized layers are skipped without error
     propagate_kv_sharing_scales(
@@ -1492,4 +1504,68 @@ def test_propagate_kv_sharing_scales_copies_target_scales():
     param_dst._k_scale = torch.nn.Parameter(torch.tensor(1.0))
     param_dst._v_scale = torch.nn.Parameter(torch.tensor(1.0))
     propagate_kv_sharing_scales({"t": target, "s": param_dst}, {"s": "t"})
-    assert param_dst._k_scale.item() == 0.25 and param_dst._v_scale.item() == 2.5
+    assert param_dst._k_scale.item() == k_scale and param_dst._v_scale.item() == v_scale
+
+
+@pytest.mark.parametrize("runner_version", ["legacy", "modular"])
+def test_kv_cache_initialization_propagates_sharing_scales(monkeypatch, runner_version):
+    """Both runners bind shared cache readers with the writer's loaded scales."""
+    from vllm.v1.worker import gpu_model_runner
+    from vllm.v1.worker.gpu import attn_utils
+
+    target = SimpleNamespace(
+        _k_scale=torch.tensor(0.25),
+        _v_scale=torch.tensor(2.5),
+        _k_scale_float=0.25,
+        _v_scale_float=2.5,
+    )
+    sharing = SimpleNamespace(
+        _k_scale=torch.tensor(1.0),
+        _v_scale=torch.tensor(1.0),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
+    context = {"target": target, "sharing": sharing}
+    shared_layers = {"sharing": "target"}
+    caches = {"target": torch.empty(1)}
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context=context),
+        cache_config=MagicMock(),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="gemma4")),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    cache_config = SimpleNamespace(kv_cache_groups=[])
+
+    def assert_scales_at_binding(bound_caches, *args, **kwargs):
+        assert bound_caches["sharing"] is bound_caches["target"]
+        assert sharing._k_scale.item() == 0.25
+        assert sharing._v_scale.item() == 2.5
+        assert sharing._k_scale_float == 0.25
+        assert sharing._v_scale_float == 2.5
+
+    if runner_version == "modular":
+        monkeypatch.setattr(attn_utils, "allocate_kv_cache", lambda *a: caches)
+        monkeypatch.setattr(
+            attn_utils, "get_shared_kv_cache_layers", lambda *a: shared_layers
+        )
+        monkeypatch.setattr(
+            attn_utils, "bind_kv_cache_to_layers", assert_scales_at_binding
+        )
+        result = attn_utils.init_kv_cache(
+            context, cache_config, torch.device("cpu"), [], config
+        )
+    else:
+        monkeypatch.setattr(gpu_model_runner, "allocate_kv_cache", lambda *a: caches)
+        monkeypatch.setattr(gpu_model_runner, "bind_kv_cache", assert_scales_at_binding)
+        runner = SimpleNamespace(
+            device=torch.device("cpu"),
+            cache_config=config.cache_config,
+            compilation_config=config.compilation_config,
+            model_config=config.model_config,
+            shared_kv_cache_layers=shared_layers,
+            kv_caches=[],
+        )
+        result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
+            runner, cache_config, []
+        )
+    assert result["sharing"] is result["target"]
