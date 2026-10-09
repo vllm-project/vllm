@@ -270,21 +270,14 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
                     for (
                         tokens,
                         prefill_cache,
-                        block_table,
-                        req_ids,
+                        physical_topk,
+                        valid_counts,
                     ) in index_group.staged_prefills(
-                        self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
+                        self.index_group_index,
+                        kv_c_and_k_pe_cache,
+                        attn_metadata,
+                        topk_indices,
                     ):
-                        physical_topk, valid_counts = (
-                            triton_convert_req_index_to_global_index(
-                                req_ids,
-                                block_table,
-                                topk_indices[tokens],
-                                BLOCK_SIZE=attn_metadata.block_size,
-                                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                                return_valid_counts=True,
-                            )
-                        )
                         outputs.append(
                             self._run_mqa_kernel(
                                 q_nope[tokens],

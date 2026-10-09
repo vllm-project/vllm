@@ -867,27 +867,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             lses: list[torch.Tensor] = []
             for (
                 tokens,
-                staged_cache,
-                plan_block_table,
-                plan_req_ids,
+                staged_rows,
+                plan_topk,
+                plan_lengths,
             ) in index_group.staged_prefills(
                 self.index_group_index,
                 kv_c_and_k_pe_cache,
                 attn_metadata,
-                staging,
+                topk_indices,
+                staging=staging,
+                flat_rows=True,
             ):
-                staged_rows, staged_stride = flat_kv_row_view(
-                    staged_cache, attn_metadata.block_size
-                )
-                plan_topk, plan_lengths = triton_convert_req_index_to_global_index(
-                    plan_req_ids,
-                    plan_block_table,
-                    topk_indices[tokens],
-                    BLOCK_SIZE=attn_metadata.block_size,
-                    BLOCK_STRIDE_ROWS=staged_stride,
-                    NUM_TOPK_TOKENS=topk_indices.shape[1],
-                    return_valid_counts=True,
-                )
                 plan_out, plan_lse = self._bf16_flash_mla_kernel(
                     q[tokens], staged_rows, plan_topk, plan_lengths, actual_num_heads
                 )

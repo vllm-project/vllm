@@ -32,7 +32,6 @@ from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     prepare_sparse_mla_safe_lengths,
-    triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
@@ -555,21 +554,14 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             for (
                 tokens,
                 prefill_cache,
-                block_table,
-                req_ids,
+                prefill_indices,
+                prefill_lens,
             ) in index_group.staged_prefills(
-                self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
+                self.index_group_index,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                topk_indices,
             ):
-                prefill_indices, prefill_lens = (
-                    triton_convert_req_index_to_global_index(
-                        req_ids,
-                        block_table,
-                        topk_indices[tokens],
-                        BLOCK_SIZE=attn_metadata.block_size,
-                        NUM_TOPK_TOKENS=topk_indices.shape[1],
-                        return_valid_counts=True,
-                    )
-                )
                 plan_out, plan_lse = self._run_mqa_kernel(
                     q[tokens], prefill_cache, prefill_indices, prefill_lens
                 )

@@ -15,6 +15,7 @@ from vllm.forward_context import in_piecewise_cudagraph
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.hisparse.runtime import (
@@ -308,12 +309,16 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         layer_index: int,
         kv_cache: torch.Tensor,
         attn_metadata: Any,
+        topk_indices: torch.Tensor,
+        *,
         staging: torch.Tensor | None = None,
+        flat_rows: bool = False,
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Stage each prefill group in turn, yielding its batch query-token slice,
-        staged cache, block table, and plan-relative request ids. Every group
-        reuses ``staging`` (default: the shared workspace), so consume each item
-        before advancing."""
+        the staged cache (flattened to rows if ``flat_rows``), the group's top-k
+        converted to staged rows, and its valid counts. Every group reuses
+        ``staging`` (default: the shared workspace), so consume each item before
+        advancing."""
         if staging is None:
             (staging,) = current_workspace_manager().get_simultaneous(
                 self.prefill_staging_spec(layer_index)
@@ -329,7 +334,21 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 num_decode_tokens + plan.tokens.start,
                 num_decode_tokens + plan.tokens.stop,
             )
-            yield tokens, staged_cache, block_table, req_ids
+            block_stride_rows = None
+            if flat_rows:
+                staged_cache, block_stride_rows = flat_kv_row_view(
+                    staged_cache, attn_metadata.block_size
+                )
+            physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+                req_ids,
+                block_table,
+                topk_indices[tokens],
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
+            yield tokens, staged_cache, physical_topk, valid_counts
 
     def _prefill_gather_plan(
         self, layer_index: int, attn_metadata: Any

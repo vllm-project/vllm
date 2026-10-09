@@ -4077,10 +4077,10 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert not lse.isnan().any()
 
 
-def test_hisparse_staged_prefills_rebase_to_plan():
+def test_hisparse_staged_prefills_rebase_to_plan(monkeypatch):
     """A plan that starts past the batch's decodes and earlier prefills stages
-    its own resident rows and yields plan-relative request ids for its own
-    query tokens."""
+    its own resident rows and converts only its own query tokens' top-k, against
+    its own block table with plan-relative request ids."""
     # One decode (1 token), then prefills of 2 and 3 tokens; the plan covers
     # only the second prefill.
     plan = SimpleNamespace(
@@ -4097,6 +4097,15 @@ def test_hisparse_staged_prefills_rebase_to_plan():
         calls.append((kv_cache, staging_plan, staging_buffer, resident_cache))
         return staged
 
+    conversions = []
+
+    def convert(req_ids, block_table, topk, **kwargs):
+        conversions.append((req_ids, block_table, topk))
+        return topk + 100, torch.ones(topk.shape[0], dtype=torch.int32)
+
+    monkeypatch.setattr(
+        index_group_module, "triton_convert_req_index_to_global_index", convert
+    )
     resident_cache = torch.empty((1, 1, 8))
     cache = SimpleNamespace(
         runtime=SimpleNamespace(gather_prefill_cache=gather),
@@ -4109,18 +4118,23 @@ def test_hisparse_staged_prefills_rebase_to_plan():
     metadata = SimpleNamespace(
         num_decodes=1,
         num_decode_tokens=1,
+        block_size=1,
         req_id_per_token=torch.tensor([0, 1, 1, 2, 2, 2], dtype=torch.int32),
         prefill=SimpleNamespace(host_staging_plans=[plan]),
     )
+    topk_indices = torch.arange(6, dtype=torch.int32).view(6, 1)
 
-    ((tokens, result, block_table, request_ids),) = list(
-        index_group.staged_prefills(0, source, metadata, staging)
+    ((tokens, result, physical_topk, _),) = list(
+        index_group.staged_prefills(0, source, metadata, topk_indices, staging=staging)
     )
 
     assert tokens == slice(3, 6)
     assert result is staged
+    ((req_ids, block_table, topk),) = conversions
+    assert req_ids.tolist() == [0, 0, 0]
     assert block_table is plan.block_table
-    assert request_ids.tolist() == [0, 0, 0]
+    assert topk.flatten().tolist() == [3, 4, 5]
+    assert physical_topk.flatten().tolist() == [103, 104, 105]
     resident_rows, resident_block_size = plan.ensure_gpu_sources.call_args.args
     assert resident_rows.tolist() == [[12]]
     assert resident_block_size == 1
