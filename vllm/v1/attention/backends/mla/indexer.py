@@ -920,6 +920,7 @@ def dense_logits_rows(max_seqlen_k: int, max_logits_bytes: int | None = None) ->
 
 
 def _supports_varlen_paged_mqa_logits() -> bool:
+    """Return whether Blackwell supports the DeepGEMM variable-length paged path."""
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
@@ -928,6 +929,7 @@ def _supports_varlen_paged_mqa_logits() -> bool:
 
 
 def _supports_flattened_device_query_lens() -> bool:
+    """Return whether Hopper supports device-side flattened query lengths."""
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(90)
@@ -1471,6 +1473,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> DeepseekV32IndexerMetadata:
+        """Build indexing metadata for the current prefill and decode batches."""
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
@@ -1880,6 +1883,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self,
         metadata: DeepseekV32IndexerMetadata,
     ) -> None:
+        """Update decode indexing lengths after a speculative draft step."""
         decode = metadata.decode
         if decode is None or metadata.num_decode_tokens == 0:
             return

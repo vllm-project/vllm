@@ -690,6 +690,7 @@ class Indexer(nn.Module):
         prefix: str = "",
         is_inplace_rope: bool = False,
     ):
+        """Initialize indexer projections, rotary embedding, and cache handling."""
         super().__init__()
         self.vllm_config = vllm_config
         self.config = config

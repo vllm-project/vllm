@@ -6,6 +6,7 @@ import torch
 
 @pytest.mark.parametrize("major,minor", [(8, 0), (8, 6), (8, 9), (9, 0), (10, 0)])
 def test_deepseek_v4_sparse_mla_supports_cuda_architectures(major: int, minor: int):
+    """Verify supported CUDA families can select DeepSeek V4 sparse MLA."""
     from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
     from vllm.platforms.interface import DeviceCapability
 
@@ -15,6 +16,7 @@ def test_deepseek_v4_sparse_mla_supports_cuda_architectures(major: int, minor: i
 
 
 def test_deepseek_v4_sparse_mla_rejects_sm75():
+    """Verify sparse MLA rejects unsupported SM75 devices."""
     from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
     from vllm.platforms.interface import DeviceCapability
 
@@ -25,6 +27,7 @@ def test_deepseek_v4_sparse_mla_rejects_sm75():
 
 @pytest.mark.parametrize("major,expected", [(7, False), (8, True), (12, True)])
 def test_triton_sparse_mla_requires_sm80(major: int, expected: bool):
+    """Verify the Triton sparse backend requires SM80 or newer."""
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.mla.triton_mla_sparse import (
         TritonMLASparseBackend,
@@ -49,6 +52,7 @@ def test_triton_sparse_mla_requires_sm80(major: int, expected: bool):
 def test_triton_sparse_mla_warmup_uses_configured_dtypes(
     monkeypatch, model_dtype, cache_dtype, expected_kv_dtype
 ):
+    """Verify sparse attention warmup uses the configured model and cache dtypes."""
     from types import SimpleNamespace
 
     from vllm.v1.attention.backends.mla import triton_mla_sparse
@@ -90,6 +94,7 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,
     sm120: bool,
 ):
+    """Verify adaptive compression keeps its cache stride stable during capture."""
     from vllm.models.deepseek_v4 import sparse_mla
     from vllm.platforms.interface import DeviceCapability
 

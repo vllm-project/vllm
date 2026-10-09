@@ -25,6 +25,7 @@ MXFP4_BLOCK_SIZE = 32
 
 
 def _can_use_cutedsl() -> bool:
+    """Return whether CUDA capability and installed CuTeDSL support this kernel."""
     capability = current_platform.get_device_capability()
     return (
         current_platform.is_cuda()
@@ -136,6 +137,7 @@ class FusedIndexerQRopeQuantTritonKernel(
         # + per_token_group_quant_fp8): GPT-J interleaved RoPE applied to the
         # LAST rope_dim dims of each head; the leading [0, NOPE_DIM) is passed
         # through unchanged.
+        """Rotate and quantize index queries while producing indexer weights."""
         INDEX_Q_ROT_DIM: tl.constexpr = 2 * INDEX_Q_HALF_ROT_DIM
         INDEX_Q_NOPE_DIM: tl.constexpr = INDEX_Q_HEAD_DIM - INDEX_Q_ROT_DIM
         tl.static_assert(INDEX_Q_NOPE_DIM >= 0)
@@ -236,6 +238,7 @@ class FusedIndexerQRopeQuantTritonKernel(
         rope_dim: int,
         use_fnuz: bool,
     ) -> CompileKey:
+        """Specialize index queries for dtype, dimensions, and FP8 support."""
         return self.CompileKey(
             dtype=dtype,
             num_heads=num_heads,
@@ -268,6 +271,7 @@ class FusedIndexerQRopeQuantTritonKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        """Construct query and weight inputs for the selected warmup specialization."""
         q_stride0 = compile_key.num_heads * compile_key.index_q_head_dim
         return dict(
             positions=TritonWarmupTensor(torch.int64),
@@ -320,6 +324,7 @@ class FusedIndexerQRopeQuantTritonKernel(
         use_fnuz: bool,
         fp8_software_conv: bool,
     ) -> LaunchSpec:
+        """Build the fused index-query launch using the input tensor strides."""
         num_tokens = positions.shape[0]
         num_index_q_heads = index_q.shape[1]
         return (num_tokens, num_index_q_heads), dict(

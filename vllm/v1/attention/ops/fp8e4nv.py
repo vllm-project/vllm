@@ -18,6 +18,7 @@ FP8E4NV_EXTERN_LIBS = {"fp8e4nv": _HELPER_PATH_STR}
 
 @tl.core.extern
 def _fp16x1_to_fp8e4m3(arg0, _semantic=None):
+    """Link the scalar FP16-to-FP8 bitcode conversion."""
     u8 = tl.core.dtype("uint8")
     u16 = tl.core.dtype("uint16")
     return tl.core.extern_elementwise(
@@ -32,6 +33,7 @@ def _fp16x1_to_fp8e4m3(arg0, _semantic=None):
 
 @tl.core.extern
 def _bf16x1_to_fp8e4m3(arg0, _semantic=None):
+    """Link the scalar BF16-to-FP8 bitcode conversion."""
     u8 = tl.core.dtype("uint8")
     u16 = tl.core.dtype("uint16")
     return tl.core.extern_elementwise(
@@ -46,6 +48,7 @@ def _bf16x1_to_fp8e4m3(arg0, _semantic=None):
 
 @tl.core.extern
 def _fp32x1_to_fp8e4m3(arg0, _semantic=None):
+    """Link direct scalar FP32-to-FP8 conversion without intermediate rounding."""
     u8 = tl.core.dtype("uint8")
     u32 = tl.core.dtype("uint32")
     return tl.core.extern_elementwise(
@@ -60,6 +63,7 @@ def _fp32x1_to_fp8e4m3(arg0, _semantic=None):
 
 @tl.core.extern
 def _fp8e4m3x1_to_fp32x1(arg0, _semantic=None):
+    """Link the scalar FP8-to-FP32 bitcode conversion."""
     u8 = tl.core.dtype("uint8")
     u32 = tl.core.dtype("uint32")
     return tl.core.extern_elementwise(
@@ -74,6 +78,7 @@ def _fp8e4m3x1_to_fp32x1(arg0, _semantic=None):
 
 @tl.core.extern
 def _fp8e4m3x4_to_fp16x4(arg0, _semantic=None):
+    """Link packed conversion of four FP8 values to FP16."""
     u32 = tl.core.dtype("uint32")
     u64 = tl.core.dtype("uint64")
     return tl.core.extern_elementwise(
@@ -88,6 +93,7 @@ def _fp8e4m3x4_to_fp16x4(arg0, _semantic=None):
 
 @tl.core.extern
 def _fp8e4m3x4_to_bf16x4(arg0, _semantic=None):
+    """Link packed conversion of four FP8 values to BF16."""
     u32 = tl.core.dtype("uint32")
     u64 = tl.core.dtype("uint64")
     return tl.core.extern_elementwise(
@@ -102,6 +108,7 @@ def _fp8e4m3x4_to_bf16x4(arg0, _semantic=None):
 
 @triton.jit
 def _pack_fp8x4(x0, x1, x2, x3):
+    """Pack four FP8 bytes into one unsigned 32-bit value."""
     return (
         x0.to(tl.uint32)
         | (x1.to(tl.uint32) << 8)
@@ -112,6 +119,7 @@ def _pack_fp8x4(x0, x1, x2, x3):
 
 @triton.jit
 def _decode_fp16_pack4(x0, x1, x2, x3):
+    """Decode a four-byte FP8 pack into four FP16 values."""
     decoded = _fp8e4m3x4_to_fp16x4(_pack_fp8x4(x0, x1, x2, x3))
     return (
         (decoded & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True),
@@ -123,6 +131,7 @@ def _decode_fp16_pack4(x0, x1, x2, x3):
 
 @triton.jit
 def _decode_bf16_pack4(x0, x1, x2, x3):
+    """Decode a four-byte FP8 pack into four BF16 values."""
     decoded = _fp8e4m3x4_to_bf16x4(_pack_fp8x4(x0, x1, x2, x3))
     return (
         (decoded & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True),
