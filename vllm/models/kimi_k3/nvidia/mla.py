@@ -75,7 +75,7 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
@@ -440,18 +440,21 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         projected into latent space by ``W_UK_T`` and the attention output is
         projected back to ``v`` by ``W_UV`` -- avoiding materializing full K/V.
         """
-        W_UK, W_UV = split_kv_b_proj(
-            self.kv_b_proj,
-            act_dtype,
-            self.kv_lora_rank,
-            self.num_local_heads,
-            self.qk_nope_head_dim,
-            self.v_head_dim,
-        )
-        # (L, N, V) -> (N, L, V)
-        replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
-        # (L, N, P) -> (N, P, L)
-        replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+        # The weight cache daemon exports the absorbed weights. Repeating the
+        # absorption would mutate its shared CUDA allocation.
+        if not (is_weights_pre_processed() and getattr(self, "W_UV", None) is not None):
+            W_UK, W_UV = split_kv_b_proj(
+                self.kv_b_proj,
+                act_dtype,
+                self.kv_lora_rank,
+                self.num_local_heads,
+                self.qk_nope_head_dim,
+                self.v_head_dim,
+            )
+            # (L, N, V) -> (N, L, V)
+            replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
+            # (L, N, P) -> (N, P, L)
+            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
 
         quant_method = (
             resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
