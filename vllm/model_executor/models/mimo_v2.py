@@ -319,7 +319,9 @@ class MiMoV2Attention(nn.Module):
 
         # V has a different head dim than K. Honor an explicit backend that
         # declares it can serve that geometry; anything else keeps the auto-pick
-        # below, with a warning.
+        # below, with a warning. The auto-pick prefers FA-DiffKV when FA3/4 is
+        # usable on this device; else, on sm_12x, TRITON_FLASHINFER_DIFFKV
+        # (FlashInfer prefill, Triton decode); else TRITON_ATTN_DIFFKV.
         if self.v_head_dim != self.head_dim:
             requested = get_current_vllm_config().attention_config.backend
             if requested is not None and requested.get_class().supports_head_size_v(
@@ -336,13 +338,24 @@ class MiMoV2Attention(nn.Module):
                         self.head_dim,
                     )
                 fa_backend = AttentionBackendEnum.FLASH_ATTN_DIFFKV.get_class()
+                fi_backend = AttentionBackendEnum.TRITON_FLASHINFER_DIFFKV.get_class()
                 assert hasattr(fa_backend, "is_supported_on_current_device")
+                assert hasattr(fi_backend, "is_supported_on_current_device")
                 if fa_backend.is_supported_on_current_device(
                     head_size=self.head_dim,
                     head_size_v=self.v_head_dim,
                     has_sinks=self.attention_sink_bias is not None,
                 ):
                     backend_enum = AttentionBackendEnum.FLASH_ATTN_DIFFKV
+                elif fi_backend.is_supported_on_current_device(
+                    head_size=self.head_dim,
+                    head_size_v=self.v_head_dim,
+                    has_sinks=self.attention_sink_bias is not None,
+                    sliding_window=sliding_window,
+                    dtype=get_current_vllm_config().model_config.dtype,
+                    kv_cache_dtype=cache_config.cache_dtype if cache_config else "auto",
+                ):
+                    backend_enum = AttentionBackendEnum.TRITON_FLASHINFER_DIFFKV
                 else:
                     backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
             attn_backend = backend_enum.get_class()
