@@ -12,86 +12,45 @@ template <bool HandleNaN>
 __attribute__((device, always_inline)) u64 fp8e4m3x4_to_fp16x4_impl(u32 input) {
   u32 out01;
   u32 out23;
+  // Packed normal conversion follows the PRMT LUT path; zero/subnormal LUTs
+  // preserve exact finite conversion instead of flushing small values.
   asm(R"ptx({
-    .reg .u32 sublut, subhi;
-    .reg .u32 raw0, mag0, m0, sign0, norm0, sub0, o0;
-    .reg .u32 raw1, mag1, m1, sign1, norm1, sub1, o1;
-    .reg .u32 raw2, mag2, m2, sign2, norm2, sub2, o2;
-    .reg .u32 raw3, mag3, m3, sign3, norm3, sub3, o3;
-    .reg .u32 out0, out1;
-    .reg .pred p_norm0;
-    .reg .pred p_norm1;
-    .reg .pred p_norm2;
-    .reg .pred p_norm3;
-    mov.u32 sublut, 0x1e1c1800;
-    mov.u32 subhi, 0x23222120;
-
-    and.b32 raw0, %2, 0xff;
-    shr.u32 raw1, %2, 8;
-    and.b32 raw1, raw1, 0xff;
-    shr.u32 raw2, %2, 16;
-    and.b32 raw2, raw2, 0xff;
-    shr.u32 raw3, %2, 24;
-    and.b32 raw3, raw3, 0xff;
-
-    // lane 0
-    and.b32 mag0, raw0, 0x7f;
-    and.b32 sign0, raw0, 0x80;
+    .reg .u32 zero, reg0, reg1, tmp0, tmp1, ctrl0, ctrl1, lt0, lt1;
+    .reg .u32 exp0, exp1, norm0, norm1, sub0, sub1, lo0, lo1, hi0, hi1;
+    .reg .u32 sign0, sign1, mask0, mask1, out0, out1;
+    mov.u32 zero, 0;
+    prmt.b32 reg0, %2, zero, 0x4140;
+    prmt.b32 reg1, %2, zero, 0x4342;
+    and.b32 tmp0, reg0, 0x007f007f;
+    and.b32 tmp1, reg1, 0x007f007f;
+    shl.b32 norm0, tmp0, 7;
+    shl.b32 norm1, tmp1, 7;
+    add.u32 norm0, norm0, 0x20002000;
+    add.u32 norm1, norm1, 0x20002000;
+    // PRMT uses one selector nibble per output byte. The original FP8
+    // mantissas index bytes 0 and 2 for each pair of 16-bit outputs.
+    and.b32 ctrl0, %2, 0x07070707;
+    shr.u32 ctrl1, ctrl0, 16;
+    mov.u32 lt0, 0x1e1c1800;
+    mov.u32 lt1, 0x23222120;
+    prmt.b32 hi0, lt0, lt1, ctrl0;
+    prmt.b32 hi1, lt0, lt1, ctrl1;
+    prmt.b32 sub0, zero, hi0, 0x6040;
+    prmt.b32 sub1, zero, hi1, 0x6040;
+    and.b32 mask0, reg0, 0x00780078;
+    and.b32 mask1, reg1, 0x00780078;
+    vset2.u32.u32.eq mask0, mask0, zero, zero;
+    vset2.u32.u32.eq mask1, mask1, zero, zero;
+    vsub2.u32.u32.u32 mask0, zero, mask0, zero;
+    vsub2.u32.u32.u32 mask1, zero, mask1, zero;
+    lop3.b32 out0, mask0, sub0, norm0, 0xca;
+    lop3.b32 out1, mask1, sub1, norm1, 0xca;
+    and.b32 sign0, reg0, 0x00800080;
+    and.b32 sign1, reg1, 0x00800080;
     shl.b32 sign0, sign0, 8;
-    shl.b32 norm0, mag0, 7;
-    add.u32 norm0, norm0, 0x2000;
-    and.b32 m0, raw0, 0x07;
-    shl.b32 m0, m0, 4;
-    prmt.b32 sub0, sublut, subhi, m0;
-    setp.ge.u32 p_norm0, mag0, 8;
-    selp.u32 o0, norm0, sub0, p_norm0;
-    or.b32 o0, o0, sign0;
-
-    // lane 1
-    and.b32 mag1, raw1, 0x7f;
-    and.b32 sign1, raw1, 0x80;
     shl.b32 sign1, sign1, 8;
-    shl.b32 norm1, mag1, 7;
-    add.u32 norm1, norm1, 0x2000;
-    and.b32 m1, raw1, 0x07;
-    shl.b32 m1, m1, 4;
-    prmt.b32 sub1, sublut, subhi, m1;
-    setp.ge.u32 p_norm1, mag1, 8;
-    selp.u32 o1, norm1, sub1, p_norm1;
-    or.b32 o1, o1, sign1;
-
-    // lane 2
-    and.b32 mag2, raw2, 0x7f;
-    and.b32 sign2, raw2, 0x80;
-    shl.b32 sign2, sign2, 8;
-    shl.b32 norm2, mag2, 7;
-    add.u32 norm2, norm2, 0x2000;
-    and.b32 m2, raw2, 0x07;
-    shl.b32 m2, m2, 4;
-    prmt.b32 sub2, sublut, subhi, m2;
-    setp.ge.u32 p_norm2, mag2, 8;
-    selp.u32 o2, norm2, sub2, p_norm2;
-    or.b32 o2, o2, sign2;
-
-    // lane 3
-    and.b32 mag3, raw3, 0x7f;
-    and.b32 sign3, raw3, 0x80;
-    shl.b32 sign3, sign3, 8;
-    shl.b32 norm3, mag3, 7;
-    add.u32 norm3, norm3, 0x2000;
-    and.b32 m3, raw3, 0x07;
-    shl.b32 m3, m3, 4;
-    prmt.b32 sub3, sublut, subhi, m3;
-    setp.ge.u32 p_norm3, mag3, 8;
-    selp.u32 o3, norm3, sub3, p_norm3;
-    or.b32 o3, o3, sign3;
-
-    shl.b32 o1, o1, 16;
-    or.b32  out0, o0, o1;
-    shl.b32 o3, o3, 16;
-    or.b32  out1, o2, o3;
-    mov.b32 %0, out0;
-    mov.b32 %1, out1;
+    or.b32 %0, out0, sign0;
+    or.b32 %1, out1, sign1;
   })ptx"
       : "=r"(out01), "=r"(out23)
       : "r"(input));
@@ -544,104 +503,55 @@ template <bool HandleNaN>
 __attribute__((device, always_inline)) u64 fp8e4m3x4_to_bf16x4_impl(u32 input) {
   u32 out01;
   u32 out23;
+  // Packed normal conversion follows the PRMT LUT path; zero/subnormal LUTs
+  // preserve exact finite conversion instead of flushing small values.
   asm(R"ptx({
-    .reg .u32 hilo, hihi, lolo, lohi;
-    .reg .u32 raw0, mag0, m0, sign0, norm0, sub0, hi0, lo0, o0;
-    .reg .u32 raw1, mag1, m1, sign1, norm1, sub1, hi1, lo1, o1;
-    .reg .u32 raw2, mag2, m2, sign2, norm2, sub2, hi2, lo2, o2;
-    .reg .u32 raw3, mag3, m3, sign3, norm3, sub3, hi3, lo3, o3;
-    .reg .u32 out0, out1;
-    .reg .pred p_norm0;
-    .reg .pred p_norm1;
-    .reg .pred p_norm2;
-    .reg .pred p_norm3;
-    mov.u32 hilo, 0x3b3b3b00;
-    mov.u32 hihi, 0x3c3c3c3c;
-    mov.u32 lolo, 0xc0800000;
-    mov.u32 lohi, 0x60402000;
-
-    and.b32 raw0, %2, 0xff;
-    shr.u32 raw1, %2, 8;
-    and.b32 raw1, raw1, 0xff;
-    shr.u32 raw2, %2, 16;
-    and.b32 raw2, raw2, 0xff;
-    shr.u32 raw3, %2, 24;
-    and.b32 raw3, raw3, 0xff;
-
-
-    and.b32 mag0, raw0, 0x7f;
-    and.b32 sign0, raw0, 0x80;
+    .reg .u32 zero, reg0, reg1, tmp0, tmp1, ctrl0, ctrl1, lt0, lt1;
+    .reg .u32 exp0, exp1, norm0, norm1, sub0, sub1, lo0, lo1, hi0, hi1;
+    .reg .u32 sign0, sign1, mask0, mask1, out0, out1;
+    mov.u32 zero, 0;
+    prmt.b32 reg0, %2, zero, 0x4140;
+    prmt.b32 reg1, %2, zero, 0x4342;
+    mov.u32 lt0, 0x3f3e3d3c;
+    mov.u32 lt1, 0x43424140;
+    shl.b32 tmp0, reg0, 4;
+    shl.b32 tmp1, reg1, 4;
+    prmt.b32 ctrl0, tmp0, zero, 0x4331;
+    prmt.b32 ctrl1, tmp1, zero, 0x4331;
+    and.b32 ctrl0, ctrl0, 0x07070707;
+    and.b32 ctrl1, ctrl1, 0x07070707;
+    prmt.b32 exp0, lt0, lt1, ctrl0;
+    prmt.b32 exp1, lt0, lt1, ctrl1;
+    prmt.b32 norm0, tmp0, exp0, 0x6240;
+    prmt.b32 norm1, tmp1, exp1, 0x6240;
+    // PRMT uses one selector nibble per output byte. The original FP8
+    // mantissas index bytes 0 and 2 for each pair of 16-bit outputs.
+    and.b32 ctrl0, %2, 0x07070707;
+    shr.u32 ctrl1, ctrl0, 16;
+    mov.u32 lt0, 0xc0800000;
+    mov.u32 lt1, 0x60402000;
+    prmt.b32 lo0, lt0, lt1, ctrl0;
+    prmt.b32 lo1, lt0, lt1, ctrl1;
+    mov.u32 lt0, 0x3b3b3b00;
+    mov.u32 lt1, 0x3c3c3c3c;
+    prmt.b32 hi0, lt0, lt1, ctrl0;
+    prmt.b32 hi1, lt0, lt1, ctrl1;
+    prmt.b32 sub0, lo0, hi0, 0x6240;
+    prmt.b32 sub1, lo1, hi1, 0x6240;
+    and.b32 mask0, reg0, 0x00780078;
+    and.b32 mask1, reg1, 0x00780078;
+    vset2.u32.u32.eq mask0, mask0, zero, zero;
+    vset2.u32.u32.eq mask1, mask1, zero, zero;
+    vsub2.u32.u32.u32 mask0, zero, mask0, zero;
+    vsub2.u32.u32.u32 mask1, zero, mask1, zero;
+    lop3.b32 out0, mask0, sub0, norm0, 0xca;
+    lop3.b32 out1, mask1, sub1, norm1, 0xca;
+    and.b32 sign0, reg0, 0x00800080;
+    and.b32 sign1, reg1, 0x00800080;
     shl.b32 sign0, sign0, 8;
-    shl.b32 norm0, mag0, 4;
-    add.u32 norm0, norm0, 0x3c00;
-    and.b32 m0, raw0, 0x07;
-    prmt.b32 hi0, hilo, hihi, m0;
-    and.b32 hi0, hi0, 0xff;
-    shl.b32 hi0, hi0, 8;
-    prmt.b32 lo0, lolo, lohi, m0;
-    and.b32 lo0, lo0, 0xff;
-    or.b32 sub0, hi0, lo0;
-    setp.ge.u32 p_norm0, mag0, 8;
-    selp.u32 o0, norm0, sub0, p_norm0;
-    or.b32 o0, o0, sign0;
-
-
-    and.b32 mag1, raw1, 0x7f;
-    and.b32 sign1, raw1, 0x80;
     shl.b32 sign1, sign1, 8;
-    shl.b32 norm1, mag1, 4;
-    add.u32 norm1, norm1, 0x3c00;
-    and.b32 m1, raw1, 0x07;
-    prmt.b32 hi1, hilo, hihi, m1;
-    and.b32 hi1, hi1, 0xff;
-    shl.b32 hi1, hi1, 8;
-    prmt.b32 lo1, lolo, lohi, m1;
-    and.b32 lo1, lo1, 0xff;
-    or.b32 sub1, hi1, lo1;
-    setp.ge.u32 p_norm1, mag1, 8;
-    selp.u32 o1, norm1, sub1, p_norm1;
-    or.b32 o1, o1, sign1;
-
-
-    and.b32 mag2, raw2, 0x7f;
-    and.b32 sign2, raw2, 0x80;
-    shl.b32 sign2, sign2, 8;
-    shl.b32 norm2, mag2, 4;
-    add.u32 norm2, norm2, 0x3c00;
-    and.b32 m2, raw2, 0x07;
-    prmt.b32 hi2, hilo, hihi, m2;
-    and.b32 hi2, hi2, 0xff;
-    shl.b32 hi2, hi2, 8;
-    prmt.b32 lo2, lolo, lohi, m2;
-    and.b32 lo2, lo2, 0xff;
-    or.b32 sub2, hi2, lo2;
-    setp.ge.u32 p_norm2, mag2, 8;
-    selp.u32 o2, norm2, sub2, p_norm2;
-    or.b32 o2, o2, sign2;
-
-
-    and.b32 mag3, raw3, 0x7f;
-    and.b32 sign3, raw3, 0x80;
-    shl.b32 sign3, sign3, 8;
-    shl.b32 norm3, mag3, 4;
-    add.u32 norm3, norm3, 0x3c00;
-    and.b32 m3, raw3, 0x07;
-    prmt.b32 hi3, hilo, hihi, m3;
-    and.b32 hi3, hi3, 0xff;
-    shl.b32 hi3, hi3, 8;
-    prmt.b32 lo3, lolo, lohi, m3;
-    and.b32 lo3, lo3, 0xff;
-    or.b32 sub3, hi3, lo3;
-    setp.ge.u32 p_norm3, mag3, 8;
-    selp.u32 o3, norm3, sub3, p_norm3;
-    or.b32 o3, o3, sign3;
-
-    shl.b32 o1, o1, 16;
-    or.b32  out0, o0, o1;
-    shl.b32 o3, o3, 16;
-    or.b32  out1, o2, o3;
-    mov.b32 %0, out0;
-    mov.b32 %1, out1;
+    or.b32 %0, out0, sign0;
+    or.b32 %1, out1, sign1;
   })ptx"
       : "=r"(out01), "=r"(out23)
       : "r"(input));
@@ -661,21 +571,124 @@ __attribute__((device, always_inline)) u64 fp8e4m3x4_to_bf16x4_impl(u32 input) {
 using u8 = unsigned char;
 using u16 = unsigned short;
 
-template <u32 (*Convert)(u32, u32)>
-__attribute__((device, always_inline)) u8 convert_lane0_with_pack4(u16 input) {
-  // Match Triton's partial pack-4 lowering: lane 0 is real; zero-fill the
-  // unused lanes so they cannot become LLVM poison.
-  return static_cast<u8>(Convert(static_cast<u32>(input), 0));
-}
-
 template <bool HandleNaN>
 __attribute__((device, always_inline)) u8 fp16x1_to_fp8e4m3_impl(u16 input) {
-  return convert_lane0_with_pack4<fp16x4_to_fp8e4m3x4_impl<HandleNaN>>(input);
+  // Reuse the x4 lane PTX without computing unused lanes.
+  u32 output;
+  asm(R"ptx({
+    .reg .u32 raw0, a0, e0, m0, r0, tmp0, ndec0, norm0, ec0, sh0, shm10, shp10, one0, half0, mask0, rem0, sub0, sdec0, sgn0, o0;
+    .reg .pred p_ntie0, p_stie0, p_tiny0, p_norm0, p_hi0;
+    cvt.u32.u16 raw0, %1;
+    and.b32  a0, raw0, 0x7fff;
+    and.b32  sgn0, raw0, 0x8000;
+    shr.u32  sgn0, sgn0, 8;
+    shr.u32  e0, a0, 10;
+    and.b32  m0, a0, 0x3ff;
+
+    add.u32  r0, m0, 0x40;
+    shr.u32  r0, r0, 7;
+    and.b32  tmp0, m0, 0xff;
+    setp.eq.u32 p_ntie0, tmp0, 0x40;
+    sub.u32  ndec0, r0, 1;
+    selp.u32 r0, ndec0, r0, p_ntie0;
+    sub.u32  norm0, e0, 8;
+    shl.b32  norm0, norm0, 3;
+    add.u32  norm0, norm0, r0;
+    min.u32  norm0, norm0, 0x7f;
+
+    max.u32  ec0, e0, 5;
+    sub.u32  sh0, 16, ec0;
+    sub.u32  shm10, sh0, 1;
+    mov.u32  one0, 1;
+    shl.b32  half0, one0, shm10;
+    or.b32   tmp0, m0, 0x400;
+    add.u32  sub0, tmp0, half0;
+    shr.u32  sub0, sub0, sh0;
+    add.u32  shp10, sh0, 1;
+    shl.b32  mask0, one0, shp10;
+    sub.u32  mask0, mask0, 1;
+    and.b32  rem0, tmp0, mask0;
+    setp.eq.u32 p_stie0, rem0, half0;
+    sub.u32  sdec0, sub0, 1;
+    selp.u32 sub0, sdec0, sub0, p_stie0;
+    min.u32  sub0, sub0, 8;
+    setp.lt.u32 p_tiny0, e0, 5;
+    selp.u32 sub0, 0, sub0, p_tiny0;
+
+    setp.gt.u32 p_norm0, e0, 8;
+    selp.u32 o0, norm0, sub0, p_norm0;
+    setp.ge.u32 p_hi0, a0, 0x5f41;
+    selp.u32 o0, 0x7e, o0, p_hi0;
+    or.b32 o0, o0, sgn0;
+    mov.b32 %0, o0;
+  })ptx"
+      : "=r"(output)
+      : "h"(input));
+  if constexpr (HandleNaN) {
+    if ((input & 0x7fff) > 0x7c00) {
+      output = 0x7fU | ((input & 0x8000) >> 8);
+    }
+  }
+  return static_cast<u8>(output);
 }
 
 template <bool HandleNaN>
 __attribute__((device, always_inline)) u8 bf16x1_to_fp8e4m3_impl(u16 input) {
-  return convert_lane0_with_pack4<bf16x4_to_fp8e4m3x4_impl<HandleNaN>>(input);
+  // Reuse the x4 lane PTX without computing unused lanes.
+  u32 output;
+  asm(R"ptx({
+    .reg .u32 raw0, a0, e0, m0, r0, tmp0, ntmp0, ndec0, norm0, ec0, sh0, sh20, shp10, one0, rnd0, mask0, rem0, sub0, sdec0, sgn0, o0;
+    .reg .pred p_ntie0, p_stie0, p_tiny0, p_norm0, p_hi0;
+    cvt.u32.u16 raw0, %1;
+    and.b32  a0, raw0, 0x7fff;
+    and.b32  sgn0, raw0, 0x8000;
+    shr.u32  sgn0, sgn0, 8;
+    shr.u32  e0, a0, 7;
+    and.b32  m0, a0, 0x7f;
+    add.u32  r0, m0, 8;
+    shr.u32  r0, r0, 4;
+    and.b32  ntmp0, m0, 0x1f;
+    setp.eq.u32 p_ntie0, ntmp0, 8;
+    sub.u32  ndec0, r0, 1;
+    selp.u32 r0, ndec0, r0, p_ntie0;
+    sub.u32  norm0, e0, 120;
+    shl.b32  norm0, norm0, 3;
+    add.u32  norm0, norm0, r0;
+    min.u32  norm0, norm0, 0x7e;
+    max.u32  ec0, e0, 117;
+    sub.u32  sh0, 125, ec0;
+    sub.u32  sh20, sh0, 1;
+    mov.u32  rnd0, 1;
+    shl.b32  rnd0, rnd0, sh20;
+    or.b32   tmp0, m0, 0x80;
+    add.u32  sub0, tmp0, rnd0;
+    shr.u32  sub0, sub0, sh0;
+    add.u32  shp10, sh0, 1;
+    mov.u32  one0, 1;
+    shl.b32  mask0, one0, shp10;
+    sub.u32  mask0, mask0, 1;
+    and.b32  rem0, tmp0, mask0;
+    setp.eq.u32 p_stie0, rem0, rnd0;
+    sub.u32  sdec0, sub0, 1;
+    selp.u32 sub0, sdec0, sub0, p_stie0;
+    min.u32  sub0, sub0, 8;
+    setp.lt.u32 p_tiny0, e0, 117;
+    selp.u32 sub0, 0, sub0, p_tiny0;
+    setp.gt.u32 p_norm0, e0, 120;
+    selp.u32 o0, norm0, sub0, p_norm0;
+    setp.ge.u32 p_hi0, a0, 0x43e0;
+    selp.u32 o0, 0x7e, o0, p_hi0;
+    or.b32 o0, o0, sgn0;
+    mov.b32 %0, o0;
+  })ptx"
+      : "=r"(output)
+      : "h"(input));
+  if constexpr (HandleNaN) {
+    if ((input & 0x7fff) > 0x7f80) {
+      output = 0x7fU | ((input & 0x8000) >> 8);
+    }
+  }
+  return static_cast<u8>(output);
 }
 
 template <bool HandleNaN>
@@ -684,17 +697,83 @@ __attribute__((device, always_inline)) u8 fp32x1_to_fp8e4m3_impl(u32 input) {
   // result while avoiding a double-rounding error.
   const u16 bf16_round_to_odd =
       static_cast<u16>((input >> 16) | ((input & 0xffff) != 0));
-  return convert_lane0_with_pack4<bf16x4_to_fp8e4m3x4_impl<HandleNaN>>(
-      bf16_round_to_odd);
+  return bf16x1_to_fp8e4m3_impl<HandleNaN>(bf16_round_to_odd);
+}
+
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u16 fp8e4m3x1_to_fp16x1_impl(u8 input) {
+  u32 output;
+  asm(R"ptx({
+    .reg .u32 raw0, mag0, m0, sign0, norm0, sub0, o0, sublut, subhi;
+    .reg .pred p_norm0;
+    mov.u32 sublut, 0x1e1c1800;
+    mov.u32 subhi, 0x23222120;
+    and.b32 raw0, %1, 0xff;
+    and.b32 mag0, raw0, 0x7f;
+    and.b32 sign0, raw0, 0x80;
+    shl.b32 sign0, sign0, 8;
+    shl.b32 norm0, mag0, 7;
+    add.u32 norm0, norm0, 0x2000;
+    and.b32 m0, raw0, 0x07;
+    shl.b32 m0, m0, 4;
+    prmt.b32 sub0, sublut, subhi, m0;
+    setp.ge.u32 p_norm0, mag0, 8;
+    selp.u32 o0, norm0, sub0, p_norm0;
+    or.b32 o0, o0, sign0;
+    mov.b32 %0, o0;
+  })ptx"
+      : "=r"(output)
+      : "r"(static_cast<u32>(input)));
+  if constexpr (HandleNaN) {
+    if ((input & 0x7f) == 0x7f) {
+      output = 0x7e00;
+    }
+  }
+  return static_cast<u16>(output);
+}
+
+template <bool HandleNaN>
+__attribute__((device, always_inline)) u16 fp8e4m3x1_to_bf16x1_impl(u8 input) {
+  u32 output;
+  asm(R"ptx({
+    .reg .u32 raw0, mag0, m0, sign0, norm0, sub0, o0, hilo, hihi, lolo, lohi, hi0, lo0;
+    .reg .pred p_norm0;
+    mov.u32 hilo, 0x3b3b3b00;
+    mov.u32 hihi, 0x3c3c3c3c;
+    mov.u32 lolo, 0xc0800000;
+    mov.u32 lohi, 0x60402000;
+    and.b32 raw0, %1, 0xff;
+    and.b32 mag0, raw0, 0x7f;
+    and.b32 sign0, raw0, 0x80;
+    shl.b32 sign0, sign0, 8;
+    shl.b32 norm0, mag0, 4;
+    add.u32 norm0, norm0, 0x3c00;
+    and.b32 m0, raw0, 0x07;
+    prmt.b32 hi0, hilo, hihi, m0;
+    and.b32 hi0, hi0, 0xff;
+    shl.b32 hi0, hi0, 8;
+    prmt.b32 lo0, lolo, lohi, m0;
+    and.b32 lo0, lo0, 0xff;
+    or.b32 sub0, hi0, lo0;
+    setp.ge.u32 p_norm0, mag0, 8;
+    selp.u32 o0, norm0, sub0, p_norm0;
+    or.b32 o0, o0, sign0;
+    mov.b32 %0, o0;
+  })ptx"
+      : "=r"(output)
+      : "r"(static_cast<u32>(input)));
+  if constexpr (HandleNaN) {
+    if ((input & 0x7f) == 0x7f) {
+      output = 0x7fc0;
+    }
+  }
+  return static_cast<u16>(output);
 }
 
 template <bool HandleNaN>
 __attribute__((device, always_inline)) u32 fp8e4m3x1_to_fp32x1_impl(u8 input) {
-  // Every finite E4M3 value is exactly representable as BF16. Decode its low
-  // lane as BF16 bits, then place those bits directly in the FP32 high word.
-  const u64 decoded =
-      fp8e4m3x4_to_bf16x4_impl<HandleNaN>(static_cast<u32>(input));
-  return static_cast<u32>(static_cast<u16>(decoded)) << 16;
+  // Finite E4M3 values are exactly representable as BF16; widening is a shift.
+  return static_cast<u32>(fp8e4m3x1_to_bf16x1_impl<HandleNaN>(input)) << 16;
 }
 
 extern "C" __attribute__((device, always_inline)) u64
@@ -775,4 +854,24 @@ fp8e4m3x1_to_fp32x1(u8 input) {
 extern "C" __attribute__((device, always_inline)) u32
 fp8e4m3x1_to_fp32x1_nan(u8 input) {
   return fp8e4m3x1_to_fp32x1_impl<true>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u16
+fp8e4m3x1_to_fp16x1(u8 input) {
+  return fp8e4m3x1_to_fp16x1_impl<false>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u16
+fp8e4m3x1_to_fp16x1_nan(u8 input) {
+  return fp8e4m3x1_to_fp16x1_impl<true>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u16
+fp8e4m3x1_to_bf16x1(u8 input) {
+  return fp8e4m3x1_to_bf16x1_impl<false>(input);
+}
+
+extern "C" __attribute__((device, always_inline)) u16
+fp8e4m3x1_to_bf16x1_nan(u8 input) {
+  return fp8e4m3x1_to_bf16x1_impl<true>(input);
 }
