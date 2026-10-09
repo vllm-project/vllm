@@ -162,6 +162,10 @@ def _uses_dense_virtual_transfer_pages(
     )
 
 
+def _is_remote_disconnect(error: Exception) -> bool:
+    return type(error).__name__ == "nixlRemoteDisconnectError"
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -887,6 +891,14 @@ class NixlBaseConnectorWorker:
         )
         # Map of pull peer (host, port) -> engine_id currently serving it.
         self._engine_by_address: dict[tuple[str, int], EngineId] = {}
+        # Peers whose NIXL endpoints failed UCX keepalive.
+        self._unreachable_remote_engines: set[EngineId] = set()
+        self._engine_heartbeat_interval: float = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "engine_heartbeat_interval", 5.0
+            )
+        )
+        self._next_engine_heartbeat: float = 0.0
 
         self.model_config = vllm_config.model_config
 
@@ -3097,6 +3109,7 @@ class NixlBaseConnectorWorker:
         self._reap_expired_send_leases(done_sending)
 
         self._cleanup_remote_engines()
+        self._release_unreachable_remote_engines()
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
@@ -3315,7 +3328,10 @@ class NixlBaseConnectorWorker:
             for agent_name in self._remote_agents[engine_id].values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
-                except Exception:
+                except Exception as e:
+                    if _is_remote_disconnect(e):
+                        self._mark_remote_engine_unreachable(engine_id, agent_name)
+                        break
                     logger.debug(
                         "Failed to send heartbeat to engine %s",
                         engine_id,
@@ -3790,6 +3806,58 @@ class NixlBaseConnectorWorker:
             engine_id,
             f" and a {backoff:.0f}s backoff" if backoff else "",
         )
+
+    def _release_unreachable_remote_engines(self) -> None:
+        """Release peers that failed heartbeat, once no reads are in flight."""
+        if self._TRANSFER_MODE != "pull":
+            return
+        self._heartbeat_remote_engines()
+        with self._handshake_lock:
+            if self._handshake_futures:
+                return
+            unreachable = self._unreachable_remote_engines & self._remote_agents.keys()
+        self._unreachable_remote_engines = set(unreachable)
+        for engine_id in unreachable - self._engines_with_inflight_transfers():
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            self._unreachable_remote_engines.discard(engine_id)
+            logger.info(
+                "Released NIXL state for unreachable remote engine %s.", engine_id
+            )
+
+    def _heartbeat_remote_engines(self) -> None:
+        """Send an empty heartbeat to every peer; it fails once UCX keepalive
+        has failed the peer's endpoints."""
+        if self._engine_heartbeat_interval <= 0:
+            return
+        now = time.perf_counter()
+        if now < self._next_engine_heartbeat:
+            return
+        self._next_engine_heartbeat = now + self._engine_heartbeat_interval
+        with self._handshake_lock:
+            engines = {
+                engine_id: list(agents.values())
+                for engine_id, agents in self._remote_agents.items()
+            }
+        for engine_id, agent_names in engines.items():
+            for agent_name in agent_names:
+                try:
+                    self.nixl_wrapper.send_notif(agent_name, notif_msg=b"HB:")
+                except Exception as e:
+                    if _is_remote_disconnect(e):
+                        self._mark_remote_engine_unreachable(engine_id, agent_name)
+                        break
+
+    def _mark_remote_engine_unreachable(
+        self, engine_id: EngineId, agent_name: str
+    ) -> None:
+        if engine_id in self._unreachable_remote_engines:
+            return
+        logger.warning(
+            "Remote engine %s (agent %s) failed heartbeat; releasing its NIXL state.",
+            engine_id,
+            agent_name,
+        )
+        self._unreachable_remote_engines.add(engine_id)
 
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
