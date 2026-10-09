@@ -149,8 +149,6 @@ The generic Triton sparse-MLA kernel preserves the query's FP16 or BF16 output
 dtype. DeepSeek V4's separate sparse-MLA backend accepts BF16 model activations.
 This focused branch retains the existing DeepSeek V4 SM90/SM100 routing gate;
 SM8x routing is enabled by the combined portability changes in the omnibus.
-The generic backend's BF16-only declaration remains narrower than its kernel's
-FP16/BF16 support.
 
 --8<-- "gen:priority-mla"
 
