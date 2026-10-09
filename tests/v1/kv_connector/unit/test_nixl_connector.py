@@ -1128,17 +1128,24 @@ class TestNixlHandshake:
                     return
         raise TimeoutError("Took too long to complete async handshake.")
 
+    @pytest.mark.parametrize(
+        ("kv_cache_layout", "enable_permute_local_kv"),
+        # enable_permute_local_kv only covers a local LBNHC cache.
+        [("LBHNC", False), ("BLHNC", True)],
+    )
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
     def test_handshake_fails_on_kv_cache_layout_mismatch(
-        self, default_vllm_config, dist_init
+        self, default_vllm_config, dist_init, kv_cache_layout, enable_permute_local_kv
     ):
         """Verify that adding a remote agent fails if kv_cache_layout differs.
         This test is only relevant for heterogeneous TP.
         """
-        vllm_config = create_vllm_config()
+        vllm_config = create_vllm_config(
+            enable_permute_local_kv=enable_permute_local_kv
+        )
 
         # Mock TP world size to 2 to force heterogeneous TP when
         # remote_tp_size=1
@@ -1151,7 +1158,10 @@ class TestNixlHandshake:
                 vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
             )
             connector.connector_worker = FakeNixlConnectorWorker(
-                vllm_config, connector.engine_id, hand_shake_latency=0
+                vllm_config,
+                connector.engine_id,
+                hand_shake_latency=0,
+                kv_cache_layout=kv_cache_layout,
             )
             worker = connector.connector_worker
 
