@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from typing import TYPE_CHECKING
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -442,6 +444,30 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
                 and quant_config.get("format") == "mxfp4-pack-quantized"
             ):
                 quant_config["quant_method"] = "mxfp4"
+
+
+class Kolibri1ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # Kolibri 1 FP8 weights carry fp32 block scales, which DeepGEMM would
+        # round to powers of two (UE8M0); on Blackwell it only takes UE8M0.
+        # The MoE and E8M0 paths only honor the global env vars. User-set
+        # values win.
+        quant_config = model_config.model_arch_config.quantization_config or {}
+        if quant_config.get("quant_method") != "fp8":
+            return
+        defaults = {
+            name: "0"
+            for name in ("VLLM_USE_DEEP_GEMM", "VLLM_USE_DEEP_GEMM_E8M0")
+            if not envs.is_set(name)
+        }
+        if not defaults:
+            return
+        os.environ.update(defaults)
+        logger.info_once(
+            "Kolibri 1 FP8 checkpoint: setting %s to keep fp32 block scales.",
+            ", ".join(f"{name}={value}" for name, value in defaults.items()),
+        )
 
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
@@ -1077,6 +1103,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
+    "Kolibri1ForCausalLM": Kolibri1ForCausalLMConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
