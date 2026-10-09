@@ -168,6 +168,11 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
+    # Set in __init__; these defaults keep registration usable on workers built
+    # without it (whole-row off, no head-sharded draft).
+    _whole_row_regions: bool = False
+    _head_sharded_draft_kv_heads: int | None = None
+
     # Layer-name routing is supported only by NixlPushConnector for HMA or
     # packed KV caches under PP.
     _supports_pp_hma = False
@@ -417,6 +422,76 @@ class NixlBaseConnectorWorker:
         """
         return region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
 
+    def _resolve_head_sharded_draft_kv_heads(self) -> int | None:
+        """Total KV heads of a non-MLA draft under an MLA target, else None.
+
+        Such a draft's KV is head-sharded while the target's is replicated."""
+        if not self.use_mla or self._has_mamba or self._is_csa_linear:
+            return None
+        spec_config = self.vllm_config.speculative_config
+        draft_config = spec_config.draft_model_config if spec_config else None
+        if draft_config is None or draft_config.use_mla:
+            return None
+        return draft_config.get_total_num_kv_heads()
+
+    def _is_draft_layer_name(self, layer_name: str) -> bool:
+        """Whether ``layer_name`` belongs to the speculative draft.
+
+        Draft layers may use a draft_model prefix or be numbered after the
+        target's layers (e.g. DFlash's model.layers.78 after 78 target layers).
+        """
+        if layer_name.startswith("draft_model."):
+            return True
+        spec_config = self.vllm_config.speculative_config
+        draft_config = spec_config.draft_model_config if spec_config else None
+        if draft_config is None:
+            return False
+        match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", layer_name)
+        if match is None:
+            return False
+        layer_idx = int(match.group(1))
+        target_layers = self.vllm_config.model_config.get_total_num_hidden_layers()
+        draft_layers = draft_config.get_total_num_hidden_layers()
+        return target_layers <= layer_idx < target_layers + draft_layers
+
+    def _is_head_sharded_draft_layer(self, layer_name: str, is_mla: bool) -> bool:
+        """Whether a layer is a head-sharded draft layer under an MLA target."""
+        return (
+            self._head_sharded_draft_kv_heads is not None
+            and not is_mla
+            and self._is_draft_layer_name(layer_name)
+        )
+
+    def _is_head_sharded_draft_region(self, region_idx: int) -> bool:
+        if self._head_sharded_draft_kv_heads is None or self._is_region_replicated(
+            region_idx
+        ):
+            return False
+        # A target SPLIT region must keep the target mapping.
+        region_name = self.region_names[region_idx]
+        if not self._is_draft_layer_name(region_name):
+            return False
+        region_kv_heads = self._region_num_kv_heads[region_idx]
+        assert (
+            region_kv_heads is not None
+            and region_kv_heads <= self._head_sharded_draft_kv_heads
+        ), (
+            f"Draft region {region_idx} ({region_name!r}) has "
+            f"{region_kv_heads} local KV heads, inconsistent with the "
+            f"draft's {self._head_sharded_draft_kv_heads} total KV heads."
+        )
+        return True
+
+    def _has_head_sharded_draft_regions(self) -> bool:
+        return any(
+            self._is_head_sharded_draft_region(i)
+            for i in range(len(self.block_len_per_layer))
+        )
+
+    def _draft_kv_heads_per_rank(self, tp_size: int) -> int:
+        assert self._head_sharded_draft_kv_heads is not None
+        return max(1, self._head_sharded_draft_kv_heads // tp_size)
+
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
         layer_names = [layer_name for region in region_layers for layer_name in region]
         assert len(layer_names) == len(set(layer_names)), (
@@ -575,6 +650,19 @@ class NixlBaseConnectorWorker:
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "bidirectional_kv_xfer", False
+            )
+        )
+        # Block-major packed caches can move a block as one descriptor covering
+        # the complete storage row. Per-layer regions stay the default whenever
+        # a layer's page is contiguous, because a HiSparse decoder lands
+        # host-resident and device-only layers in different memory and must
+        # address them separately. Only replicated (MLA) layers join the row; a
+        # head-sharded draft keeps per-layer regions so each rank reads its head
+        # slice. Both P and D must set it or the handshake rejects the region
+        # count.
+        self._whole_row_regions = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "whole_row_regions", False
             )
         )
 
@@ -927,6 +1015,12 @@ class NixlBaseConnectorWorker:
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
+        # Per-region KV head count for non-MLA (SPLIT) regions, 1:1 with
+        # block_len_per_layer; None where not tracked (MLA regions, or a
+        # layer_spec without num_kv_heads). Lets a head-sharded draft region be
+        # verified by an actual model property instead of inferred purely from
+        # "not MLA" -- see `_is_head_sharded_draft_region`.
+        self._region_num_kv_heads = list[int | None]()
         self._ssm_region_indices = list[int]()
         # Regions holding a scratch cache (the CSA compressor circular buffer).
         # Tracked explicitly because a scratch page shares its address with the
@@ -958,6 +1052,9 @@ class NixlBaseConnectorWorker:
         self._transfer_layer_group_ids = tuple[int, ...]()
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
+        # GQA draft under an MLA target: its SPLIT regions use a draft TP mapping.
+        self._head_sharded_draft_kv_heads = self._resolve_head_sharded_draft_kv_heads()
+        self.draft_tp_mappings: dict[EngineId, TPMapping] = {}
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
@@ -1438,6 +1535,18 @@ class NixlBaseConnectorWorker:
                 "NIXL host staging does not preserve CSA-linear shared tensors."
             )
 
+        if self._whole_row_regions and (
+            self.use_host_buffer
+            or any(
+                group.host_resident for group in self.kv_cache_config.transfer_groups
+            )
+        ):
+            raise ValueError(
+                "whole_row_regions requires device-resident KV caches; it cannot "
+                "be combined with kv_buffer_device=cpu or host-resident transfer "
+                "groups."
+            )
+
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
             assert len(self.host_xfer_buffers) == len(kv_caches), (
@@ -1463,6 +1572,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        seen_region_keys: list[tuple[int, int]] = []
         self._ssm_region_indices = []
         self._scratch_region_indices = []
         self._ple_block_len = None
@@ -1502,6 +1612,20 @@ class NixlBaseConnectorWorker:
                 layer_spec, cache, physical_page_size, num_blocks
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
+
+        # A whole row of a group that also holds head-sharded draft pages would
+        # carry TP-dependent bytes, so P and D rows could not match.
+        sharded_row_groups: set[int] = set()
+        if self._whole_row_regions:
+            group_by_layer = self.kv_cache_config.transfer_group_index_by_layer
+            sharded_row_groups = {
+                group_by_layer[name]
+                for name, spec in layer_specs.items()
+                if name in group_by_layer
+                and self._is_head_sharded_draft_layer(
+                    name, isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                )
+            }
 
         track_region_layers = self._tracks_region_layers()
         region_layers: list[list[str]] = []
@@ -1559,6 +1683,12 @@ class NixlBaseConnectorWorker:
             base_addr = cache.data_ptr()
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            )
+            region_num_kv_heads = (
+                None if is_mla_region else getattr(layer_spec, "num_kv_heads", None)
+            )
+            head_sharded_draft = self._is_head_sharded_draft_layer(
+                layer_name, is_mla_region
             )
             logger.debug(
                 "Registering layer %s with cache shape: %s", layer_name, cache.shape
@@ -1658,6 +1788,20 @@ class NixlBaseConnectorWorker:
                     and storage_is_block_major
                     and is_mla_region
                 )
+                if (
+                    storage_is_block_major
+                    and self._whole_row_regions
+                    and is_mla_region
+                    and group_id in sharded_row_groups
+                ):
+                    raise ValueError(
+                        "whole_row_regions cannot register a block row that also "
+                        f"holds head-sharded draft pages (layer {layer_name}, group "
+                        f"{group_id}): the row size depends on the TP size, so P and "
+                        "D rows would differ. Keep the draft in its own KV cache "
+                        "group (do not combine with "
+                        "--disable-hybrid-kv-cache-manager) or drop the flag."
+                    )
                 if virtual_transfer_pages:
                     # A compressed kernel row can contain multiple NIXL transfer pages.
                     region_specs = [
@@ -1678,12 +1822,24 @@ class NixlBaseConnectorWorker:
                     offset = cache.data_ptr() - storage_addr
                     assert offset >= 0 and offset + physical_page_size <= block_stride
                     packed_member_layouts[layer_name] = (offset, physical_page_size)
-                elif storage_is_block_major and (
-                    not page_contiguous
-                    and ((packed_storage and is_mla_region) or not self._is_csa_linear)
+                elif (
+                    storage_is_block_major
+                    and not head_sharded_draft
+                    and (
+                        (
+                            not page_contiguous
+                            and (
+                                (packed_storage and is_mla_region)
+                                or not self._is_csa_linear
+                            )
+                        )
+                        or (self._whole_row_regions and is_mla_region)
+                    )
                 ):
                     # TODO(Lucas): handle TP slicing for packed_storage; for now
-                    # restrict to MLA (DSv4) where kv is replicated.
+                    # restrict to MLA (DSv4) where kv is replicated. A head-sharded
+                    # draft page must stay its own region so each rank can read its
+                    # head slice.
                     # The complete storage row is one block stride. Dividing the
                     # registered length instead would fold the padding tail in.
                     storage_block_len = block_stride
@@ -1719,12 +1875,20 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                # A packed PP producer keeps one region per layer, so aliases at
-                # one address (a layer and its SWA view) stay distinct.
-                if base_addr in seen_base_addresses and not route_packed_layers:
-                    region_index = seen_base_addresses.index(base_addr)
+                # Distinct transfer geometries must stay distinct regions even
+                # when they alias the same base address (e.g. an MLA swa_cache
+                # and a compressor state_cache sharing one HMA allocation):
+                # collapsing them would make the later layer silently transfer
+                # with the earlier layer's block length. A packed PP producer
+                # instead keeps one region per layer, so aliases at one address
+                # (a layer and its SWA view) stay distinct unconditionally.
+                region_key = (base_addr, block_len)
+                if region_key in seen_region_keys and not route_packed_layers:
+                    region_index = seen_region_keys.index(region_key)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
+                    if not is_mla_region:
+                        self._region_num_kv_heads[region_index] = region_num_kv_heads
                     if is_mla_region:
                         self.block_len_per_layer[region_index] = block_len
                         self.block_stride_per_layer[region_index] = block_stride
@@ -1734,12 +1898,14 @@ class NixlBaseConnectorWorker:
                 else:
                     region_index = len(seen_base_addresses)
                     seen_base_addresses.append(base_addr)
+                    seen_region_keys.append(region_key)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
                     self.region_names.append(layer_name)
                     self.region_num_blocks.append(num_blocks)
                     self._region_is_mla.append(is_mla_region)
+                    self._region_num_kv_heads.append(region_num_kv_heads)
                     region_mem_types.append(mem_type)
 
                 if track_region_layers:
@@ -1787,10 +1953,12 @@ class NixlBaseConnectorWorker:
         assert (
             len(self.block_len_per_layer)
             == len(seen_base_addresses)
+            == len(seen_region_keys)
             == len(self._region_is_mla)
             == len(self.block_stride_per_layer)
             == len(self.region_group_ids)
             == len(self.region_names)
+            == len(self._region_num_kv_heads)
             == len(self.region_num_blocks)
         )
         # Descriptor ids must be region-ordered, matching the remote side.
@@ -2114,9 +2282,6 @@ class NixlBaseConnectorWorker:
         fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
-        # SPLIT regions read their head slice from this many remote ranks at a
-        # per-rank offset; REPLICATE regions read the whole block once.
-        split_reads = len(plan.source_ranks_per_group[fa_group_idx])
         region_num_blocks = nixl_agent_meta.region_num_blocks or [
             nixl_agent_meta.num_blocks
         ] * len(nixl_agent_meta.kv_caches_base_addr)
@@ -2137,11 +2302,17 @@ class NixlBaseConnectorWorker:
                 local_block_len = remote_kv_block_len
 
             # REPLICATE reads the whole block once at offset 0; SPLIT gathers
-            # its head slice from `split_reads` remote ranks at a per-rank offset.
-            num_reads = 1 if replicated else split_reads
-            rank_offset = (
-                0 if replicated else plan.rank_offset_factor * remote_kv_block_len
-            )
+            # its head slice from each source rank at a per-rank offset.
+            if replicated:
+                num_reads, rank_offset = 1, 0
+            else:
+                region_plan = (
+                    self.draft_tp_mappings[nixl_agent_meta.engine_id]
+                    if self._is_head_sharded_draft_region(local_region)
+                    else plan
+                )
+                num_reads = len(region_plan.source_ranks_per_group[fa_group_idx])
+                rank_offset = region_plan.rank_offset_factor * remote_kv_block_len
             local_block_len = local_block_len // num_reads
 
             block_arange = np.arange(region_num_blocks[i], dtype=np.uint64)
@@ -2358,6 +2529,14 @@ class NixlBaseConnectorWorker:
             group_spec_types=self._group_spec_types,
             remote_dcp_size=remote_dcp_size,
         )
+        if self._has_head_sharded_draft_regions():
+            self.draft_tp_mappings[engine_id] = compute_tp_mapping(
+                transfer_topology=transfer_topo,
+                remote_tp_size=remote_tp_size,
+                group_spec_types=self._group_spec_types,
+                remote_dcp_size=remote_dcp_size,
+                head_sharded_kv_heads=self._head_sharded_draft_kv_heads,
+            )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
@@ -2547,6 +2726,24 @@ class NixlBaseConnectorWorker:
             assert not (
                 tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
             )
+        has_draft_regions = self._has_head_sharded_draft_regions()
+        if has_draft_regions:
+            if self._TRANSFER_MODE == "push":
+                raise NotImplementedError(
+                    "NIXL push mode does not support a head-sharded draft's KV "
+                    "under an MLA target. Use pull mode."
+                )
+            # In pull mode local is decode and remote is prefill.
+            prefill_tp_above_decode = tp_ratio < 0
+            if prefill_tp_above_decode or self.dcp_size > 1 or remote_dcp_size > 1:
+                raise NotImplementedError(
+                    "NIXL cannot transfer a head-sharded draft's KV under an MLA "
+                    "target when prefill TP exceeds decode TP or with DCP: "
+                    f"local TP={self.transfer_topo.tp_size}, "
+                    f"remote TP={remote_tp_size}, "
+                    f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
+                    f"transfer_mode={self._TRANSFER_MODE}."
+                )
 
         remote_physical_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
@@ -2642,6 +2839,23 @@ class NixlBaseConnectorWorker:
                 "Heterogeneous TP head-dimension splitting requires contiguous heads. "
                 "Use a block-contiguous layout (e.g. LBHNC) on the prefill side."
             )
+        # The MLA exemption above does not cover a head-sharded draft, which
+        # slices the prefill draft block by head.
+        if (
+            has_draft_regions
+            and self._draft_kv_heads_per_rank(remote_tp_size)
+            != self._draft_kv_heads_per_rank(self.transfer_topo.tp_size)
+            and (
+                nixl_agent_meta.kv_cache_layout != kv_cache_layout
+                or not KVCacheLayout[kv_cache_layout].is_block_contiguous
+            )
+        ):
+            raise RuntimeError(
+                "Head-sharded draft KV under an MLA target needs the same "
+                "block-contiguous kv_cache_layout (e.g. LBHNC) on prefill and "
+                f"decode, got local={kv_cache_layout}, "
+                f"remote={nixl_agent_meta.kv_cache_layout}."
+            )
 
         # Per-region block_len validation enforcing the P/D invariant.
         # REPLICATE regions (MLA, or a whole-model MLA / replicated-KV transfer)
@@ -2675,12 +2889,21 @@ class NixlBaseConnectorWorker:
                 remote_engine_id
             )
             total_kv_heads = self.transfer_topo.total_num_kv_heads
-            local_heads = self.transfer_topo.local_physical_heads
-            remote_heads = max(1, total_kv_heads // remote_tp_size)
             for i, region_idx in enumerate(local_regions):
                 local_len = self.block_len_per_layer[region_idx]
-                replicated = model_replicated or self._is_region_replicated(region_idx)
                 remote_len = nixl_agent_meta.block_lens[i]
+                if self._is_head_sharded_draft_region(region_idx):
+                    replicated = False
+                    local_heads = self._draft_kv_heads_per_rank(
+                        self.transfer_topo.tp_size
+                    )
+                    remote_heads = self._draft_kv_heads_per_rank(remote_tp_size)
+                else:
+                    replicated = model_replicated or self._is_region_replicated(
+                        region_idx
+                    )
+                    local_heads = self.transfer_topo.local_physical_heads
+                    remote_heads = max(1, total_kv_heads // remote_tp_size)
                 if replicated:
                     assert local_len // block_size_ratio == remote_len, (
                         "KV cache sizes must match between P and D when "
@@ -3810,6 +4033,7 @@ class NixlBaseConnectorWorker:
         self.dst_uses_region_group_mapping.pop(engine_id, None)
         self.dst_region_mem_types.pop(engine_id, None)
         self.tp_mappings.pop(engine_id, None)
+        self.draft_tp_mappings.pop(engine_id, None)
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 

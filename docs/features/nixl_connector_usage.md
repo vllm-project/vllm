@@ -236,6 +236,7 @@ Additional configuration options in `kv_connector_extra_config`:
 | `bidirectional_kv_xfer` | `false` | Enable bidirectional D→P KV transfer. |
 | `kv_recompute_threshold` | `64` | Minimum number of remote tokens required to trigger a D→P pull. Below this threshold, P recomputes locally instead of pulling (to amortize transfer latency). |
 | `decoder_kv_blocks_ttl` | `480` | TTL (seconds) for KV blocks cached on D for bidirectional reuse. Blocks are released after this duration. Not renewed via heartbeats. |
+| `whole_row_regions` | `false` | With a block-major (`BLHNC`) layout, register every replicated (MLA) layer of a block row as one NIXL region, so a block transfers as a single descriptor instead of one per layer. Head-sharded layers, such as a GQA draft under an MLA target, keep per-layer regions so each TP rank reads its head slice. Requires device-resident caches on both peers (incompatible with `kv_buffer_device=cpu` and HiSparse host-resident groups) and must be set on both P and D. |
 
 ### Multi-turn proxy setup
 
