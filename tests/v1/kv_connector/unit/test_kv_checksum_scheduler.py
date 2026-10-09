@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV checksums end to end through a producer's and a consumer's schedulers
-(NIXL pull, kv_transfer_params carrier) with real checksum workers: the
-consumer accepts a correct load whatever the TP sizes, and handles a
-corrupted or unverifiable one per kv_checksum_fail_closed and
-kv_load_failure_policy."""
+with real checksum workers, for NIXL pull (kv_transfer_params carrier) and
+push (completion notif carrier): the consumer accepts a correct load whatever
+the TP and PP sizes, and handles a corrupted or unverifiable one per
+kv_checksum_fail_closed and kv_load_failure_policy."""
 
 from typing import Any
 
@@ -68,6 +68,7 @@ class _Engine:
     def __init__(
         self,
         kv_role: str,
+        connector: str = "NixlConnector",
         tp_size: int = 1,
         pp_size: int = 1,
         fail_closed: bool = False,
@@ -77,7 +78,10 @@ class _Engine:
         """``extra_group``: None, or whether the workers can checksum a second
         group ("covered") or skip it for lack of a cache ("skipped")."""
         vllm_config = create_vllm_config(
-            kv_role=kv_role, block_size=BLOCK_SIZE, kv_load_failure_policy=policy
+            kv_connector=connector,
+            kv_role=kv_role,
+            block_size=BLOCK_SIZE,
+            kv_load_failure_policy=policy,
         )
         kv_transfer_config = vllm_config.kv_transfer_config
         kv_transfer_config.enable_kv_checksum = True
@@ -129,13 +133,19 @@ class _Engine:
         return output
 
     def finish_step(
-        self, output: SchedulerOutput, finished_recving: set[str] | None = None
+        self,
+        output: SchedulerOutput,
+        finished_recving: set[str] | None = None,
+        received: dict[str, bytes] | None = None,
     ):
-        """Run the workers' post_forward and the scheduler's update."""
+        """Run the workers' post_forward and the scheduler's update.
+
+        ``received``: checksums the connector received with the loads.
+        """
         checksums = None
         for worker in self.workers:
             worker_output = worker.post_forward(
-                finished_recving, set(), output.finished_req_ids
+                finished_recving, set(), output.finished_req_ids, received
             )
             if checksums is None:
                 checksums = worker_output
@@ -156,9 +166,14 @@ def _block_ids(output: SchedulerOutput, req_id: str, send: bool) -> tuple[int, l
     return blocks.groups[0]
 
 
-def _prefill(producer: _Engine, request: Request) -> dict[str, Any]:
-    """Prefill ``request`` on the producer; returns its kv_transfer_params and
-    leaves the KV in the producer's blocks."""
+def _prefill(producer: _Engine, request: Request) -> tuple[dict[str, Any], Any]:
+    """Prefill ``request`` on the producer, leaving the KV in its blocks.
+
+    Returns:
+        Its kv_transfer_params, and the checksums the connector sends to the
+        consumer itself (push), if any.
+
+    """
     producer.scheduler.add_request(request)
     output = producer.schedule()
     _, block_ids = _block_ids(output, request.request_id, send=True)
@@ -171,8 +186,12 @@ def _prefill(producer: _Engine, request: Request) -> dict[str, Any]:
     [engine_output] = producer.finish_step(output)[0].outputs
     assert engine_output.finish_reason == FinishReason.LENGTH
     params = engine_output.kv_transfer_params
-    assert params is not None and KV_TRANSFER_PARAMS_KEY in params
-    return params
+    assert params is not None
+    # Push: the next step ships the checksums to the workers with the blocks.
+    meta = producer.schedule().kv_connector_metadata
+    sent = getattr(meta, "push_finished_kv_checksums", {}).get(request.request_id)
+    assert (sent is not None) != (KV_TRANSFER_PARAMS_KEY in params)
+    return params, sent
 
 
 def _copy_blocks(
@@ -195,10 +214,12 @@ def _load(
     consumer: _Engine,
     request: Request,
     params: dict[str, Any],
+    sent: bytes | None = None,
     corrupt: bool = False,
 ):
     """Start the load of ``request`` on the consumer, copy the producer's
-    blocks into the consumer's, and report the load finished."""
+    blocks into the consumer's, and report the load finished with the
+    checksums the producer's connector ``sent``, if any."""
     request.kv_transfer_params = {**params, "do_remote_prefill": True}
     consumer.scheduler.add_request(request)
     output = consumer.schedule()
@@ -207,7 +228,13 @@ def _load(
     _copy_blocks(producer, consumer, params, start, block_ids)
     if corrupt:
         consumer.kv[LAYERS[1]][block_ids[-1], 0, 0, 0] ^= 1
-    return consumer.finish_step(output, finished_recving={request.request_id})
+    received = {request.request_id: sent} if sent is not None else None
+    return consumer.finish_step(output, {request.request_id}, received)
+
+
+CONNECTORS = pytest.mark.parametrize(
+    "connector", ["NixlConnector", "NixlPushConnector"], ids=["pull", "push"]
+)
 
 
 def _error_ids(engine_outputs) -> set[str]:
@@ -225,17 +252,22 @@ def _error_ids(engine_outputs) -> set[str]:
     + [((1, 2), (1, 1)), ((1, 1), (2, 2))],
     ids=lambda tp_pp: f"tp{tp_pp[0]}pp{tp_pp[1]}",
 )
-def test_correct_load_is_verified(producer_tp_pp, consumer_tp_pp):
+@CONNECTORS
+def test_correct_load_is_verified(connector, producer_tp_pp, consumer_tp_pp):
     """Checksums and group fingerprints sum over TP shards and PP stages, and a
     consumer with replicated heads (TP 4, 2 heads) checks every replica, so
     any TP and PP pairing verifies."""
     (p_tp, p_pp), (c_tp, c_pp) = producer_tp_pp, consumer_tp_pp
-    producer = _Engine("kv_producer", tp_size=p_tp, pp_size=p_pp)
-    consumer = _Engine("kv_consumer", tp_size=c_tp, pp_size=c_pp, fail_closed=True)
-    params = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+    producer = _Engine("kv_producer", connector, tp_size=p_tp, pp_size=p_pp)
+    consumer = _Engine(
+        "kv_consumer", connector, tp_size=c_tp, pp_size=c_pp, fail_closed=True
+    )
+    params, sent = _prefill(
+        producer, create_request(1, NUM_TOKENS, do_remote_decode=True)
+    )
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
-    assert not _error_ids(_load(producer, consumer, request, params))
+    assert not _error_ids(_load(producer, consumer, request, params, sent))
     consumer.schedule()
     assert request.status == RequestStatus.RUNNING
 
@@ -246,7 +278,7 @@ def test_prefix_hit_verifies_only_loaded_blocks():
     producer = _Engine("kv_producer")
     consumer = _Engine("kv_consumer", fail_closed=True)
     prefix = BLOCK_SIZE
-    params = _prefill(
+    params, _ = _prefill(
         producer,
         create_request(1, NUM_TOKENS, prefix, do_remote_decode=True),
     )
@@ -269,19 +301,25 @@ def test_prefix_hit_verifies_only_loaded_blocks():
 @pytest.mark.parametrize(
     "fail_closed,policy", [(False, "fail"), (True, "fail"), (True, "recompute")]
 )
-def test_bad_load_follows_failure_policy(fault, fail_closed, policy, caplog_vllm):
+@CONNECTORS
+def test_bad_load_follows_failure_policy(
+    connector, fault, fail_closed, policy, caplog_vllm
+):
     """A corrupted or unverifiable load is only logged when fail-open; when
     fail-closed it is a KV load failure: the request fails, or recomputes its
     prompt locally."""
-    producer = _Engine("kv_producer")
-    consumer = _Engine("kv_consumer", fail_closed=fail_closed, policy=policy)
-    params = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+    producer = _Engine("kv_producer", connector)
+    consumer = _Engine("kv_consumer", connector, fail_closed=fail_closed, policy=policy)
+    params, sent = _prefill(
+        producer, create_request(1, NUM_TOKENS, do_remote_decode=True)
+    )
     if fault == "no-checksums":
-        del params[KV_TRANSFER_PARAMS_KEY]
+        params.pop(KV_TRANSFER_PARAMS_KEY, None)
+        sent = None
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
     engine_outputs = _load(
-        producer, consumer, request, params, corrupt=fault == "corrupt"
+        producer, consumer, request, params, sent, corrupt=fault == "corrupt"
     )
     if fault == "corrupt":
         assert "KV checksum mismatch" in caplog_vllm.text
@@ -304,7 +342,7 @@ def test_groups_skipped_on_both_sides_are_ignored(producer_group):
     verdict; a group only one side checksums leaves the load unverified."""
     producer = _Engine("kv_producer", extra_group=producer_group)
     consumer = _Engine("kv_consumer", fail_closed=True, extra_group="skipped")
-    params = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+    params, _ = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
     errors = _error_ids(_load(producer, consumer, request, params))

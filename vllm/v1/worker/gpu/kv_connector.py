@@ -155,6 +155,7 @@ class ActiveKVConnector(KVConnector):
                 transfer_results.finished_recving,
                 transfer_results.failed_recving,
                 finished_req_ids,
+                transfer_results.kv_checksums,
             )
         self.kv_connector.clear_connector_metadata()
         return output

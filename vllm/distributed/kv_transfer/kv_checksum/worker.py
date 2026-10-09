@@ -302,6 +302,7 @@ class KVChecksumOutput:
         self._skipped_groups = skipped_groups
         self._fingerprints = fingerprints or {}
         self._req_ids: list[str] = []
+        self._received: dict[str, bytes] = {}
         # group id -> (segments, replica keys, [rows, len(replica keys)] int64
         # values). The device values stay referenced until the copy is done.
         self._groups: dict[
@@ -312,10 +313,13 @@ class KVChecksumOutput:
         self._records: list[KVChecksumRecord] = []
 
     def __bool__(self) -> bool:
-        return bool(self._req_ids or self._records)
+        return bool(self._req_ids or self._received or self._records)
 
     def add_requests(self, req_ids: Iterable[str]) -> None:
         self._req_ids.extend(req_ids)
+
+    def add_received(self, received: dict[str, bytes]) -> None:
+        self._received.update(received)
 
     def add_group(
         self,
@@ -355,7 +359,7 @@ class KVChecksumOutput:
 
     def finalize(self) -> list[KVChecksumRecord]:
         """Wait for the copy, if any, and return the records."""
-        if not self._req_ids:
+        if not self._req_ids and not self._received:
             return self._records
         if self._groups and not self._host:
             self.start_cpu_copy(None)
@@ -374,10 +378,15 @@ class KVChecksumOutput:
                 row += num_rows
         self._records.append(
             KVChecksumRecord(
-                *self._rank, checksums, self._skipped_groups, self._fingerprints
+                *self._rank,
+                checksums,
+                self._skipped_groups,
+                self._fingerprints,
+                self._received,
             )
         )
         self._req_ids.clear()
+        self._received = {}
         self._groups.clear()
         self._host.clear()
         self._copy_event = None
@@ -464,14 +473,18 @@ class KVChecksumWorker:
         finished_recving: set[str] | None,
         failed_recving: set[str],
         finished_req_ids: set[str],
+        received: dict[str, bytes] | None = None,
         defer_sends: bool = False,
     ) -> KVChecksumOutput | None:
-        """Compute the checksums this step allows and start their copy.
+        """Checksum this step's sends and finished loads, and start copying the
+        results to host.
 
         Args:
             finished_recving: Requests whose load this worker finished.
             failed_recving: Requests whose load failed; nothing to check.
             finished_req_ids: Requests that ended, e.g. aborted while loading.
+            received: Producer checksums the connector received with finished
+                loads, passed on to the scheduler.
             defer_sends: Leave the requests to send, and the copy, to
                 ``finalize_sends``, for a drafter that writes this step's KV
                 after this call.
@@ -492,6 +505,7 @@ class KVChecksumWorker:
         output = KVChecksumOutput(
             self.pp_rank, self.tp_rank, self._skipped_groups, self._fingerprints
         )
+        output.add_received(received or {})
         self._compute(loaded, output, replica_zero_only=False)
         if defer_sends and self._reqs_to_send:
             self._deferred_output = output
