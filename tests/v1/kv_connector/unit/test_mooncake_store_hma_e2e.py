@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
-    partial_tail_non_mamba_puts,
+    _partial_tail_non_mamba_puts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     KVCacheStoreRecvingThread,
@@ -386,7 +386,7 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
 def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
     """Add the tail's non-Mamba puts as the scheduler does before the worker."""
     req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
-    req.boundary_puts[:0] = partial_tail_non_mamba_puts(
+    req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
         thread.coord, req, [db.block_size for db in thread.token_databases]
     )
     return req

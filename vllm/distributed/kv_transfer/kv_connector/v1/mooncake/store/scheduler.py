@@ -62,7 +62,7 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
     return request.prompt_token_ids
 
 
-def partial_tail_non_mamba_puts(
+def _partial_tail_non_mamba_puts(
     coord: MooncakeStoreCoordinator,
     req_meta: ReqMeta,
     block_sizes: Sequence[int],
@@ -554,21 +554,6 @@ class MooncakeStoreScheduler:
                 block_ids[group_id] for group_id in self._store_group_ids
             )
 
-    def _add_partial_tail_puts(self, req_meta: ReqMeta) -> None:
-        """Add this job's non-Mamba partial-tail blocks to its boundary puts.
-
-        Runs once per store job, before the job's blocks are pinned; the worker
-        puts exactly the pinned blocks.
-        """
-        coord = self._store_coord
-        puts = partial_tail_non_mamba_puts(
-            coord,
-            req_meta,
-            [group.kv_cache_spec.block_size for group in coord.kv_cache_groups],
-        )
-        if puts:
-            req_meta.boundary_puts = [*puts, *(req_meta.boundary_puts or [])]
-
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
         """Take a GPU block reference for every store job this step emits.
 
@@ -577,6 +562,8 @@ class MooncakeStoreScheduler:
         itself is freed, until every rank reports the job done.
         """
         pool = self._gpu_block_pool
+        coord = self._store_coord
+        block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
         for req_meta in meta.requests:
             if not req_meta.can_save:
                 continue
@@ -586,7 +573,8 @@ class MooncakeStoreScheduler:
             if req_meta.store_job_id is not None:
                 assert req_meta.store_job_id in self._pinned_saves
                 continue
-            self._add_partial_tail_puts(req_meta)
+            if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
+                req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
             block_ids = [put.block_id for put in req_meta.boundary_puts or []]
@@ -657,8 +645,15 @@ class MooncakeStoreScheduler:
             boundary_puts=mamba_puts,
             completed_token_len=request.num_computed_tokens,
         )
-        self._add_partial_tail_puts(req_meta)
-        assert req_meta.boundary_puts is not None
+        coord = self._store_coord
+        req_meta.boundary_puts = [
+            *_partial_tail_non_mamba_puts(
+                coord,
+                req_meta,
+                [g.kv_cache_spec.block_size for g in coord.kv_cache_groups],
+            ),
+            *mamba_puts,
+        ]
         pinned_block_ids = list(
             dict.fromkeys(put.block_id for put in req_meta.boundary_puts)
         )
