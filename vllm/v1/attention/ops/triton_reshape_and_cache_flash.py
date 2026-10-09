@@ -432,7 +432,8 @@ def triton_reshape_and_cache_flash(
     assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
         f"Triton reshape-and-cache cannot store kv_cache_dtype={kv_cache_dtype} "
         f"on this device: fp8/fp8_e4m3 use software conversion on SM75-88 or "
-        f"native conversion on SM89+; other FP8 formats need native support."
+        f"native conversion on SM89+; other FP8 formats need native support. "
+        f"Use --kv-cache-dtype bfloat16 (or float16 below SM80)."
     )
     kv_cache_torch_dtype = (
         current_platform.fp8_dtype()

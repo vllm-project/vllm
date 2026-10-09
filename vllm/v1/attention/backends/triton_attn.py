@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+    _fp8_software_conv,
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
@@ -534,7 +535,7 @@ class TritonAttentionImpl(AttentionImpl):
                         if current_platform.has_device_capability(80)
                         else "float16"
                     )
-                    logger.warning(
+                    logger.warning_once(
                         "FP8 KV cache on %s (compute capability %s) is supported "
                         "on the Triton attention path via software conversion "
                         "(this GPU has no native fp8e4nv), which adds emulation "
@@ -587,12 +588,7 @@ class TritonAttentionImpl(AttentionImpl):
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
         # Pre-SM89 CUDA has no native fp8e4nv cast -> software-convert fp8 KV in
         # the reshape store and the unified_attention read.
-        self._fp8_software_conv = (
-            is_quantized_kv_cache(kv_cache_dtype)
-            and current_platform.is_cuda()
-            and current_platform.has_device_capability(75)
-            and not current_platform.has_device_capability(89)
-        )
+        self._fp8_software_conv = _fp8_software_conv(kv_cache_dtype)
         # With software fp8 KV the query cannot be quantized to fp8 (no native
         # cast for torch.compile to fuse into RoPE); _cast_kv_tile dequantizes
         # K/V to the query dtype instead.

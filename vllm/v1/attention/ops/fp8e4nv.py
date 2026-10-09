@@ -57,6 +57,10 @@ def convert_to_fp8e4m3(x):
 @triton.jit
 def convert_from_fp8e4m3(x, dtype: tl.constexpr):
     """Decode 4 packed uint8 fp8e4m3 bytes -> dtype (tl.float16 or tl.bfloat16)."""
+    tl.static_assert(
+        (dtype == tl.float16) or (dtype == tl.bfloat16),
+        "convert_from_fp8e4m3 expects fp16 or bf16 output",
+    )
     if dtype == tl.float16:
         return tl.inline_asm_elementwise(
             _FP8E4M3_TO_FP16_ASM,
