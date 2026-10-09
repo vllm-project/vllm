@@ -465,3 +465,35 @@ def test_gfx942_copies_dense_linears_at_load(monkeypatch, make, copied):
     for name in copied:
         linear = linears[name]
         assert linear.mono942 == ("copy", linear.weight, linear.weight_scale)
+
+
+def test_gfx942_reload_writes_the_copies_in_place(monkeypatch):
+    """A reload of the weights (reload_weights, or a weight update in RL) runs
+    process_weights_after_loading again. The kernels and captured CUDA graphs
+    read the first copies by their addresses, so the copies of the reload are
+    written into the first copies instead of replacing them."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    weights942 = ModuleType("vllm.models.deepseek_v41.amd.mono.weights942")
+    weights942.linear_copy = lambda w, s: (w.clone(), s.clone())  # type: ignore[attr-defined]
+    weights942.moe_copies = lambda w13, w13_s, w2, w2_s, inter: tuple(  # type: ignore[attr-defined]
+        t.clone() for t in (w13, w13_s, w2, w2_s)
+    )
+    monkeypatch.setitem(sys.modules, weights942.__name__, weights942)
+    layer = _decoder_layer()
+    assert md.MonoDecodeLayer.create(layer, _config()) is not None
+    experts, linear = layer.ffn.experts.routed_experts, layer.attn.wo_a
+
+    def load(value):
+        u8 = dict(dtype=torch.uint8)
+        for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"):
+            setattr(experts, name, torch.full((2, 4), value, **u8))
+        linear.weight = torch.full((4, 8), value, **u8)
+        linear.weight_scale = torch.full((4, 1), value, **u8)
+        for module in (experts, linear):
+            module.quant_method.process_weights_after_loading(module)
+
+    load(1)
+    first = (experts.mono942, linear.mono942)
+    load(2)
+    assert experts.mono942 is first[0] and linear.mono942 is first[1]
+    assert all(bool((t == 2).all()) for t in (*first[0], *first[1]))

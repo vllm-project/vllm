@@ -134,19 +134,36 @@ def _capture_plain_experts(experts) -> None:
     original = qm.process_weights_after_loading
 
     def process_weights_after_loading(layer):
-        if layer is experts and not hasattr(layer, "mono942"):
+        if layer is experts:
             from vllm.models.deepseek_v41.amd.mono.weights942 import moe_copies
 
-            layer.mono942 = moe_copies(
-                layer.w13_weight.data,
-                _scale_bytes(layer.w13_weight_scale.data),
-                layer.w2_weight.data,
-                _scale_bytes(layer.w2_weight_scale.data),
-                INTER_TP4,
+            _keep_copies(
+                layer,
+                moe_copies(
+                    layer.w13_weight.data,
+                    _scale_bytes(layer.w13_weight_scale.data),
+                    layer.w2_weight.data,
+                    _scale_bytes(layer.w2_weight_scale.data),
+                    INTER_TP4,
+                ),
             )
         return original(layer)
 
     qm.process_weights_after_loading = process_weights_after_loading
+
+
+def _keep_copies(layer, copies: tuple[torch.Tensor, ...]) -> None:
+    """Store a layer's gfx942 copies as ``layer.mono942``. A reload of the
+    weights (``reload_weights``, or a weight update in RL) runs
+    ``process_weights_after_loading`` again, and the kernels and captured
+    CUDA graphs read the first copies by their addresses. So the copies of a
+    reload are written into the first copies in place."""
+    kept = getattr(layer, "mono942", None)
+    if kept is None:
+        layer.mono942 = copies
+        return
+    for old, new in zip(kept, copies, strict=True):
+        old.copy_(new)
 
 
 # The attention linears that the gfx942 kernels read as ``linear_copy``
@@ -164,10 +181,10 @@ def _copy_linear_at_load(linear) -> None:
 
     def process_weights_after_loading(layer):
         out = original(layer)
-        if layer is linear and not hasattr(layer, "mono942"):
+        if layer is linear:
             from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
 
-            layer.mono942 = linear_copy(layer.weight, layer.weight_scale)
+            _keep_copies(layer, linear_copy(layer.weight, layer.weight_scale))
         return out
 
     qm.process_weights_after_loading = process_weights_after_loading
