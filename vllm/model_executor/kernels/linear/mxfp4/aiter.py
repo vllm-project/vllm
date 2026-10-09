@@ -26,10 +26,7 @@ _ASM_FP4_FORCE_TRITON_SCALE_ROWS = {96}
 
 def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
     # The ASM swizzle reshapes weight_scale into a fixed tile layout, requiring
-    # scale rows divisible by 32 and scale columns divisible by 8. Qwen3.8's
-    # TP1 GDN in_proj_ba has 96 rows, which is layout-legal, but the default
-    # ASM dispatch is numerically incorrect for M <= 64. Keep that narrow
-    # projection on the Triton path.
+    # scale rows divisible by 32 and scale columns divisible by 8
     if weight_scale.ndim != 2:
         return False
     sm, sn = weight_scale.shape
