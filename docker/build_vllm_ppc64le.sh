@@ -265,7 +265,7 @@ else
     python setup.py develop
     rm -f dist/torch*+git*whl
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
-    PYTORCH_BUILD_VERSION=${TORCH_VERSION} PYTORCH_BUILD_NUMBER=1 uv build --wheel --out-dir ${WHEEL_DIR}
+    PYTORCH_BUILD_VERSION=${TORCH_VERSION} PYTORCH_BUILD_NUMBER=1 uv build --wheel --out-dir "${WHEEL_DIR}"
     uv pip install "${WHEEL_DIR}"/torch*.whl
     cd "${REPO_ROOT}"
     rm -rf "${TEMP_BUILD_DIR}"
@@ -300,7 +300,7 @@ else
     uv pip install standard-pkg-resources --no-build-isolation
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
     BUILD_VERSION=${TORCHVISION_VERSION} \
-    uv build --wheel --out-dir ${WHEEL_DIR} --no-build-isolation
+    uv build --wheel --out-dir "${WHEEL_DIR}" --no-build-isolation
 
     export BUILD_VERSION="${TORCHVISION_VERSION}"
 
@@ -471,4 +471,5 @@ export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/
 uv pip install -r requirements/common.txt \
                -r requirements/cpu.txt \
                -r requirements/build/cpu.txt --index-strategy unsafe-best-match
+
 
