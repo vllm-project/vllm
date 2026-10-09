@@ -17,6 +17,7 @@ from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
 
 
 def get_fp8_weight_scale(layer: nn.Module) -> torch.Tensor | None:
+    """Return either supported checkpoint scale attribute, or None."""
     if hasattr(layer, "weight_scale_inv"):
         return layer.weight_scale_inv
     if hasattr(layer, "weight_scale"):
@@ -27,6 +28,7 @@ def get_fp8_weight_scale(layer: nn.Module) -> torch.Tensor | None:
 def maybe_unpack_linear_output(
     output: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
 ) -> torch.Tensor:
+    """Extract the output tensor from a linear result with optional bias."""
     if isinstance(output, tuple):
         return output[0]
     return output
@@ -44,6 +46,7 @@ def inv_rope_bf16_o_proj(
     rope_dim: int,
     o_lora_rank: int,
 ) -> torch.Tensor:
+    """Apply inverse RoPE and grouped output projection using BF16 operations."""
     num_tokens, num_heads, head_dim = o.shape
     expected_heads = n_groups * heads_per_group
     expected_head_dim = nope_dim + rope_dim
