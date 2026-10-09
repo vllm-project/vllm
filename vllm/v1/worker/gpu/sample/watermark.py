@@ -802,11 +802,8 @@ def philox_gumbel_sample(
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
 
 
-# SynthID-Text tournament in FP32. A token's probability after layer l is p_v
-# times factors that depend only on its g-bits and the masses m_<l. So each
-# chunk of layers needs one pass that bins p by the token's g-bits for the
-# chunk, then a per-row reduce that derives the chunk's factors. 1 - m comes
-# from the g = 0 mass, so it does not cancel when m is close to 1.
+# Process four SynthID layers per pass by binning probability mass by g-bit
+# pattern and deriving the corresponding tournament factors.
 _SYNTHID_CHUNK_BITS = 4
 _SYNTHID_BLOCK_SIZE = 2048
 
