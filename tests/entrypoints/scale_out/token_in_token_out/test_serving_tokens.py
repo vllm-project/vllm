@@ -76,6 +76,11 @@ def server(request):
     ]
 
     extra_args = getattr(request, "param", None)
+    env_dict = None
+    if isinstance(extra_args, dict):
+        # {"args": [...], "env": {...}} lets a test pin server env vars.
+        env_dict = extra_args.get("env")
+        extra_args = extra_args.get("args")
     if extra_args is not None:
         args = args + (
             list(extra_args)
@@ -83,7 +88,7 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
 
@@ -354,6 +359,300 @@ async def test_generate_prompt_token_id_logprobs(client):
     )
     assert resp.status_code == 400
     assert "scored rows" in resp.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+async def test_generate_return_token_logprobs(client):
+    """Flat per-token sampled logprobs match the OpenAI-style objects."""
+    base = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 8, "temperature": 0.0, "logprobs": 0},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=base)
+    resp.raise_for_status()
+    ref = resp.json()["choices"][0]
+
+    resp = await client.post(GEN_ENDPOINT, json={**base, "return_token_logprobs": True})
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+
+    assert choice["token_ids"] == ref["token_ids"]
+    assert choice["logprobs"]["content"] is None
+    assert len(choice["logprobs"]["sampled"]) == len(choice["token_ids"])
+    expected = [entry["logprob"] for entry in ref["logprobs"]["content"]]
+    assert choice["logprobs"]["sampled"] == pytest.approx(expected, abs=1e-6)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+async def test_generate_return_token_logprobs_defaults_logprobs(client):
+    """Omitting sampling_params.logprobs still returns the flat array."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0},
+        "stream": False,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    assert choice["logprobs"]["content"] is None
+    assert len(choice["logprobs"]["sampled"]) == len(choice["token_ids"])
+    assert all(v <= 0.0 for v in choice["logprobs"]["sampled"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+async def test_generate_return_token_logprobs_keeps_top_logprobs(client):
+    """With logprobs > 0 both representations are returned."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0, "logprobs": 2},
+        "stream": False,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    content = choice["logprobs"]["content"]
+    sampled = choice["logprobs"]["sampled"]
+    assert len(content) == len(choice["token_ids"]) == len(sampled)
+    assert sampled == pytest.approx([entry["logprob"] for entry in content], abs=1e-6)
+    assert all(len(entry["top_logprobs"]) == 2 for entry in content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("n", [2, 4])
+async def test_generate_return_token_logprobs_n_choices(client, n):
+    """Every choice carries its own aligned array; values match the objects."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": 6,
+            "temperature": 1.0,
+            "seed": 7,
+            "n": n,
+            "logprobs": 1,
+        },
+        "stream": False,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choices = resp.json()["choices"]
+    assert len(choices) == n
+    assert sorted(c["index"] for c in choices) == list(range(n))
+    for choice in choices:
+        assert len(choice["logprobs"]["sampled"]) == len(choice["token_ids"])
+        assert choice["logprobs"]["sampled"] == pytest.approx(
+            [entry["logprob"] for entry in choice["logprobs"]["content"]], abs=1e-6
+        )
+
+
+def test_sampled_token_logprobs_clamps_like_object_path():
+    """-inf and extreme values follow the same clamp as the logprobs objects."""
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+    from vllm.logprobs import FlatLogprobs
+
+    flat = FlatLogprobs(
+        start_indices=[0, 2, 3],
+        end_indices=[2, 3, 5],
+        token_ids=[5, 9, 7, 1, 2],
+        logprobs=[-0.25, -1.5, float("-inf"), -123456.0, -0.1],
+        ranks=[1, 2, 1, 1, 2],
+        decoded_tokens=[None] * 5,
+    )
+    assert ServingTokens._sampled_token_logprobs(flat, [5, 7, 1]) == [
+        -0.25,
+        -9999.0,
+        -9999.0,
+    ]
+
+
+def test_sampled_token_logprobs_clamp_nan():
+    """NaN is clamped too (Python's max(nan, x) is nan), so it stays valid JSON."""
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+    from vllm.logprobs import FlatLogprobs
+
+    flat = FlatLogprobs(
+        start_indices=[0, 1],
+        end_indices=[1, 2],
+        token_ids=[5, 9],
+        logprobs=[float("nan"), -0.5],
+        ranks=[0, 1],
+        decoded_tokens=[None] * 2,
+    )
+    assert ServingTokens._sampled_token_logprobs(flat, [5, 9]) == [-9999.0, -0.5]
+
+
+def test_sampled_token_logprobs_reads_any_per_position_dicts():
+    """Representations other than FlatLogprobs (e.g. a list of dicts or an
+    array-backed sequence of them) are read by the sampled token id instead of
+    failing."""
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+    from vllm.logprobs import Logprob
+
+    positions = [
+        {5: Logprob(-0.25, 1), 9: Logprob(-1.5, 2)},
+        # Sampled token outside the top k: listed first, other ranks follow.
+        {7: Logprob(float("-inf"), 3), 1: Logprob(-0.1, 1)},
+        {2: Logprob(float("nan"), 0)},
+    ]
+    assert ServingTokens._sampled_token_logprobs(positions, [5, 7, 2]) == [
+        -0.25,
+        -9999.0,
+        -9999.0,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("logprobs", [None, 0, 2])
+async def test_generate_return_token_logprobs_rejects_logprob_token_ids(
+    client, logprobs
+):
+    """The sampled-only path drops per-token entries, so the requested token
+    scores would silently come back empty; the combination is rejected."""
+    sampling_params = {"max_tokens": 3, "temperature": 0.0, "logprob_token_ids": [5]}
+    if logprobs is not None:
+        sampling_params["logprobs"] = logprobs
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": sampling_params,
+        "stream": False,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "logprob_token_ids" in resp.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+async def test_generate_omits_sampled_unless_requested(client):
+    """Callers that did not ask for the field must not see it (schema stays)."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 3, "temperature": 0.0, "logprobs": 0},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    assert "sampled" not in resp.json()["choices"][0]["logprobs"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize(
+    "server",
+    [
+        {
+            "args": [
+                "--speculative-config",
+                (
+                    '{"method": "ngram", "num_speculative_tokens": 3, '
+                    '"prompt_lookup_max": 4, "prompt_lookup_min": 2}'
+                ),
+            ],
+            # Without batch-invariant execution the object path is not a
+            # stable numerical oracle in this configuration: repeated
+            # object-path requests returned identical tokens but sampled
+            # logprobs differing by up to ~2e-2. Under VLLM_BATCH_INVARIANT=1
+            # the object and sampled-only paths match exactly.
+            "env": {"VLLM_BATCH_INVARIANT": "1"},
+        }
+    ],
+    indirect=True,
+)
+async def test_generate_return_token_logprobs_with_speculative_decoding(client):
+    """Multi-token steps (ngram speculation) keep the flat array aligned with
+    the object path through the ragged cu_num_generated_tokens boundaries."""
+    # A repetitive prompt so the n-gram proposer gets accepted drafts.
+    token_ids = [1, 2, 3, 4, 5, 6] * 6
+    base = {
+        "model": MODEL_NAME,
+        "token_ids": token_ids,
+        "sampling_params": {"max_tokens": 24, "temperature": 0.0, "logprobs": 0},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=base)
+    resp.raise_for_status()
+    ref = resp.json()["choices"][0]
+    resp = await client.post(GEN_ENDPOINT, json={**base, "return_token_logprobs": True})
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    assert choice["token_ids"] == ref["token_ids"]
+    assert len(choice["logprobs"]["sampled"]) == len(choice["token_ids"]) == 24
+    assert choice["logprobs"]["sampled"] == pytest.approx(
+        [entry["logprob"] for entry in ref["logprobs"]["content"]], abs=1e-6
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+async def test_generate_return_token_logprobs_rejects_stream(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0},
+        "stream": True,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "return_token_logprobs" in resp.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="return_token_logprobs is not supported by the Rust frontend",
+)
+async def test_generate_return_token_logprobs_requires_tokens_mode(client):
+    """``sampled`` lives on the tokens-mode ``GenerateLogProbs``."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0},
+        "output_mode": "text",
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "output_mode" in resp.text
 
 
 @pytest.mark.asyncio
@@ -842,3 +1141,38 @@ async def test_abort_requests_is_served_without_tokens_only(client):
         "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
     )
     assert resp.status_code == 404
+
+
+def test_stream_chunks_never_carry_sampled():
+    """Streaming never sets logprobs.sampled, so a chunk must not grow a
+    "sampled": null key that the Rust frontend does not emit."""
+    import json
+
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        GenerateLogProbs,
+        GenerateLogProbsContent,
+        GenerateTokensStreamChoice,
+        GenerateTokensStreamResponse,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import (
+        _stream_exclude,
+    )
+
+    chunk = GenerateTokensStreamResponse(
+        request_id="r",
+        choices=[
+            GenerateTokensStreamChoice(
+                index=0,
+                token_ids=[7],
+                logprobs=GenerateLogProbs(
+                    content=[GenerateLogProbsContent(token_id=7, logprob=-0.1)]
+                ),
+            ),
+            GenerateTokensStreamChoice(index=1, token_ids=[8], logprobs=None),
+        ],
+    )
+    data = json.loads(chunk.model_dump_json(exclude=_stream_exclude(chunk)))
+    assert "sampled" not in data["choices"][0]["logprobs"]
+    assert data["choices"][0]["logprobs"]["content"][0]["token_id"] == 7
+    assert data["choices"][1]["logprobs"] is None
+    assert "prompt_token_ids" not in data

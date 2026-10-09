@@ -369,6 +369,16 @@ class SamplingParams(
     NOTE: GC costs of FlatLogprobs is significantly smaller than
     list[dict[int, Logprob]]. After enabled, PromptLogprobs and
     SampleLogprobs would populated as FlatLogprobs."""
+    _sampled_logprobs_only: bool = False
+    """Internal: set only by ``/inference/v1/generate`` for
+    ``return_token_logprobs`` (private, so it is not part of the request schema
+    and clients cannot set it, but still sent to the engine). Requires
+    ``logprobs == 0``. The scheduler emits one float per token instead of a
+    per-request ``LogprobsLists`` and the output processor keeps a plain float
+    list instead of building ``Logprob`` entries or detokenizing;
+    ``CompletionOutput.logprobs`` is ``None`` and
+    ``CompletionOutput.sampled_logprobs`` carries the values. Read it through
+    ``sampled_logprobs_only``."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -629,6 +639,11 @@ class SamplingParams(
             )
 
     def _verify_args(self) -> None:
+        if self._sampled_logprobs_only and self.logprobs != 0:
+            raise ValueError(
+                "sampled_logprobs_only requires logprobs == 0, "
+                f"got logprobs={self.logprobs}."
+            )
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
             self._verify_extra_args()
@@ -875,6 +890,11 @@ class SamplingParams(
     @property
     def all_stop_token_ids(self) -> set[int]:
         return self._all_stop_token_ids
+
+    @property
+    def sampled_logprobs_only(self) -> bool:
+        """See ``_sampled_logprobs_only``."""
+        return self._sampled_logprobs_only
 
     @property
     def bad_words_token_ids(self) -> list[list[int]] | None:

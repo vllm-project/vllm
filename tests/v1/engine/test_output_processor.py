@@ -1436,6 +1436,7 @@ def test_routed_experts_are_accumulated_until_finish():
         prompt_embeds=None,
         logprobs_processor=Mock(
             logprobs=None,
+            sampled_logprobs=None,
             cumulative_logprob=0.0,
             pop_prompt_logprobs=Mock(return_value=None),
         ),

@@ -76,6 +76,9 @@ class CompletionOutput:
     lora_request: LoRARequest | None = None
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+    # Sampled-token logprob per generated token for requests that set
+    # ``SamplingParams.sampled_logprobs_only``; ``logprobs`` is None then.
+    sampled_logprobs: list[float] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -206,6 +209,12 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
+                        if next_completion.sampled_logprobs is not None:
+                            if completion.sampled_logprobs is None:
+                                completion.sampled_logprobs = []
+                            completion.sampled_logprobs.extend(
+                                next_completion.sampled_logprobs
+                            )
                         if next_completion.sampling_mask is not None:
                             if completion.sampling_mask is None:
                                 completion.sampling_mask = SamplingMask([])

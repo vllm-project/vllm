@@ -106,6 +106,13 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
 ```
 
 - `content` has one entry per generated token, in generation order.
+- `sampled` is the sampled token's logprob per generated position, as a flat
+  float list. It is only returned when the request sets
+  `return_token_logprobs` (non-streaming, `output_mode: "tokens"`), for RL
+  rollouts that need one float per token. With `sampling_params.logprobs` 0 or
+  unset it is the only thing returned: no per-token entries are built and
+  `content: null` is the normal state, not an error. With `logprobs > 0`,
+  `content` is returned alongside.
 - `top_logprobs` is a list, not a dict: JSON turns dict keys into strings and
   the ordering would be implicit. It follows the engine's order: the sampled
   token first, then the remaining candidates in rank order. With non-greedy
