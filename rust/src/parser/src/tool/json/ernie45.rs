@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use xgrammar_structural_tag::format::Format;
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
+use crate::output_grammar::{self, OutputGrammarContext};
 use crate::tool::{
     Result, StructuralTagBuilder, Tool, ToolParser, ToolParserEvent, ToolParserOutput,
 };
@@ -101,6 +104,15 @@ impl ToolParser for Ernie45ToolParser {
         Some(xgrammar_structural_tag::Model::Hermes.builder())
     }
 
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let format =
+            output_grammar::visible_format_from_builder(self.structural_tag_builder(), ctx)?;
+        Ok(format.map(with_template_framing))
+    }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         // Filter the newly committed events on their own: the caller's output
         // may merge new text into an event it already holds.
@@ -124,11 +136,40 @@ impl ToolParser for Ernie45ToolParser {
     }
 }
 
+/// Allow the newlines the ERNIE 4.5 template renders around forced tool calls.
+///
+/// The Hermes tags for `required` and named tool choices must start right at
+/// `<tool_call>` and end right after `</tool_call>`, while the model puts a
+/// newline after `</think>`, after every `</tool_call>` and between calls.
+/// Masking those newlines blocks the model's natural `\n` + EOS ending; under
+/// `required` it then prefers another `<tool_call>` to EOS and repeats calls
+/// until `max_tokens`.
+fn with_template_framing(format: Format) -> Format {
+    let Format::TagsWithSeparator(calls) = format else {
+        return format;
+    };
+    if !calls.at_least_one {
+        return Format::TagsWithSeparator(calls);
+    }
+    let newlines = || Format::star(Format::const_string("\n"));
+    let call = Format::tags_with_separator(calls.tags, "", true, true);
+    let mut elements = vec![newlines(), call.clone()];
+    if !calls.stop_after_first {
+        elements.push(Format::star(Format::sequence(vec![newlines(), call])));
+    }
+    elements.push(newlines());
+    Format::sequence(elements)
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
 
+    use xgrammar_structural_tag::ToolChoice;
+
     use super::Ernie45ToolParser;
+    use crate::output_grammar::OutputGrammarContext;
+    use crate::output_grammar::test_utils::outline;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{ToolParser as _, ToolParserOutput, ToolParserTestExt as _};
 
@@ -292,5 +333,46 @@ mod tests {
 
         assert_eq!(output.normal_text(), "Done.\n");
         assert_eq!(output.calls().len(), 1);
+    }
+
+    #[test]
+    fn ernie45_forced_tool_grammar_allows_template_newlines() {
+        // The model writes `</think>\n\n<tool_call>...</tool_call>\n` and then
+        // EOS, so a forced-call grammar must admit those framing newlines.
+        let tools = &test_tools()[..1];
+        let parser = Ernie45ToolParser::new(tools);
+        let outline_for = |tool_choice: ToolChoice, parallel_tool_calls: bool| {
+            let ctx = OutputGrammarContext {
+                tools,
+                tool_choice: &tool_choice,
+                tool_strict_level: Default::default(),
+                parallel_tool_calls,
+            };
+            outline(&parser.build_visible_format(&ctx).unwrap().unwrap())
+        };
+
+        expect![[r#"
+            sequence
+              star `\n`
+              tags_with_separator `` at_least_one stop_after_first
+                tag `<tool_call>\n{"name": "get_weather", "arguments": ` json(any) `}\n</tool_call>`
+                tag `<tool_call>{"name": "get_weather", "arguments": ` json(any) `}</tool_call>`
+              star
+                sequence
+                  star `\n`
+                  tags_with_separator `` at_least_one stop_after_first
+                    tag `<tool_call>\n{"name": "get_weather", "arguments": ` json(any) `}\n</tool_call>`
+                    tag `<tool_call>{"name": "get_weather", "arguments": ` json(any) `}</tool_call>`
+              star `\n`
+        "#]].assert_eq(&outline_for(ToolChoice::required(), true));
+        expect![[r#"
+            sequence
+              star `\n`
+              tags_with_separator `` at_least_one stop_after_first
+                tag `<tool_call>\n{"name": "get_weather", "arguments": ` json(any) `}\n</tool_call>`
+                tag `<tool_call>{"name": "get_weather", "arguments": ` json(any) `}</tool_call>`
+              star `\n`
+        "#]]
+        .assert_eq(&outline_for(ToolChoice::function("get_weather"), true));
     }
 }
