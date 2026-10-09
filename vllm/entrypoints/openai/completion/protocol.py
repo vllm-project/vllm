@@ -94,6 +94,7 @@ class CompletionRequest(OpenAIBaseModel):
     )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    packed_top_logprobs: bool = False
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
@@ -383,6 +384,8 @@ class CompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
+            flat_logprobs=self.packed_top_logprobs,
+            skip_output_logprob_detokenization=self.packed_top_logprobs,
             logprob_token_ids=self.logprob_token_ids or None,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
@@ -401,6 +404,23 @@ class CompletionRequest(OpenAIBaseModel):
             thinking_token_budget=self.thinking_token_budget,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
+
+    @model_validator(mode="after")
+    def check_packed_top_logprobs(self):
+        if self.packed_top_logprobs and (
+            self.echo
+            or self.use_beam_search
+            or self.logprob_token_ids
+            or self.logprobs is None
+            or self.logprobs < 1
+            or not self.return_tokens_as_token_ids
+        ):
+            raise ValueError(
+                "packed_top_logprobs requires positive logprobs and "
+                "return_tokens_as_token_ids=true; echo, beam search "
+                "and logprob_token_ids are unsupported"
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -627,11 +647,28 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
+class PackedTopLogprobs(OpenAIBaseModel):
+    """Row-major arrays of the highest-k candidates, without normalization.
+
+    Ties retain engine top-k order. Sampled-token scores
+    remain in CompletionLogProbs even when the sampled token is outside k.
+    """
+
+    shape: tuple[int, int]
+    token_ids_dtype: Literal["<i4"] = "<i4"
+    logprobs_dtype: Literal["<f4"] = "<f4"
+    token_ids_b64: str
+    logprobs_b64: str
+
+
 class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)
     token_logprobs: list[float | None] = Field(default_factory=list)
     tokens: list[str] = Field(default_factory=list)
     top_logprobs: list[dict[str, float] | None] = Field(default_factory=list)
+    packed_top_logprobs: PackedTopLogprobs | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class CompletionResponseChoice(OpenAIBaseModel):

@@ -40,6 +40,7 @@ class LogprobsProcessor:
     cumulative_logprob: float | None
     num_logprobs: int | None
     num_prompt_logprobs: int | None
+    skip_output_logprob_detokenization: bool = False
     # [num_scored_rows, num_token_ids], set once on the final prefill chunk.
     prompt_token_id_logprobs: np.ndarray | None = None
 
@@ -68,6 +69,9 @@ class LogprobsProcessor:
             ),
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
+            skip_output_logprob_detokenization=(
+                sampling_params.skip_output_logprob_detokenization
+            ),
         )
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
@@ -94,7 +98,7 @@ class LogprobsProcessor:
             token_ids = token_ids_np.tolist()
             # Detokenize (non-incrementally).
             decoded_tokens: list[str] | Iterable[None]
-            if self.tokenizer is None:
+            if self.tokenizer is None or self.skip_output_logprob_detokenization:
                 decoded_tokens = NONES
             else:
                 decoded_tokens_list = convert_ids_list_to_tokens(
