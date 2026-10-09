@@ -74,7 +74,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
-    resolve_dcp_kv_cache_spec,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -1509,31 +1508,10 @@ class MooncakeStoreWorker:
             )
             return
 
-        self._kv_cache_groups = [
-            dataclasses.replace(
-                group,
-                kv_cache_spec=resolve_dcp_kv_cache_spec(
-                    group.kv_cache_spec,
-                    self.dcp_size,
-                ),
-            )
-            for group in kv_cache_config.prefix_cacheable_groups
-        ]
-        spec_cfg = getattr(vllm_config, "speculative_config", None)
-        use_eagle_block_drop = bool(
-            spec_cfg.use_eagle_block_drop()
-            if spec_cfg is not None
-            and callable(getattr(spec_cfg, "use_eagle_block_drop", None))
-            else False
+        self.coord = MooncakeStoreCoordinator.from_kv_cache_config(
+            kv_cache_config, vllm_config, self.block_size, self.hash_block_size
         )
-        self.coord = MooncakeStoreCoordinator(
-            self._kv_cache_groups,
-            scheduler_block_size=self.block_size,
-            hash_block_size=self.hash_block_size,
-            use_eagle=use_eagle_block_drop,
-            retention_interval=kv_cache_config.prefix_cache_retention_interval,
-            dcp_world_size=self.dcp_size,
-        )
+        self._kv_cache_groups = self.coord.kv_cache_groups
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
         )

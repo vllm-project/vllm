@@ -6,7 +6,6 @@
 """Scheduler-side logic for MooncakeStoreConnector."""
 
 from collections.abc import Sequence
-from dataclasses import replace
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -32,7 +31,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
-    resolve_dcp_kv_cache_spec,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -174,22 +172,8 @@ class MooncakeStoreScheduler:
         ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
 
-        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-        spec_config = vllm_config.speculative_config
-        self._store_coord = MooncakeStoreCoordinator(
-            [
-                replace(
-                    group,
-                    kv_cache_spec=resolve_dcp_kv_cache_spec(
-                        group.kv_cache_spec, dcp_size
-                    ),
-                )
-                for group in store_groups
-            ],
-            self._block_size,
-            self._hash_block_size,
-            use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
-            dcp_world_size=dcp_size,
+        self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
+            kv_cache_config, vllm_config, self._block_size, self._hash_block_size
         )
         self.enable_partial_hash_hits = self._store_coord.enable_partial_hash_hits
 

@@ -3,7 +3,8 @@
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
 from collections.abc import Sequence
-from typing import NamedTuple, cast
+from dataclasses import replace
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
@@ -14,19 +15,23 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     eagle_proof_margin,
-    partial_hash_hits_enabled,
+    resolve_dcp_kv_cache_spec,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class StoreSpecGroup(NamedTuple):
@@ -84,7 +89,7 @@ class MooncakeStoreCoordinator:
         hash_block_size: int,
         use_eagle: bool = False,
         retention_interval: int | None = None,
-        dcp_world_size: int = 1,
+        enable_partial_hash_hits: bool = False,
     ) -> None:
         # Mirrors core's resolve_kv_cache_block_sizes: the hash unit only has
         # to divide groups that participate in prefix caching. Non-shareable
@@ -112,13 +117,50 @@ class MooncakeStoreCoordinator:
         }
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
-        self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            kv_cache_groups, hash_block_size, dcp_world_size
-        )
+        # Core's decision: whether hits land on the hash unit, below the block.
+        self.enable_partial_hash_hits = enable_partial_hash_hits
         self.use_eagle = use_eagle
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
+
+    @classmethod
+    def from_kv_cache_config(
+        cls,
+        kv_cache_config: KVCacheConfig,
+        vllm_config: "VllmConfig",
+        scheduler_block_size: int,
+        hash_block_size: int,
+    ) -> "MooncakeStoreCoordinator":
+        """Build the coordinator the connector's scheduler and workers share.
+
+        Specs are DCP-resolved, so a block spans the tokens of one block-table
+        entry. Partial hits follow core's hit alignment, which checks every KV
+        cache group and its manager, not only the groups the store transfers;
+        unset (a config the engine core did not resolve) keeps hits on the
+        block.
+        """
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        spec_config = vllm_config.speculative_config
+        alignment = kv_cache_config.cache_hit_alignment_tokens
+        return cls(
+            [
+                replace(
+                    group,
+                    kv_cache_spec=resolve_dcp_kv_cache_spec(
+                        group.kv_cache_spec, dcp_world_size
+                    ),
+                )
+                for group in kv_cache_config.prefix_cacheable_groups
+            ],
+            scheduler_block_size,
+            hash_block_size,
+            use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            retention_interval=kv_cache_config.prefix_cache_retention_interval,
+            enable_partial_hash_hits=(
+                alignment is not None and alignment < scheduler_block_size
+            ),
+        )
 
     def align_lookup_length(self, length: int) -> int:
         alignment = (

@@ -90,6 +90,7 @@ def _make_bare_scheduler(
         ],
         max(16, hash_block_size),
         hash_block_size,
+        enable_partial_hash_hits=enable_partial_hash_hits,
     )
     return scheduler
 
@@ -1205,7 +1206,9 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
         ),
         is_eagle_group=use_eagle,
     )
-    scheduler._store_coord = MooncakeStoreCoordinator(groups, 16, 4, use_eagle)
+    scheduler._store_coord = MooncakeStoreCoordinator(
+        groups, 16, 4, use_eagle, enable_partial_hash_hits=True
+    )
     prompt_tokens = 49 if use_eagle else 45
     attention_ids = list(
         range(1, (prompt_tokens + attention_block_size - 1) // attention_block_size + 1)

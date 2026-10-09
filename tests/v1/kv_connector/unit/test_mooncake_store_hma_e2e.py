@@ -408,7 +408,12 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     assert coord.enable_partial_hash_hits
 
     class _RecordingStore(_DictStore):
@@ -489,7 +494,12 @@ def test_offload_syncs_event_before_put():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     event = MagicMock()
 
     class _FencedStore(_DictStore):
@@ -562,7 +572,12 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     assert coord.enable_partial_hash_hits
 
     class _RecordingStore(_DictStore):
@@ -661,6 +676,8 @@ def test_worker_lookup_hits_sub_block_partial_tail():
             KVCacheGroupSpec(["L0"], full),
             KVCacheGroupSpec(["L1"], mamba),
         ],
+        # The hit alignment the engine core resolves for this config.
+        cache_hit_alignment_tokens=4,
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
     # Hash unit 4 < mamba block 16 -> partial hash hits are enabled.
@@ -763,6 +780,8 @@ def test_worker_setup_tolerates_finer_scratch_group():
             KVCacheGroupSpec(["L1"], mamba),
             KVCacheGroupSpec(["L2"], scratch),
         ],
+        # The hit alignment the engine core resolves for this config.
+        cache_hit_alignment_tokens=8,
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
     # Hash unit 8 divides the participating groups (16) but not the scratch

@@ -3782,7 +3782,13 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
     ):
         scheduler = MooncakeStoreScheduler(
             config,
-            KVCacheConfig(num_blocks=128, kv_cache_tensors=[], kv_cache_groups=groups),
+            KVCacheConfig(
+                num_blocks=128,
+                kv_cache_tensors=[],
+                kv_cache_groups=groups,
+                # The hit alignment the engine core resolves for this config.
+                cache_hit_alignment_tokens=prefix_match_unit or 16,
+            ),
         )
     assert scheduler.enable_partial_hash_hits
     hash_block_size = prefix_match_unit or 16
@@ -3791,7 +3797,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         groups,
         scheduler_block_size=math.lcm(16 * dcp_world_size, mamba_block_size),
         hash_block_size=hash_block_size,
-        dcp_world_size=dcp_world_size,
+        enable_partial_hash_hits=True,
     )
     hashes = [BlockHash(bytes([i]) * 16) for i in range(512 // hash_block_size)]
     pool = mooncake_coordinator.ExternalCachedBlockPool(
@@ -3799,8 +3805,62 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         exists={(group, bytes(h)) for group in range(2) for h in hashes},
     )
     _, hit = coordinator.find_longest_cache_hit(hashes, 511, pool)
-    assert coordinator.enable_partial_hash_hits
     assert hit == 512 - hash_block_size
+
+
+@pytest.mark.parametrize("alignment, expected", [(8, True), (32, False), (None, False)])
+def test_scheduler_follows_core_hit_alignment(alignment, expected):
+    """The store takes partial hits from core's resolved alignment, not from its
+    own groups: these Mamba specs alone would allow them, but core may still
+    keep hits on the block (e.g. for a sliding-window group it never sees)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+        MooncakeStoreScheduler,
+    )
+
+    groups = [
+        KVCacheGroupSpec(
+            ["full"],
+            FullAttentionSpec(
+                block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=32,
+                shapes=(1, 1),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
+    ]
+    config = SimpleNamespace(
+        speculative_config=None,
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both", kv_connector_extra_config={}
+        ),
+        kv_events_config=None,
+        cache_config=SimpleNamespace(
+            block_size=32, enable_prefix_caching=True, prefix_match_unit=8
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "scheduler.LookupKeyClient"
+    ):
+        scheduler = MooncakeStoreScheduler(
+            config,
+            KVCacheConfig(
+                num_blocks=128,
+                kv_cache_tensors=[],
+                kv_cache_groups=groups,
+                cache_hit_alignment_tokens=alignment,
+            ),
+        )
+
+    assert scheduler.enable_partial_hash_hits is expected
+    assert scheduler._store_coord.enable_partial_hash_hits is expected
 
 
 def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
@@ -4096,6 +4156,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
         worker._kv_cache_groups,
         scheduler_block_size=16,
         hash_block_size=4,
+        enable_partial_hash_hits=True,
     )
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
@@ -4169,6 +4230,7 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
         scheduler_block_size=16,
         hash_block_size=4,
         use_eagle=True,
+        enable_partial_hash_hits=True,
     )
     _refresh_group_tp_replication_factors(worker)
     hashes = [BlockHash(f"h{i}".encode()) for i in range(6)]
@@ -4238,6 +4300,7 @@ def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
         worker._kv_cache_groups,
         scheduler_block_size=16,
         hash_block_size=4,
+        enable_partial_hash_hits=True,
     )
     _refresh_group_tp_replication_factors(worker)
     hashes = [BlockHash(f"h{i}".encode()) for i in range(12)]
