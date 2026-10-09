@@ -343,6 +343,16 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
+    def append_pinned_computed_blocks(
+        self,
+        request_id: str,
+        blocks: tuple[Sequence[KVCacheBlock], ...],
+    ) -> None:
+        for manager, group_blocks in zip(
+            self.single_type_managers, blocks, strict=True
+        ):
+            manager.append_pinned_computed_blocks(request_id, group_blocks)
+
     def get_num_cacheable_tokens(
         self, num_computed_tokens: int, kv_cache_group_id: int
     ) -> int:
