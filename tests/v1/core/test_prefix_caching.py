@@ -282,7 +282,7 @@ def _allocate_scheduled(
 def _resident_block_ids(manager: KVCacheManager, request_id: str) -> list[int]:
     """The GPU block HiSparse reads each resident page from; 0 if host-only."""
     resident = get_hisparse_coordinator(manager).resident_managers[0]
-    return [block.block_id for block in resident.get_resident_pages(request_id)]
+    return [block.block_id for block in resident.get_residency_row(request_id)]
 
 
 def test_hisparse_does_not_write_back_reprefillable_tokens():

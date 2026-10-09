@@ -2587,7 +2587,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         assert self.coordinator is not None
         self.coordinator.free(request_id)
-        blocks = self.get_resident_pages(request_id)
+        blocks = self.get_residency_row(request_id)
         self.residency_changes.pop(request_id, None)
         super().pop_blocks_for_free(request_id)
         return blocks
@@ -2624,8 +2624,9 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             block = changes.get(block_idx, block)
         return None if block.is_null else block
 
-    def get_resident_pages(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
-        """The request's GPU block per page from ``start``; null if not resident."""
+    def get_residency_row(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
+        """The request's row from ``start`` with residency changes applied. Unlike
+        ``get_resident_page``, host-only pages stay as the null block."""
         blocks = self.req_to_blocks.get(request_id, [])[start:]
         changes = self.residency_changes.get(request_id)
         if not changes:

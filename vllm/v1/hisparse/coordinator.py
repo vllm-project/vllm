@@ -692,7 +692,7 @@ class HiSparseCoordinator:
             if any(
                 block.is_null
                 for manager in self.resident_managers
-                for block in manager.get_resident_pages(request_id)
+                for block in manager.get_residency_row(request_id)
             ):
                 return False
             self._resident_requests.add(request_id)
@@ -730,7 +730,7 @@ class HiSparseCoordinator:
                 ]
                 group_block_ids.extend(
                     block.block_id
-                    for block in manager.get_resident_pages(request_id, start)
+                    for block in manager.get_residency_row(request_id, start)
                 )
                 block_ids.append(group_block_ids)
             updates[request_id] = SparseKVResidencyUpdate(
@@ -877,7 +877,7 @@ class HiSparseCoordinator:
             # planned, so its copies do not prove that the KV was computed.
             state.publication = None
         for manager in self.resident_managers:
-            blocks = manager.get_resident_pages(request_id)
+            blocks = manager.get_residency_row(request_id)
             # Tail first, so a prefix loses its tail pages before its head.
             for page_idx in reversed(range(len(blocks))):
                 block = blocks[page_idx]
