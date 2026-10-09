@@ -357,3 +357,101 @@ def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer
         assert torch.equal(out, buffer[:4])
     else:
         assert out is hidden_states
+
+
+@pytest.mark.parametrize("has_speculator", [False, True])
+@pytest.mark.parametrize("requires_completion", [False, True])
+def test_output_readiness_covers_draft_kv_writes(
+    monkeypatch, has_speculator: bool, requires_completion: bool
+):
+    """Publishing output must cover draft writes before RDMA can reuse KV."""
+    timeline: list[str] = []
+    writes: set[str] = set()
+    visible: set[str] = set()
+    ready: set[str] = set()
+    copy_stream = Mock()
+
+    def wait_stream(stream):
+        assert stream is runner.main_stream
+        timeline.append("wait")
+        visible.update(writes)
+
+    copy_stream.wait_stream.side_effect = wait_stream
+    event = Mock()
+
+    def record(stream):
+        assert stream is copy_stream
+        timeline.append("record")
+        ready.update(visible)
+
+    event.record.side_effect = record
+
+    def async_output(**kwargs):
+        timeline.append("d2h")
+        copy_stream.wait_stream(kwargs["main_stream"])
+        event.record(copy_stream)
+        return SimpleNamespace(copy_event=event)
+
+    monkeypatch.setattr(model_runner_module, "AsyncOutput", async_output)
+    runner = Mock()
+    runner.output_copy_stream = copy_stream
+    runner.is_last_pp_rank = True
+    runner.pcp_manager = None
+    runner.pp_handler = None
+    runner.aux_output_connector = None
+    runner.adaptive_verification = None
+    runner.num_speculative_steps = 0
+    runner._draft_workspace_lane = 0
+    runner.model = Mock(spec=["compute_logits"])
+    runner.kv_connector.requires_full_step_completion = requires_completion
+    runner.req_states.draft_tokens = torch.zeros((1, 1), dtype=torch.int64)
+    runner.prompt_logprobs_worker.compute_prompt_logprobs.return_value = {}
+    input_batch = SimpleNamespace(
+        req_ids=["request"], idx_mapping=torch.tensor([0]), query_start_loc=None
+    )
+    runner.execute_model_state.input_batch = input_batch
+    runner.execute_model_state.num_spec_tokens_to_schedule = 0
+    runner.sample.return_value = (Mock(), torch.tensor([1]), torch.tensor([0]))
+
+    def postprocess(*args):
+        timeline.append("postprocess")
+        writes.add("postprocess")
+
+    def post_forward(*args):
+        timeline.append("post_forward")
+        writes.add("post_forward")
+
+    runner.postprocess_sampled.side_effect = postprocess
+    runner.kv_connector.post_forward.side_effect = post_forward
+    if has_speculator:
+        runner.speculator.supports_mm_inputs = False
+
+        def propose(*args, **kwargs):
+            assert timeline[:3] == ["d2h", "wait", "record"]
+            assert "draft" not in ready
+            timeline.append("draft")
+            writes.add("draft")
+            return torch.zeros((1, 1), dtype=torch.int64)
+
+        runner.speculator.propose.side_effect = propose
+    else:
+        runner.speculator = None
+    monkeypatch.setattr(
+        model_runner_module, "use_workspace_lane", lambda _: contextlib.nullcontext()
+    )
+    GPUModelRunner.sample_tokens(runner, None)
+    assert ("draft" in ready) == (has_speculator and requires_completion)
+    assert ("postprocess" in ready) == (has_speculator and requires_completion)
+    assert event.record.call_count == (
+        2 if has_speculator and requires_completion else 1
+    )
+    assert ("post_forward" in ready) == (has_speculator and requires_completion)
+    assert timeline == (
+        ["d2h", "wait", "record", "postprocess"]
+        + (["draft"] if has_speculator else [])
+        + ["post_forward"]
+        + (["wait", "record"] if has_speculator and requires_completion else [])
+    )
+    event.synchronize.assert_not_called()
+    copy_stream.synchronize.assert_not_called()
+    runner.main_stream.synchronize.assert_not_called()

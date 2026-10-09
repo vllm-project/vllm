@@ -2284,6 +2284,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
 
+        if (
+            self.speculator is not None
+            and self.kv_connector.requires_full_step_completion
+        ):
+            # Keep early D2H copies, but publish output only after draft KV
+            # writes finish, before a READ can export or reuse these blocks.
+            self.output_copy_stream.wait_stream(self.main_stream)
+            async_output.copy_event.record(self.output_copy_stream)
+
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:

@@ -95,3 +95,21 @@ def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
     connector.no_forward(_scheduler_output(False))
 
     assert events == ["handle", "bind", "start", "wait", "clear"]
+
+
+@pytest.mark.parametrize("requires_completion", [False, True])
+def test_disabled_connector_does_not_require_step_completion(
+    monkeypatch: pytest.MonkeyPatch, requires_completion: bool
+):
+    connector = _make_connector(monkeypatch, [])
+    connector.kv_connector.requires_full_step_completion = requires_completion
+    monkeypatch.setattr(
+        kv_connector_module.kv_transfer_state, "_KV_CONNECTOR_AGENT", None
+    )
+
+    assert not kv_connector_module.NO_OP_KV_CONNECTOR.requires_full_step_completion
+    assert connector.requires_full_step_completion == requires_completion
+    connector.set_disabled(True)
+    assert not connector.requires_full_step_completion
+    connector.set_disabled(False)
+    assert connector.requires_full_step_completion == requires_completion

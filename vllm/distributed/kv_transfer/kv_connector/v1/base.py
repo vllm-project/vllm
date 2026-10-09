@@ -194,6 +194,15 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def requires_full_step_completion(self) -> bool:
+        """Whether output readiness must cover post-sampling KV writes.
+
+        Out-of-band transfers cannot rely on the GPU stream to order loads
+        after earlier writes to a reused block, or before source publication.
+        """
+        return False
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 
