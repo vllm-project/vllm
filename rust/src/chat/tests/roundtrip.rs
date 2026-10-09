@@ -59,8 +59,9 @@ struct RoundtripCase {
     /// Whether the template renders tool-call argument object keys in sorted order.
     sort_json_keys: bool,
     /// Answer-constraint variants of the tool-call fixture this case runs. The
-    /// variants without calls need a template that keeps the reasoning of a
-    /// turn without tool calls in history; the variant with calls needs a tool
+    /// variants without calls need a template that renders a final turn
+    /// without tool calls back to its completion (some templates drop its
+    /// reasoning or its stop suffix); the variant with calls needs a tool
     /// grammar, which holds the calls next to the answer.
     answer_variants: &'static [FixtureVariant],
 }
@@ -304,7 +305,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: &[FixtureVariant::AutoAnswerCalls],
+            answer_variants: FixtureVariant::ANSWERS,
         }
     }
 
@@ -404,7 +405,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: &[FixtureVariant::AutoAnswerCalls],
+            answer_variants: FixtureVariant::ANSWERS,
         }
     }
 
