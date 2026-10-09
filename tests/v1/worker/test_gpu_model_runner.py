@@ -460,6 +460,7 @@ def _mock_backend(
 
     return _MockBackendCls
 
+
 @pytest.mark.parametrize(
     "backends,expected",
     [
@@ -506,6 +507,7 @@ def test_preferred_block_size_falls_back_when_preference_is_not_common():
         _mock_backend([16], exact=True),
     ]
     assert Platform._preferred_block_size_for_backends(classes, 16, None) == 16
+
 
 def test_preferred_block_size_searches_past_an_exact_size_backend():
     # Extending greedily picks lcm(16, 32) = 32, which the exact backend
