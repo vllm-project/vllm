@@ -5,13 +5,13 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::{Prompt, TruncationSide};
 
+use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
     Usage, default_true, deserialize_request_top_k, validate_stop,
@@ -262,8 +262,7 @@ pub(super) struct CompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
-    #[serde(serialize_with = "crate::routes::openai::utils::metrics::serialize_stream_metrics")]
-    pub metrics: Option<PerRequestMetrics>,
+    pub metrics: Option<StreamPerRequestMetrics>,
 }
 
 impl CompletionStreamResponse {

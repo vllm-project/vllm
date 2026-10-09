@@ -38,7 +38,7 @@ use crate::routes::openai::chat_completions::types::{
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
-use crate::routes::openai::utils::metrics::per_request_metrics;
+use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, FunctionCallDelta, FunctionCallResponse, StreamResponseEnvelope, ToolCall,
     ToolCallDelta, Usage,
@@ -205,11 +205,8 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let metrics = per_request_metrics(
-        enable_per_request_metrics,
-        timestamps,
-        usage.output_token_count,
-    );
+    let metrics = enable_per_request_metrics
+        .then(|| PerRequestMetrics::from_timestamps(timestamps, usage.output_token_count));
     let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -483,16 +480,18 @@ async fn chat_completion_chunk_stream(
                 }
 
                 if include_usage {
-                    let mut chunk = usage_chunk(
+                    let metrics = enable_per_request_metrics.then(|| {
+                        PerRequestMetrics::from_timestamps(
+                            timestamps,
+                            final_usage.output_token_count,
+                        )
+                    });
+                    y.yield_ok(usage_chunk(
                         &envelope,
                         Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
-                    );
-                    chunk.metrics = per_request_metrics(
-                        enable_per_request_metrics,
-                        timestamps,
-                        final_usage.output_token_count,
-                    );
-                    y.yield_ok(chunk).await;
+                        metrics,
+                    ))
+                    .await;
                 }
 
                 return Ok(());
@@ -512,9 +511,11 @@ async fn chat_completion_chunk_stream(
 fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
+    metrics: Option<PerRequestMetrics>,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
+    chunk.metrics = metrics.map(Into::into);
     chunk
 }
 

@@ -102,15 +102,6 @@ struct EventMetricHandles {
 }
 
 impl RequestMetricsTracker {
-    pub(crate) fn timestamps(&self) -> RequestTimestamps {
-        RequestTimestamps {
-            queued_ts: self.queued_ts,
-            scheduled_ts: self.scheduled_ts,
-            first_token_ts: self.first_token_ts,
-            last_token_ts: self.last_token_ts,
-        }
-    }
-
     /// Create the per-request tracker from the normalized `llm`-layer request
     /// context.
     pub(crate) fn new(
@@ -235,6 +226,16 @@ impl RequestMetricsTracker {
             events.request_queue_time_seconds.observe(queue_time_seconds);
             events.request_prefill_time_seconds.observe(prefill_time_seconds);
             events.request_inference_time_seconds.observe(inference_time_seconds);
+        }
+    }
+
+    /// Engine lifecycle timestamps recorded so far.
+    pub(crate) fn timestamps(&self) -> RequestTimestamps {
+        RequestTimestamps {
+            queued_ts: self.queued_ts,
+            scheduled_ts: self.scheduled_ts,
+            first_token_ts: self.first_token_ts,
+            last_token_ts: self.last_token_ts,
         }
     }
 

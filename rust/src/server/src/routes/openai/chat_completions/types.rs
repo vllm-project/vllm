@@ -6,7 +6,6 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::SerializeDisplay;
@@ -14,6 +13,7 @@ use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::TruncationSide;
 
+use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, ReasoningEffort, StreamOptions,
@@ -408,8 +408,7 @@ pub(super) struct ChatCompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
-    #[serde(serialize_with = "crate::routes::openai::utils::metrics::serialize_stream_metrics")]
-    pub metrics: Option<PerRequestMetrics>,
+    pub metrics: Option<StreamPerRequestMetrics>,
     pub prompt_token_ids: Option<Vec<u32>>,
 }
 
