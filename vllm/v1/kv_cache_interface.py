@@ -1127,7 +1127,10 @@ def get_mamba_prefill_checkpoint_position(
     drop_eagle_block: bool,
 ) -> int:
     """Return the reusable Mamba checkpoint boundary for a prefill."""
-    checkpoint_position = (num_tokens - 1) // hash_block_size * hash_block_size
+    # Without EAGLE, leave one token to recompute on resend.
+    # EAGLE's block drop already leaves tokens to recompute.
+    proof_limit = num_tokens if drop_eagle_block else num_tokens - 1
+    checkpoint_position = proof_limit // hash_block_size * hash_block_size
     if drop_eagle_block:
         checkpoint_position -= hash_block_size
     return max(checkpoint_position, 0)
@@ -1487,6 +1490,10 @@ class KVCacheConfig:
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
+    hash_block_size: int | None = None
+    """Tokens per prefix-cache block hash, resolved by the engine core."""
+    cache_hit_alignment_tokens: int | None = None
+    """Token granularity of prefix-cache hits, resolved by the engine core."""
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
