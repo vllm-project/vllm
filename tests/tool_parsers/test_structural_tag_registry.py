@@ -60,6 +60,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     ToolChoice,
     get_function_parameters,
     get_model_structural_tag,
+    limit_to_single_tool_call,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
@@ -349,10 +350,12 @@ def test_get_model_structural_tag_supports_vllm_hermes(
     assert dump["type"] == "structural_tag"
 
     fmt = dump["format"]
-    assert fmt["type"] == "tags_with_separator"
-    assert fmt["separator"] == ""
-    assert fmt["at_least_one"] is True
-    assert fmt["stop_after_first"] is False
+    assert fmt["type"] == "or"
+    assert [element["separator"] for element in fmt["elements"]] == ["\n", ""]
+    for element in fmt["elements"]:
+        assert element["type"] == "tags_with_separator"
+        assert element["at_least_one"] is True
+        assert element["stop_after_first"] is False
 
     expected_schema = {
         "type": "object",
@@ -363,14 +366,15 @@ def test_get_model_structural_tag_supports_vllm_hermes(
         ('<tool_call>\n{"name": "get_weather", "arguments": ', "}\n</tool_call>"),
         ('<tool_call>{"name": "get_weather", "arguments": ', "}</tool_call>"),
     ]
-    assert len(fmt["tags"]) == len(expected_tags)
-    for tag_dump, (begin, end) in zip(fmt["tags"], expected_tags):
-        assert tag_dump["type"] == "tag"
-        assert tag_dump["begin"] == begin
-        assert tag_dump["end"] == end
-        content = tag_dump["content"]
-        assert content["type"] == "json_schema"
-        assert content["json_schema"] == expected_schema
+    for element in fmt["elements"]:
+        assert len(element["tags"]) == len(expected_tags)
+        for tag_dump, (begin, end) in zip(element["tags"], expected_tags):
+            assert tag_dump["type"] == "tag"
+            assert tag_dump["begin"] == begin
+            assert tag_dump["end"] == end
+            content = tag_dump["content"]
+            assert content["type"] == "json_schema"
+            assert content["json_schema"] == expected_schema
 
 
 def test_hermes_required_without_strict_leaves_arguments_free(
@@ -384,12 +388,20 @@ def test_hermes_required_without_strict_leaves_arguments_free(
     )
 
     assert isinstance(tag, StructuralTag)
-    tags = tag.model_dump()["format"]["tags"]
+    elements = tag.model_dump()["format"]["elements"]
+    tags = [tag_dump for element in elements for tag_dump in element["tags"]]
     assert tags
     assert all(tag_dump["content"]["json_schema"] is True for tag_dump in tags)
 
 
-def test_hermes_required_tool_calls_use_empty_separator():
+def _hermes_parallel_calls(*names: str, separator: str = "\n") -> str:
+    return separator.join(_hermes_call(name) for name in names)
+
+
+def test_hermes_required_accepts_template_separated_parallel_calls():
+    """Hermes templates put a newline between parallel calls and some
+    fine-tunes write them back to back; required must accept both, or the
+    model can only end after its first call."""
     tools = [
         ChatCompletionToolsParam(
             type="function",
@@ -407,15 +419,32 @@ def test_hermes_required_tool_calls_use_empty_separator():
         ),
     ]
 
-    tag = get_model_structural_tag(
-        model="hermes",
-        tools=tools,
-        tool_choice="required",
-        reasoning=False,
-    )
+    def required_tag() -> StructuralTag:
+        tag = get_model_structural_tag(
+            model="hermes",
+            tools=tools,
+            tool_choice="required",
+            reasoning=False,
+        )
+        assert tag is not None
+        return tag
 
-    assert tag is not None
-    assert tag.format.separator == ""
+    grammar = Grammar.from_structural_tag(json.dumps(required_tag().model_dump()))
+    single = limit_to_single_tool_call(required_tag())
+    single_grammar = Grammar.from_structural_tag(json.dumps(single.model_dump()))
+    assert _is_grammar_accept_string(grammar, _hermes_call("get_weather"))
+    assert _is_grammar_accept_string(single_grammar, _hermes_call("get_weather"))
+    for separator in ("\n", ""):
+        two = _hermes_parallel_calls("get_weather", "get_time", separator=separator)
+        three = _hermes_parallel_calls(
+            "get_time", "get_weather", "get_time", separator=separator
+        )
+        assert _is_grammar_accept_string(grammar, two)
+        assert _is_grammar_accept_string(grammar, three)
+        assert not _is_grammar_accept_string(single_grammar, two)
+    assert not _is_grammar_accept_string(
+        grammar, _hermes_call("get_weather") + "\nDone.\n" + _hermes_call("get_time")
+    )
 
 
 def _plamo3_call(name: str, arguments: str) -> str:
@@ -2061,6 +2090,9 @@ _SINGLE_CALL_CASES = [
 
 _SINGLE_CALL_IDS = [case[0] for case in _SINGLE_CALL_CASES]
 
+# What chat templates render between parallel calls; back to back unless listed.
+_PARALLEL_CALL_SEPARATORS = {"hermes": ("", "\n")}
+
 
 def _tool_calling_grammar(
     tool_parser: str,
@@ -2099,7 +2131,10 @@ def test_parallel_tool_calls_false_limits_grammar_to_one_call(
 
     assert grammar is not None
     assert _is_grammar_accept_string(grammar, prefix + call + suffix)
-    assert not _is_grammar_accept_string(grammar, prefix + call * 2 + suffix)
+    for separator in _PARALLEL_CALL_SEPARATORS.get(tool_parser, ("",)):
+        assert not _is_grammar_accept_string(
+            grammar, prefix + call + separator + call + suffix
+        )
     assert not _is_grammar_accept_string(grammar, prefix + call + suffix + "text")
 
 
@@ -2120,7 +2155,10 @@ def test_parallel_tool_calls_default_keeps_grammar_unlimited(
     assert _tool_calling_grammar(tool_parser, sample_tools, request("auto")) is None
     grammar = _tool_calling_grammar(tool_parser, sample_tools, request("required"))
     assert grammar is not None
-    assert _is_grammar_accept_string(grammar, prefix + call * 2 + suffix)
+    for separator in _PARALLEL_CALL_SEPARATORS.get(tool_parser, ("",)):
+        assert _is_grammar_accept_string(
+            grammar, prefix + call + separator + call + suffix
+        )
 
 
 def test_parallel_tool_calls_false_does_not_enable_calls_with_response_format(
@@ -2169,4 +2207,5 @@ def test_responses_parallel_tool_calls_false_limits_grammar_to_one_call():
 
     assert grammar is not None
     assert _is_grammar_accept_string(grammar, call)
-    assert not _is_grammar_accept_string(grammar, call * 2)
+    for separator in _PARALLEL_CALL_SEPARATORS["hermes"]:
+        assert not _is_grammar_accept_string(grammar, call + separator + call)
