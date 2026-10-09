@@ -123,8 +123,11 @@ pydantic==2.13.5
     # via
     #   -r requirements/docs.in
     #   mkdocs-awesome-nav
+    #   pydantic-settings
 pydantic-core==2.46.5
     # via pydantic
+pydantic-settings==2.15.0
+    # via -r requirements/docs.in
 pygments==2.21.0
     # via mkdocs-material
 pymdown-extensions==12.0.1
@@ -133,6 +136,8 @@ pymdown-extensions==12.0.1
     #   mkdocstrings
 python-dateutil==2.9.0.post0
     # via ghp-import
+python-dotenv==1.2.4
+    # via pydantic-settings
 pyyaml==6.0.3
     # via
     #   mkdocs
@@ -163,7 +168,9 @@ typing-extensions==4.16.0
     #   pydantic-core
     #   typing-inspection
 typing-inspection==0.4.4
-    # via pydantic
+    # via
+    #   pydantic
+    #   pydantic-settings
 urllib3==2.8.0
     # via requests
 watchdog==6.0.0

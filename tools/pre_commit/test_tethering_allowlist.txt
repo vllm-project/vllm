@@ -58,3 +58,6 @@ tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platform
 
 # tests/tools/
 tests/tools/test_config_validator.py  # logic covered by the validate-config pre-commit hook; no test_areas job
+
+# tests/docs/
+tests/docs/test_env_vars_gen.py  # imports docs/mkdocs/gen_files from the repo root; under a CI job's tests/ cwd the tests/docs package shadows the top-level docs/ package

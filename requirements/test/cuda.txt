@@ -938,6 +938,8 @@ pydantic-extra-types==2.10.5
     #   mistral-common
 pydantic-settings==2.14.2
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
     #   fastapi
 pygments==2.21.0
