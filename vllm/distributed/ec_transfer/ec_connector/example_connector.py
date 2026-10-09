@@ -201,8 +201,13 @@ class ECExampleConnector(ECConnectorBase):
     # ==============================
 
     def _found_match_for_mm_data(self, mm_hash) -> bool:
-        """Check if the cache is hit for the request."""
-        filename = self._generate_filename_debug(mm_hash)
+        """Check if the cache is hit for the request.
+
+        Pure lookup: must not create anything in shared storage,
+        otherwise every probed-but-missed hash leaves an empty
+        directory behind (issue #60820).
+        """
+        filename = self._generate_filename_debug(mm_hash, create_folder=False)
         return os.path.exists(filename)
 
     def _generate_foldername_debug(
@@ -219,11 +224,15 @@ class ECExampleConnector(ECConnectorBase):
             os.makedirs(foldername, exist_ok=True)
         return foldername
 
-    def _generate_filename_debug(self, mm_hash: str) -> str:
+    def _generate_filename_debug(
+        self, mm_hash: str, create_folder: bool = True
+    ) -> str:
         """Return the full path of the safetensors file for this mm_hash.
-        Ensures the parent directory exists because
-        `_generate_foldername_debug` is called with its default
-        (`create_folder=True`).
+        If `create_folder` is True (default) the parent directory is
+        created recursively, which is what the save path needs; lookup
+        paths should pass `create_folder=False`.
         """
-        foldername = self._generate_foldername_debug(mm_hash)  # <- folder auto-created
+        foldername = self._generate_foldername_debug(
+            mm_hash, create_folder=create_folder
+        )
         return os.path.join(foldername, "encoder_cache.safetensors")
