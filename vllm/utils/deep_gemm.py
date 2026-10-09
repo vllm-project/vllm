@@ -8,6 +8,7 @@ Users of vLLM should always import **only** these wrappers.
 import contextlib
 import functools
 import importlib
+import inspect
 import os
 from collections.abc import Callable
 from enum import Enum
@@ -178,6 +179,26 @@ _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
 ) = None
 
 
+def _callable_accepts_keyword(fn: Callable[..., Any], keyword: str) -> bool:
+    """Best-effort ABI check for Python and pybind callables."""
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        # pybind functions do not always expose ``__signature__``, but their
+        # generated first doc paragraph contains the argument list.
+        doc_signature = (getattr(fn, "__doc__", None) or "").split("\n\n", 1)[0]
+        return f"{keyword}:" in doc_signature or f"{keyword} =" in doc_signature
+    return keyword in signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _module_supports_mqa_logits_out(module: Any) -> bool:
+    fn = getattr(module, "fp8_fp4_mqa_logits", None)
+    return fn is not None and _callable_accepts_keyword(fn, "out")
+
+
 @functools.cache
 def _import_deep_gemm():
     """Import the deep_gemm module.
@@ -228,6 +249,17 @@ def _apply_pdl(mod, enable: bool = True) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
+
+
+@functools.cache
+def _get_fp8_fp4_mqa_logits_out_impl() -> Callable[..., Any] | None:
+    """Resolve an MQA backend that explicitly supports caller-owned output."""
+    deep_gemm = _import_deep_gemm()
+    if deep_gemm is None or not _module_supports_mqa_logits_out(deep_gemm):
+        return None
+    if current_platform.is_arch_support_pdl():
+        _apply_pdl(deep_gemm, True)
+    return getattr(deep_gemm, "fp8_fp4_mqa_logits", None)
 
 
 def _lazy_init() -> None:
@@ -597,6 +629,8 @@ def fp8_fp4_mqa_logits(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
     clean_logits: bool,
+    *,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits for a single sequence without KV paging.
 
@@ -618,21 +652,41 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ke: End indices (exclusive) for valid K per query
             position, shape [M], dtype int32.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
+        out: Optional caller-owned flat or padded output slab. The selected
+            DeepGEMM backend must explicitly support this keyword and return a
+            tensor aliasing the same storage.
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
 
     """
-    _lazy_init()
-    if _fp8_fp4_mqa_logits_impl is None:
+    if out is None:
+        _lazy_init()
+        impl = _fp8_fp4_mqa_logits_impl
+    else:
+        impl = _get_fp8_fp4_mqa_logits_out_impl()
+    if impl is None:
         return _missing()
-    return _fp8_fp4_mqa_logits_impl(
-        q,
-        kv,
-        weights,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
-        clean_logits=clean_logits,
+
+    kwargs: dict[str, Any] = {"clean_logits": clean_logits}
+    if out is not None:
+        kwargs["out"] = out
+    result = impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, **kwargs)
+    if out is not None and (
+        not isinstance(result, torch.Tensor) or result.data_ptr() != out.data_ptr()
+    ):
+        raise RuntimeError(
+            "DeepGEMM fp8_fp4_mqa_logits(out=) did not return an alias of "
+            "the caller-owned output slab"
+        )
+    return result
+
+
+def is_fp8_fp4_mqa_logits_out_supported() -> bool:
+    """Whether an available backend accepts a caller-owned output buffer."""
+    return (
+        torch.accelerator.is_available()
+        and _get_fp8_fp4_mqa_logits_out_impl() is not None
     )
 
 

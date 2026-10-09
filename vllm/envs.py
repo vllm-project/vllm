@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
+    VLLM_LITETOPK: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -1106,6 +1107,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN": lambda: int(
         os.getenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "8192")
     ),
+    # Enable the vendored SM100 LiteTopK sparse-prefill indexer.
+    "VLLM_LITETOPK": lambda: bool(int(os.getenv("VLLM_LITETOPK", "0"))),
+    # LiteTopK integration controls. Register every supported VLLM_* knob so
+    # strict environment validation and compile provenance do not reject or
+    # omit an explicitly qualified run.
+    "VLLM_LITETOPK_BUILD": lambda: os.getenv("VLLM_LITETOPK_BUILD", ""),
+    "VLLM_LITETOPK_SO": lambda: os.getenv("VLLM_LITETOPK_SO", ""),
+    "VLLM_LITETOPK_SO_SHA256": lambda: os.getenv("VLLM_LITETOPK_SO_SHA256", ""),
+    "VLLM_LITETOPK_PRODUCTION_MIN_S": lambda: int(
+        os.getenv("VLLM_LITETOPK_PRODUCTION_MIN_S", "196608")
+    ),
+    "VLLM_LITETOPK_MERGE_CAP": lambda: int(
+        os.getenv("VLLM_LITETOPK_MERGE_CAP", "49152")
+    ),
+    "VLLM_LITETOPK_NB": lambda: int(os.getenv("VLLM_LITETOPK_NB", "256")),
+    "VLLM_LITETOPK_HEADROOM": lambda: float(os.getenv("VLLM_LITETOPK_HEADROOM", "0")),
+    "VLLM_LITETOPK_PROBE_EVERY": lambda: int(
+        os.getenv("VLLM_LITETOPK_PROBE_EVERY", "8")
+    ),
+    "VLLM_LITETOPK_OVF_WATERMARK": lambda: int(
+        os.getenv("VLLM_LITETOPK_OVF_WATERMARK", "40960")
+    ),
+    "VLLM_LITETOPK_OVF_LOG": lambda: bool(int(os.getenv("VLLM_LITETOPK_OVF_LOG", "0"))),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(

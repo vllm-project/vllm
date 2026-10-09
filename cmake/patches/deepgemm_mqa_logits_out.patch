@@ -1,0 +1,97 @@
+diff --git a/csrc/apis/attention.hpp b/csrc/apis/attention.hpp
+index 191bb98..cedaba2 100644
+--- a/csrc/apis/attention.hpp
++++ b/csrc/apis/attention.hpp
+@@ -90,7 +90,8 @@ static torch::Tensor fp8_fp4_mqa_logits(const std::tuple<torch::Tensor, std::opt
+                                         const bool& clean_logits,
+                                         const int& max_seqlen_k,
+                                         const at::ScalarType& logits_dtype,
+-                                        const std::optional<torch::Tensor>& schedule_meta = std::nullopt) {
++                                        const std::optional<torch::Tensor>& schedule_meta = std::nullopt,
++                                        const std::optional<torch::Tensor>& out = std::nullopt) {
+     const auto [q_fp, q_sf] = q;
+     const auto [kv_fp, kv_sf] = kv;
+     const auto qk_dtype = q_fp.scalar_type();
+@@ -156,9 +157,18 @@ static torch::Tensor fp8_fp4_mqa_logits(const std::tuple<torch::Tensor, std::opt
+     const int stride_logits_alignment = 1024 / static_cast<int>(c10::elementSize(logits_dtype));
+     if (max_seqlen_k == 0) {
+         stride_logits = align(seq_len_kv + block_kv, stride_logits_alignment);
+-        logits = torch::empty({aligned_seq_len, stride_logits}, q_fp.options().dtype(logits_dtype));
++        if (out.has_value()) {
++            DG_HOST_ASSERT(out->is_cuda() and out->is_contiguous());
++            DG_HOST_ASSERT(out->device() == q_fp.device() and out->scalar_type() == logits_dtype);
++            const int64_t padded_numel = static_cast<int64_t>(aligned_seq_len) * stride_logits;
++            DG_HOST_ASSERT(out->numel() >= padded_numel);
++            logits = out->view(-1).narrow(0, 0, padded_numel).view({aligned_seq_len, stride_logits});
++        } else {
++            logits = torch::empty({aligned_seq_len, stride_logits}, q_fp.options().dtype(logits_dtype));
++        }
+         logits = logits.index({torch::indexing::Slice(0, seq_len), torch::indexing::Slice(0, seq_len_kv)});
+     } else {
++        DG_HOST_ASSERT(not out.has_value());
+         stride_logits = align(align(max_seqlen_k, block_kv), stride_logits_alignment);
+         logits = torch::empty({aligned_seq_len, stride_logits}, q_fp.options().dtype(logits_dtype));
+         logits = logits.index({torch::indexing::Slice(0, seq_len), torch::indexing::Slice(0, max_seqlen_k)});
+@@ -653,6 +663,25 @@ static torch::Tensor fp8_fp4_mqa_logits(
+         logits_dtype, schedule_meta);
+ }
+
++static torch::Tensor fp8_fp4_mqa_logits_out(
++    const torch::Tensor& q, const c10::optional<torch::Tensor>& q_sf,
++    const torch::Tensor& kv, const torch::Tensor& kv_sf,
++    const torch::Tensor& weights,
++    const torch::Tensor& cu_seq_len_k_start,
++    const torch::Tensor& cu_seq_len_k_end,
++    const torch::Tensor& out,
++    const bool& clean_logits,
++    const int64_t& max_seqlen_k,
++    at::ScalarType logits_dtype,
++    const std::optional<torch::Tensor>& schedule_meta) {
++    return attention::fp8_fp4_mqa_logits(
++        std::make_tuple(q, q_sf),
++        std::make_tuple(kv, kv_sf),
++        weights, cu_seq_len_k_start, cu_seq_len_k_end,
++        clean_logits, static_cast<int>(max_seqlen_k),
++        logits_dtype, schedule_meta, out);
++}
++
+ static torch::Tensor get_paged_mqa_logits_metadata(
+     const torch::Tensor& context_lens, const int64_t& block_kv,
+     const int64_t& num_sms, const c10::optional<torch::Tensor>& indices) {
+@@ -774,6 +803,8 @@ TORCH_LIBRARY_FRAGMENT(deep_gemm, m) {
+         "fp8_gemm_nt_skip_head_mid(Tensor a, Tensor sfa, Tensor b, Tensor sfb, Tensor(d!) d, int[3] head_splits, int[3]? recipe=None, str compiled_dims='nk', bool disable_ue8m0_cast=False) -> ()");
+     m.def(
+         "fp8_fp4_mqa_logits(Tensor q, Tensor? q_sf, Tensor kv, Tensor kv_sf, Tensor weights, Tensor cu_seq_len_k_start, Tensor cu_seq_len_k_end, bool clean_logits=True, int max_seqlen_k=0, ScalarType logits_dtype=float, Tensor? schedule_meta=None) -> Tensor");
++    m.def(
++        "fp8_fp4_mqa_logits_out(Tensor q, Tensor? q_sf, Tensor kv, Tensor kv_sf, Tensor weights, Tensor cu_seq_len_k_start, Tensor cu_seq_len_k_end, Tensor(a!) out, bool clean_logits=True, int max_seqlen_k=0, ScalarType logits_dtype=float, Tensor? schedule_meta=None) -> Tensor(a!)");
+     m.def("get_mqa_logits_metadata(Tensor cu_seq_len_k_start, Tensor cu_seq_len_k_end, int num_kv_tokens, int num_heads) -> Tensor");
+     m.def("get_sparse_mqa_logits_metadata(Tensor cu_seq_len_k_start, Tensor cu_seq_len_k_end, int num_kv_tokens, Tensor sparse_kv_block_indices, ScalarType qk_dtype, int sparse_block_kv, bool use_unaligned_ks=False) -> Tensor");
+     m.def("get_paged_sparse_mqa_logits_metadata(Tensor context_lens, Tensor block_table, Tensor indices, int page_kv, Tensor sparse_kv_block_indices, ScalarType qk_dtype, int sparse_block_kv) -> Tensor");
+@@ -795,6 +826,7 @@ TORCH_LIBRARY_IMPL(deep_gemm, CUDA, m) {
+
+     m.impl("fp8_gemm_nt_skip_head_mid", TORCH_FN(fp8_gemm_nt_skip_head_mid));
+     m.impl("fp8_fp4_mqa_logits", TORCH_FN(fp8_fp4_mqa_logits));
++    m.impl("fp8_fp4_mqa_logits_out", TORCH_FN(fp8_fp4_mqa_logits_out));
+     m.impl("get_mqa_logits_metadata", TORCH_FN(deep_gemm::torch_registration::get_mqa_logits_metadata));
+     m.impl("get_sparse_mqa_logits_metadata", TORCH_FN(deep_gemm::torch_registration::get_sparse_mqa_logits_metadata));
+     m.impl("get_paged_sparse_mqa_logits_metadata", TORCH_FN(deep_gemm::torch_registration::get_paged_sparse_mqa_logits_metadata));
+diff --git a/deep_gemm/_C.py b/deep_gemm/_C.py
+index 7e5a3da..52aef0d 100644
+--- a/deep_gemm/_C.py
++++ b/deep_gemm/_C.py
+@@ -160,9 +160,14 @@ def _register_deep_gemm_kernels():
+         return _torch_ops.fp8_einsum(expr, a[0], a[1], b[0], b[1], d_tensor, c, list(recipe), sfd)
+
+     def fp8_fp4_mqa_logits(q, kv, weights, cu_seq_len_k_start, cu_seq_len_k_end, clean_logits=True,
+-                           max_seqlen_k=0, logits_dtype=torch.float32, schedule_meta=None):
++                           max_seqlen_k=0, logits_dtype=torch.float32, schedule_meta=None, out=None):
+         q_fp, q_sf = q[0], q[1]
+         kv_fp, kv_sf = _unpack_kv(kv)
++        if out is not None:
++            return _torch_ops.fp8_fp4_mqa_logits_out(
++                q_fp, q_sf, kv_fp, kv_sf, weights, cu_seq_len_k_start, cu_seq_len_k_end,
++                out, clean_logits, max_seqlen_k, logits_dtype, schedule_meta,
++            )
+         return _torch_ops.fp8_fp4_mqa_logits(
+             q_fp, q_sf, kv_fp, kv_sf, weights, cu_seq_len_k_start, cu_seq_len_k_end,
+             clean_logits, max_seqlen_k, logits_dtype, schedule_meta,

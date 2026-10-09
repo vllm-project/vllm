@@ -10,7 +10,7 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -20,6 +20,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.layers import litetopk_indexer
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     get_indexer_topk,
@@ -52,6 +53,7 @@ logger = init_logger(__name__)
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+_LITETOPK_FP8_FULL_QUERY_LENS = (8192, 8128)
 
 
 def _assert_cutedsl_dcp_merge_supported(
@@ -317,6 +319,84 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+_LITETOPK_TP_SHARD_BUFS: dict[tuple[str, int, int], torch.Tensor] = {}
+_LITETOPK_TP_SHARD_STATUS: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+_LITETOPK_TP_SHARD_LOGGED = False
+
+
+def _litetopk_tp_guarded_call(tp_query_shard, stage, func, *args, **kwargs):
+    """Turn shard-local setup errors into a peer-visible decline."""
+    try:
+        return func(*args, **kwargs)
+    except Exception as error:
+        if tp_query_shard is None:
+            raise
+        logger.error("LiteTopK TP query shard %s failed locally: %s", stage, error)
+        return None
+
+
+def _litetopk_tp_query_shard(
+    full_q: int,
+    topk: int,
+    device: torch.device,
+    *,
+    use_fp4_cache: bool,
+    use_pcp: bool,
+    pcp_world_size: int,
+    compress_ratio: int,
+    num_heads: int,
+    num_reqs: int,
+    dcp_world_size: int,
+) -> tuple[int, int, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Return this rank's qualified TP row interval and persistent buffers."""
+    global _LITETOPK_TP_SHARD_LOGGED
+    if (
+        not envs.VLLM_LITETOPK
+        or num_reqs != 1
+        or use_pcp
+        or pcp_world_size != 1
+        or dcp_world_size != 1
+        or (device.type == "cuda" and torch.cuda.is_current_stream_capturing())
+    ):
+        return None
+    glm_profile = (
+        not use_fp4_cache
+        and compress_ratio == 1
+        and num_heads == 32
+        and topk == 2048
+        and full_q in _LITETOPK_FP8_FULL_QUERY_LENS
+    )
+    if not glm_profile:
+        return None
+    tp_group = get_tp_group()
+    if tp_group.world_size != 8:
+        return None
+    local_q = full_q // tp_group.world_size
+    lo = tp_group.rank_in_group * local_q
+    key = (str(device), local_q, topk)
+    local_out = _LITETOPK_TP_SHARD_BUFS.get(key)
+    if local_out is None:
+        local_out = torch.empty((local_q, topk), dtype=torch.int32, device=device)
+        _LITETOPK_TP_SHARD_BUFS[key] = local_out
+    status_key = (str(device), tp_group.world_size)
+    status_bufs = _LITETOPK_TP_SHARD_STATUS.get(status_key)
+    if status_bufs is None:
+        status_bufs = (
+            torch.empty(1, dtype=torch.int32, device=device),
+            torch.empty(tp_group.world_size, dtype=torch.int32, device=device),
+        )
+        _LITETOPK_TP_SHARD_STATUS[status_key] = status_bufs
+    if not _LITETOPK_TP_SHARD_LOGGED:
+        print(
+            f"[litetopk] GLM TP{tp_group.world_size} query-row shard active: "
+            f"rank={tp_group.rank_in_group} full_q={full_q} "
+            f"rows=[{lo},{lo + local_q})",
+            flush=True,
+        )
+        _LITETOPK_TP_SHARD_LOGGED = True
+    return lo, lo + local_q, local_out, status_bufs[0], status_bufs[1]
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -418,6 +498,8 @@ def sparse_attn_indexer(
     has_decode = attn_metadata_narrowed.num_decodes > 0
     has_prefill = attn_metadata_narrowed.num_prefills > 0
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
+    pcp_world_size = get_pcp_group().world_size if use_pcp else 1
+    litetopk_no_cp = not use_pcp and dcp_world_size == 1
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
     # folds the Q scale into `weights` inside fused_indexer_q_rope_quant.
@@ -521,14 +603,77 @@ def sparse_attn_indexer(
             assert chunk.local_cu_seq_lens is not None
             k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
             k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
-            if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
-                ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_quant,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.local_cu_seq_lens,
+            sample_plan = None
+            query_length = chunk.token_end - chunk.token_start
+            tp_query_shard = (
+                _litetopk_tp_query_shard(
+                    query_length,
+                    topk_tokens,
+                    k_quant.device,
+                    use_fp4_cache=use_fp4_cache,
+                    use_pcp=use_pcp,
+                    pcp_world_size=pcp_world_size,
+                    compress_ratio=chunk.compress_ratio,
+                    num_heads=int(q_quant.shape[1]),
+                    num_reqs=chunk.num_reqs,
+                    dcp_world_size=dcp_world_size,
                 )
+                if chunk.fused_indexer_planned
+                else None
+            )
+            shard_row_offset = 0 if tp_query_shard is None else tp_query_shard[0]
+            common_end = (
+                chunk.common_ke_min or chunk.total_seq_lens - query_length + 1
+            ) + shard_row_offset
+            fused_indexer_runtime_eligible = (
+                chunk.fused_indexer_planned
+                and envs.VLLM_LITETOPK
+                and tp_query_shard is not None
+                and litetopk_no_cp
+                and not use_fp4_cache
+                and not current_platform.is_xpu()
+                and not torch.cuda.is_current_stream_capturing()
+                and q_quant.dim() == 3
+                and q_quant.shape[1:] == (32, 128)
+                and chunk.compress_ratio == 1
+                and topk_tokens == 2048
+                and _litetopk_tp_guarded_call(
+                    tp_query_shard,
+                    "availability preflight",
+                    litetopk_indexer.production_extension_available,
+                    use_fp4=use_fp4_cache,
+                    topk=topk_tokens,
+                )
+            )
+            if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
+                if fused_indexer_runtime_eligible:
+                    # Gather only the fixed random sample; the scoring kernel
+                    # reads the remaining keys directly from paged cache.
+                    sample_plan = _litetopk_tp_guarded_call(
+                        tp_query_shard,
+                        "paged sample preparation",
+                        litetopk_indexer.prepare_paged_sample,
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        sequence_length=chunk.max_local_total_seq_lens,
+                        query_length=(
+                            query_length
+                            if tp_query_shard is None
+                            else tp_query_shard[1] - tp_query_shard[0]
+                        ),
+                        num_reqs=chunk.num_reqs,
+                        common_end=common_end,
+                    )
+                if sample_plan is None:
+                    ops.cp_gather_indexer_k_quant_cache(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.local_cu_seq_lens,
+                    )
 
             # PCP + DCP KV all-gather.
             deinterleave_idx = chunk.pcp_deinterleave_idx
@@ -571,6 +716,75 @@ def sparse_attn_indexer(
                     q_slice_cast = q_slice
                     k_quant_cast = k_quant
                     k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
+                # An unsplit chunk cannot safely fall back to full logits.
+                # Graph warmup retains the dense path; TP peers agree below.
+                if tp_query_shard is None and (
+                    (
+                        chunk.fused_indexer_planned
+                        and not fused_indexer_runtime_eligible
+                        and not torch.cuda.is_current_stream_capturing()
+                    )
+                    or (fused_indexer_runtime_eligible and sample_plan is None)
+                ):
+                    raise RuntimeError(
+                        "LiteTopK preparation failed for an unsplit prefill "
+                        "chunk; dense fallback is unsafe"
+                    )
+                fused_ok = False
+                shard_lo = 0
+                shard_hi = query_length
+                fused_topk_indices = topk_indices
+                if tp_query_shard is not None:
+                    shard_lo, shard_hi, fused_topk_indices = tp_query_shard[:3]
+                if fused_indexer_runtime_eligible:
+                    fused_ok = _litetopk_tp_guarded_call(
+                        tp_query_shard,
+                        "selection",
+                        litetopk_indexer.try_large_exact_once_chunk,
+                        q_slice_cast[shard_lo:shard_hi],
+                        k_quant_cast,
+                        k_scale_cast,
+                        weights[
+                            chunk.token_start + shard_lo : chunk.token_start + shard_hi
+                        ],
+                        cu_seqlen_ks[shard_lo:shard_hi],
+                        cu_seqlen_ke[shard_lo:shard_hi],
+                        fused_topk_indices,
+                        topk_tokens,
+                        sample_plan=sample_plan,
+                        num_reqs=chunk.num_reqs,
+                        ke_min_hint=common_end,
+                        cap=litetopk_indexer.MERGE_CAP,
+                    )
+                if tp_query_shard is not None:
+                    local_status = tp_query_shard[3]
+                    all_status = tp_query_shard[4]
+                    if not fused_ok:
+                        fused_topk_indices.fill_(-1)
+                    tp_group = get_tp_group()
+                    torch.distributed.all_gather_into_tensor(
+                        topk_indices,
+                        fused_topk_indices,
+                        group=tp_group.device_group,
+                    )
+                    local_status.fill_(int(bool(fused_ok)))
+                    torch.distributed.all_gather_into_tensor(
+                        all_status,
+                        local_status,
+                        group=tp_group.device_group,
+                    )
+                    torch._assert_async(
+                        torch.all(all_status == 1),
+                        "LiteTopK TP query shard declined on a peer rank",
+                    )
+                    fused_ok = True
+                if fused_ok:
+                    continue
+                elif fused_indexer_runtime_eligible:
+                    raise RuntimeError(
+                        "LiteTopK was selected for an unsplit prefill chunk "
+                        "but declined at runtime; dense fallback is unsafe"
+                    )
                 if current_platform.is_xpu():
                     if q_scale_slice is not None:
                         raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")

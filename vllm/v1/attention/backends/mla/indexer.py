@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers import litetopk_indexer
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -201,6 +202,28 @@ class PrepareUniformDecodeKernel(
             expanded_bt_stride=expanded_block_table.stride(0),
             BLOCK_SIZE=self.BLOCK_SIZE,
         )
+
+
+# Must agree with litetopk_indexer and sparse_attn_indexer.
+_FUSED_MIN_SEQ_LEN = litetopk_indexer.PRODUCTION_MIN_S
+_FUSED_MAX_SEQ_LEN = 1 << 20
+_FUSED_QUERY_LEN = 8192
+_FUSED_TAIL_QUERY_LEN = 8128
+
+
+def _should_plan_fused_indexer(
+    num_reqs: int,
+    total_seq_len: int,
+    query_len: int,
+    fused_min_seq_len: int,
+) -> bool:
+    """Whether this whole chunk may skip dense-logits budget splitting."""
+    if fused_min_seq_len <= 0 or num_reqs != 1:
+        return False
+    return (
+        query_len in (_FUSED_QUERY_LEN, _FUSED_TAIL_QUERY_LEN)
+        and fused_min_seq_len <= total_seq_len <= _FUSED_MAX_SEQ_LEN
+    )
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
@@ -403,6 +426,9 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
 
+    fused_indexer_planned: bool = False
+    common_ke_min: int = 0
+    compress_ratio: int = 1
     pcp_deinterleave_idx: torch.Tensor | None = None
 
 
@@ -930,6 +956,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
+        self.tp_world_size = parallel_config.tensor_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # KV compression (DeepseekV4). Default to 1 for no compression.
@@ -1287,6 +1314,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        fused_min_seq_len: int = 0,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
@@ -1331,6 +1359,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             max_q = (
                 max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
             )
+            if _should_plan_fused_indexer(
+                end - start, chunk_n, chunk_m, fused_min_seq_len
+            ):
+                max_q = max(1, chunk_m)
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
                 chunks.append((req_slice, slice(q_off, q_off + sub_m)))
@@ -1438,6 +1470,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            # Exempt only qualified LiteTopK chunks from dense-logits splitting.
+            config = self.vllm_config.model_config.hf_config
+            fused_min_seq_len = (
+                _FUSED_MIN_SEQ_LEN
+                if (
+                    envs.VLLM_LITETOPK
+                    and litetopk_indexer.supports_model(config, self.tp_world_size)
+                    # Prefix-cache reuse shapes are not yet qualified for
+                    # unsplit fused chunks; retain budgeted dense chunking.
+                    and not self.vllm_config.cache_config.enable_prefix_caching
+                    and not self.use_fp4_indexer_cache
+                    and self.compress_ratio == 1
+                    and self.dcp_world_size == 1
+                    and self.pcp_world_size == 1
+                    and not current_platform.is_xpu()
+                    and current_platform.is_device_capability(100)
+                    # TP peers agree on extension availability at runtime.
+                )
+                else 0
+            )
             # Upper bound is exact for prefill rows (the `[num_decodes:]`
             # slice below).
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
@@ -1475,6 +1527,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
+                    fused_min_seq_len=fused_min_seq_len,
                 )
 
             chunks = []
@@ -1505,6 +1558,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     dcp_world_size=self.dcp_world_size,
                     cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
                     pcp_plan=pcp_plan,
+                    fused_min_seq_len=fused_min_seq_len,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -1805,6 +1859,7 @@ def build_prefill_chunk_metadata(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     pcp_plan: PCPGlobalChunkPlan | None = None,
+    fused_min_seq_len: int = 0,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     if pcp_plan is not None:
         total_seq_lens = pcp_plan.total
@@ -1906,6 +1961,15 @@ def build_prefill_chunk_metadata(
         token_end = query_start_loc_cpu[end_idx].item()
 
     return DeepseekV32IndexerPrefillChunkMetadata(
+        fused_indexer_planned=_should_plan_fused_indexer(
+            num_reqs, total_seq_lens, output_query_len, fused_min_seq_len
+        ),
+        common_ke_min=(
+            total_seq_lens - total_query_len + qs_start + 1
+            if num_reqs == 1 and compress_ratio == 1
+            else 0
+        ),
+        compress_ratio=compress_ratio,
         pcp_deinterleave_idx=pcp_deinterleave_idx,
         cu_seqlen_ks=cu_seq_len_ks,
         cu_seqlen_ke=cu_seq_len_ke,
