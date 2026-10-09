@@ -327,9 +327,11 @@ def _check_unsupported(parsed) -> None:
             for branch in tval[1]:
                 _check_unsupported(branch)
 
-        # tval is (min, max, subpattern)
-        elif ttype == _parser.MAX_REPEAT:
-            _check_unsupported(tval[2])
+        else:
+            nested = tval if isinstance(tval, tuple) else (tval,)
+            for sub in nested:
+                if isinstance(sub, _parser.SubPattern):
+                    _check_unsupported(sub)
 
 
 def validate_regex_is_buildable(pattern: str) -> None:
