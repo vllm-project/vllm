@@ -292,6 +292,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: int | None = None
     logprob_token_ids: list[int] | None = Field(
         default=None,
+        min_length=1,
         description=(
             "Specific vocab token IDs to return logprobs for at each generated "
             "position, in addition to the sampled token. More efficient than "
@@ -746,7 +747,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 else None
             ),
             prompt_logprobs=prompt_logprobs,
-            logprob_token_ids=self.logprob_token_ids or None,
+            logprob_token_ids=self.logprob_token_ids,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
@@ -819,17 +820,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def check_logprobs(cls, data):
         if not isinstance(data, dict):
             return data
-        if data.get("logprob_token_ids") and data.get("use_beam_search"):
-            raise VLLMValidationError(
-                "`logprob_token_ids` is not supported with beam search.",
-                parameter="logprob_token_ids",
-            )
-
-        if data.get("logprob_token_ids") and not data.get("logprobs"):
-            raise VLLMValidationError(
-                "when using `logprob_token_ids`, `logprobs` must be set to true.",
-                parameter="logprob_token_ids",
-            )
+        if data.get("logprob_token_ids") is not None:
+            if not isinstance(data["logprob_token_ids"], list):
+                return data
+            if not data["logprob_token_ids"]:
+                raise VLLMValidationError(
+                    "`logprob_token_ids` must not be an empty list.",
+                    parameter="logprob_token_ids",
+                )
+            if data.get("use_beam_search"):
+                raise VLLMValidationError(
+                    "`logprob_token_ids` is not supported with beam search.",
+                    parameter="logprob_token_ids",
+                )
+            if not data.get("logprobs"):
+                raise VLLMValidationError(
+                    "when using `logprob_token_ids`, `logprobs` must be set to true.",
+                    parameter="logprob_token_ids",
+                )
 
         # These fields are integers, but `mode="before"` runs on the raw
         # request data, so a non-numeric value (e.g. a JSON string) would
@@ -1111,6 +1119,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     top_logprobs: TopLogprobsParam = 0
     logprob_token_ids: list[int] | None = Field(
         default=None,
+        min_length=1,
         description=(
             "Specific vocab token IDs to return logprobs for at each generated "
             "position, in addition to the sampled token. Requires "
@@ -1170,11 +1179,19 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "Please set `use_beam_search` to False.",
                 parameter="use_beam_search",
             )
-        if data.get("logprob_token_ids") and not data.get("logprobs"):
-            raise VLLMValidationError(
-                "when using `logprob_token_ids`, `logprobs` must be set to true.",
-                parameter="logprob_token_ids",
-            )
+        if data.get("logprob_token_ids") is not None:
+            if not isinstance(data["logprob_token_ids"], list):
+                return data
+            if not data["logprob_token_ids"]:
+                raise VLLMValidationError(
+                    "`logprob_token_ids` must not be an empty list.",
+                    parameter="logprob_token_ids",
+                )
+            if not data.get("logprobs"):
+                raise VLLMValidationError(
+                    "when using `logprob_token_ids`, `logprobs` must be set to true.",
+                    parameter="logprob_token_ids",
+                )
         kv_transfer_params = data.get("kv_transfer_params")
         if (
             isinstance(kv_transfer_params, dict)
