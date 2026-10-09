@@ -93,7 +93,9 @@ torch_utils.async_tensor_h2d = async_tensor_h2d
 
 # Patch model runner APIs
 import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
+import vllm.v1.worker.gpu.block_table as gpu_block_table
 import vllm.v1.worker.gpu.input_batch as gpu_input_batch
+import vllm.v1.worker.cpu.block_table as cpu_block_table
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
 import vllm.v1.worker.cpu.input_batch as cpu_input_batch
 
@@ -111,6 +113,9 @@ gpu_structured_outputs.GRAMMAR_BITMASK_BLOCK_SIZE = 1024
 from vllm.triton_utils import HAS_TRITON, tl
 
 if not HAS_TRITON:
+    gpu_block_table.BlockTables.gather_block_tables = (
+        cpu_block_table.gather_block_tables
+    )
     gpu_input_batch.prepare_prefill_inputs = cpu_input_batch.prepare_prefill_inputs
     gpu_input_batch.prepare_pos_seq_lens = cpu_input_batch.prepare_pos_seq_lens
     gpu_input_batch.combine_sampled_and_draft_tokens = (

@@ -409,6 +409,11 @@ void dynamic_per_token_scaled_fp8_quant(
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
+void gather_block_table_cpu(const torch::Tensor& block_table,
+                            torch::Tensor& output,
+                            const torch::Tensor& idx_mapping,
+                            const torch::Tensor& num_blocks,
+                            const int64_t num_reqs_padded);
 void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
                                 torch::Tensor& next_prefill_tokens,
                                 const torch::Tensor& idx_mapping,
@@ -1016,6 +1021,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &mamba_chunk_scan_fwd_cpu_impl);
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
+
+  ops.def(
+      "gather_block_table_cpu(Tensor block_table, Tensor(a1!) output, "
+      "Tensor idx_mapping, Tensor num_blocks, SymInt num_reqs_padded) -> ()",
+      &cpu_utils::gather_block_table_cpu);
 
   ops.def(
       "prepare_prefill_inputs_cpu(Tensor(a0!) input_ids, "
