@@ -698,6 +698,42 @@ test_mori_standalone_gpu.py
 - Reset 不得遗留 lookup、transfer 或 socket state。
 - Lazy 和 eager 路径使用一致的 object identity。
 
+### 9.4 PIT GPU/MORI 实测记录
+
+2026-10-09 在 PIT `pit2-p03-g10` 上通过直接 SSH 运行测试，没有创建
+Slurm allocation。测试使用镜像：
+
+```text
+charles5/vllm-openai-rocm:umbp-k3-dcp-af1c01499-async-load-fix
+```
+
+环境信息：
+
+- 8 张 MI355X GPU。
+- PyTorch `2.12.0+rocm10.0.0`。
+- MORI Python bindings 和 `umbp_standalone_server` 可用。
+
+结果：
+
+- Embedded MORI GPU integration：4 passed。
+    - TP2/PP2 四进程 store/lookup/load roundtrip。
+    - Store 与 GPU compute overlap。
+    - DRAM eviction 后 ranged restore。
+    - DRAM eviction 后 bulk restore。
+- Standalone MORI GPU integration：3 passed。
+    - Writer 退出后由另一进程和另一张 GPU restore。
+    - 多 client 可见的全局 cache clear。
+    - Server loss 降级为 lookup miss 和 transfer failure。
+- Qwen3-0.6B token-level restore：2 passed。
+    - Eager offload。
+    - Lazy offload。
+
+节点虽然被 Slurm 标记为 idle，但 GPU 0 当时只有约 30--67 GiB 空闲，因此
+token-level 测试显式使用 `gpu_memory_utilization=0.05`。该测试同时固定
+`num_gpu_blocks_override=128`，降低启动预算不会改变测试所需的 KV block 数量。
+
+测试结束后，临时源码目录、模型缓存和测试容器均已清理。
+
 ## 10. 作者和来源记录
 
 最终提交不是原样 cherry-pick，因此 commit message 应记录实际来源。例如：
