@@ -112,6 +112,8 @@ class HiSparseConnectorScheduler:
         stats.record_host_usage(
             host_pool.get_usage(), len(self.coordinator.pending_spills)
         )
+        if host_pool.metrics_collector is not None:
+            stats.record_host_evictions(host_pool.metrics_collector.drain_events())
         return stats
 
     def build_connector_meta(

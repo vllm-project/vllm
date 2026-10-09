@@ -3,7 +3,7 @@
 import contextlib
 import ctypes
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.hisparse import runtime as runtime_module
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
@@ -33,6 +34,7 @@ from vllm.v1.hisparse.types import (
     SparseKVPageTransfer,
     SparseKVRowMirror,
 )
+from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -98,6 +100,46 @@ def test_scheduler_stats_report_host_pool_usage():
     for _ in range(2):
         stats = scheduler.get_kv_connector_stats()
         assert stats.data["host_cache_usage_perc"] == [expected]
+
+
+def test_hisparse_host_residency_reported_as_hisparse_metrics():
+    """Host blocks sample into HiSparse's own residency metrics."""
+    from tests.v1.core.test_prefix_caching import (
+        make_hisparse_kv_cache_config,
+        make_kv_cache_manager,
+    )
+    from tests.v1.core.utils import create_requests
+
+    collector = KVCacheMetricsCollector(sample_rate=1.0)
+    manager = make_kv_cache_manager(
+        make_hisparse_kv_cache_config(2, 2),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+        metrics_collector=collector,
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    assert coordinator.host_manager is not None
+    scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    scheduler.bind_coordinator(coordinator)
+    device = manager.block_pool
+    host = coordinator.host_manager.block_pool
+    request = create_requests(1, num_tokens=16)[0]
+    for pool, birth in ((device, 1), (host, 2)):
+        with patch("time.monotonic_ns", return_value=birth * 10**9):
+            block = pool.get_new_blocks(1)[0]
+            assert block.block_id == 1
+            pool.cache_full_blocks(request, [block], 0, 1, 16, 0)
+    with patch("time.monotonic_ns", return_value=4_000_000_000):
+        host.free_blocks([host.blocks[1]])
+        host.evict_blocks({1})
+    with patch("time.monotonic_ns", return_value=6_000_000_000):
+        device.evict_blocks({1})
+
+    assert collector.drain_events() == [KVCacheEvictionEvent(5.0, 5.0, ())]
+    stats = scheduler.get_kv_connector_stats()
+    assert stats.data["host_block_lifetime_seconds"] == [2.0]
+    assert stats.data["host_block_idle_before_evict_seconds"] == [2.0]
 
 
 def test_no_forward_enqueues_deferred_hisparse_transfers():
