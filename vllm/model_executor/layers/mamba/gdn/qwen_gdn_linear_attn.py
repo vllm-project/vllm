@@ -8,6 +8,7 @@ from typing import Literal
 import torch
 from einops import rearrange
 from torch import nn
+from transformers import Qwen3NextConfig
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -58,7 +59,6 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
