@@ -151,8 +151,18 @@ def test_validation_rejects_mamba_mode_directly():
         ("kv_both", False, False, False),
     ],
 )
+@pytest.mark.parametrize(
+    "attention_block_size,mamba_block_size",
+    [(None, 16), (1_048_576, 6_400)],
+    ids=["mamba-only", "hybrid-no-prefix"],
+)
 def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
-    kv_role, enable_lookup, save_decode_cache, capacity_only
+    kv_role,
+    enable_lookup,
+    save_decode_cache,
+    capacity_only,
+    attention_block_size,
+    mamba_block_size,
 ):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeStoreConnector",
@@ -162,16 +172,33 @@ def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
             "save_decode_cache": save_decode_cache,
         },
     )
+    vllm_config.cache_config.enable_prefix_caching = False
     mamba_spec = MambaSpec(
-        block_size=16,
+        block_size=mamba_block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="none",
     )
+    groups = [KVCacheGroupSpec(["mamba"], mamba_spec)]
+    if attention_block_size is not None:
+        # Captured Kimi K3 non-align layout: the LCM hash unit exceeds
+        # both group block sizes, so it cannot initialize a lookup coordinator.
+        groups.insert(
+            0,
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=attention_block_size,
+                    num_kv_heads=8,
+                    head_size=64,
+                    dtype=torch.float32,
+                ),
+            ),
+        )
     kv_cache_config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["mamba"], mamba_spec)],
+        kv_cache_groups=groups,
     )
 
     with patch(
