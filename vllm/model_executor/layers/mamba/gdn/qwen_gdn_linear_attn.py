@@ -130,7 +130,9 @@ def _resolve_gdn_prefill_backend(
     * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
 
     Under "auto", a model or build FlyDSL cannot serve stays on Triton/FLA
-    without a warning; only an explicit "aiter_flydsl" request fails closed.
+    without a warning. An explicit "aiter_flydsl" request raises if the
+    FlyDSL kernels are missing, and otherwise warns before falling back to
+    Triton/FLA for a model they cannot serve.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -1267,14 +1269,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 aiter_prefill_metadata=aiter_prefill_metadata,
             )
         except Exception:
-            logger.warning(
-                "GDN prefill kernel warmup (T=%d) failed for "
-                "layer %s. First inference may OOM due to "
-                "autotuner.",
-                T,
-                self.prefix,
-                exc_info=True,
-            )
+            if self.gdn_prefill_backend == "aiter_flydsl":
+                # Nothing here is autotuned: the FlyDSL kernels that failed are
+                # the ones the first real prefill runs, so it likely fails too.
+                logger.warning(
+                    "GDN prefill kernel warmup (T=%d) failed for layer %s "
+                    "with the AITER FlyDSL backend. The first prefill runs "
+                    "the same kernels and is likely to fail the same way.",
+                    T,
+                    self.prefix,
+                    exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "GDN prefill kernel warmup (T=%d) failed for "
+                    "layer %s. First inference may OOM due to "
+                    "autotuner.",
+                    T,
+                    self.prefix,
+                    exc_info=True,
+                )
         else:
             logger.debug(
                 "GDN prefill kernel warmup (T=%d) completed for layer %s",

@@ -151,10 +151,11 @@ def test_explicit_request_warns_with_every_reason():
 
 @pytest.mark.parametrize("on_rocm", [True, False], ids=["kernels_missing", "not_rocm"])
 def test_explicit_aiter_flydsl_fails_closed(on_rocm: bool):
-    """An explicit request that cannot be honoured is a configuration error.
+    """An explicit request whose kernels cannot be provided is an error.
 
     Falling back silently would report the run as healthy while the requested
-    kernels were never used.
+    kernels were never used. A model the kernels cannot serve is different: it
+    warns and falls back, as test_explicit_request_warns_with_every_reason pins.
     """
     config = _make_config()
     if on_rocm:
@@ -171,6 +172,63 @@ def test_explicit_aiter_flydsl_fails_closed(on_rocm: bool):
         pytest.raises(RuntimeError, match="aiter_flydsl"),
     ):
         _resolve_gdn_prefill_backend(config)
+
+
+@pytest.mark.parametrize(
+    "backend,expected,unexpected",
+    [
+        ("aiter_flydsl", "AITER FlyDSL backend", "autotuner"),
+        ("triton", "autotuner", "FlyDSL"),
+    ],
+)
+def test_warmup_failure_warning_names_the_backend(
+    backend: str, expected: str, unexpected: str
+):
+    """Only the Triton kernels are autotuned, so the OOM hint must not appear
+    for a FlyDSL failure, which will recur on the first real prefill."""
+    num_heads, head_dim = 2, 128
+
+    def failing_prefill(**kwargs):
+        raise RuntimeError("kernel failed")
+
+    layer = SimpleNamespace(
+        _prefill_kernels_warmed_up=False,
+        num_k_heads=num_heads,
+        num_v_heads=num_heads,
+        tp_size=1,
+        head_k_dim=head_dim,
+        head_v_dim=head_dim,
+        A_log=None,
+        dt_bias=None,
+        prefix="layers.0.linear_attn",
+        gdn_prefill_backend=backend,
+        get_state_dtype=lambda: (torch.bfloat16, torch.bfloat16),
+        chunk_gated_delta_rule=failing_prefill,
+    )
+
+    def fake_prep(*, conv_output, a, **kwargs):
+        tokens = conv_output.shape[0]
+        qkv = torch.zeros(tokens, num_heads, head_dim)
+        gate = torch.zeros(tokens, num_heads)
+        return qkv, qkv, qkv, gate, gate
+
+    with (
+        patch.object(qwen_gdn_linear_attn, "fused_post_conv_prep", fake_prep),
+        patch.object(
+            qwen_gdn_linear_attn.rocm_aiter_ops,
+            "build_gdn_flydsl_prefill_metadata",
+            return_value=object(),
+        ),
+        patch.object(qwen_gdn_linear_attn.logger, "warning") as warning,
+    ):
+        qwen_gdn_linear_attn.QwenGatedDeltaNetAttention._warmup_prefill_kernels(
+            layer, torch.zeros(64, 3 * head_dim * num_heads), 0
+        )
+
+    warning.assert_called_once()
+    message = warning.call_args.args[0]
+    assert expected in message
+    assert unexpected not in message
 
 
 def _flydsl_prefill_unavailable() -> bool:
