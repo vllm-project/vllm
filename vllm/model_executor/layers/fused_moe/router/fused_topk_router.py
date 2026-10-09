@@ -107,11 +107,11 @@ def dispatch_topk_softmax_func(
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     """Pick the softmax top-k implementation for one launch.
 
-    On ROCm with AITER, ``topk_gating`` is chosen when it is enabled
-    (``VLLM_ROCM_USE_AITER_TOPK_GATING``) and the launch described by the
-    tensors and shared-expert arguments is one it supports; every other
-    AITER launch uses the legacy ``topk_softmax``. The tensors are optional:
-    without them the launch cannot be judged and the legacy launcher is used.
+    On ROCm with AITER, ``topk_gating`` is chosen on gfx950 when the launch
+    described by the tensors and shared-expert arguments is one it supports;
+    every other AITER launch uses the legacy ``topk_softmax``. The tensors are
+    optional: without them the launch cannot be judged and the legacy launcher
+    is used.
     """
     if use_rocm_aiter:
         if (

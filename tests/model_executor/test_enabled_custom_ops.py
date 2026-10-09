@@ -200,30 +200,28 @@ def _topk_gating_launch(
         ),
     ],
 )
-@pytest.mark.parametrize("topk_gating_enabled", [True, False])
+@pytest.mark.parametrize("on_gfx950", [True, False])
 def test_topk_softmax_dispatch_aiter_topk_gating(
     monkeypatch: pytest.MonkeyPatch,
     launch: dict,
     num_shared_experts: int,
     scoring_func: str,
     expect_gating: bool,
-    topk_gating_enabled: bool,
+    on_gfx950: bool,
 ):
-    """AITER launches use topk_gating only when it is enabled and supports them.
+    """AITER launches use topk_gating only on gfx950, and only when it supports them.
 
     Every other AITER launch must reach the legacy topk_softmax, so this is the
     one place the choice is made.
     """
-    monkeypatch.setattr(
-        rocm_aiter_ops, "is_topk_gating_enabled", lambda: topk_gating_enabled
-    )
+    monkeypatch.setattr(rocm_aiter_ops, "is_topk_gating_enabled", lambda: on_gfx950)
     topk_func = dispatch_topk_softmax_func(
         True,
         **_topk_gating_launch(**launch),
         num_shared_experts=num_shared_experts,
         shared_expert_scoring_func=scoring_func,
     )
-    if expect_gating and topk_gating_enabled:
+    if expect_gating and on_gfx950:
         assert topk_func == rocm_aiter_ops.topk_gating
     else:
         assert topk_func == rocm_aiter_ops.topk_softmax
