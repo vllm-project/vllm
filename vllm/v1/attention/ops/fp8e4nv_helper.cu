@@ -45,6 +45,8 @@ fp8e4m3x4_to_fp16x4(u32 input) {
     prmt.b32 sub0, sublut, subhi, m0;
     setp.ge.u32 p_norm0, mag0, 8;
     selp.u32 o0, norm0, sub0, p_norm0;
+    setp.eq.u32 p_norm0, mag0, 0x7f;
+    selp.u32 o0, 0x7e00, o0, p_norm0;
     or.b32 o0, o0, sign0;
 
     // lane 1
@@ -58,6 +60,8 @@ fp8e4m3x4_to_fp16x4(u32 input) {
     prmt.b32 sub1, sublut, subhi, m1;
     setp.ge.u32 p_norm1, mag1, 8;
     selp.u32 o1, norm1, sub1, p_norm1;
+    setp.eq.u32 p_norm1, mag1, 0x7f;
+    selp.u32 o1, 0x7e00, o1, p_norm1;
     or.b32 o1, o1, sign1;
 
     // lane 2
@@ -71,6 +75,8 @@ fp8e4m3x4_to_fp16x4(u32 input) {
     prmt.b32 sub2, sublut, subhi, m2;
     setp.ge.u32 p_norm2, mag2, 8;
     selp.u32 o2, norm2, sub2, p_norm2;
+    setp.eq.u32 p_norm2, mag2, 0x7f;
+    selp.u32 o2, 0x7e00, o2, p_norm2;
     or.b32 o2, o2, sign2;
 
     // lane 3
@@ -84,6 +90,8 @@ fp8e4m3x4_to_fp16x4(u32 input) {
     prmt.b32 sub3, sublut, subhi, m3;
     setp.ge.u32 p_norm3, mag3, 8;
     selp.u32 o3, norm3, sub3, p_norm3;
+    setp.eq.u32 p_norm3, mag3, 0x7f;
+    selp.u32 o3, 0x7e00, o3, p_norm3;
     or.b32 o3, o3, sign3;
 
     shl.b32 o1, o1, 16;
@@ -166,6 +174,8 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o0, norm0, sub0, p_norm0;
     setp.ge.u32 p_hi0, a0, 0x5f41;
     selp.u32 o0, 0x7e, o0, p_hi0;
+    setp.gt.u32 p_hi0, a0, 0x7c00;
+    selp.u32 o0, 0x7f, o0, p_hi0;
     or.b32 o0, o0, sgn0;
 
     // lane 1
@@ -209,6 +219,8 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o1, norm1, sub1, p_norm1;
     setp.ge.u32 p_hi1, a1, 0x5f41;
     selp.u32 o1, 0x7e, o1, p_hi1;
+    setp.gt.u32 p_hi1, a1, 0x7c00;
+    selp.u32 o1, 0x7f, o1, p_hi1;
     or.b32 o1, o1, sgn1;
 
     // lane 2
@@ -252,6 +264,8 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o2, norm2, sub2, p_norm2;
     setp.ge.u32 p_hi2, a2, 0x5f41;
     selp.u32 o2, 0x7e, o2, p_hi2;
+    setp.gt.u32 p_hi2, a2, 0x7c00;
+    selp.u32 o2, 0x7f, o2, p_hi2;
     or.b32 o2, o2, sgn2;
 
     // lane 3
@@ -295,6 +309,8 @@ fp16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o3, norm3, sub3, p_norm3;
     setp.ge.u32 p_hi3, a3, 0x5f41;
     selp.u32 o3, 0x7e, o3, p_hi3;
+    setp.gt.u32 p_hi3, a3, 0x7c00;
+    selp.u32 o3, 0x7f, o3, p_hi3;
     or.b32 o3, o3, sgn3;
 
     shl.b32 o1, o1, 8;
@@ -374,6 +390,8 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o0, norm0, sub0, p_norm0;
     setp.ge.u32 p_hi0, a0, 0x43e0;
     selp.u32 o0, 0x7e, o0, p_hi0;
+    setp.gt.u32 p_hi0, a0, 0x7f80;
+    selp.u32 o0, 0x7f, o0, p_hi0;
     or.b32 o0, o0, sgn0;
 
     and.b32  a1, raw1, 0x7fff;
@@ -414,6 +432,8 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o1, norm1, sub1, p_norm1;
     setp.ge.u32 p_hi1, a1, 0x43e0;
     selp.u32 o1, 0x7e, o1, p_hi1;
+    setp.gt.u32 p_hi1, a1, 0x7f80;
+    selp.u32 o1, 0x7f, o1, p_hi1;
     or.b32 o1, o1, sgn1;
 
     and.b32  a2, raw2, 0x7fff;
@@ -454,6 +474,8 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o2, norm2, sub2, p_norm2;
     setp.ge.u32 p_hi2, a2, 0x43e0;
     selp.u32 o2, 0x7e, o2, p_hi2;
+    setp.gt.u32 p_hi2, a2, 0x7f80;
+    selp.u32 o2, 0x7f, o2, p_hi2;
     or.b32 o2, o2, sgn2;
 
     and.b32  a3, raw3, 0x7fff;
@@ -494,6 +516,8 @@ bf16x4_to_fp8e4m3x4(u32 input01, u32 input23) {
     selp.u32 o3, norm3, sub3, p_norm3;
     setp.ge.u32 p_hi3, a3, 0x43e0;
     selp.u32 o3, 0x7e, o3, p_hi3;
+    setp.gt.u32 p_hi3, a3, 0x7f80;
+    selp.u32 o3, 0x7f, o3, p_hi3;
     or.b32 o3, o3, sgn3;
 
     shl.b32 o1, o1, 8;
@@ -551,6 +575,8 @@ fp8e4m3x4_to_bf16x4(u32 input) {
     or.b32 sub0, hi0, lo0;
     setp.ge.u32 p_norm0, mag0, 8;
     selp.u32 o0, norm0, sub0, p_norm0;
+    setp.eq.u32 p_norm0, mag0, 0x7f;
+    selp.u32 o0, 0x7fc0, o0, p_norm0;
     or.b32 o0, o0, sign0;
 
 
@@ -568,6 +594,8 @@ fp8e4m3x4_to_bf16x4(u32 input) {
     or.b32 sub1, hi1, lo1;
     setp.ge.u32 p_norm1, mag1, 8;
     selp.u32 o1, norm1, sub1, p_norm1;
+    setp.eq.u32 p_norm1, mag1, 0x7f;
+    selp.u32 o1, 0x7fc0, o1, p_norm1;
     or.b32 o1, o1, sign1;
 
 
@@ -585,6 +613,8 @@ fp8e4m3x4_to_bf16x4(u32 input) {
     or.b32 sub2, hi2, lo2;
     setp.ge.u32 p_norm2, mag2, 8;
     selp.u32 o2, norm2, sub2, p_norm2;
+    setp.eq.u32 p_norm2, mag2, 0x7f;
+    selp.u32 o2, 0x7fc0, o2, p_norm2;
     or.b32 o2, o2, sign2;
 
 
@@ -602,6 +632,8 @@ fp8e4m3x4_to_bf16x4(u32 input) {
     or.b32 sub3, hi3, lo3;
     setp.ge.u32 p_norm3, mag3, 8;
     selp.u32 o3, norm3, sub3, p_norm3;
+    setp.eq.u32 p_norm3, mag3, 0x7f;
+    selp.u32 o3, 0x7fc0, o3, p_norm3;
     or.b32 o3, o3, sign3;
 
     shl.b32 o1, o1, 16;
