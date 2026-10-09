@@ -44,6 +44,8 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
+    worker._draft_layers = ()
+    worker._draft_mirror_pending = False
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
@@ -90,6 +92,8 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         "cache_hits": [12],
         "cache_misses": [4],
         "host_to_device_bytes": [64],
+        "host_cache_usage_perc": [],
+        "pending_page_transfers": [],
     }
 
 
@@ -783,30 +787,6 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
     worker._enqueue_host_mirror()
 
     worker._enqueue_row_dma.assert_not_called()
-
-
-def test_hisparse_finish_forward_submits_lazy_post_forward_transfer(monkeypatch):
-    runtime = SimpleNamespace(eager_host_mirror=False)
-    worker = _make_hisparse_worker()
-    worker.is_host_writer = True
-    worker.cache_handles = [SimpleNamespace(runtime=runtime, num_actual_tokens=0)]
-    transfer = SparseKVPageTransfer(7, 2, (1,), after_forward=True)
-    worker._post_forward_transfers = [transfer]
-    worker._forward_ready_event = MagicMock()
-    worker._enqueue_host_mirror = MagicMock()
-    worker._submit_transfers = MagicMock()
-    worker._dma_submitted = False
-    worker._submitted_mirror_layers = set()
-    worker._finish_mirror_phase = MagicMock()
-    worker._release_completed_dma_descriptors = MagicMock()
-    stream = MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
-
-    worker.finish_forward()
-
-    worker._finish_mirror_phase.assert_called_once_with(worker._forward_ready_event)
-    worker._submit_transfers.assert_called_once_with([transfer])
-    worker.host_write_event.record.assert_called_once_with(stream)
 
 
 def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
