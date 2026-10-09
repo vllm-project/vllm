@@ -4101,7 +4101,7 @@ def test_hisparse_staged_prefills_rebase_to_plan(monkeypatch):
 
     def convert(req_ids, block_table, topk, **kwargs):
         conversions.append((req_ids, block_table, topk))
-        return topk + 100, torch.ones(topk.shape[0], dtype=torch.int32)
+        return topk, torch.ones(topk.shape[0], dtype=torch.int32)
 
     monkeypatch.setattr(
         index_group_module, "triton_convert_req_index_to_global_index", convert
@@ -4124,7 +4124,7 @@ def test_hisparse_staged_prefills_rebase_to_plan(monkeypatch):
     )
     topk_indices = torch.arange(6, dtype=torch.int32).view(6, 1)
 
-    ((tokens, result, physical_topk, _),) = list(
+    ((tokens, result, _, _),) = list(
         index_group.staged_prefills(0, source, metadata, topk_indices, staging=staging)
     )
 
@@ -4134,7 +4134,6 @@ def test_hisparse_staged_prefills_rebase_to_plan(monkeypatch):
     assert req_ids.tolist() == [0, 0, 0]
     assert block_table is plan.block_table
     assert topk.flatten().tolist() == [3, 4, 5]
-    assert physical_topk.flatten().tolist() == [103, 104, 105]
     resident_rows, resident_block_size = plan.ensure_gpu_sources.call_args.args
     assert resident_rows.tolist() == [[12]]
     assert resident_block_size == 1

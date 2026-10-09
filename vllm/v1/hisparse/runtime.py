@@ -1260,9 +1260,9 @@ def create_hisparse_cache_handle(
     is_index_group_leader: bool,
     row_width: int,
     kv_dtype: torch.dtype,
+    stages_prefill: bool,
     index_group: HiSparseMLAIndexGroup | None = None,
     device: torch.device | str | None = None,
-    stages_prefill: bool = False,
 ) -> HiSparseCacheHandle | None:
     config = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k)
     if config is None:
