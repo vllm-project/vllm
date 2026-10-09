@@ -70,7 +70,7 @@ from .attention import (
     compute_skip_topk_layers,
     is_skip_topk_indexer_weight,
 )
-from .hc import HYV4HCHeadLayer, HYV4HCLayer
+from .hc import CudaIHCPostPre, HYV4HCHeadLayer, HYV4HCLayer
 from .moe import HYV4FeedForward, HYV4MoEFused
 
 logger = init_logger(__name__)
@@ -159,12 +159,38 @@ class HYV4DecoderLayer(nn.Module):
             config, layer_idx, prefix=f"{prefix}.hc_mlp_layer"
         )
 
-        self.hpc_attn_pre_norm: HpcIHCPre | None = None
-        self.hpc_mlp_post_pre: HpcIHCPostPre | None = None
-        self.hpc_attn_post_pre: HpcIHCPostPre | None = None
+        # Fused iHC boundaries: the vLLM CUDA op (faster than the HPC library's,
+        # same numerics), else the HPC one.
+        self.hpc_attn_pre_norm: HpcIHCPre | CudaIHCPostPre | None = None
+        self.hpc_mlp_post_pre: HpcIHCPostPre | CudaIHCPostPre | None = None
+        self.hpc_attn_post_pre: HpcIHCPostPre | CudaIHCPostPre | None = None
         attn_pre = getattr(self.hc_attn_layer, "hc_pre", None)
         mlp_pre = getattr(self.hc_mlp_layer, "hc_pre", None)
         if (
+            self.enable_ihc
+            and attn_pre is not None
+            and mlp_pre is not None
+            and CudaIHCPostPre.support(config.hc_mult, config.hidden_size)
+        ):
+            fused_args = dict(
+                hc_mult=config.hc_mult,
+                hidden_size=config.hidden_size,
+                magnitude=config.hc_magnitude,
+                hc_eps=config.hc_eps,
+                norm_eps=config.rms_norm_eps,
+            )
+            self.hpc_attn_pre_norm = CudaIHCPostPre(
+                **fused_args, pre_owner=attn_pre, norm_owner=self.input_layernorm
+            )
+            self.hpc_mlp_post_pre = CudaIHCPostPre(
+                **fused_args,
+                pre_owner=mlp_pre,
+                norm_owner=self.post_attention_layernorm,
+            )
+            self.hpc_attn_post_pre = CudaIHCPostPre(
+                **fused_args, pre_owner=attn_pre, norm_owner=self.input_layernorm
+            )
+        elif (
             self.enable_ihc
             and attn_pre is not None
             and mlp_pre is not None
