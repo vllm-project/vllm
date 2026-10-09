@@ -25,6 +25,8 @@ def require_flashinfer_bf16_cutedsl() -> None:
         (8, True, False),
         (16, False, True),
         (32, True, True),
+        (64, True, True),
+        (512, False, False),
     ],
 )
 def test_flashinfer_bf16_cutedsl_correctness(
