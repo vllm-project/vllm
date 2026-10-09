@@ -434,7 +434,7 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
         ),
-        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1),
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
     )
 
     def allocate(*args):
