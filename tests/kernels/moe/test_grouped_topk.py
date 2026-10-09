@@ -112,7 +112,10 @@ def test_kimi_grouped_topk_masks_padding_when_enabled(skip_padding: bool):
     [
         (16, 2, 8, 2),
         (128, 2, 8, 2),
+        (144, 8, 9, 4),
         (256, 8, 8, 4),
+        (256, 8, 16, 4),
+        (256, 8, 32, 4),
         (384, 8, 1, 1),
         (512, 22, 1, 1),
     ],

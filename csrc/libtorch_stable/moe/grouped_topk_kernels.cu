@@ -1308,6 +1308,7 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
   int64_t const experts_per_group = num_experts / n_group;
   bool const is_multi_group =
       (n_group > 1) && (num_experts <= NumDeepseekExperts) &&
+      (n_group <= NumDeepseekExperts / WARP_SIZE) &&
       (experts_per_group <= WARP_SIZE) &&
       (experts_per_group * topk_group <= MaxNumExpertsUnit) &&
       (topk <= DefaultMaxNumTopExperts) && (topk_group <= MaxNumTopGroups);
