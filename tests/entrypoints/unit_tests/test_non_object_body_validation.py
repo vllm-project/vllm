@@ -13,6 +13,9 @@ request models whose before-validators were missing the same guard.
 import pytest
 from pydantic import ValidationError
 
+from vllm.entrypoints.generate.structured_decisions.protocol import (
+    StructuredDecisionRequest,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -74,6 +77,18 @@ def test_tokenize_chat_request_still_validates_dict_bodies():
 
 
 CACHE_SALT_MODELS = [
+    (
+        StructuredDecisionRequest,
+        {
+            "state": "hello",
+            "questions": {
+                "lang": {
+                    "type": "choice",
+                    "criteria": {"English": "Text written in English."},
+                }
+            },
+        },
+    ),
     (CompletionRequest, {"prompt": "hello"}),
     (ChatCompletionRequest, {"messages": [{"role": "user", "content": "hello"}]}),
     (ResponsesRequest, {"input": "hello"}),

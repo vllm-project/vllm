@@ -7,7 +7,7 @@ Only models in NEXT_TOKEN_ARCHITECTURES are currently supported.
 
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,6 +74,8 @@ class ReadStrategy(ABC):
         chat_template_kwargs: dict[str, Any] | None,
         lora_request: LoRARequest | None,
         priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
     ) -> list[QuestionRead]:
         """One read per question, in order."""
 
@@ -136,13 +138,15 @@ class NextTokenStrategy(ReadStrategy):
         return DecisionLimits(max_questions=64, max_options=len(LABELS))
 
     def _read_request(
-        self, chat_template_kwargs: dict[str, Any] | None
+        self, chat_template_kwargs: dict[str, Any] | None, cache_salt: str | None = None
     ) -> ReadPromptRequest:
         if (chat_template_kwargs or {}).get("enable_thinking"):
             raise StructuredDecisionError(
                 "a read is the reply's first token, so thinking must be off"
             )
-        return ReadPromptRequest(chat_template_kwargs=chat_template_kwargs)
+        return ReadPromptRequest(
+            chat_template_kwargs=chat_template_kwargs, cache_salt=cache_salt
+        )
 
     async def _render(
         self, read_request: ReadPromptRequest, messages: list[dict[str, Any]]
@@ -170,9 +174,11 @@ class NextTokenStrategy(ReadStrategy):
         chat_template_kwargs: dict[str, Any] | None,
         lora_request: LoRARequest | None,
         priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
     ) -> list[QuestionRead]:
         ctx = self.context
-        read_request = self._read_request(chat_template_kwargs)
+        read_request = self._read_request(chat_template_kwargs, cache_salt)
 
         slots, engine_inputs = [], []
         for q in questions:
@@ -197,6 +203,7 @@ class NextTokenStrategy(ReadStrategy):
             ],
             request_id,
             lora_request=lora_request,
+            trace_headers=trace_headers,
             priority=priority,
         )
 
