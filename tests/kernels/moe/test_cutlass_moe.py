@@ -183,6 +183,111 @@ def test_cutlass_moe_permutation_maps_padding_to_zero():
     torch.testing.assert_close(restored[3], torch.zeros_like(restored[3]))
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    "case,m,topk,num_experts",
+    [
+        ("single", 1, 1, 1),
+        ("decode", 1, 10, 512),
+        ("decode", 4, 10, 512),
+        ("masked", 4, 10, 511),
+        ("fallback", 4, 10, 513),
+        ("rounding", 127, 1, 512),
+        ("rounding", 128, 1, 512),
+        ("rounding", 129, 1, 512),
+        ("invalid", 4, 10, 512),
+    ],
+)
+@torch.inference_mode()
+def test_cutlass_moe_blockscale_offsets_preserve_routing(case, m, topk, num_experts):
+    """Check padded prefixes and permutation segments through the public op."""
+    ids = (torch.arange(m * topk, dtype=torch.int32) * 73) % num_experts
+    if case == "rounding":
+        ids.fill_(num_experts - 1)
+    elif case == "invalid":
+        ids[::2] = -1
+        ids[1::2] = num_experts
+    elif ids.numel() > 2:
+        ids[:3] = torch.tensor([num_experts - 1, -1, num_experts])
+    topk_ids = ids.reshape(m, topk).cuda()
+    num_routes = ids.numel()
+    expert_offsets = torch.full(
+        (num_experts + 1,), -777, device="cuda", dtype=torch.int32
+    )
+    blockscale_offsets = torch.full_like(expert_offsets, -777)
+    problem_sizes1 = torch.full(
+        (num_experts, 3), -777, device="cuda", dtype=torch.int32
+    )
+    problem_sizes2 = torch.full_like(problem_sizes1, -777)
+    input_permutation = torch.full(
+        (num_routes,), -777, device="cuda", dtype=torch.int32
+    )
+    output_permutation = torch.full_like(input_permutation, -777)
+    n, k = 640, 2560
+
+    def run():
+        ops.get_cutlass_moe_mm_data(
+            topk_ids,
+            expert_offsets,
+            problem_sizes1,
+            problem_sizes2,
+            input_permutation,
+            output_permutation,
+            num_experts,
+            n,
+            k,
+            blockscale_offsets,
+        )
+
+    def check():
+        flat = topk_ids.cpu().flatten().long()
+        valid = (flat >= 0) & (flat < num_experts)
+        counts = torch.bincount(flat[valid], minlength=num_experts).int()
+        prefix = torch.cat([torch.zeros(1, dtype=torch.int32), counts.cumsum(0).int()])
+        padded = torch.div(counts + 127, 128, rounding_mode="floor") * 128
+        padded_prefix = torch.cat(
+            [torch.zeros(1, dtype=torch.int32), padded.cumsum(0).int()]
+        )
+        torch.testing.assert_close(expert_offsets.cpu(), prefix, rtol=0, atol=0)
+        torch.testing.assert_close(
+            blockscale_offsets.cpu(), padded_prefix, rtol=0, atol=0
+        )
+        ps1 = torch.stack(
+            [counts, torch.full_like(counts, 2 * n), torch.full_like(counts, k)], 1
+        )
+        ps2 = torch.stack(
+            [counts, torch.full_like(counts, k), torch.full_like(counts, n)], 1
+        )
+        torch.testing.assert_close(problem_sizes1.cpu(), ps1, rtol=0, atol=0)
+        torch.testing.assert_close(problem_sizes2.cpu(), ps2, rtol=0, atol=0)
+        in_map, out_map = (
+            input_permutation.cpu().long(),
+            output_permutation.cpu().long(),
+        )
+        destinations = out_map[valid]
+        valid_count = int(valid.sum())
+        torch.testing.assert_close(
+            destinations.sort().values, torch.arange(valid_count)
+        )
+        expected_experts = torch.repeat_interleave(torch.arange(num_experts), counts)
+        torch.testing.assert_close(expected_experts[destinations], flat[valid])
+        torch.testing.assert_close(
+            in_map[destinations], torch.arange(num_routes)[valid] // topk
+        )
+        assert (out_map[~valid] == num_routes).all()
+        assert (in_map[valid_count:] == -1).all()
+
+    run()
+    check()
+    if case == "decode" and m == 4:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        topk_ids.fill_(num_experts - 1)
+        graph.replay()
+        check()
+
+
 @pytest.mark.parametrize("quantization", ["nvfp4", "mxfp4"])
 @torch.inference_mode()
 def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(quantization: str):

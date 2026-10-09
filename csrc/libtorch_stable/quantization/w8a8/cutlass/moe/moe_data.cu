@@ -1,4 +1,5 @@
 #include <cudaTypedefs.h>
+#include <cub/block/block_scan.cuh>
 
 #include "libtorch_stable/torch_utils.h"
 #include <torch/csrc/stable/tensor.h>
@@ -83,6 +84,57 @@ __global__ void compute_expert_blockscale_offsets(
     blockscale_offsets[i + 1] = tot_offset_round;
   }
   atomic_buffer[num_experts] = tot_offset;
+}
+
+namespace {
+constexpr int BLOCKSCALE_SCAN_THREADS = 256;
+constexpr int BLOCKSCALE_SCAN_ITEMS = 2;
+constexpr int BLOCKSCALE_SCAN_CAPACITY =
+    BLOCKSCALE_SCAN_THREADS * BLOCKSCALE_SCAN_ITEMS;
+
+struct AddExpertOffsets {
+  __device__ int2 operator()(const int2& a, const int2& b) const {
+    return make_int2(a.x + b.x, a.y + b.y);
+  }
+};
+}  // namespace
+
+__global__ void compute_expert_blockscale_offsets_parallel(
+    const int32_t* __restrict__ problem_sizes1, int32_t* expert_offsets,
+    int32_t* blockscale_offsets, int32_t* atomic_buffer, const int num_experts,
+    const bool swap_ab) {
+  using BlockScan = cub::BlockScan<int2, BLOCKSCALE_SCAN_THREADS>;
+  __shared__ typename BlockScan::TempStorage temp_storage;
+  int2 counts[BLOCKSCALE_SCAN_ITEMS];
+  int2 offsets[BLOCKSCALE_SCAN_ITEMS];
+#pragma unroll
+  for (int i = 0; i < BLOCKSCALE_SCAN_ITEMS; ++i) {
+    const int expert = threadIdx.x * BLOCKSCALE_SCAN_ITEMS + i;
+    const int32_t count = expert < num_experts
+                              ? problem_sizes1[expert * 3 + (swap_ab ? 1 : 0)]
+                              : 0;
+    counts[i] = make_int2(count, (count + 127) / 128 * 128);
+  }
+
+  int2 total;
+  BlockScan(temp_storage)
+      .ExclusiveScan(counts, offsets, make_int2(0, 0), AddExpertOffsets{},
+                     total);
+#pragma unroll
+  for (int i = 0; i < BLOCKSCALE_SCAN_ITEMS; ++i) {
+    const int expert = threadIdx.x * BLOCKSCALE_SCAN_ITEMS + i;
+    if (expert < num_experts) {
+      expert_offsets[expert] = offsets[i].x;
+      blockscale_offsets[expert] = offsets[i].y;
+      atomic_buffer[expert] = offsets[i].x;
+    }
+  }
+  if (threadIdx.x == 0) {
+    expert_offsets[num_experts] = total.x;
+    blockscale_offsets[num_experts] = total.y;
+    // Invalid routes are appended after the last valid expert segment.
+    atomic_buffer[num_experts] = total.x;
+  }
 }
 
 __global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
@@ -261,12 +313,22 @@ void get_cutlass_moe_mm_data_caller(
 
   if (blockscale_offsets.has_value()) {
     // fp4 path
-    compute_expert_blockscale_offsets<<<1, 1, 0, stream>>>(
-        static_cast<const int32_t*>(problem_sizes1.data_ptr()),
-        static_cast<int32_t*>(expert_offsets.data_ptr()),
-        static_cast<int32_t*>(blockscale_offsets.value().data_ptr()),
-        static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
-        may_swap_ab);
+    if (num_experts > 0 && num_experts <= BLOCKSCALE_SCAN_CAPACITY) {
+      compute_expert_blockscale_offsets_parallel<<<1, BLOCKSCALE_SCAN_THREADS,
+                                                   0, stream>>>(
+          static_cast<const int32_t*>(problem_sizes1.data_ptr()),
+          static_cast<int32_t*>(expert_offsets.data_ptr()),
+          static_cast<int32_t*>(blockscale_offsets.value().data_ptr()),
+          static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
+          may_swap_ab);
+    } else {
+      compute_expert_blockscale_offsets<<<1, 1, 0, stream>>>(
+          static_cast<const int32_t*>(problem_sizes1.data_ptr()),
+          static_cast<int32_t*>(expert_offsets.data_ptr()),
+          static_cast<int32_t*>(blockscale_offsets.value().data_ptr()),
+          static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
+          may_swap_ab);
+    }
   } else {
     compute_expert_offsets<<<1, 1, 0, stream>>>(
         static_cast<const int32_t*>(problem_sizes1.data_ptr()),
