@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.worker.tpsp_profile import TPSPBackend
 else:
     FlexibleArgumentParser = object
 
@@ -254,9 +255,9 @@ class Platform:
         return cls.simple_compile_backend
 
     @classmethod
-    def get_tpsp_backend_cls(cls) -> str:
-        """Return the TPSP backend class path, or empty if unsupported."""
-        return ""
+    def get_tpsp_backend_cls(cls) -> "type[TPSPBackend] | None":
+        """Return the TPSP backend class, or None if unsupported."""
+        return None
 
     @classmethod
     def import_ir_kernels(cls) -> None:

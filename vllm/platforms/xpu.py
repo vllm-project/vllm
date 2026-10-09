@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.worker.tpsp_profile import TPSPBackend
 else:
     VllmConfig = None
 
@@ -130,8 +131,10 @@ class XPUPlatform(Platform):
     ]
 
     @classmethod
-    def get_tpsp_backend_cls(cls) -> str:
-        return "vllm.v1.worker.tpsp_profile.XPUTPSPBackend"
+    def get_tpsp_backend_cls(cls) -> type[TPSPBackend]:
+        from .tpsp_xpu import XPUTPSPBackend
+
+        return XPUTPSPBackend
 
     @classmethod
     def import_kernels(cls) -> None:

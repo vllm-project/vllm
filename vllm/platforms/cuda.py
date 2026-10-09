@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.worker.tpsp_profile import TPSPBackend
 else:
     VllmConfig = None
     CacheDType = None
@@ -234,8 +235,10 @@ class CudaPlatformBase(Platform):
     ]
 
     @classmethod
-    def get_tpsp_backend_cls(cls) -> str:
-        return "vllm.v1.worker.tpsp_cuda.CudaTPSPBackend"
+    def get_tpsp_backend_cls(cls) -> type[TPSPBackend]:
+        from .tpsp_cuda import CudaTPSPBackend
+
+        return CudaTPSPBackend
 
     @classmethod
     def import_kernels(cls) -> None:
