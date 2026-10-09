@@ -218,9 +218,11 @@ def get_processor(
         revision = "main"
     try:
         processor_name = convert_model_repo_to_path(processor_name)
-        processor_name = get_non_weight_snapshot_path(
-            processor_name, revision=revision, token=kwargs.get("token")
-        )
+        # A snapshot pinned to `revision` would shadow remote code at `code_revision`
+        if kwargs.get("code_revision") in (None, revision):
+            processor_name = get_non_weight_snapshot_path(
+                processor_name, revision=revision, token=kwargs.get("token")
+            )
         registered_cls_name = get_processor_cls_name_from_config(
             processor_name, revision=revision
         )

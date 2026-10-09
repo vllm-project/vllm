@@ -315,10 +315,45 @@ _WEIGHT_FILE_PATTERNS = [
     "*.msgpack",
     "*.onnx",
     "*.onnx_data",
+    # Large non-weight assets that tokenizers and processors never read
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.webp",
+    "*.mp3",
+    "*.mp4",
+    "*.wav",
+    "*.flac",
+    "*.parquet",
+    "*.arrow",
+    "*.ipynb",
+    "*.zip",
+    "*.tar*",
 ]
 
 
 @cache
+def _snapshot_non_weight_files(
+    repo_id: str,
+    revision: str | None,
+    cache_dir: str | None,
+    token: str | bool | None,
+) -> str:
+    # Avoid circular import
+    from vllm.model_executor.model_loader.weight_utils import get_lock
+
+    with get_lock(repo_id, cache_dir):
+        return hf_api().snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            cache_dir=cache_dir,
+            token=token,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            ignore_patterns=_WEIGHT_FILE_PATTERNS,
+        )
+
+
 def get_non_weight_snapshot_path(
     repo_id: str,
     revision: str | None = None,
@@ -330,24 +365,12 @@ def get_non_weight_snapshot_path(
     Loading tokenizers and processors from a local directory stops Transformers
     from making a Hub request per file (including the `additional_chat_templates`
     listing). Returns `repo_id` unchanged if it is local or cannot be fetched, so
-    Transformers handles it as before.
+    Transformers handles it as before. Failures are not cached, so they are retried.
     """
     if envs.VLLM_USE_MODELSCOPE or Path(repo_id).exists():
         return repo_id
-
-    # Avoid circular import
-    from vllm.model_executor.model_loader.weight_utils import get_lock
-
     try:
-        with get_lock(repo_id, cache_dir):
-            return hf_api().snapshot_download(
-                repo_id=repo_id,
-                revision=revision,
-                cache_dir=cache_dir,
-                token=token,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                ignore_patterns=_WEIGHT_FILE_PATTERNS,
-            )
+        return _snapshot_non_weight_files(repo_id, revision, cache_dir, token)
     except (HfHubHTTPError, OSError, ValueError):
         logger.debug("Failed to snapshot %s", repo_id, exc_info=True)
         return repo_id
