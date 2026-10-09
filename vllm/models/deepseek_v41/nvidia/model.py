@@ -100,6 +100,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import (
     Engram,
+    EngramBatch,
     EngramLayout,
     NgramHashState,
     can_share_engram_tables,
@@ -777,6 +778,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        self.engram_batch = EngramBatch.create(
+            [
+                layer.engram
+                for layer in islice(self.layers, self.start_layer, self.end_layer)
+                if getattr(layer, "engram", None) is not None
+            ],
+            vllm_config.scheduler_config.max_num_batched_tokens,
+        )
         if self.fuse_mhc_all_reduce:
             # A MoE's top-k finalize folds into the next layer's first mHC
             # boundary, which the last local layer lacks and an engram layer
@@ -971,15 +980,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if engram_hashes is not None:
                 # Gather all Engram rows before entering the decoder layers.
                 # One gather feeds every layer sharing the DP-split table.
-                gathered_hashes = gather_engram_hashes(
-                    engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
-                )
-                for layer in islice(self.layers, self.start_layer, self.end_layer):
-                    engram = getattr(layer, "engram", None)
-                    if engram is not None:
-                        engram.prepare_embeddings(
-                            gathered_hashes[:, engram.layer_hash_index]
-                        )
+                if self.engram_batch is not None:
+                    self.engram_batch.prepare_embeddings(engram_hashes)
+                else:
+                    gathered_hashes = gather_engram_hashes(
+                        engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
+                    )
+                    for layer in islice(self.layers, self.start_layer, self.end_layer):
+                        engram = getattr(layer, "engram", None)
+                        if engram is not None:
+                            engram.prepare_embeddings(
+                                gathered_hashes[:, engram.layer_hash_index]
+                            )
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:

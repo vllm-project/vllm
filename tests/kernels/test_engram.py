@@ -7,6 +7,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+)
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
     Engram,
@@ -714,8 +717,9 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 )
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 7, 256])
-def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
+def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
     zeros for rows another TP rank owns."""
@@ -729,8 +733,13 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
         layer.vocab_start_idx,
         layer.vocab_end_idx,
     )
-    out = torch.empty(num_tokens, cols, layer.dim, dtype=torch.bfloat16, device="cuda")
+    width = layer.dim + layer.dim // 32 if packed else layer.dim
+    dtype = torch.uint8 if packed else torch.bfloat16
+    out = torch.empty(num_tokens, cols, width, dtype=dtype, device="cuda")
     layer.lookup(ids, out, background=background)
+    if packed:
+        values = out[..., : layer.dim].view(torch.float8_e4m3fn)
+        out = dequant_mxfp8_to_bf16(values, out[..., layer.dim :])
     assert torch.equal(out, expected)
 
 
