@@ -10,7 +10,10 @@ import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import get_attention_context
-from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
+    MLACommonMetadata,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -20,7 +23,6 @@ from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 
 _OPT_KV_LORA_RANK = 512
 _OPT_ROT_DIM = 64

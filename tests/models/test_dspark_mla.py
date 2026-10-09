@@ -346,6 +346,8 @@ def _bare_dspark_attn(monkeypatch: pytest.MonkeyPatch):
     )
     attn._rope_positions = torch.arange(4)
     attn.use_pcp = False
+    # update_kv_cache reads this before the PCP gather, even when PCP is off.
+    attn.pcp_shard_decode_requests = False
     attn.qk_nope_head_dim = 4
     attn.qk_rope_head_dim = 2
     attn.kv_lora_rank = 4
@@ -429,6 +431,16 @@ def test_prefill_k_pe_is_rerotated_for_mha(monkeypatch: pytest.MonkeyPatch):
 
     q = torch.zeros(2, 1, 6)
     q_for_mha = q.clone()
+    # The MHA hook is called with the prefill slices only, so it reads the
+    # decode split from the forward context rather than from those slices.
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.amd.mla.get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={
+                attn.layer_name: SimpleNamespace(num_decode_tokens=2),
+            }
+        ),
+    )
     out_q, out_k = attn._prepare_mha_inputs(q_for_mha, k_pe[2:])
     assert torch.count_nonzero(q) == 0
     assert torch.count_nonzero(out_q[..., :4]) == 0
