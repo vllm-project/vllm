@@ -412,15 +412,12 @@ def _policy_kernel(
     PACK: tl.constexpr,
     HANDLE_NAN: tl.constexpr,
     FLUSH_UNDERFLOW: tl.constexpr,
-    FLUSH_NEGATIVE_ZERO: tl.constexpr,
 ):
     """Exercise the direct PTX interface without caller-side packing."""
     offsets = tl.program_id(0) * 512 + tl.arange(0, 512)
     x = tl.load(src + offsets, offsets < n, other=0)
     if ENCODE:
-        y = ptx_convert_to(
-            x, HANDLE_NAN, True, FLUSH_UNDERFLOW, FLUSH_NEGATIVE_ZERO, PACK
-        )
+        y = ptx_convert_to(x, HANDLE_NAN, True, FLUSH_UNDERFLOW, PACK)
     else:
         y = ptx_convert_from(
             x,
@@ -428,7 +425,6 @@ def _policy_kernel(
             HANDLE_NAN,
             True,
             FLUSH_UNDERFLOW,
-            FLUSH_NEGATIVE_ZERO,
             PACK,
         )
     tl.store(dst + offsets, y, offsets < n)
@@ -439,10 +435,7 @@ def _policy_kernel(
 @pytest.mark.parametrize("encode", [False, True])
 @pytest.mark.parametrize("handle_nan", [False, True])
 @pytest.mark.parametrize("flush_underflow", [False, True])
-@pytest.mark.parametrize("flush_negative_zero", [False, True])
-def test_packed_conversion_policies(
-    dtype, pack, encode, handle_nan, flush_underflow, flush_negative_zero
-):
+def test_packed_conversion_policies(dtype, pack, encode, handle_nan, flush_underflow):
     """Check independent policies over every input encoding, including signed zeros."""
     if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
         pytest.skip("bf16 needs SM80+")
@@ -452,19 +445,15 @@ def test_packed_conversion_policies(
         expected = _saturating_fp8_ref(src)
         finite = ~src.isnan()
         if flush_underflow:
-            signed_zero = ((bits.to(torch.int32) >> 8) & 0x80).to(torch.uint8)
-            expected = torch.where(src.abs() < 2**-6, signed_zero, expected)
-        if flush_negative_zero:
-            expected = torch.where(expected == 0x80, 0, expected)
+            expected = torch.where(src.abs() < 2**-6, 0, expected)
     else:
         src = torch.arange(256, device="cuda", dtype=torch.int32).to(torch.uint8)
         expected = src.view(FP8_DTYPE).to(dtype)
         finite = (src & 0x7F) != 0x7F
         if flush_underflow:
-            signed_zero = torch.copysign(torch.zeros_like(expected), expected)
-            expected = torch.where((src & 0x78) == 0, signed_zero, expected)
-        if flush_negative_zero:
-            expected = torch.where(expected == 0, torch.zeros_like(expected), expected)
+            expected = torch.where(
+                (src & 0x78) == 0, torch.zeros_like(expected), expected
+            )
     actual = torch.empty_like(expected)
     _policy_kernel[(triton.cdiv(src.numel(), 512),)](
         src,
@@ -475,7 +464,6 @@ def test_packed_conversion_policies(
         pack,
         handle_nan,
         flush_underflow,
-        flush_negative_zero,
         num_warps=4,
     )
     assert torch.equal(

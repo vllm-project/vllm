@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Direct packed E4M3 conversion with compile-time PTX policy fragments.
 
-NaN handling, E4M3 underflow flushing, and negative-zero flushing are independently
-opt-in. PACK selects one, two, or four elements per inline-assembly invocation.
+NaN handling and E4M3 underflow flushing are independently opt-in.
+Flushing underflows also canonicalizes zero to positive zero.
+PACK selects one, two, or four elements per inline-assembly invocation.
 Flushing removes subnormal work before compilation. The production helper remains
 unchanged while this implementation is benchmarked.
 """
@@ -220,7 +221,7 @@ FULL = {
 }
 
 
-def _encode(name, width, nan, flush, zero):
+def _encode(name, width, nan, flush):
     """Compose encoder phases; omit subnormal arithmetic when flushing."""
     pieces = ["{"]
     for i in range(width):
@@ -247,15 +248,7 @@ def _encode(name, width, nan, flush, zero):
         pieces.append(f["saturation"].format(i=i))
         pieces.append(f"or.b32 o{i},o{i},sgn{i};")
         if flush:
-            pieces.append(
-                f"selp.u32 o{i},{'0' if zero else f'sgn{i}'},o{i},p_flush{i};"
-            )
-        if zero and not flush:
-            pieces.append(
-                f".reg .pred p_zero{i}; "
-                f"setp.eq.u32 p_zero{i},o{i},0x80; "
-                f"selp.u32 o{i},0,o{i},p_zero{i};"
-            )
+            pieces.append(f"selp.u32 o{i},0,o{i},p_flush{i};")
         if nan:
             limit = "0x7c00" if name == "fp16" else "0x7f80"
             pieces.append(
@@ -275,7 +268,7 @@ def _encode(name, width, nan, flush, zero):
     return "\n".join(pieces + ["}"])
 
 
-def _scalar_decode(name, nan, flush, zero):
+def _scalar_decode(name, nan, flush):
     """Use a scalar decoder without calculating a discarded second lane."""
     shift, bias = (7, "0x2000") if name == "fp16" else (4, "0x3c00")
     p = [
@@ -292,7 +285,7 @@ def _scalar_decode(name, nan, flush, zero):
         p += [
             "or.b32 norm,norm,sign;",
             "setp.ge.u32 normal,mag,8;",
-            f"selp.u32 out,norm,{'0' if zero else 'sign'},normal;",
+            "selp.u32 out,norm,0,normal;",
         ]
     else:
         p += ["and.b32 m,raw,7;"]
@@ -312,8 +305,6 @@ def _scalar_decode(name, nan, flush, zero):
             "selp.u32 out,norm,sub,normal;",
             "or.b32 out,out,sign;",
         ]
-    if zero and not flush:
-        p += [".reg .pred z;", "setp.eq.u32 z,mag,0;", "selp.u32 out,0,out,z;"]
     if nan:
         p += [
             ".reg .pred n;",
@@ -323,10 +314,10 @@ def _scalar_decode(name, nan, flush, zero):
     return "\n".join(p + ["cvt.u16.u32 $0,out;", "}"])
 
 
-def _decode(name, width, nan, flush, zero):
+def _decode(name, width, nan, flush):
     """Cut packed decoding to its width and select only enabled policy phases."""
     if width == 1:
-        return _scalar_decode(name, nan, flush, zero)
+        return _scalar_decode(name, nan, flush)
     body = FULL[name]
     if width == 2:
         lines = []
@@ -356,8 +347,6 @@ def _decode(name, width, nan, flush, zero):
                 out = match.group()
                 pair = 0 if out == "$0" else 1
                 lines.append(f"and.b32 {out},{out},mask{pair};")
-                if not zero:
-                    lines.append(f"or.b32 {out},{out},sign{pair};")
                 continue
             # Keep the normal BF16 LUT; remove subnormal constants only.
             if any(
@@ -382,17 +371,6 @@ def _decode(name, width, nan, flush, zero):
     for i in range(width):
         out = f"${i // 2}"
         shift = (i % 2) * 16
-        if zero and not flush:
-            suffix.extend(
-                [
-                    f".reg .u32 zraw{i},zmag{i}; .reg .pred z{i};",
-                    f"shr.u32 zraw{i}, ${width // 2}, {i * 8};",
-                    f"and.b32 zmag{i},zraw{i},0x7f;",
-                    f"setp.eq.u32 z{i},zmag{i},0;",
-                    f"and.b32 zraw{i},{out},{hex(0xFFFFFFFF ^ (0xFFFF << shift))};",
-                    f"selp.u32 {out},zraw{i},{out},z{i};",
-                ]
-            )
         if nan:
             bits = (0x7E00 if name == "fp16" else 0x7FC0) << shift
             suffix.extend(
@@ -410,16 +388,14 @@ def _decode(name, width, nan, flush, zero):
 
 
 @lru_cache(None)
-def ptx(direction, name, width, nan=False, flush=False, zero=False):
+def ptx(direction, name, width, nan=False, flush=False):
     """Build a constant assembly string before Triton compilation."""
     assert (
         direction in ("encode", "decode")
         and name in ("fp16", "bf16")
         and width in (1, 2, 4)
     )
-    return (_encode if direction == "encode" else _decode)(
-        name, width, nan, flush, zero
-    )
+    return (_encode if direction == "encode" else _decode)(name, width, nan, flush)
 
 
 @tl.core.builtin
@@ -430,17 +406,16 @@ def _convert(
     encode,
     HANDLE_NAN,
     FLUSH_UNDERFLOW,
-    FLUSH_NEGATIVE_ZERO,
     _semantic=None,
 ):
     """Pass packed tensors directly to inline PTX without caller repacking."""
     unwrap = tl.core._unwrap_if_constexpr
-    dtype, width, encode, nan, flush, zero = map(
-        unwrap, (dtype, width, encode, HANDLE_NAN, FLUSH_UNDERFLOW, FLUSH_NEGATIVE_ZERO)
+    dtype, width, encode, nan, flush = map(
+        unwrap, (dtype, width, encode, HANDLE_NAN, FLUSH_UNDERFLOW)
     )
     name = "fp16" if dtype == tl.float16 else "bf16"
     assert dtype in (tl.float16, tl.bfloat16)
-    asm = ptx("encode" if encode else "decode", name, width, nan, flush, zero)
+    asm = ptx("encode" if encode else "decode", name, width, nan, flush)
     constraints = (
         ("=h,h" if width == 1 else "=r,r" if width == 2 else "=r,r,r")
         if encode
@@ -463,13 +438,13 @@ def convert_to_fp8e4m3(
     HANDLE_NAN: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
     FLUSH_UNDERFLOW: tl.constexpr = False,
-    FLUSH_NEGATIVE_ZERO: tl.constexpr = False,
     PACK: tl.constexpr = None,
 ):
     """Encode FP16/BF16 to saturating RNE E4M3 bytes.
 
-    FLUSH_UNDERFLOW uses the E4M3 input cutoff |x| < 2**-6. Its zeros retain
-    their sign unless FLUSH_NEGATIVE_ZERO is enabled. NaN sign/payload are
+    With FLUSH_UNDERFLOW=True, positive and negative underflows and negative
+    zero all flush to +0. The input cutoff is |x| < 2**-6. With flushing
+    disabled, subnormals and signed zeros are preserved. NaN sign/payload are
     unspecified; opt-in NaN handling guarantees a NaN output only.
     """
     tl.static_assert(
@@ -486,9 +461,7 @@ def convert_to_fp8e4m3(
         else 1
     )
     tl.static_assert(width == 1 or width == 2 or width == 4, "PACK must be 1, 2, or 4")
-    return _convert(
-        x, x.dtype, width, True, HANDLE_NAN, FLUSH_UNDERFLOW, FLUSH_NEGATIVE_ZERO
-    )
+    return _convert(x, x.dtype, width, True, HANDLE_NAN, FLUSH_UNDERFLOW)
 
 
 @triton.jit
@@ -498,14 +471,14 @@ def convert_from_fp8e4m3(
     HANDLE_NAN: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
     FLUSH_UNDERFLOW: tl.constexpr = False,
-    FLUSH_NEGATIVE_ZERO: tl.constexpr = False,
     PACK: tl.constexpr = None,
 ):
     """Decode E4M3 bytes to FP16/BF16 with optional compile-time flushing.
 
-    FLUSH_UNDERFLOW replaces E4M3 subnormals with signed zero; independently,
-    FLUSH_NEGATIVE_ZERO canonicalizes zeros to positive zero. NaN handling
-    guarantees NaN output without a sign/payload preservation requirement:
+    With FLUSH_UNDERFLOW=True, positive and negative E4M3 denormals and
+    negative zero all flush to +0. With flushing disabled, denormals and
+    signed zeros are preserved. Opt-in NaN handling guarantees NaN output
+    without a sign/payload preservation requirement:
     https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt
     """
     tl.static_assert(x.dtype == tl.uint8, "expected E4M3 bytes as uint8")
@@ -523,6 +496,4 @@ def convert_from_fp8e4m3(
         else 1
     )
     tl.static_assert(width == 1 or width == 2 or width == 4, "PACK must be 1, 2, or 4")
-    return _convert(
-        x, dtype, width, False, HANDLE_NAN, FLUSH_UNDERFLOW, FLUSH_NEGATIVE_ZERO
-    )
+    return _convert(x, dtype, width, False, HANDLE_NAN, FLUSH_UNDERFLOW)
