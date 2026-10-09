@@ -87,6 +87,9 @@ def test_labels_start_the_reply(qwen):
     tail, ids = reply_label_ids(tokenizer, prompt_ids)
     assert tokenizer.decode(tail) == "\n\n"
     assert [tokenizer.decode([i]) for i in ids] == list(LABELS)
+    # A noul's and a score's labels are one token here too.
+    _, ids = reply_label_ids(tokenizer, prompt_ids, ("yes", "no", *"0123456789"))
+    assert len(set(ids)) == 12
     # After a colon, Qwen writes ":A" as one token, so "A" is not one token.
     with pytest.raises(ValueError, match="not one distinct token"):
         reply_label_ids(tokenizer, tokenizer.encode("team:"))
