@@ -173,7 +173,6 @@ class PhiloxPRF(WatermarkPRF):
         """
         if not 0 <= stream <= 2**64 - 1:
             raise ValueError("Philox streams must fit in 64 bits")
-
         key_words = self.key & _UINT32_MASK, self.key >> 32
         # Split outside torch.compile: Inductor miscompiles 64-bit shifts on CUDA.
         stream_words = stream & _UINT32_MASK, stream >> 32
