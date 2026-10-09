@@ -786,16 +786,22 @@ def _cuda_platform_cls():
     return CudaPlatform
 
 
-def test_sm86_mismatch_autoselects_triton():
-    """SM86 drops FlashAttention and FlashInfer and keeps Triton."""
+@pytest.mark.parametrize(
+    "capability",
+    [DeviceCapability(8, 6), DeviceCapability(10, 0)],
+    ids=["sm86", "sm100"],
+)
+def test_mismatch_autoselects_triton(capability):
+    """SM86 drops FlashAttention; causal SM100 drops FlashInfer. Triton remains."""
     cuda_platform_cls = _cuda_platform_cls()
+    _cached_get_attn_backend.cache_clear()
     with (
         set_current_vllm_config(VllmConfig()),
         patch("vllm.platforms.current_platform", cuda_platform_cls()),
         patch.object(
             cuda_platform_cls,
             "get_device_capability",
-            return_value=DeviceCapability(8, 6),
+            return_value=capability,
         ),
     ):
         backend = get_attn_backend(128, torch.bfloat16, "float16")
