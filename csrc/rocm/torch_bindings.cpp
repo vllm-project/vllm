@@ -73,6 +73,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int top_k, int block_size_m, bool mul_topk_weight, "
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
+
+  // qwen4_exp HyperConnection combine_and_mix for decode (1 <= M <= 8).
+  rocm_ops.def(
+      "qwen4_hc_combine_mix(Tensor h, Tensor block_out, Tensor inj, "
+      "Tensor norm_w, Tensor wd, Tensor wu, float eps) -> Tensor[]");
+  rocm_ops.impl("qwen4_hc_combine_mix", torch::kCUDA, &qwen4_hc_combine_mix);
+  rocm_ops.def("qwen4_hc_mix_xn(Tensor xn, Tensor wd, Tensor wu) -> Tensor[]");
+  rocm_ops.impl("qwen4_hc_mix_xn", torch::kCUDA, &qwen4_hc_mix_xn);
 #endif
 
   // Custom attention op
