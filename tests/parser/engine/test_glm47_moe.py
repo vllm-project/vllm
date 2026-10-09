@@ -190,6 +190,37 @@ class TestStrayToolCallTag:
             "city": "Tokyo",
         }
 
+    def test_phantom_dropped_when_request_has_tools(self, mock_request):
+        """With a populated tools list, validate_tool_names drops the
+        phantom: exactly one call must come back, not a prose-named extra."""
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionToolsParam,
+        )
+
+        tool = ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        )
+        mock_request.tools = [tool]
+        parser = Glm47MoeParser(
+            make_mock_tokenizer(VOCAB),
+            tools=[tool],
+            chat_template_kwargs={"thinking": False},
+        )
+        result = parser.extract_tool_calls(self.STRAY_THEN_REAL, mock_request)
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "city": "Tokyo",
+        }
+
     def test_streaming_stray_tag_inside_arg_value_preserved(
         self, content_parser, mock_request
     ):
