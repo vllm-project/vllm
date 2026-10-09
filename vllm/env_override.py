@@ -100,8 +100,6 @@ def _run_torch_rocm_sdk_init(torch_root: str) -> None:
     init_path = os.path.join(torch_root, "_rocm_init.py")
     if not os.path.exists(init_path):
         return
-    import importlib.util
-
     spec = importlib.util.spec_from_file_location("_vllm_torch_rocm_init", init_path)
     if spec is None or spec.loader is None:
         return
@@ -136,10 +134,10 @@ def _maybe_promote_torch_symbols_for_rocm():
         torch_root = _get_torch_root()
         if not torch_root:
             return
-        _run_torch_rocm_sdk_init(torch_root)
         lib = os.path.join(torch_root, "lib", "libtorch_cpu.so")
         if not os.path.exists(lib):
             return
+        _run_torch_rocm_sdk_init(torch_root)
         try:
             ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
         except OSError:
