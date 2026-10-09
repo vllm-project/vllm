@@ -30,6 +30,7 @@ use vllm_engine_core_client::protocol::logprobs::{PositionLogprobs, TokenLogprob
 
 use super::types::GenerateResponse;
 use super::{top_logprob_entries, wire_rank};
+use crate::error::ApiError;
 use crate::routes::openai::utils::logprobs::clamp_logprob;
 
 /// Output logprobs of the single choice, rendered by [`generate_response`].
@@ -61,7 +62,10 @@ pub(super) fn generate_response(response: GenerateResponse, logprobs: ChoiceLogp
             requested,
         } => (positions, requested),
     };
-    let (mut head, choice_tail) = split_response(response);
+    let Some((mut head, choice_tail)) = split_response(response) else {
+        return ApiError::server_error("failed to serialize raw generate response".to_string())
+            .into_response();
+    };
     head.extend_from_slice(b"{\"content\":[");
     let mut tail = b"]}".to_vec();
     tail.extend_from_slice(&choice_tail);
@@ -86,21 +90,20 @@ pub(super) fn generate_response(response: GenerateResponse, logprobs: ChoiceLogp
 /// Serialize `response` around the first choice's `logprobs` value: the bytes
 /// before the value and the bytes after it. The value is serialized as a random
 /// placeholder, which no client-supplied string can reproduce.
-fn split_response(mut response: GenerateResponse) -> (Vec<u8>, Vec<u8>) {
+fn split_response(mut response: GenerateResponse) -> Option<(Vec<u8>, Vec<u8>)> {
     let placeholder = format!("\"vllm-logprobs-{}\"", uuid::Uuid::new_v4());
-    response.choices[0].logprobs =
-        Some(RawValue::from_string(placeholder.clone()).expect("a JSON string"));
-    let mut head = serde_json::to_vec(&response).expect("generate response must serialize");
+    response.choices[0].logprobs = Some(RawValue::from_string(placeholder.clone()).ok()?);
+    let mut head = serde_json::to_vec(&response).ok()?;
     let mut matches = head
         .windows(placeholder.len())
         .enumerate()
         .filter(|(_, window)| *window == placeholder.as_bytes());
     let (Some((start, _)), None) = (matches.next(), matches.next()) else {
-        unreachable!("the logprobs placeholder occurs exactly once");
+        return None;
     };
     let tail = head.split_off(start + placeholder.len());
     head.truncate(start);
-    (head, tail)
+    Some((head, tail))
 }
 
 /// Render one body (head, output logprobs, tail) into `tx`, releasing each
@@ -110,7 +113,7 @@ fn split_response(mut response: GenerateResponse) -> (Vec<u8>, Vec<u8>) {
 /// offloaded generate route is the request runtime, so the HTTP runtime only
 /// moves ready chunks. `send` waits while the channel is full (backpressure
 /// from the client); a dropped body closes the channel and stops rendering.
-/// `None` marks the end of the body.
+/// `None` marks the end of the body; an empty row ends the task without it.
 async fn produce_body(
     head: Bytes,
     positions: Vec<PositionLogprobs>,
@@ -125,14 +128,17 @@ async fn produce_body(
     let mut positions = positions.into_iter();
     let mut first = true;
     while positions.len() > 0 {
-        let mut chunk = Vec::new();
+        // Slack for the position that crosses the limit.
+        let mut chunk = Vec::with_capacity(BODY_CHUNK_BYTES + (64 << 10));
         while chunk.len() < BODY_CHUNK_BYTES
             && let Some(position) = positions.next()
         {
             if !std::mem::replace(&mut first, false) {
                 chunk.push(b',');
             }
-            write_position(&mut chunk, &position, requested, &mut seen);
+            if write_position(&mut chunk, &position, requested, &mut seen).is_none() {
+                return;
+            }
             #[cfg(test)]
             tests::RENDERED_ON_THREAD.with(|count| count.set(count.get() + 1));
         }
@@ -151,10 +157,9 @@ async fn produce_body(
 
 /// HTTP body fed by [`produce_body`]; size unknown (chunked).
 ///
-/// If the producer stops without its completion marker (cancelled, or
-/// panicked in an unwinding build; release builds abort on panic), the body
-/// yields an error so hyper aborts the connection instead of writing the
-/// final chunk terminator after truncated JSON.
+/// If the producer stops without its completion marker (cancelled, or an
+/// empty row), the body yields an error so hyper aborts the connection instead
+/// of writing the final chunk terminator after truncated JSON.
 struct ChannelBody {
     rx: mpsc::Receiver<Option<Bytes>>,
     complete: bool,
@@ -190,14 +195,15 @@ impl http_body::Body for ChannelBody {
 
 /// Write one `GenerateLogProbsContent` object, byte-identical to `serde_json`
 /// serialization of `position_to_generate_logprobs_content(position,
-/// requested)`. `position.entries` must be non-empty.
+/// requested)`. Writes nothing and returns `None` if `position.entries` is
+/// empty.
 fn write_position(
     out: &mut Vec<u8>,
     position: &PositionLogprobs,
     requested: i32,
     seen: &mut HashSet<u32>,
-) {
-    write_candidate_fields(out, &position.entries[0]);
+) -> Option<()> {
+    write_candidate_fields(out, position.entries.first()?);
     out.extend_from_slice(b",\"top_logprobs\":[");
     for (index, entry) in top_logprob_entries(position, requested, seen).enumerate() {
         if index > 0 {
@@ -207,6 +213,7 @@ fn write_position(
         out.push(b'}');
     }
     out.extend_from_slice(b"]}");
+    Some(())
 }
 
 /// Write `{"token_id":N,"logprob":X,"rank":R` (no closing brace).
@@ -242,9 +249,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn render_task_failure_errors_the_body_instead_of_ending_it() {
-        // An invariant violation (an empty row slipping past validation)
-        // panics the render task midway (tests unwind; release builds abort,
-        // where cancellation is the reachable early stop). The body must fail,
+        // An empty row slipping past validation stops the render task midway
+        // (without panicking, which aborts release builds). The body must fail,
         // so hyper aborts the connection rather than writing a clean chunked
         // terminator after truncated JSON.
         let mut rows = positions(300, 3);
@@ -312,7 +318,7 @@ mod tests {
             )
             .unwrap();
             let mut direct = Vec::new();
-            write_position(&mut direct, &position, requested, &mut seen);
+            write_position(&mut direct, &position, requested, &mut seen).unwrap();
             assert_eq!(
                 String::from_utf8_lossy(&direct),
                 String::from_utf8_lossy(&expected),
