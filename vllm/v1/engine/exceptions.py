@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 from vllm.exceptions import VLLMServerError
 
 
@@ -31,7 +33,7 @@ class EngineUnhealthyError(VLLMServerError):
 
     """
 
-    def __init__(self, message: str = "", reason: str = "unhealthy", **details):
+    def __init__(self, message: str = "", reason: str = "unhealthy", **details: Any):
         super().__init__(message)
         self.reason = reason
         self.details = details
@@ -40,5 +42,5 @@ class EngineUnhealthyError(VLLMServerError):
 class EngineSleepingError(EngineUnhealthyError):
     """Raised when the engine is intentionally sleeping or paused."""
 
-    def __init__(self, message: str = "", **details):
+    def __init__(self, message: str = "", **details: Any):
         super().__init__(message, reason="sleeping", **details)
