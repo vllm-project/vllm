@@ -356,7 +356,7 @@ class ModelConfig:
     "vllm.models.deepseek_v32.nvidia.model:DeepseekV32ForCausalLM"}`. This
     argument is for development and debugging purposes only."""
     enable_tpsp: bool = False
-    """Use a TP/SP model class if available, otherwise warn and use the original."""
+    """Attempt TP/SP profiling for models that support the fused forward path."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -1151,40 +1151,7 @@ class ModelConfig:
     @property
     def registry(self):
         self._maybe_register_model_class_overrides()
-        registry = me_models.ModelRegistry
-        if self.enable_tpsp:
-            arch = next(
-                (arch for arch in self.architectures if arch in registry.models),
-                None,
-            )
-            if (
-                arch is None
-                or self.model_impl not in ("auto", "vllm")
-                or registry._try_inspect_model_cls(arch) is None
-            ):
-                return registry
-            from vllm.model_executor.models.registry import (
-                _ModelRegistry,
-                find_tpsp_model_cls,
-            )
-
-            target = find_tpsp_model_cls(registry.models[arch])
-            if target is not None:
-                if arch in self.model_class_overrides:
-                    raise ValueError(
-                        "--enable-tpsp conflicts with a model class override for "
-                        f"{arch}"
-                    )
-                registry = _ModelRegistry(models=registry.models.copy())
-                registry.register_model(arch, target)
-            else:
-                logger.warning_once(
-                    "TPSP model class not found for architectures %s with "
-                    "model_impl=%s; using the standard model",
-                    tuple(self.architectures),
-                    self.model_impl,
-                )
-        return registry
+        return me_models.ModelRegistry
 
     def _maybe_register_model_class_overrides(self) -> None:
         # Apply ``model_class_overrides`` here because this property is the
@@ -1565,10 +1532,6 @@ class ModelConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
-        if self.enable_tpsp and parallel_config.pipeline_parallel_size > 1:
-            raise ValueError(
-                "--enable-tpsp is incompatible with --pipeline-parallel-size > 1"
-            )
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:

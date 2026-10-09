@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch import nn
 from torch.distributed import distributed_c10d as c10d
 
 if TYPE_CHECKING:
@@ -390,6 +391,7 @@ class XPUTPSPBackend(TPSPBackend):
     def close(self, context: Any | None = None) -> None:
         if context is not None:
             self._profile_context(context)
+            return
         if not self._closed:
             close = getattr(self.ops, "close_tpsp", None)
             if close is not None:
@@ -440,126 +442,149 @@ class TPSPShape:
     sharded_residual: bool
 
 
-class TPSPProfileSession:
-    """Profile named projection shapes without depending on a model class."""
+class TPSPProjection(nn.Module):
+    """A model-owned projection plan, populated after weights are loaded."""
 
-    def __init__(
-        self, shapes: dict[str, TPSPShape], tp_size: int, group_name: str
-    ) -> None:
-        self.shapes = shapes
+    def __init__(self, shape: TPSPShape, tp_size: int, group_name: str) -> None:
+        super().__init__()
+        self.shape = shape
         self.tp_size = tp_size
         self.group_name = group_name
-        self.profiles: dict[str, SPProfile] | None = None
+        self.profile: SPProfile | None = None
         self.backend: TPSPBackend | None = None
-        self.contexts: dict[str, Any] = {}
+        self.context: Any | None = None
 
-    def profile(self, max_batched_tokens: int, parameter: torch.nn.Parameter) -> None:
-        if self.profiles is not None:
-            return
-        if not self.shapes:
-            raise ValueError("TPSP requires at least one projection shape")
-        backend = get_tpsp_backend(self.group_name, parameter.device)
-        self.backend = backend
-        if backend is None:
-            self.profiles = {
-                name: SPProfile(
-                    self.tp_size,
-                    shape.hidden_size,
-                    max_batched_tokens,
-                    "unsupported",
-                    "no fused backend on this device",
-                    input_width=shape.input_width,
-                    norm_eps=shape.norm_eps,
-                    gather_sharded_residual=shape.sharded_residual,
+    @property
+    def active(self) -> bool:
+        return self.profile is not None and self.profile.enabled
+
+
+def _tpsp_projections(model: nn.Module) -> dict[str, TPSPProjection]:
+    return {
+        name: module
+        for name, module in model.named_modules()
+        if isinstance(module, TPSPProjection)
+    }
+
+
+def close_tpsp_projections(model: nn.Module) -> None:
+    projections = _tpsp_projections(model)
+    backends: dict[int, TPSPBackend] = {}
+    for projection in projections.values():
+        backend = projection.backend
+        if backend is not None:
+            backends[id(backend)] = backend
+            if projection.context is not None:
+                backend.close(projection.context)
+        projection.context = None
+        projection.backend = None
+        if profile := projection.profile:
+            projection.profile = SPProfile(
+                profile.tp_size,
+                profile.hidden_size,
+                profile.max_batched_tokens,
+                "disabled",
+                "TPSP closed",
+                input_width=profile.input_width,
+                norm_eps=profile.norm_eps,
+                gather_sharded_residual=profile.gather_sharded_residual,
+            )
+    for backend in backends.values():
+        backend.close()
+
+
+def profile_tpsp_projections(model: nn.Module, max_batched_tokens: int) -> bool:
+    """Profile TPSP modules after loading weights, before memory profiling."""
+    projections = _tpsp_projections(model)
+    if not projections:
+        return False
+    if all(projection.profile is not None for projection in projections.values()):
+        return True
+    if any(projection.profile is not None for projection in projections.values()):
+        raise RuntimeError("TPSP projections were only partially profiled")
+    parameter = next(model.parameters())
+    groups: dict[tuple[str, int], dict[str, TPSPProjection]] = {}
+    for name, projection in projections.items():
+        groups.setdefault((projection.group_name, projection.tp_size), {})[name] = (
+            projection
+        )
+    try:
+        for (group_name, tp_size), members in groups.items():
+            backend = get_tpsp_backend(group_name, parameter.device)
+            for projection in members.values():
+                projection.backend = backend
+                shape = projection.shape
+                context = (
+                    backend.open(
+                        dtype=parameter.dtype,
+                        tp_size=tp_size,
+                        hidden_size=shape.hidden_size,
+                        max_batched_tokens=max_batched_tokens,
+                        group_name=group_name,
+                        device=parameter.device,
+                    )
+                    if backend is not None
+                    else None
                 )
-                for name, shape in self.shapes.items()
-            }
-            self._log_fallback()
-            return
-        try:
-            profiles = {}
-            for name, shape in self.shapes.items():
-                context = backend.open(
-                    dtype=parameter.dtype,
-                    tp_size=self.tp_size,
-                    hidden_size=shape.hidden_size,
-                    max_batched_tokens=max_batched_tokens,
-                    group_name=self.group_name,
-                    device=parameter.device,
-                )
-                if context is None:
-                    profiles[name] = SPProfile(
-                        self.tp_size,
+                if context is not None:
+                    assert backend is not None
+                    projection.context = context
+                    projection.profile = backend.profile(
+                        tp_size=tp_size,
+                        hidden_size=shape.hidden_size,
+                        input_width=shape.input_width,
+                        max_batched_tokens=max_batched_tokens,
+                        norm_eps=shape.norm_eps,
+                        sharded_residual=shape.sharded_residual,
+                        time_budget_s=240.0,
+                        context=context,
+                    )
+                else:
+                    projection.profile = SPProfile(
+                        tp_size,
                         shape.hidden_size,
                         max_batched_tokens,
                         "unsupported",
-                        "neither NCCL nor P2P is usable",
+                        "no fused backend on this device"
+                        if backend is None
+                        else "neither NCCL nor P2P is usable",
                         input_width=shape.input_width,
                         norm_eps=shape.norm_eps,
                         gather_sharded_residual=shape.sharded_residual,
                     )
-                    continue
-                self.contexts[name] = context
-                profiles[name] = backend.profile(
-                    tp_size=self.tp_size,
-                    hidden_size=shape.hidden_size,
-                    input_width=shape.input_width,
-                    max_batched_tokens=max_batched_tokens,
-                    norm_eps=shape.norm_eps,
-                    sharded_residual=shape.sharded_residual,
-                    time_budget_s=240.0,
-                    context=context,
+                if not projection.active and projection.context is not None:
+                    assert backend is not None
+                    backend.close(projection.context)
+                    projection.context = None
+            if not any(projection.active for projection in members.values()):
+                if backend is not None:
+                    backend.close()
+                for projection in members.values():
+                    projection.backend = None
+            inactive = [
+                f"{name}={projection.profile.status}"
+                + (
+                    f" ({projection.profile.reason})"
+                    if projection.profile.reason
+                    else ""
                 )
-            self.profiles = profiles
-            if not all(profile.enabled for profile in profiles.values()):
-                self._close_backend()
-                self._log_fallback()
-        except Exception:
-            self.close()
-            raise
-
-    def _log_fallback(self) -> None:
-        assert self.profiles is not None
-        details = ", ".join(
-            f"{name}={profile.status}"
-            + (f" ({profile.reason})" if profile.reason else "")
-            for name, profile in self.profiles.items()
-        )
-        _LOG.warning("TPSP using standard forward; projection plans: %s", details)
-
-    def _close_backend(self) -> None:
-        if self.backend is not None:
-            for context in self.contexts.values():
-                self.backend.close(context)
-            self.backend.close()
-            self.backend = None
-            self.contexts.clear()
-
-    def close(self) -> None:
-        self._close_backend()
-        if self.profiles is not None:
-            self.profiles = {
-                name: SPProfile(
-                    profile.tp_size,
-                    profile.hidden_size,
-                    profile.max_batched_tokens,
-                    "disabled",
-                    "TPSP closed",
-                    input_width=profile.input_width,
-                    norm_eps=profile.norm_eps,
-                    gather_sharded_residual=profile.gather_sharded_residual,
+                for name, projection in members.items()
+                if projection.profile is not None and not projection.active
+            ]
+            if len(inactive) == len(members):
+                _LOG.warning(
+                    "TPSP using standard forward; projection plans: %s",
+                    ", ".join(inactive),
                 )
-                for name, profile in self.profiles.items()
-            }
-
-
-def profile_registered_tpsp(model: torch.nn.Module, max_batched_tokens: int) -> None:
-    """Profile projection shapes registered by an opt-in model adapter."""
-    session = getattr(model, "tpsp_profile", None)
-    if session is not None:
-        if not isinstance(session, TPSPProfileSession):
-            raise TypeError("tpsp_profile must be a TPSPProfileSession")
-        session.profile(max_batched_tokens, next(model.parameters()))
+            elif inactive:
+                _LOG.warning(
+                    "TPSP using regular projection for inactive plans: %s",
+                    ", ".join(inactive),
+                )
+    except Exception:
+        close_tpsp_projections(model)
+        raise
+    return True
 
 
 def select_sp_config(profile: SPProfile, current_batched_tokens: int) -> bool:

@@ -1086,34 +1086,6 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
 
 @lru_cache(maxsize=128)
-def _has_tpsp_model_cls(
-    module_name: str, class_name: str, base_class_name: str
-) -> bool:
-    def check() -> bool:
-        mod = importlib.import_module(module_name)
-        model_cls = getattr(mod, class_name, None)
-        base_cls = getattr(mod, base_class_name)
-        return isinstance(model_cls, type) and issubclass(model_cls, base_cls)
-
-    return _run_in_subprocess(check)
-
-
-def find_tpsp_model_cls(model: _BaseRegisteredModel) -> str | None:
-    if isinstance(model, _LazyRegisteredModel):
-        module_name = model.module_name
-        base_class_name = model.class_name
-    elif isinstance(model, _RegisteredModel):
-        module_name = model.model_cls.__module__
-        base_class_name = model.model_cls.__name__
-    else:
-        raise TypeError(f"Unsupported model registration: {type(model)}")
-    class_name = f"TPSP{base_class_name}"
-    if _has_tpsp_model_cls(module_name, class_name, base_class_name):
-        return f"{module_name}:{class_name}"
-    return None
-
-
-@lru_cache(maxsize=128)
 def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
