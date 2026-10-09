@@ -133,12 +133,6 @@ class PassConfig:
     """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: bool = None  # type: ignore[assignment]
-    """Enable sequence parallelism. Requires TP>1. Automatically disabled
-    if the model's hidden_size is too small for SP to be beneficial
-    (threshold is device-capability dependent)."""
-    fuse_gemm_comms: bool = None  # type: ignore[assignment]
-    """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
@@ -183,12 +177,6 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
-    sp_min_token_num: int | None = None
-    """The minimum number of tokens above which vllm should use
-    sequence parallelism. Specified as an integer token count.
-    Unspecified will fallback to default values which are compute
-    capability and world size dependent."""
-
     # TODO(luka) better pass enabling system.
 
     def flashinfer_max_size(self, world_size: int) -> int | None:
@@ -231,8 +219,6 @@ class PassConfig:
         "fuse_norm_quant",
         "fuse_act_quant",
         "fuse_attn_quant",
-        "enable_sp",
-        "fuse_gemm_comms",
         "fuse_allreduce_rms",
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
@@ -788,6 +774,8 @@ class CompilationConfig:
         # Qwen4Exp's AMD backend still uses these splitting ops.
         "vllm::qwen4_exp_ple_short_conv",
         "vllm::qwen4_exp_qsa_with_output",
+        # The fused prepare calls this op instead of the one above.
+        "vllm::qwen4_exp_qsa_prepare_with_output",
         "vllm::linear_attention",
         "vllm::qwen_gdn_attention_core",
         "vllm::qwen_gdn_attention_core_fused_norm_packed",
@@ -1244,25 +1232,6 @@ class CompilationConfig:
                     self.cudagraph_mode = CUDAGraphMode.FULL
                 self.splitting_ops = []
 
-        if (
-            not self.use_inductor_graph_partition
-            and (self.pass_config.enable_sp or self.pass_config.fuse_gemm_comms)
-            and self.splitting_ops
-        ):
-            logger.warning_once(
-                "Sequence parallelism requires full-graph compilation when "
-                "use_inductor_graph_partition is off. Setting splitting_ops "
-                "to an empty list to preserve SP and async TP."
-            )
-            self.splitting_ops = []
-            if self.cudagraph_mode.has_piecewise_cudagraphs():
-                logger.warning_once(
-                    "Sequence parallelism is incompatible with piecewise "
-                    "cudagraph when use_inductor_graph_partition is off. "
-                    "Setting cudagraph_mode to FULL."
-                )
-                self.cudagraph_mode = CUDAGraphMode.FULL
-
         # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
         if (
             all2all_backend == "deepep_high_throughput"
@@ -1403,7 +1372,6 @@ class CompilationConfig:
         min_cg_attn_backend: str | None,
         uniform_decode_query_len: int = 1,
         use_v2_model_runner: bool = False,
-        tensor_parallel_size: int = 1,
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
@@ -1530,10 +1498,7 @@ class CompilationConfig:
             and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and uniform_decode_query_len > 1
         ):
-            self.adjust_cudagraph_sizes_for_spec_decode(
-                uniform_decode_query_len,
-                tensor_parallel_size,
-            )
+            self.adjust_cudagraph_sizes_for_spec_decode(uniform_decode_query_len)
 
         # For Mamba models with FULL decode cudagraphs, each decode
         # sequence needs one Mamba cache block. The decode cudagraph
@@ -1562,25 +1527,8 @@ class CompilationConfig:
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode
 
-    def adjust_cudagraph_sizes_for_spec_decode(
-        self, uniform_decode_query_len: int, tensor_parallel_size: int
-    ):
+    def adjust_cudagraph_sizes_for_spec_decode(self, uniform_decode_query_len: int):
         multiple_of = uniform_decode_query_len
-        if tensor_parallel_size > 1 and self.pass_config.enable_sp:
-            multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
-            if (
-                multiple_of % uniform_decode_query_len != 0
-                or multiple_of % tensor_parallel_size != 0
-            ):
-                raise ValueError(
-                    f"Can't determine cudagraph shapes that are both a "
-                    f"multiple of {uniform_decode_query_len} "
-                    f"(num_speculative_tokens + 1) required by spec-decode "
-                    f"and {tensor_parallel_size} (tensor_parallel_size) "
-                    f"required by sequence parallelism please adjust "
-                    f"num_speculative_tokens or disable sequence parallelism"
-                )
-
         if not self.cudagraph_capture_sizes or multiple_of <= 1:
             return
 
@@ -1600,7 +1548,7 @@ class CompilationConfig:
         if len(rounded_sizes) == 0:
             raise ValueError(
                 f"No valid cudagraph sizes after rounding to multiple of {multiple_of} "
-                f"(num_speculative_tokens + 1 or tp if sequence parallelism is enabled)"
+                f"(num_speculative_tokens + 1)"
                 f" please adjust num_speculative_tokens ({uniform_decode_query_len - 1}"
                 f") or max_cudagraph_capture_size ({self.max_cudagraph_capture_size})"
                 f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"
