@@ -58,6 +58,12 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.parametrize("min_split_kv", [0, 257])
+def test_tokenspeed_mla_split_floor_rejects_out_of_range(min_split_kv):
+    with pytest.raises(ValidationError, match="tokenspeed_mla_min_split_kv"):
+        AttentionConfig(tokenspeed_mla_min_split_kv=min_split_kv)
+
+
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
     calls = []
 

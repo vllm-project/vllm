@@ -223,7 +223,6 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
-    VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV: int = 1
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1805,11 +1804,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when the installed FlashInfer MoeAlltoAll kernel supports it.
     "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "0"))
-    ),
-    # Minimum KV splits for the TokenSpeed MLA decode kernel.
-    # Default 1 uses automatic scheduling.
-    "VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV": lambda: int(
-        os.getenv("VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV", "1")
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for

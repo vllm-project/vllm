@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -231,12 +230,12 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 f"got kv_cache_dtype={self.kv_cache_dtype!r}."
             )
 
-        self._min_split_kv = envs.VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV
+        config = get_current_vllm_config()
+        self._min_split_kv = config.attention_config.tokenspeed_mla_min_split_kv
         self._decode_kwargs: dict[str, int] = {}
         self._max_decode_tokens = 0
         if self._min_split_kv > 1:
             self._decode_kwargs["min_split_kv"] = self._min_split_kv
-            config = get_current_vllm_config()
             spec = config.speculative_config
             query_len = 1 + (spec.num_speculative_tokens if spec else 0)
             self._max_decode_tokens = max(
@@ -251,7 +250,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self.output_scale: float | None = None
         # NIXL resolves interleaving after model construction; retain the config
         # rather than caching its initial interleave size.
-        self._parallel_config = get_current_vllm_config().parallel_config
+        self._parallel_config = config.parallel_config
 
         # Pre-JIT BF16 and FP8 prefill kernels here too — decode impl always
         # runs when tokenspeed is selected, prefill backend may not (user can
