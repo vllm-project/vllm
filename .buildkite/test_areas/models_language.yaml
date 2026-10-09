@@ -220,10 +220,10 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Language Models (MTEB)"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (MTEB)"
   key: language-models-test-mteb
   timeout_in_minutes: 68
-  device: h200_18gb
+  device: h200_35gb
   optional: true
   source_file_dependencies:
   - vllm/
