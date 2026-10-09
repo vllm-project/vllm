@@ -200,7 +200,7 @@ async def _probe_endpoint(
                 # A non-200 response is authoritative and should not be
                 # retried as a connection failure.
                 return response.status == HTTPStatus.OK
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        except (TimeoutError, aiohttp.ClientError) as e:
             # Allow retry of connection errors.
             logger.debug(
                 "Probe attempt %d/%d failed on port %d: %r",
