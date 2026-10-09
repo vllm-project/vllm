@@ -4,16 +4,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    SupportsHMA,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    PromMetric,
+    PromMetricT,
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
@@ -29,6 +36,7 @@ from .data import (
 )
 from .runtime import UMBPRuntimeConfig, UMBPRuntimeFactory
 from .scheduler import UMBPStoreConnectorScheduler
+from .stats import UMBPStoreConnectorStats, UMBPStorePromMetrics
 from .worker import UMBPStoreConnectorWorker
 
 if TYPE_CHECKING:
@@ -37,7 +45,55 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-class UMBPStoreConnector(KVConnectorBase_V1):
+class UMBPStoreKVEvents(KVConnectorKVEvents):
+    """Ordered, deduplicated UMBP events ready for publication."""
+
+    def __init__(self, events: list[KVCacheEvent] | None = None) -> None:
+        self._events = list(dict.fromkeys(events or ()))
+        self._num_workers = 1
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        """Merge duplicate worker reports within one engine step."""
+        seen = set(self._events)
+        for event in events:
+            if event in seen:
+                continue
+            seen.add(event)
+            self._events.append(event)
+
+    def append_events(self, events: Iterable[KVCacheEvent]) -> None:
+        """Append events from a later step while preserving repetitions."""
+        self._events.extend(events)
+
+    def aggregate(self) -> UMBPStoreKVEvents:
+        self._num_workers = 1
+        return self
+
+    def pop_common_events(self) -> list[KVCacheEvent]:
+        events = self._events
+        self._events = []
+        return events
+
+    def has_events(self) -> bool:
+        return bool(self._events)
+
+    def increment_workers(self, count: int = 1) -> None:
+        if count <= 0:
+            raise ValueError("count must be positive")
+        self._num_workers += count
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        return list(self._events)
+
+    def get_number_of_workers(self) -> int:
+        return self._num_workers
+
+    def clear_events(self) -> None:
+        self._events.clear()
+        self._num_workers = 1
+
+
+class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """vLLM connector lifecycle shared by every UMBP runtime mode."""
 
     def __init__(
@@ -55,6 +111,19 @@ class UMBPStoreConnector(KVConnectorBase_V1):
             raise NotImplementedError(
                 f"{runtime_config.mode} UMBP does not support pipeline parallelism"
             )
+        # A restored prefix skips the draft model's prefill too, so its KV must
+        # come from the pool along with the target's.
+        cacheable = set(kv_cache_config.prefix_cacheable_group_ids)
+        skipped_drafts = [
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if getattr(group, "is_eagle_group", False) and group_id not in cacheable
+        ]
+        if skipped_drafts:
+            raise NotImplementedError(
+                f"{runtime_config.mode} UMBP cannot restore draft-model KV cache "
+                f"groups {skipped_drafts}: they are not prefix-cacheable"
+            )
         runtime = UMBPRuntimeFactory.build(runtime_config)
         namespace = UMBPNamespace.from_vllm_config(vllm_config, kv_cache_config)
         codec = BlockIdentityCodec(
@@ -68,6 +137,7 @@ class UMBPStoreConnector(KVConnectorBase_V1):
         layout_descriptor = layout.describe(topology)
         self._runtime = runtime
         self._store_submitted = False
+        self._kv_cache_events: UMBPStoreKVEvents | None = None
         self.connector_scheduler: UMBPStoreConnectorScheduler | None = None
         self.connector_worker: UMBPStoreConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
@@ -87,6 +157,11 @@ class UMBPStoreConnector(KVConnectorBase_V1):
                 ),
                 layout,
                 codec=codec,
+                report_failed_requests=len(kv_cache_config.kv_cache_groups) > 1,
+                enable_kv_cache_events=bool(
+                    vllm_config.kv_events_config
+                    and vllm_config.kv_events_config.enable_kv_cache_events
+                ),
             )
 
     def get_num_new_matched_tokens(
@@ -124,9 +199,48 @@ class UMBPStoreConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, (block_ids,))
 
+    def request_finished_all_groups(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, block_ids)
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.register_finished_partial_tail(
+            request, block_ids, partial_tail_offloads
+        )
+
     def update_connector_output(self, connector_output: Any) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
+        scheduler_events = self.connector_scheduler.take_events()
+        if scheduler_events:
+            if self._kv_cache_events is None:
+                self._kv_cache_events = UMBPStoreKVEvents(scheduler_events)
+            else:
+                self._kv_cache_events.append_events(scheduler_events)
+        events = connector_output.kv_cache_events
+        if not isinstance(events, UMBPStoreKVEvents):
+            return
+        if self._kv_cache_events is None:
+            self._kv_cache_events = events
+        else:
+            self._kv_cache_events.append_events(events.get_all_events())
+
+    def take_events(self) -> Iterable[KVCacheEvent]:
+        if self._kv_cache_events is None:
+            return
+        yield from self._kv_cache_events.pop_common_events()
+        if not self._kv_cache_events.has_events():
+            self._kv_cache_events = None
 
     def has_pending_push_work(self) -> bool:
         assert self.connector_scheduler is not None
@@ -203,6 +317,7 @@ class UMBPStoreConnector(KVConnectorBase_V1):
         return KVConnectorTransferResults(
             finished_sending=set(finished_sending or ()),
             finished_recving=set(finished_recving or ()),
+            failed_recving=self.connector_worker.get_failed_recving(),
         )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -212,6 +327,40 @@ class UMBPStoreConnector(KVConnectorBase_V1):
     def build_connector_worker_meta(self) -> UMBPConnectorWorkerMetadata:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
+
+    def get_kv_connector_stats(self) -> UMBPStoreConnectorStats | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> UMBPStoreConnectorStats | None:
+        return UMBPStoreConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> UMBPStorePromMetrics:
+        return UMBPStorePromMetrics(
+            vllm_config,
+            metric_types,
+            labelnames,
+            per_engine_labelvalues,
+        )
+
+    def get_kv_connector_kv_cache_events(self) -> UMBPStoreKVEvents | None:
+        assert self.connector_worker is not None
+        events = self.connector_worker.get_kv_events()
+        if not self.connector_worker.enable_kv_cache_events:
+            return None
+        # An empty container still counts this worker toward the quorum.
+        return UMBPStoreKVEvents(events)
 
     def shutdown(self) -> None:
         if self.connector_scheduler is not None:
