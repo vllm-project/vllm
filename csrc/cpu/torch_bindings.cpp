@@ -408,6 +408,10 @@ void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
                                 const torch::Tensor& all_token_ids,
                                 const torch::Tensor& prefill_len,
                                 const torch::Tensor& num_computed_tokens);
+void prepare_pos_seq_lens_cpu(const torch::Tensor& idx_mapping,
+                              const torch::Tensor& query_start_loc,
+                              const torch::Tensor& num_computed_tokens,
+                              torch::Tensor& pos, torch::Tensor& seq_lens);
 void eagle_prepare_inputs_padded_kernel_impl(
     const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& valid_sampled_tokens_count,
@@ -997,6 +1001,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor query_start_loc, Tensor all_token_ids, Tensor prefill_len, "
       "Tensor num_computed_tokens) -> ()",
       &cpu_utils::prepare_prefill_inputs_cpu);
+
+  ops.def(
+      "prepare_pos_seq_lens_cpu(Tensor idx_mapping, Tensor query_start_loc, "
+      "Tensor num_computed_tokens, Tensor(a3!) pos, "
+      "Tensor(a4!) seq_lens) -> ()",
+      &cpu_utils::prepare_pos_seq_lens_cpu);
 
   // Fused sampling kernels
   ops.def("fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor");
