@@ -3,7 +3,10 @@
 
 import torch
 
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -16,6 +19,18 @@ def _norm_row(x, weight, row, stride, eps, SIZE: tl.constexpr, BLOCK: tl.constex
     values = tl.load(x + row * stride + cols, cols < SIZE, 0).to(tl.float32)
     rrms = tl.rsqrt(tl.sum(values * values, 0) / SIZE + eps)
     return values * rrms * w
+
+
+@triton.jit
+def mxfp8_scale_offset(row, group, GROUPS: tl.constexpr):
+    """F8_128x4: [row/128, group/4, row%32, row%128/32, group%4]."""
+    offset = (row // 128 * triton.cdiv(GROUPS, 4) + group // 4) * 512
+    return offset + row % 32 * 16 + row % 128 // 32 * 4 + group % 4
+
+
+def mxfp8_scale_bytes(tokens: int, width: int) -> int:
+    """Bytes of F8_128x4 scales for `tokens` rows of `width` MXFP8 values."""
+    return triton.cdiv(tokens, 128) * 128 * triton.cdiv(width // 32, 4) * 4
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
@@ -65,14 +80,7 @@ def _q_kv_norm_quant_kernel(
             sf = tl.full((BLOCK // 32,), 0, tl.uint32)
         padded_groups: tl.constexpr = triton.cdiv(Q_SIZE // 32, 4) * 4
         sf = tl.where(groups < Q_SIZE // 32, sf, 0)
-        # F8_128x4: [row/128, group/4, row%32, row%128/32, group%4].
-        offsets = (
-            row // 128 * (128 * padded_groups)
-            + groups // 4 * 512
-            + row % 32 * 16
-            + row % 128 // 32 * 4
-            + groups % 4
-        )
+        offsets = mxfp8_scale_offset(row, groups, Q_SIZE // 32)
         tl.store(scales + offsets, sf, groups < padded_groups)
     elif row < num_tokens:
         y = _norm_row(kv, kvw, row, kv_stride, eps, KV_SIZE, BLOCK)
@@ -96,12 +104,12 @@ def fused_q_kv_rmsnorm_quant(
     qo = torch.empty(qr.shape, dtype=torch.float8_e4m3fn, device=qr.device)
     kvo = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
     padded_tokens = triton.cdiv(tokens, 128) * 128
-    padded_groups = triton.cdiv(q_size // 32, 4) * 4
     scales = torch.empty(
-        padded_tokens * padded_groups, dtype=torch.uint8, device=qr.device
+        mxfp8_scale_bytes(tokens, q_size), dtype=torch.uint8, device=qr.device
     )
     if tokens:
         block = triton.next_power_of_2(max(q_size, kv_size))
+        launch_pdl = current_platform.is_arch_support_pdl()
         _q_kv_norm_quant_kernel[(padded_tokens, 2)](
             qr,
             kv,
@@ -117,8 +125,9 @@ def fused_q_kv_rmsnorm_quant(
             q_size,
             kv_size,
             block,
-            current_platform.is_arch_support_pdl(),
+            launch_pdl,
             num_warps=8 if block >= 2048 else 4,
+            launch_pdl=launch_pdl,
         )
     return QuantizedActivation(qo, scales, qr.dtype, qr.shape, kMxfp8Dynamic), kvo
 
@@ -135,7 +144,7 @@ def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
     # QuantKey does not encode scale layout; restrict this producer to the
     # consumers that accept F8_128x4 swizzled scales.
     return all(
-        getattr(linear, "input_quant_key", None) == kMxfp8Dynamic
+        get_input_quant_key(linear) == kMxfp8Dynamic
         and type(getattr(getattr(linear, "quant_method", None), "kernel", None))
         in (FlashInferCutedslMxfp8LinearKernel, FlashInferCutlassMxfp8LinearKernel)
         for linear in linears
