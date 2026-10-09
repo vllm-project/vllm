@@ -504,6 +504,89 @@ def test_encoder_only_prompt_longer_than_budget_is_chunked():
     assert third.num_scheduled_tokens[request.request_id] == 452
 
 
+def test_oversized_encoder_input_fails_request_instead_of_waiting_forever():
+    """A single mm item whose embedding count exceeds the *whole* encoder
+    budget (or the whole encoder cache) can never be admitted: the budget
+    and capacity checks can never pass for it, so deferring the request
+    would leave it queued forever (a livelock). The request must instead
+    finish with an error in the same engine step.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=4096,
+    )
+    assert scheduler.max_num_encoder_input_tokens == 1024
+    # 2000 embeddings > 1024-token budget: unschedulable in any step.
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=3000,
+        mm_positions=[[PlaceholderRange(offset=100, length=2000)]],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # The request is not scheduled this step; the failure is structural,
+    # not a transient budget contention.
+    assert len(output.scheduled_new_reqs) == 0
+    assert request.request_id not in output.num_scheduled_tokens
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # The request was failed and removed from the scheduler instead of
+    # being left in the waiting queue forever.
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.request_id not in scheduler.requests
+    assert len(scheduler.waiting) == 0
+
+
+def test_encoder_input_fitting_budget_is_not_failed():
+    """Inputs that fit the whole budget must keep the existing behavior:
+    they are scheduled (possibly chunked), never terminated as errors.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=4096,
+    )
+    # 900 embeddings < 1024-token budget: schedulable.
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=2000,
+        mm_positions=[[PlaceholderRange(offset=100, length=900)]],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert request.request_id in output.scheduled_encoder_inputs
+    assert request.status == RequestStatus.RUNNING
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            # Prefill is still in progress, so no tokens sampled yet.
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    # The request survives the step and remains schedulable.
+    assert not request.is_finished()
+    assert request.request_id in scheduler.requests
+
+
 @pytest.mark.parametrize("has_running", [True, False])
 def test_schedule_prefills_gating(has_running: bool):
     """DP prefill-balancing gate: when `throttle_prefills` is True, a new

@@ -251,6 +251,10 @@ class Scheduler(SchedulerInterface):
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
         self.encoder_cache_mismatch_reqs: set[str] = set()
+        # Encoder inputs that can never be admitted (larger than the whole
+        # encoder budget or the whole encoder cache), to finish as
+        # per-request errors in update_from_output.
+        self.encoder_budget_exceeded_reqs: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1749,6 +1753,40 @@ class Scheduler(SchedulerInterface):
             num_output_tokens=num_output_tokens,
         )
 
+    def _is_unschedulable_encoder_input(self, num_encoder_embeds: int) -> bool:
+        """Whether a single encoder input can never be scheduled, regardless
+        of the other requests in the batch.
+
+        This compares the input against the *whole* per-step encoder budget
+        and the *whole* encoder cache capacity, not the amounts left in the
+        current step, so that transient contention (other inputs consuming
+        this step's budget or temporarily filling the cache) still defers
+        the request as before.
+        """
+        if num_encoder_embeds > self.max_num_encoder_input_tokens:
+            return True
+        cache_size = getattr(self.encoder_cache_manager, "cache_size", None)
+        return cache_size is not None and num_encoder_embeds > cache_size
+
+    def _reject_on_encoder_budget_exceeded(
+        self, request: Request, input_id: int, num_encoder_embeds: int
+    ) -> None:
+        logger.error(
+            "Request %s encoder input %d requires %d encoder embeddings, "
+            "but the per-step encoder budget is %d and the encoder cache "
+            "capacity is %d, so it can never be scheduled. Terminating the "
+            "request instead of leaving it queued forever. Consider "
+            "increasing max_num_batched_tokens (which sizes the encoder "
+            "budget and cache) or reducing the size of the multimodal "
+            "input (e.g. smaller max_pixels for images).",
+            request.request_id,
+            input_id,
+            num_encoder_embeds,
+            self.max_num_encoder_input_tokens,
+            getattr(self.encoder_cache_manager, "cache_size", 0),
+        )
+        self.encoder_budget_exceeded_reqs.add(request.request_id)
+
     def _reject_on_encoder_cache_embed_mismatch(
         self,
         request: Request,
@@ -1925,6 +1963,15 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
+                if self._is_unschedulable_encoder_input(num_encoder_embeds):
+                    # The input alone exceeds the whole encoder budget or the
+                    # whole encoder cache, so no future step can admit it.
+                    # Deferring the request would only leave it waiting forever.
+                    # Fail it (as FINISHED_ERROR in update_from_output) instead.
+                    self._reject_on_encoder_budget_exceeded(
+                        request, i, num_encoder_embeds
+                    )
+                    return [], 0, encoder_compute_budget, [], []
                 if num_computed_tokens + shift_computed_tokens < start_pos:
                     # We only schedule the decoder tokens just before the
                     # encoder input.
@@ -2302,6 +2349,11 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs.clear()
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
+        # An encoder input that can never fit the budget or the cache.
+        # Failing is retryable once the request's input sizes (or the engine's
+        # budget/cache settings) change.
+        error_req_ids.update(self.encoder_budget_exceeded_reqs)
+        self.encoder_budget_exceeded_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
         if self.ec_connector is not None:
