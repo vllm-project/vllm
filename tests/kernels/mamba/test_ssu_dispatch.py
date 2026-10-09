@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -8,18 +9,15 @@ import pytest
 import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
-    commit_replayssm_ring_trackers,
+    _postprocess_replayssm_kernel,
+    _ReplaySSMGroupContext,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
-    reset_replayssm_ring_trackers,
     selective_state_update,
-    selective_state_update_replayssm_flashinfer,
-    update_replayssm_ring_trackers,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
@@ -30,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.worker.utils import allocate_replayssm_caches
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -37,13 +36,6 @@ try:
     HAS_FLASHINFER = True
 except ImportError:
     HAS_FLASHINFER = False
-
-try:
-    from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
-
-    HAS_FLASHINFER_CHECKPOINTING_SSU = CheckpointingSSURunner is not None
-except ImportError:
-    HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
 
 @pytest.fixture(autouse=True)
@@ -55,234 +47,6 @@ def restore_backend_state():
     yield
     mod._mamba_ssu_backend = old_backend
     mod._flashinfer_replayssm_kernel = old_replayssm_kernel
-
-
-def test_flashinfer_replayssm_ring_tracker_lifecycle():
-    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
-
-    observed = []
-    for _ in range(33):
-        update_replayssm_ring_trackers(
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-            state_batch_indices,
-            logical_window=16,
-            ring_buffer_len=17,
-        )
-        observed.append((int(ring_start[1]), int(prev_num_accepted[1])))
-
-    assert observed[4] == (0, 5)
-    assert observed[15] == (0, 16)
-    assert observed[16] == (16, 1)
-    assert observed[31] == (16, 16)
-    assert observed[32] == (15, 1)
-
-    reset_replayssm_ring_trackers(
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
-        state_batch_indices,
-    )
-    assert (
-        ring_start[1].item(),
-        prev_num_accepted[1].item(),
-        prev_query_len[1].item(),
-    ) == (0, 0, 0)
-
-
-@pytest.mark.parametrize(
-    ("accepted_sequence", "expected"),
-    [
-        pytest.param(
-            [4] * 22,
-            [
-                (0, 0, 4),
-                (0, 4, 4),
-                (0, 8, 4),
-                (0, 12, 4),
-                (0, 16, 4),
-                (16, 4, 4),
-                (16, 8, 4),
-                (16, 12, 4),
-                (16, 16, 4),
-                (12, 4, 4),
-                (12, 8, 4),
-                (12, 12, 4),
-                (12, 16, 4),
-                (8, 4, 4),
-                (8, 8, 4),
-                (8, 12, 4),
-                (8, 16, 4),
-                (4, 4, 4),
-                (4, 8, 4),
-                (4, 12, 4),
-                (4, 16, 4),
-                (0, 4, 4),
-            ],
-            id="all-accepted",
-        ),
-        pytest.param(
-            [4, 4, 0, 3, 4, 2, 4, 1],
-            [
-                (0, 0, 4),
-                (0, 4, 4),
-                (0, 4, 4),
-                (0, 7, 4),
-                (0, 11, 4),
-                (0, 13, 4),
-                (13, 4, 4),
-                (13, 5, 4),
-            ],
-            id="mixed",
-        ),
-    ],
-)
-def test_replayssm_commit_tracker_acceptance_sequence(accepted_sequence, expected):
-    logical_window = 16
-    num_speculative_tokens = 3
-    query_len = 1 + num_speculative_tokens
-    ring_buffer_len = logical_window + 1 + num_speculative_tokens
-    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
-    query_start_loc = torch.tensor([0, query_len], dtype=torch.int32, device="cuda")
-
-    observed = []
-    for accepted in accepted_sequence:
-        commit_replayssm_ring_trackers(
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-            state_batch_indices,
-            torch.tensor([accepted], dtype=torch.int32, device="cuda"),
-            query_start_loc,
-            logical_window,
-            ring_buffer_len,
-        )
-        snapshot = (
-            ring_start[1].item(),
-            prev_num_accepted[1].item(),
-            prev_query_len[1].item(),
-        )
-        observed.append(snapshot)
-        assert snapshot[1] + snapshot[2] <= ring_buffer_len
-
-    assert observed == expected
-
-
-def test_replayssm_resume_resets_commit_history():
-    ring_start = torch.tensor([0, 13], dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.tensor([0, 13], dtype=torch.int32, device="cuda")
-    prev_query_len = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
-
-    reset_replayssm_ring_trackers(
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
-        state_batch_indices,
-    )
-    assert (
-        ring_start[1].item(),
-        prev_num_accepted[1].item(),
-        prev_query_len[1].item(),
-    ) == (0, 0, 0)
-
-    commit_replayssm_ring_trackers(
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
-        state_batch_indices,
-        torch.tensor([3], dtype=torch.int32, device="cuda"),
-        torch.tensor([0, 4], dtype=torch.int32, device="cuda"),
-        logical_window=16,
-        ring_buffer_len=20,
-    )
-    assert (
-        ring_start[1].item(),
-        prev_num_accepted[1].item(),
-        prev_query_len[1].item(),
-    ) == (0, 0, 4)
-
-
-def test_replayssm_commit_tracker_ragged_query_lengths():
-    ring_start = torch.zeros(3, dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.zeros(3, dtype=torch.int32, device="cuda")
-    prev_query_len = torch.zeros(3, dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.tensor([1, 2], dtype=torch.int32, device="cuda")
-    query_start_loc = torch.tensor([0, 4, 6], dtype=torch.int32, device="cuda")
-
-    observed = []
-    for accepted in ([4, 2], [3, 1]):
-        commit_replayssm_ring_trackers(
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-            state_batch_indices,
-            torch.tensor(accepted, dtype=torch.int32, device="cuda"),
-            query_start_loc,
-            logical_window=16,
-            ring_buffer_len=20,
-        )
-        observed.append(
-            [
-                (
-                    ring_start[slot].item(),
-                    prev_num_accepted[slot].item(),
-                    prev_query_len[slot].item(),
-                )
-                for slot in (1, 2)
-            ]
-        )
-
-    assert observed == [[(0, 0, 4), (0, 0, 2)], [(0, 3, 4), (0, 1, 2)]]
-
-
-@pytest.mark.parametrize("operation", ["commit", "reset"])
-def test_replayssm_tracker_kernels_mask_invalid_slots(operation):
-    num_states = 3
-    ring_start = torch.tensor([11, 2, 33], dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.tensor([11, 3, 33], dtype=torch.int32, device="cuda")
-    prev_query_len = torch.tensor([11, 4, 33], dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.tensor(
-        [-1, num_states, NULL_BLOCK_ID, 1], dtype=torch.int32, device="cuda"
-    )
-
-    if operation == "commit":
-        commit_replayssm_ring_trackers(
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-            state_batch_indices,
-            torch.tensor([4, 4, 4, 2], dtype=torch.int32, device="cuda"),
-            torch.tensor([0, 4, 8, 12, 16], dtype=torch.int32, device="cuda"),
-            logical_window=16,
-            ring_buffer_len=20,
-        )
-        expected_valid = (2, 5, 4)
-    else:
-        reset_replayssm_ring_trackers(
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-            state_batch_indices,
-        )
-        expected_valid = (0, 0, 0)
-
-    assert (
-        ring_start.tolist(),
-        prev_num_accepted.tolist(),
-        prev_query_len.tolist(),
-    ) == (
-        [11, expected_valid[0], 33],
-        [11, expected_valid[1], 33],
-        [11, expected_valid[2], 33],
-    )
 
 
 def _kv_cache_config_with_ssu(
@@ -299,6 +63,194 @@ def _kv_cache_config_with_ssu(
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["l0"], kv_cache_spec=spec)],
     )
+
+
+def _cuda_ints(values):
+    return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+
+@pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
+def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_step):
+    """Publish a boundary without modifying its live or cached-prefix sources."""
+    try:
+        from flashinfer.mamba.replayssm_materialize import (
+            replayssm_materialize,  # noqa: F401
+        )
+
+        has_materializer = True
+    except ImportError:
+        has_materializer = False
+    if not (torch.cuda.is_available() and has_materializer):
+        reason = "requires CUDA and FlashInfer ReplaySSM materialization"
+        if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
+
+    set_random_seed(42)
+    slots, heads, dim, dstate, ring_len = 6, 8, 64, 128, 20
+    state = torch.randn(slots, heads, dim, dstate, device="cuda") * 0.1
+    # Slot 1 is an immutable cached prefix, copied to private live slot 3.
+    state[3].copy_(state[1])
+    original = state.clone()
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((heads, dim, dstate),),
+        dtypes=(torch.float32,),
+        replayssm_shapes=(
+            (heads, ring_len, dim),
+            (heads, ring_len),
+            (1, ring_len, dstate),
+        ),
+        replayssm_dtypes=(torch.bfloat16, torch.float32, torch.bfloat16),
+    )
+    config = KVCacheConfig(
+        num_blocks=slots,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["mixer", "neighbor"], spec),
+            KVCacheGroupSpec(["other_group"], spec),
+        ],
+    )
+    rings = allocate_replayssm_caches(config, torch.device("cuda"))
+    x, dt, B = rings["mixer"]
+    x.normal_()
+    dt.fill_(0.01)
+    B.normal_()
+    assert not x.is_contiguous() and not dt.is_contiguous() and not B.is_contiguous()
+    assert x.data_ptr() == rings["other_group"][0].data_ptr()
+    # The other layer is disjoint within this group. Group B owns physical4,
+    # while materialization only uses group A's live3 and destination2.
+    for tensor in rings["neighbor"]:
+        tensor.fill_(7)
+    neighbor_before = [tensor.clone() for tensor in rings["neighbor"]]
+    for tensor in rings["other_group"]:
+        tensor[4].fill_(9)
+    other_owned_before = [tensor[4].clone() for tensor in rings["other_group"]]
+    A = -torch.ones(heads, device="cuda")
+    mixer = SimpleNamespace(
+        kv_cache=(torch.empty(0, device="cuda"), state),
+        replayssm_cache=(x, dt, B),
+        _replayssm_ring_start=_cuda_ints([0, 0, 0, 7, 0, 2]),
+        _replayssm_prev_num_accepted=_cuda_ints([0, 0, 0, 2, 0, 1]),
+        replayssm_buffer_len=16,
+        A=A,
+        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+    )
+    group = _ReplaySSMGroupContext.create(
+        [mixer],
+        _cuda_ints(
+            [
+                [2, 3],
+                [NULL_BLOCK_ID, 5],
+                [NULL_BLOCK_ID, NULL_BLOCK_ID],
+                [NULL_BLOCK_ID, NULL_BLOCK_ID],
+            ]
+        ),
+        "align",
+        16,
+        4,
+    )
+    # Batch row 0 crosses token 16; row 1 rejects all drafts and stops at 15.
+    # Rows 2 and 3 exercise padded physical slots and padded request indices.
+    mapping = _cuda_ints([2, 0, 1, -1])
+    group.postprocess(
+        idx_mapping=mapping,
+        query_metadata=_cuda_ints([0, 4, 8, 12, 16])
+        if post_step
+        else _cuda_ints([4] * 4),
+        query_metadata_is_cumulative=post_step,
+        num_computed_tokens=_cuda_ints([15, 17, 17])
+        if post_step
+        else _cuda_ints([14] * 3),
+        num_computed_is_post_step=post_step,
+        num_accepted_tokens=_cuda_ints([1, 3, 3]),
+        is_prefilling=torch.zeros(4, dtype=torch.bool, device="cuda"),
+        live_cols=_cuda_ints([1, 1, 1]),
+        num_reqs=4,
+    )
+    assert group.active_request_indices.tolist() == [0, -1, -1, -1]
+    assert group.plan_flush_count.tolist() == [4, -1, -1, -1]
+    group.materialize()
+
+    expected = original[3].clone()
+    for offset in range(4):
+        pos = (7 + offset) % ring_len
+        delta = dt[3, :, pos]
+        expected *= torch.exp(delta * A)[:, None, None]
+        expected += (
+            delta[:, None, None]
+            * x[3, :, pos].float()[:, :, None]
+            * B[3, 0, pos].float()[None, None, :]
+        )
+    torch.testing.assert_close(state[2], expected, atol=2e-3, rtol=2e-3)
+    # The snapshot excludes the accepted tail past 16 and all rejected drafts.
+    for slot in (0, 1, 3, 4, 5):
+        torch.testing.assert_close(state[slot], original[slot], atol=0, rtol=0)
+    assert mixer._replayssm_prev_num_accepted[3].item() == 5
+    assert mixer._replayssm_prev_num_accepted[2].item() == 0
+    for tensor, before in zip(rings["neighbor"], neighbor_before, strict=True):
+        torch.testing.assert_close(tensor, before, atol=0, rtol=0)
+    for tensor, before in zip(rings["other_group"], other_owned_before, strict=True):
+        torch.testing.assert_close(tensor[4], before, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
+def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_step):
+    """Skip prefill self-copies, reset trackers, and preserve in-place MTP replay."""
+    mixer = SimpleNamespace(
+        kv_cache=(
+            torch.empty(0, device="cuda"),
+            torch.empty(6, 1, 1, 1, device="cuda"),
+        ),
+        replayssm_cache=(
+            torch.empty(6, 1, 20, 1, device="cuda"),
+            torch.empty(6, 1, 20, device="cuda"),
+            torch.empty(6, 1, 20, 1, device="cuda"),
+        ),
+        _replayssm_ring_start=_cuda_ints([3] * 6),
+        _replayssm_prev_num_accepted=_cuda_ints([2] * 6),
+        replayssm_buffer_len=16,
+        A=torch.empty(1, device="cuda"),
+    )
+    group = _ReplaySSMGroupContext.create(
+        [mixer],
+        _cuda_ints(
+            [
+                [0, 1, 2],
+                [3, 4, 5],
+                [NULL_BLOCK_ID] * 3,
+                [NULL_BLOCK_ID] * 3,
+            ]
+        ),
+        "align",
+        16,
+        4,
+    )
+    # Reordered rows: canonical prefill in slot 2; in-place MTP replay in slot 4;
+    # padded slot; padded request.
+    group.postprocess(
+        idx_mapping=_cuda_ints([1, 2, 0, -1]),
+        query_metadata=(
+            _cuda_ints([0, 48, 52, 68, 68]) if post_step else _cuda_ints([48, 4, 16, 0])
+        ),
+        query_metadata_is_cumulative=post_step,
+        num_computed_tokens=_cuda_ints([16, 48, 32])
+        if post_step
+        else _cuda_ints([0, 0, 28]),
+        num_computed_is_post_step=post_step,
+        num_accepted_tokens=_cuda_ints([1, 1, 4]),
+        is_prefilling=torch.tensor([True, False, True, True], device="cuda"),
+        live_cols=_cuda_ints([0, 2, 1]),
+        num_reqs=4,
+    )
+
+    assert group.plan_flush_count.tolist() == [-1, 6, -1, -1]
+    assert group.active_request_indices.tolist() == [1, -1, -1, -1]
+    assert group.src_slots[0, 1].item() == 4
+    assert group.dst_slots[0, 1].item() == 4
+    assert mixer._replayssm_ring_start.tolist() == [3, 0, 0, 3, 0, 3]
+    assert mixer._replayssm_prev_num_accepted.tolist() == [2, 0, 0, 2, 0, 2]
 
 
 def test_default_backend_is_triton():
@@ -407,6 +359,7 @@ def test_flashinfer_import_error():
         FlashInferSSUBackend(MambaConfig())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_triton_basic_call():
     set_random_seed(0)
     initialize_mamba_ssu_backend(
@@ -442,89 +395,128 @@ def test_triton_basic_call():
     assert not torch.isnan(out).any()
 
 
-@pytest.mark.parametrize("layout", ["packed", "dense"])
-def test_replayssm_flashinfer_call_forwards_mtp_layout(monkeypatch, layout):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    kernel = Mock(return_value=torch.empty(0))
-    monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
-
-    batch, max_seqlen, nheads, dim, dstate, ngroups = 2, 4, 2, 4, 8, 1
-    state = torch.empty(2, nheads, dim, dstate)
-    x_shape: tuple[int, ...]
-    B_shape: tuple[int, ...]
-    expected_x_shape: tuple[int, ...]
-    expected_B_shape: tuple[int, ...]
-    if layout == "packed":
-        x_shape = (6, nheads, dim)
-        B_shape = (6, ngroups, dstate)
-        expected_x_shape = (1, 6, nheads, dim)
-        expected_B_shape = (1, 6, ngroups, dstate)
-        cu_seqlens = torch.tensor([0, 4, 6], dtype=torch.int32)
-        kernel_max_seqlen = max_seqlen
-    else:
-        x_shape = (batch, max_seqlen, nheads, dim)
-        B_shape = (batch, max_seqlen, ngroups, dstate)
-        expected_x_shape = x_shape
-        expected_B_shape = B_shape
-        cu_seqlens = None
-        kernel_max_seqlen = None
-    x = torch.empty(x_shape)
-    dt = torch.empty_like(x)
-    A = torch.empty(nheads, dim, dstate)
-    B = torch.empty(B_shape)
-    C = torch.empty_like(B)
-    out = torch.empty_like(x)
-    x_cache = torch.empty(2, nheads, 20, dim)
-    dt_cache = torch.empty(2, nheads, 20)
-    B_cache = torch.empty(2, ngroups, 20, dstate)
-    ring_start = torch.zeros(2, dtype=torch.int32)
-    prev_num_accepted = torch.zeros(2, dtype=torch.int32)
-    prev_query_len = torch.zeros(2, dtype=torch.int32)
-    selective_state_update_replayssm_flashinfer(
-        state,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        out,
-        x_cache,
-        B_cache,
-        dt_cache,
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
+@pytest.mark.parametrize(
+    ("backend", "num_speculative_tokens", "expected_ring_len"),
+    [
+        (MambaBackendEnum.TRITON, 0, 16),
+        (MambaBackendEnum.FLASHINFER, 0, 17),
+        (MambaBackendEnum.FLASHINFER, 3, 20),
+    ],
+)
+def test_replayssm_physical_ring_shape(
+    backend, num_speculative_tokens, expected_ring_len
+):
+    shapes = MambaStateShapeCalculator.replayssm_ring_shapes(
+        num_heads=16,
+        head_dim=4,
+        state_size=16,
+        n_groups=4,
+        tp_world_size=2,
         logical_window=16,
-        state_batch_indices=torch.tensor([0, 1], dtype=torch.int32),
-        cu_seqlens=cu_seqlens,
-        max_seqlen=kernel_max_seqlen,
-        update_trackers=False,
+        backend=backend,
+        num_speculative_tokens=num_speculative_tokens,
     )
 
-    args = kernel.call_args.args
-    assert args[6].shape == expected_x_shape
-    assert args[7].shape == expected_x_shape
-    assert args[9].shape == expected_B_shape
-    assert args[10].shape == expected_B_shape
-    assert args[11].shape == expected_x_shape
-    assert kernel.call_args.kwargs["cu_seqlens"] is cu_seqlens
-    assert kernel.call_args.kwargs["max_seqlen"] == kernel_max_seqlen
+    assert shapes == (
+        (8, expected_ring_len, 4),
+        (8, expected_ring_len),
+        (2, expected_ring_len, 16),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("post_step", [False, True])
+@pytest.mark.parametrize(
+    (
+        "computed_before",
+        "query_len",
+        "prefilling",
+        "accepted",
+        "old_committed",
+        "old_start",
+        "expected_committed",
+        "expected_start",
+    ),
+    [
+        (256, 4, False, 1, 2, 3, 3, 3),  # Padded prompt tail.
+        (256, 4, False, 3, 2, 3, 5, 3),  # Speculative decode.
+        (0, 50_000, True, 1, 2, 3, 0, 0),  # Long initial prefill.
+        (50_000, 4, True, 1, 2, 3, 0, 0),  # Later prefill chunk.
+        (256, 4, False, 1, 15, 7, 1, 2),  # Checkpoint wraps the physical ring.
+    ],
+)
+def test_replayssm_postprocess_commits_staged_transition(
+    post_step,
+    computed_before,
+    query_len,
+    prefilling,
+    accepted,
+    old_committed,
+    old_start,
+    expected_committed,
+    expected_start,
+):
+    """Mode none updates only its live slot, including for long prompt chunks."""
+    computed = computed_before
+    if post_step:
+        computed += query_len if prefilling else accepted
+    ring_start = _cuda_ints([old_start, 7])
+    committed = _cuda_ints([old_committed, 9])
+    # Neighboring request rows provide valid canary IDs, making erroneous
+    # column reads deterministically corrupt another slot rather than crash.
+    block_table = torch.ones((256, 1), dtype=torch.int32, device="cuda")
+    block_table[0, 0] = 0
+    plan_start, plan_flush = _cuda_ints([0]), _cuda_ints([-1])
+    slots = _cuda_ints([[0]])
+    _postprocess_replayssm_kernel[(1,)](
+        _cuda_ints([0]),
+        _cuda_ints([0, query_len]) if post_step else _cuda_ints([query_len]),
+        _cuda_ints([computed]),
+        _cuda_ints([accepted]),
+        torch.tensor([prefilling], device="cuda"),
+        None,
+        block_table[:1],
+        ring_start,
+        committed,
+        slots,
+        slots,
+        plan_start,
+        plan_flush,
+        block_table.stride(0),
+        1,
+        MAMBA_BLOCK_SIZE=256,
+        LOGICAL_WINDOW=16,
+        RING_BUFFER_LEN=20,
+        NUM_LAYERS=1,
+        PAD_SLOT_ID=-1,
+        QUERY_METADATA_IS_CUMULATIVE=post_step,
+        NUM_COMPUTED_IS_POST_STEP=post_step,
+        HAS_IDX_MAPPING=post_step,
+        MATERIALIZE_PREFIXES=False,
+        LIVE_COL_IS_ZERO=True,
+    )
+    assert committed.tolist() == [expected_committed, 9]
+    assert ring_start.tolist() == [expected_start, 7]
 
 
 @pytest.mark.parametrize(
-    ("query_start_loc", "expected_shape", "expected_max_seqlen"),
+    ("query_start_loc", "expected_x_shape", "expected_B_shape", "expected_max_seqlen"),
     [
-        pytest.param([0, 4, 8], (2, 4, 2, 4), None, id="dense"),
-        pytest.param([0, 4, 6], (6, 2, 4), 4, id="packed"),
+        pytest.param([0, 4, 8], (2, 4, 2, 4), (2, 4, 1, 8), None, id="dense"),
+        pytest.param([0, 4, 6], (1, 6, 2, 4), (1, 6, 1, 8), 4, id="packed"),
     ],
 )
 def test_replayssm_mixer_selects_mtp_layout(
-    monkeypatch, query_start_loc, expected_shape, expected_max_seqlen
+    monkeypatch,
+    query_start_loc,
+    expected_x_shape,
+    expected_B_shape,
+    expected_max_seqlen,
 ):
     import vllm.model_executor.layers.mamba.mamba_mixer2 as mod
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as dispatch
 
-    mixer = MambaMixer2.__new__(MambaMixer2)
+    mixer = mod.MambaMixer2.__new__(mod.MambaMixer2)
     torch.nn.Module.__init__(mixer)
     mixer.prefix = "mixer"
     mixer.tped_intermediate_size = 0
@@ -536,9 +528,8 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.ssm_state_size = 8
     mixer.num_spec = 3
     mixer.use_replayssm = True
+    mixer.use_flashinfer_replayssm = True
     mixer.replayssm_buffer_len = 16
-    mixer._commits_replayssm_trackers = True
-    mixer._updates_replayssm_trackers = False
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
     mixer.conv_weights = torch.empty(0)
@@ -549,10 +540,11 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.D = torch.empty(2)
     mixer._replayssm_ring_start = torch.zeros(3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.zeros(3, dtype=torch.int32)
-    mixer._replayssm_prev_query_len = torch.zeros(3, dtype=torch.int32)
     mixer.kv_cache = (
         torch.empty(3, 1),
         torch.empty(3, 2, 4, 8),
+    )
+    mixer.replayssm_cache = (
         torch.empty(3, 2, 20, 4),
         torch.empty(3, 2, 20),
         torch.empty(3, 1, 20, 8),
@@ -592,48 +584,23 @@ def test_replayssm_mixer_selects_mtp_layout(
         "get_forward_context",
         lambda: SimpleNamespace(attn_metadata={mixer.prefix: metadata}),
     )
-    monkeypatch.setattr(mod, "commit_replayssm_ring_trackers", Mock())
     monkeypatch.setattr(
         mod, "causal_conv1d_update", lambda values, *args, **kwargs: values
     )
-    monkeypatch.setattr(mod, "selective_state_update_replayssm_flashinfer", kernel)
+    monkeypatch.setattr(dispatch, "_flashinfer_replayssm_kernel", kernel)
 
     mixer.conv_ssm_forward(
         torch.empty(num_decode_tokens, 3), torch.empty(num_decode_tokens, 8)
     )
 
-    assert kernel.call_args.args[1].shape == expected_shape
+    args = kernel.call_args.args
+    assert args[6].shape == expected_x_shape
+    assert args[7].shape == expected_x_shape
+    assert args[9].shape == expected_B_shape
+    assert args[10].shape == expected_B_shape
+    assert args[11].shape == expected_x_shape
     if expected_max_seqlen is None:
         assert kernel.call_args.kwargs["cu_seqlens"] is None
     else:
         assert kernel.call_args.kwargs["cu_seqlens"] is query_start_loc_d
     assert kernel.call_args.kwargs["max_seqlen"] == expected_max_seqlen
-
-
-@pytest.mark.parametrize(
-    ("backend", "num_speculative_tokens", "expected_ring_len"),
-    [
-        (MambaBackendEnum.TRITON, 0, 16),
-        (MambaBackendEnum.FLASHINFER, 0, 17),
-        (MambaBackendEnum.FLASHINFER, 3, 20),
-    ],
-)
-def test_replayssm_physical_ring_shape(
-    backend, num_speculative_tokens, expected_ring_len
-):
-    base_shapes = ((64, 3), (8, 4, 16))
-
-    shapes = MambaStateShapeCalculator.append_replayssm_ring(
-        base_shapes,
-        n_groups=4,
-        tp_world_size=2,
-        logical_window=16,
-        backend=backend,
-        num_speculative_tokens=num_speculative_tokens,
-    )
-
-    assert shapes[2:] == (
-        (8, expected_ring_len, 4),
-        (8, expected_ring_len),
-        (2, expected_ring_len, 16),
-    )

@@ -40,8 +40,8 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    _estimate_max_model_len_from_groups,
     check_enough_kv_cache_memory,
-    estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
@@ -2209,10 +2209,11 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
             dtype=torch.float16,
         )
     # Estimate the maximum model length, 16384 model_len need 8GB
-    estimated_max_len = estimate_max_model_len(
-        vllm_config, kv_cache_spec, 8 * GiB_bytes
+    estimated_max_len = _estimate_max_model_len_from_groups(
+        vllm_config, get_kv_cache_groups(vllm_config, kv_cache_spec), 8 * GiB_bytes
     )
     assert estimated_max_len == want_estimated_max_len
+    assert vllm_config.model_config.max_model_len == max_model_len
 
 
 def test_get_max_concurrency_for_kv_cache_config():

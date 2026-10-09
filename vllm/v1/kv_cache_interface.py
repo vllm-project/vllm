@@ -1049,6 +1049,8 @@ class KpoolTailSpec(SlidingWindowSpec):
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
+    replayssm_shapes: tuple[tuple[int, ...], ...] = ()
+    replayssm_dtypes: tuple[torch.dtype, ...] = ()
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
@@ -1116,6 +1118,8 @@ class MambaSpec(KVCacheSpec):
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
+            and spec.replayssm_shapes == self.replayssm_shapes
+            and spec.replayssm_dtypes == self.replayssm_dtypes
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
