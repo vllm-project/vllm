@@ -222,20 +222,21 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Language Models (MTEB)"
+- label: ":nvidia: (H200 MIG 18GB) Language Models (MTEB) Shard %N"
   key: language-models-test-mteb
   timeout_in_minutes: 68
   device: h200_18gb
+  parallelism: 3
   optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/pooling_mteb_test
   commands:
-    - pytest -v -s models/language/pooling_mteb_test
+    - pytest -v -s models/language/pooling_mteb_test --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI250) Language Models (MTEB)"
+      label: ":amd: (MI250) Language Models (MTEB) Shard %N"
       dind: false
       device: mi250_1
       timeout_in_minutes: 60
