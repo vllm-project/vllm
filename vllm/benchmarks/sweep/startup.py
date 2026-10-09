@@ -16,7 +16,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
-from .utils import sanitize_filename
+from .utils import sanitize_filename, validate_result_paths
 
 try:
     import pandas as pd
@@ -232,6 +232,11 @@ def run_combs(
     show_stdout: bool,
     dry_run: bool,
 ) -> "pd.DataFrame | None":
+    validate_result_paths(
+        _get_comb_base_path(experiment_dir, serve_comb, startup_comb)
+        for serve_comb in serve_params
+        for startup_comb in startup_params
+    )
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
         for startup_comb in startup_params:

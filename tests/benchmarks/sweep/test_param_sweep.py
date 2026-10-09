@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from vllm.benchmarks.sweep import serve as sweep_serve
+from vllm.benchmarks.sweep import serve_workload as sweep_workload
+from vllm.benchmarks.sweep import startup as sweep_startup
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep, ParameterSweepItem
 
 
@@ -373,3 +377,133 @@ def test_run_comb_warmup_default_is_backward_compatible(
 
     assert calls == [0]
     assert measured == [{"run_number": 0}]
+
+
+def _run_sweep(
+    mode, tmp_path, serve_params, bench_params, *, dry_run=True, link_vars=None
+):
+    kwargs: dict[str, Any] = {
+        "serve_params": serve_params,
+        "experiment_dir": tmp_path,
+        "num_runs": 1,
+        "show_stdout": False,
+        "dry_run": dry_run,
+    }
+    if mode == "startup":
+        return sweep_startup.run_combs([], startup_params=bench_params, **kwargs)
+
+    kwargs.update(
+        bench_params=bench_params,
+        link_vars=link_vars or [],
+        server_ready_timeout=1,
+        warmup_num_prompts=0,
+        continue_on_error=True,
+    )
+    if mode == "serve_workload":
+        return sweep_workload.explore_combs_workloads(
+            [], [], [], workload_var="request_rate", workload_iters=2, **kwargs
+        )
+    return sweep_serve.run_combs([], [], [], **kwargs)
+
+
+@pytest.mark.parametrize("mode", ["serve", "serve_workload", "startup"])
+@pytest.mark.parametrize("axis", ["serve", "benchmark"])
+def test_sweep_rejects_sanitized_path_collisions(mode, axis, monkeypatch, tmp_path):
+    """Reject aliases before starting a child, including continue-on-error sweeps."""
+
+    def unexpected_process(*args, **kwargs):
+        pytest.fail("A child process was started before result-path validation")
+
+    monkeypatch.setattr(subprocess, "Popen", unexpected_process)
+    key = (
+        "max_model_len"
+        if axis == "serve"
+        else ("num_iters_cold" if mode == "startup" else "num_prompts")
+    )
+    colliding = ParameterSweep.read_from_dict(
+        {"experiment/a": {key: 10}, "experiment_a": {key: 20}}
+    )
+    default = ParameterSweep.from_records([{}])
+
+    with pytest.raises(ValueError, match="same result directory"):
+        _run_sweep(
+            mode,
+            tmp_path,
+            colliding if axis == "serve" else default,
+            colliding if axis == "benchmark" else default,
+            dry_run=False,
+        )
+
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("mode", ["serve", "serve_workload", "startup"])
+def test_sweep_rejects_collisions_between_combined_names(mode, monkeypatch, tmp_path):
+    """Distinct names on each axis can still alias after the axes are joined."""
+
+    def unexpected_process(*args, **kwargs):
+        pytest.fail("A child process was started before result-path validation")
+
+    monkeypatch.setattr(subprocess, "Popen", unexpected_process)
+    marker = "STARTUP" if mode == "startup" else "BENCH"
+    serve_params = ParameterSweep.read_from_dict({f"a-{marker}--b": {}, "a": {}})
+    bench_params = ParameterSweep.read_from_dict({"c": {}, f"b-{marker}--c": {}})
+
+    with pytest.raises(ValueError, match="same result directory"):
+        _run_sweep(mode, tmp_path, serve_params, bench_params, dry_run=False)
+
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("mode", ["serve", "serve_workload", "startup"])
+def test_sweep_accepts_distinct_result_paths(mode, tmp_path):
+    params = ParameterSweep.read_from_dict({"scenario-a": {}, "scenario-b": {}})
+
+    assert _run_sweep(mode, tmp_path, ParameterSweep.from_records([{}]), params) is None
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("mode", ["serve", "serve_workload"])
+def test_sweep_ignores_collisions_in_unselected_linked_combinations(mode, tmp_path):
+    serve_params = ParameterSweep.from_records([{"max_model_len": 16}])
+    bench_params = ParameterSweep.read_from_dict(
+        {
+            "experiment/a": {"random_input_len": 16},
+            "experiment_a": {"random_input_len": 32},
+        }
+    )
+
+    assert (
+        _run_sweep(
+            mode,
+            tmp_path,
+            serve_params,
+            bench_params,
+            link_vars=[("max_model_len", "random_input_len")],
+        )
+        is None
+    )
+
+
+def test_sweep_preserves_existing_paths_for_cached_results(tmp_path):
+    params = ParameterSweep.read_from_dict(
+        {"scenario-a": {"num_prompts": 10}, "scenario-b": {"num_prompts": 20}}
+    )
+    for name, completed in [("scenario-a", 10), ("scenario-b", 20)]:
+        directory = tmp_path / f"BENCH--{name}"
+        directory.mkdir()
+        (directory / "run=0.json").write_text(json.dumps({"completed": completed}))
+        (directory / "summary.json").write_text("[]")
+
+    frame = _run_sweep(
+        "serve", tmp_path, ParameterSweep.from_records([{}]), params, dry_run=False
+    )
+
+    assert frame["completed"].tolist() == [10, 20]
+    assert frame["num_prompts"].tolist() == [10, 20]
+    assert sorted(
+        directory.name for directory in tmp_path.iterdir() if directory.is_dir()
+    ) == [
+        "BENCH--scenario-a",
+        "BENCH--scenario-b",
+    ]
