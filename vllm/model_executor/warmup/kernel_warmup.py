@@ -396,6 +396,9 @@ def _run_flashinfer_autotune_dummy_runs(
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
+            dsv41 = sys.modules.get("vllm.models.deepseek_v41.attention")
+            if dsv41 is not None:
+                dsv41.autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
 def _run_flashinfer_bf16_autotune_dummy_run(
