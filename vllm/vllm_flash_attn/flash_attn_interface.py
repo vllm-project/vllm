@@ -307,6 +307,33 @@ def flash_attn_varlen_func(
         "seqused_k must be provided if block_table is provided"
     )
 
+    sm90_fp8_kv = (
+        k.dtype == torch.float8_e4m3fn and torch.cuda.get_device_capability()[0] == 9
+    )
+    fa4_fp8_kv_dequant = (
+        sm90_fp8_kv and q.shape[-1] == k.shape[-1] == v.shape[-1] == 512
+    )
+    if fa_version == 4 and sm90_fp8_kv and not fa4_fp8_kv_dequant:
+        if (
+            q.dtype == torch.float8_e4m3fn
+            and q.shape[-1] <= 256
+            and k.shape[-1] == q.shape[-1] == v.shape[-1]
+        ):
+            # The FP8-MMA V transpose below is specialized for two 256-column
+            # halves. Preserve the established FA3 FP8-KV path for smaller dims.
+            if dynamic_causal is not None or block_sparse_tensors is not None:
+                raise NotImplementedError(
+                    "SM90 FP8 FA3 fallback does not support dynamic_causal "
+                    "or block_sparse_tensors"
+                )
+            fa_version = 3
+        else:
+            raise NotImplementedError(
+                "SM90 FA4 FP8 MMA requires Q/K/V head dimension 512; "
+                f"got q={q.shape[-1]}, k={k.shape[-1]}, v={v.shape[-1]}. "
+                "FA3 fallback supports FP8 Q/K/V with head dimensions up to 256."
+            )
+
     assert output_scale is None or fa_version == 4, (
         f"Fused FP8 output (output_scale) is only supported by FA4, "
         f"got fa_version={fa_version}"
@@ -434,14 +461,9 @@ def flash_attn_varlen_func(
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
-        # SM90 FA4 fp8-KV path: fp8 e4m3 paged K/V dequantized and the K/V descale folded
-        # in-kernel; accepts bf16/fp16 Q and writes O in its native dtype (no Q cast, no
-        # output copy). Only the (batch, num_kv_heads) f32 K/V descales are forwarded.
-        fa4_fp8_kv_dequant = (
-            k.dtype == torch.float8_e4m3fn
-            and torch.cuda.get_device_capability()[0] == 9
-        )
-
+        # SM90 d512 uses native FP16/BF16 Q and paged E4M3 K/V with compensated
+        # FP8 QK/PV MMA and FP32 accumulation. K/V descales are folded in-kernel;
+        # O is written in Q's native dtype without an output copy.
         out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
