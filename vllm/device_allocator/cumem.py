@@ -360,8 +360,8 @@ class CuMemAllocator:
                         data.cpu_backup_tensor = None
                 elif current_platform.is_rocm():
                     # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
-                    stream = torch.cuda.current_stream().cuda_stream
-                    libcudart.cudaMemsetAsync(ptr, 0, handle[1], stream)
+                    libcudart.cudaMemset(ptr, 0, handle[1])
+                    torch.accelerator.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

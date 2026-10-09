@@ -60,12 +60,6 @@ class CudaRTLibrary:
         Function(
             "cudaMemset", cudaError_t, [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
         ),
-        # cudaError_t cudaMemsetAsync ( void* devPtr, int value, size_t count, cudaStream_t stream ) # noqa
-        Function(
-            "cudaMemsetAsync",
-            cudaError_t,
-            [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t, ctypes.c_void_p],
-        ),
         # ​cudaError_t cudaMemcpy ( void* dst, const void* src, size_t count, cudaMemcpyKind kind ) # noqa
         Function(
             "cudaMemcpy",
@@ -105,7 +99,6 @@ class CudaRTLibrary:
         "cudaMalloc": "hipMalloc",
         "cudaFree": "hipFree",
         "cudaMemset": "hipMemset",
-        "cudaMemsetAsync": "hipMemsetAsync",
         "cudaMemcpy": "hipMemcpy",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
@@ -181,11 +174,6 @@ class CudaRTLibrary:
 
     def cudaMemset(self, devPtr: ctypes.c_void_p, value: int, count: int) -> None:
         self.CUDART_CHECK(self.funcs["cudaMemset"](devPtr, value, count))
-
-    def cudaMemsetAsync(
-        self, devPtr: ctypes.c_void_p, value: int, count: int, stream: int
-    ) -> None:
-        self.CUDART_CHECK(self.funcs["cudaMemsetAsync"](devPtr, value, count, stream))
 
     def cudaMemcpy(
         self, dst: ctypes.c_void_p, src: ctypes.c_void_p, count: int
