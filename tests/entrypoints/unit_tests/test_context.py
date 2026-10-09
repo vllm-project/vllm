@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.responses.context import (
 )
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import ChunkResult, HarmonyParser, Segment
+from vllm.v1.metrics.stats import RequestSpecDecodeMetrics
 
 
 def create_mock_request_output(
@@ -20,6 +21,7 @@ def create_mock_request_output(
     output_token_ids=None,
     num_cached_tokens=0,
     finished=True,
+    spec_decode_metrics=None,
 ):
     """Helper function to create a mock RequestOutput object for testing."""
     outputs = []
@@ -33,6 +35,7 @@ def create_mock_request_output(
             logprobs=None,
             finish_reason=None,
             stop_reason=None,
+            spec_decode_metrics=spec_decode_metrics,
         )
     ]
 
@@ -921,3 +924,67 @@ def test_simple_context_output_messages_no_mutation():
     assert len(msgs3) == 1
     assert msgs3[0].message == "hello world"
     assert msgs3[0].tokens == [1, 2]
+
+
+def _spec_decode_metrics(*accepted: int) -> RequestSpecDecodeMetrics:
+    m = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
+    for j in accepted:
+        m.observe(num_draft_tokens=3, num_accepted=j)
+    return m
+
+
+def test_harmony_context_sums_spec_decode_metrics_across_turns():
+    context, _ = make_harmony_context(available_tools=["browser"])
+    turn1 = _spec_decode_metrics(3, 0)
+    turn2 = _spec_decode_metrics(1)
+    context.append_output(
+        create_mock_request_output([1, 2], [3], spec_decode_metrics=turn1)
+    )
+    context.append_output(
+        create_mock_request_output([1, 2, 3, 4], [5], spec_decode_metrics=turn2)
+    )
+
+    assert context.spec_decode_metrics is not None
+    assert context.spec_decode_metrics.histogram == [1, 1, 0, 1]
+    assert context.spec_decode_metrics.num_draft_tokens == 9
+    # per-turn metrics owned by the RequestOutput are not mutated
+    assert turn1.histogram == [1, 0, 0, 1]
+
+
+def test_simple_context_sums_spec_decode_metrics_across_turns():
+    context = SimpleContext()
+    context.append_output(
+        create_mock_request_output(
+            [1], [2], spec_decode_metrics=_spec_decode_metrics(2)
+        )
+    )
+    context.append_output(
+        create_mock_request_output(
+            [1], [3], spec_decode_metrics=_spec_decode_metrics(3, 3)
+        )
+    )
+
+    assert context.spec_decode_metrics is not None
+    assert context.spec_decode_metrics.histogram == [0, 0, 1, 2]
+
+
+def test_context_spec_decode_metrics_absent_when_not_collected():
+    context, _ = make_harmony_context()
+    context.append_output(create_mock_request_output([1], [2]))
+    assert context.spec_decode_metrics is None
+
+
+def test_spec_decode_metrics_ignored_on_unfinished_outputs():
+    context, _ = make_harmony_context()
+    metrics = _spec_decode_metrics(3)
+    context.append_output(
+        create_mock_request_output(
+            [1], [2], finished=False, spec_decode_metrics=metrics
+        )
+    )
+    assert context.spec_decode_metrics is None
+    context.append_output(
+        create_mock_request_output([1], [3], spec_decode_metrics=metrics)
+    )
+    assert context.spec_decode_metrics is not None
+    assert context.spec_decode_metrics.histogram == [0, 0, 0, 1]
