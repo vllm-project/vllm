@@ -16,7 +16,7 @@ via Gemma4MultimodalEmbedder.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,7 +25,7 @@ import torch
 import torch._dynamo
 from torch import nn
 from torch.nn import functional as F
-from transformers import AutoModel
+from transformers import AutoModel, DiffusionGemmaConfig
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -113,26 +113,13 @@ class DiffusionGemmaSelfConditioning(nn.Module):
 
 
 class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
-    """Processing info for DiffusionGemma.
+    """Processing info for DiffusionGemma, which has no audio tower."""
 
-    Overrides ``get_hf_config`` to accept ``DiffusionGemmaConfig``
-    (which inherits from ``PreTrainedConfig``, not ``Gemma4Config``).
-    Supports image and video modalities.
-    """
+    def get_hf_config(self) -> DiffusionGemmaConfig:
+        return self.ctx.get_hf_config(DiffusionGemmaConfig)
 
-    def get_hf_config(self):
-        # DiffusionGemmaConfig doesn't inherit from Gemma4Config, so we
-        # accept any PreTrainedConfig here.
-        return self.ctx.get_hf_config()
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        # DiffusionGemma supports image and video inputs.
-        return {"image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> Mapping[str, int] | None:
-        return super().get_mm_max_tokens_per_item(seq_len, mm_counts)
+    def has_audio(self) -> bool:
+        return False
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
@@ -445,11 +432,6 @@ def _mask_rows_to_allowed(
     return logits if out is None else out
 
 
-# Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
-# on compute_sc and on sizes that coincide with the state buffers. That set
-# is small but passes Dynamo's default of 8, after which every step would run
-# eager: about twice as slow for a self-conditioned step.
-@torch._dynamo.config.patch(recompile_limit=64)
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _denoise_temperature(
     step_tensor: torch.Tensor,
@@ -464,6 +446,12 @@ def _denoise_temperature(
     return t_min + (t_max - t_min) * (remaining / max_denoising_steps)
 
 
+# Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
+# on compute_sc and on sizes that coincide with the state buffers. That set
+# is small but passes Dynamo's default of 8, after which every step would run
+# eager: about twice as slow for a self-conditioned step.
+@torch._dynamo.config.patch(recompile_limit=64)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compiled_sample_step(
     # Per-position statistics of the temperature-scaled logits, from
     # sample_row_stats: [num_decode, CL] each, and the softmax
@@ -909,9 +897,12 @@ class DiffusionGemmaModelState(ModelState):
         self._req_id_to_index: dict[str, int] = {}
 
         # Persistent buffer for per-request causal flags, updated in-place
-        # so FULL CUDA graph replay sees the latest values.
+        # so FULL CUDA graph replay sees the latest values. Must be int32:
+        # FlashAttentionMetadataBuilder.build() rejects other dtypes, since
+        # an out-of-place cast there would detach the captured graph from
+        # this buffer and freeze replay at the capture-time snapshot.
         self._causal_buf = torch.zeros(
-            self.max_num_reqs, dtype=torch.bool, device=device
+            self.max_num_reqs, dtype=torch.int32, device=device
         )
 
         # Persistent inputs_embeds buffer — required so FULL CUDA graph
@@ -1116,11 +1107,11 @@ class DiffusionGemmaModelState(ModelState):
         # Invariant: the sampler flips is_encoder_phase to False only after a
         # request's FINAL prompt chunk, so a prompt spanning multiple chunks
         # (longer than the token budget) stays causal for every chunk.
-        self._causal_buf[:actual_num_reqs] = self.diffusion_states.is_encoder_phase[
-            slots
-        ]
+        self._causal_buf[:actual_num_reqs].copy_(
+            self.diffusion_states.is_encoder_phase[slots]
+        )
         if actual_num_reqs < num_reqs:
-            self._causal_buf[actual_num_reqs:num_reqs] = False
+            self._causal_buf[actual_num_reqs:num_reqs] = 0
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
 
         return build_attn_metadata(
@@ -1493,7 +1484,7 @@ class DiffusionSampler:
         # [tile * W, vocab] copies, so a tile is also bounded by free memory.
         widths_np = states.canvas_width_np[decode_slots_np]
         order = np.argsort(widths_np, kind="stable")
-        free = current_platform.mem_get_info()[0] if num_decode > 0 else 0
+        free = torch.accelerator.get_memory_info()[0] if num_decode > 0 else 0
         run_start = 0
         while run_start < num_decode:
             W = int(widths_np[order[run_start]])
