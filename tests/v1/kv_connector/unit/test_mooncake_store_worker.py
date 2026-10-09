@@ -29,7 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
-    partial_tail_block_ranges,
+    partial_tail_non_mamba_blocks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlobBlockHashes,
@@ -947,7 +947,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
 
 def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
     """Resolve the tail on ``req`` as the scheduler does before the worker."""
-    req.partial_tail = partial_tail_block_ranges(
+    req.partial_tail_non_mamba = partial_tail_non_mamba_blocks(
         thread.coord, req, [db.block_size for db in thread.token_databases]
     )
     return req
@@ -1454,7 +1454,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
         publish_partial_tail=True,
     )
     assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
-    assert req.partial_tail == {0: (44, range(2, 3))}
+    assert req.partial_tail_non_mamba == {0: (44, range(2, 3))}
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     # Mamba block cdiv(44, 8) - 1 = 5 belongs to put_step_rank 5 % 2 = 1,

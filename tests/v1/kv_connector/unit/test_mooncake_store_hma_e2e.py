@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     MooncakeStoreCoordinator,
-    partial_tail_block_ranges,
+    partial_tail_non_mamba_blocks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
@@ -382,7 +382,7 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
 
 def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
     """Resolve the tail on ``req`` as the scheduler does before the worker."""
-    req.partial_tail = partial_tail_block_ranges(
+    req.partial_tail_non_mamba = partial_tail_non_mamba_blocks(
         thread.coord, req, [db.block_size for db in thread.token_databases]
     )
     return req

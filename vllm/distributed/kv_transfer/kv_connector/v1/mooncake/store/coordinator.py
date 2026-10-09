@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import NamedTuple, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
-    PartialTail,
+    PartialTailNonMamba,
     ReqMeta,
     chunk_hashes_for_block_size,
 )
@@ -124,26 +124,26 @@ class MooncakeStoreCoordinator:
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
 
-    def resolve_partial_tail(self, req_meta: ReqMeta) -> None:
+    def resolve_partial_tail_non_mamba(self, req_meta: ReqMeta) -> None:
         """Compute the blocks this job's partial-tail save publishes.
 
         Runs once per store job on the scheduler; the worker puts the result.
         """
-        req_meta.partial_tail = partial_tail_block_ranges(
+        req_meta.partial_tail_non_mamba = partial_tail_non_mamba_blocks(
             self,
             req_meta,
             [group.kv_cache_spec.block_size for group in self.kv_cache_groups],
         )
 
-    def tail_attention_block_ids(self, req_meta: ReqMeta) -> list[int]:
-        """Return full-attention block IDs needed to complete a Mamba tail hit.
+    def partial_tail_non_mamba_block_ids(self, req_meta: ReqMeta) -> list[int]:
+        """Return the non-Mamba block IDs needed to complete a Mamba tail hit.
 
         Mamba state IDs are handled separately.
         """
-        if req_meta.partial_tail is None:
+        if req_meta.partial_tail_non_mamba is None:
             return []
         block_ids: list[int] = []
-        for group_id, (_, block_indices) in req_meta.partial_tail.items():
+        for group_id, (_, block_indices) in req_meta.partial_tail_non_mamba.items():
             group_blocks = req_meta.block_ids[group_id]
             block_ids.extend(
                 group_blocks[idx]
@@ -498,11 +498,11 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     return spec
 
 
-def partial_tail_block_ranges(
+def partial_tail_non_mamba_blocks(
     coord: MooncakeStoreCoordinator,
     req_meta: ReqMeta,
     block_sizes: Sequence[int],
-) -> PartialTail | None:
+) -> PartialTailNonMamba | None:
     """Locate the non-Mamba blocks a partial-tail save publishes.
 
     A later request resumes at the prompt's Mamba checkpoint (``boundary``) only

@@ -742,8 +742,8 @@ class RequestTracker:
 
 
 # {group_id: (proof_end, block_indices)} for the non-Mamba groups; see
-# ``partial_tail_block_ranges``.
-PartialTail = dict[int, tuple[int, range]]
+# ``partial_tail_non_mamba_blocks``.
+PartialTailNonMamba = dict[int, tuple[int, range]]
 
 
 @dataclass
@@ -779,9 +779,9 @@ class ReqMeta:
     # Set on the save that first covers the whole prompt, so the scheduler
     # publishes the prompt's partial tail once rather than on every save.
     publish_partial_tail: bool = False
-    # Scheduler-computed ``partial_tail_block_ranges`` result: the scheduler
+    # Scheduler-computed ``partial_tail_non_mamba_blocks`` result: the scheduler
     # pins exactly these blocks and the worker puts exactly these blocks.
-    partial_tail: PartialTail | None = None
+    partial_tail_non_mamba: PartialTailNonMamba | None = None
 
     @staticmethod
     def from_request_tracker(

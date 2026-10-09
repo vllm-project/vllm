@@ -51,7 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
-    PartialTail,
+    PartialTailNonMamba,
     PoolKey,
     ReqMeta,
     StoreShardId,
@@ -618,8 +618,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             )
         return puts
 
-    def _partial_tail_attention_puts(
-        self, req_meta: ReqMeta, tail_blocks_by_group: PartialTail
+    def _partial_tail_non_mamba_puts(
+        self, req_meta: ReqMeta, tail_blocks_by_group: PartialTailNonMamba
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
         """Puts for the non-Mamba blocks of the request's sub-block partial
         tail, so a later request can hit the sub-block prefix.
@@ -670,7 +670,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         This is every mamba key the connector writes — ``store_mask`` excludes
         mamba groups from the positional normal save, aligned boundaries
         included (see :meth:`_mamba_state_puts`). The scheduler-resolved
-        partial tail (``ReqMeta.partial_tail``) adds the other groups' blocks
+        partial tail (``ReqMeta.partial_tail_non_mamba``) adds the other groups' blocks
         in the normal save's lcm gap; both go in one batch.
 
         Returns:
@@ -680,14 +680,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         mamba_offloads = req_meta.boundary_state_offloads or []
         if not req_meta.block_hashes:
             return True
-        partial_tail = req_meta.partial_tail
-        if not mamba_offloads and partial_tail is None:
+        partial_tail_non_mamba = req_meta.partial_tail_non_mamba
+        if not mamba_offloads and partial_tail_non_mamba is None:
             return True
 
         puts = (
             []
-            if partial_tail is None
-            else self._partial_tail_attention_puts(req_meta, partial_tail)
+            if partial_tail_non_mamba is None
+            else self._partial_tail_non_mamba_puts(req_meta, partial_tail_non_mamba)
         )
         puts.extend(self._mamba_state_puts(req_meta, mamba_offloads))
         puts = list({put[0]: put for put in puts}.values())

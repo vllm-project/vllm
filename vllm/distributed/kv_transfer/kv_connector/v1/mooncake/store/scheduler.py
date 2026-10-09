@@ -495,7 +495,7 @@ class MooncakeStoreScheduler:
             if req_meta.store_job_id is not None:
                 assert req_meta.store_job_id in self._pinned_saves
                 continue
-            self._store_coord.resolve_partial_tail(req_meta)
+            self._store_coord.resolve_partial_tail_non_mamba(req_meta)
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
             block_ids: list[int] = []
@@ -508,7 +508,9 @@ class MooncakeStoreScheduler:
             )
             if req_meta.token_len_chunk == 0:
                 # Tail-only save: pin the companion attention proof.
-                block_ids.extend(self._store_coord.tail_attention_block_ids(req_meta))
+                block_ids.extend(
+                    self._store_coord.partial_tail_non_mamba_block_ids(req_meta)
+                )
             else:
                 # Normal prefix save: pin all attention sources for retries.
                 # Every allocated block is referenced, not just the ones covering
@@ -575,8 +577,10 @@ class MooncakeStoreScheduler:
             boundary_state_offloads=remapped_offloads,
             completed_token_len=request.num_computed_tokens,
         )
-        self._store_coord.resolve_partial_tail(req_meta)
-        pinned_block_ids.extend(self._store_coord.tail_attention_block_ids(req_meta))
+        self._store_coord.resolve_partial_tail_non_mamba(req_meta)
+        pinned_block_ids.extend(
+            self._store_coord.partial_tail_non_mamba_block_ids(req_meta)
+        )
         pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
 
         pool = self._gpu_block_pool
