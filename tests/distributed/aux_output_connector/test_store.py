@@ -22,6 +22,8 @@ from vllm.distributed.aux_output_connector.logprobs import (
     LogprobRows,
     decode_rows,
     encode_rows,
+    rows_from_lists,
+    rows_from_tensors,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -91,6 +93,34 @@ def test_variable_store_round_trips_logprob_rows():
     np.testing.assert_array_equal(result.values, rows.values)
     np.testing.assert_array_equal(result.ranks, rows.ranks)
     store.close()
+
+
+def test_logprob_rows_preserve_top_k_width_and_ranks():
+    """Auxiliary rows retain the request-level top-k payload shape."""
+    lists = LogprobsLists(
+        np.array([[11, 12, 13], [21, 22, 23]], dtype=np.int64),
+        np.array([[-0.1, -0.2, -0.3], [-1.1, -1.2, -1.3]], dtype=np.float64),
+        np.array([0, 2], dtype=np.int64),
+    )
+    rows = rows_from_lists(lists, start=7)
+
+    np.testing.assert_array_equal(rows.positions, [7, 8])
+    np.testing.assert_array_equal(rows.token_ids, lists.logprob_token_ids)
+    np.testing.assert_allclose(rows.values, lists.logprobs)
+    np.testing.assert_array_equal(rows.ranks, lists.sampled_token_ranks)
+    assert rows.token_ids.dtype == np.dtype("int32")
+    assert rows.values.dtype == np.dtype("float32")
+    assert rows.ranks.dtype == np.dtype("int32")
+
+    tensors = LogprobsTensors(
+        torch.from_numpy(lists.logprob_token_ids),
+        torch.from_numpy(lists.logprobs),
+        torch.from_numpy(lists.sampled_token_ranks),
+    )
+    tensor_rows = rows_from_tensors(tensors, start=7)
+    np.testing.assert_array_equal(tensor_rows.token_ids, rows.token_ids)
+    np.testing.assert_allclose(tensor_rows.values, rows.values)
+    np.testing.assert_array_equal(tensor_rows.ranks, rows.ranks)
 
 
 def test_variable_store_rolls_back_references_after_failed_put():
@@ -1930,6 +1960,32 @@ def test_scheduler_rejects_missing_prompt_logprob_artifact():
         connector.take_prompt_logprobs(
             request, {request.request_id: AuxRequestOutput(0)}
         )
+
+
+def test_scheduler_takes_generated_logprobs_without_routed_experts():
+    connector = AuxOutputSchedulerConnector(
+        enable_routed_experts=False,
+        enable_logprobs=True,
+    )
+    request = _scheduler_request("request", [b"a" * 32])
+    request.sampling_params = SimpleNamespace(
+        routed_experts_prompt_start=0,
+        extra_args={"aux_output_replay": True},
+        num_logprobs=2,
+        prompt_logprobs=None,
+        logprob_token_ids=None,
+        prompt_logprob_token_ids=None,
+    )
+    connector.build_connector_meta(
+        _step_output([request.request_id], [0], [4]),
+        {request.request_id: request},
+    )
+
+    rows = _logprob_rows(4, 1)
+    value = LogprobsLists(rows.token_ids, rows.values, rows.ranks)
+    output = {request.request_id: AuxRequestOutput(0, logprobs=value)}
+
+    assert connector.take_logprobs(request, output) is value
 
 
 def test_logprob_artifact_identity_includes_boundary_token():
