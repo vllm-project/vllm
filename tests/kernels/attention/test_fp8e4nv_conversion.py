@@ -8,7 +8,7 @@ on dtype; encode is round-to-nearest-even, and decode is exact.
 Oracle (per the test plan):
   * SM75-SM88: compare against a PyTorch reference. The reference SATURATES
     overflow (and +-inf) to the fp8 representable max (+-448), preserving
-    signed E4M3 NaNs only with HANDLE_NAN enabled.
+    signed E4M3 NaNs only with propagate_nan enabled.
   * SM89+: the same sampled set, plus a FULL barrage over every one of the 65,536
     fp16/bf16 bit patterns, cross-checked against the native hardware fp8 cast
     (which the saturating reference lowers to once the input is clamped in range).
@@ -56,7 +56,7 @@ def _decode_kernel(
     IS_FP16: tl.constexpr,
     IS_FP32: tl.constexpr,
     BLOCK: tl.constexpr,
-    HANDLE_NAN: tl.constexpr = False,
+    propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = True,
 ):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -65,7 +65,7 @@ def _decode_kernel(
     dt = tl.float16 if IS_FP16 else tl.float32 if IS_FP32 else tl.bfloat16
     tl.store(
         out_ptr + offs,
-        convert_from_fp8e4m3(x, dt, HANDLE_NAN, FORCE_SOFTWARE_CONVERSION),
+        convert_from_fp8e4m3(x, dt, propagate_nan, FORCE_SOFTWARE_CONVERSION),
         mask=mask,
     )
 
@@ -76,7 +76,7 @@ def _encode_kernel(
     out_ptr,
     n,
     BLOCK: tl.constexpr,
-    HANDLE_NAN: tl.constexpr = False,
+    propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = True,
 ):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -84,7 +84,7 @@ def _encode_kernel(
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
     tl.store(
         out_ptr + offs,
-        convert_to_fp8e4m3(x, HANDLE_NAN, FORCE_SOFTWARE_CONVERSION),
+        convert_to_fp8e4m3(x, propagate_nan, FORCE_SOFTWARE_CONVERSION),
         mask=mask,
     )
 
@@ -96,7 +96,7 @@ def _finite_fp8_bytes() -> torch.Tensor:
 
 
 def _run_decode(
-    x_u8: torch.Tensor, dtype: torch.dtype, handle_nan: bool = False
+    x_u8: torch.Tensor, dtype: torch.dtype, propagate_nan: bool = False
 ) -> torch.Tensor:
     out = torch.empty(x_u8.numel(), dtype=dtype, device="cuda")
     n = x_u8.numel()
@@ -104,7 +104,7 @@ def _run_decode(
         x_u8,
         out,
         n,
-        HANDLE_NAN=handle_nan,
+        propagate_nan=propagate_nan,
         IS_FP16=(dtype == torch.float16),
         IS_FP32=(dtype == torch.float32),
         BLOCK=256,
@@ -115,7 +115,7 @@ def _run_decode(
 
 
 def _run_encode(
-    x: torch.Tensor, block: int = 256, handle_nan: bool = False
+    x: torch.Tensor, block: int = 256, propagate_nan: bool = False
 ) -> torch.Tensor:
     out = torch.empty(x.numel(), dtype=torch.uint8, device="cuda")
     n = x.numel()
@@ -125,7 +125,7 @@ def _run_encode(
         n,
         BLOCK=block,
         num_warps=4,
-        HANDLE_NAN=handle_nan,
+        propagate_nan=propagate_nan,
         extern_libs=FP8E4NV_EXTERN_LIBS,
     )
     return out
@@ -201,8 +201,8 @@ def _all_uint16_as(dtype: torch.dtype) -> torch.Tensor:
     "dtype,min_cap",
     [(torch.float16, 75), (torch.bfloat16, 80), (torch.float32, 75)],
 )
-@pytest.mark.parametrize("handle_nan", [False, True])
-def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int, handle_nan: bool):
+@pytest.mark.parametrize("propagate_nan", [False, True])
+def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int, propagate_nan: bool):
     """fp8 -> {fp16, bf16, fp32} is exact for every finite byte (incl. denorms).
 
     The decode input domain is only 256 bytes, so 'all finite bytes' is already
@@ -211,14 +211,14 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int, handle_nan: bo
     """
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
-    if handle_nan:
+    if propagate_nan:
         nan_bytes = torch.tensor([0x7F, 0xFF], dtype=torch.uint8, device="cuda")
-        decoded_nan = _run_decode(nan_bytes, dtype, handle_nan=True)
+        decoded_nan = _run_decode(nan_bytes, dtype, propagate_nan=True)
         # NaN sign and payload are not part of this contract; only NaN output
         # is required.
         assert torch.isnan(decoded_nan).all()
     x_u8 = _finite_fp8_bytes()
-    actual = _run_decode(x_u8, dtype, handle_nan=handle_nan)
+    actual = _run_decode(x_u8, dtype, propagate_nan=propagate_nan)
     expected = x_u8.view(FP8_DTYPE).to(dtype)
     torch.testing.assert_close(
         actual.view(torch.uint8), expected.view(torch.uint8), atol=0.0, rtol=0.0
@@ -231,9 +231,9 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int, handle_nan: bo
     [(torch.float16, 75), (torch.bfloat16, 80), (torch.float32, 75)],
 )
 @pytest.mark.parametrize("block", [64, 128, 256, 512])
-@pytest.mark.parametrize("handle_nan", [False, True])
+@pytest.mark.parametrize("propagate_nan", [False, True])
 def test_encode_sampled_edge_cases(
-    dtype: torch.dtype, min_cap: int, block: int, handle_nan: bool
+    dtype: torch.dtype, min_cap: int, block: int, propagate_nan: bool
 ):
     """RNE encode over a sampled set incl. edge cases, bit-exact vs the saturating
     reference. Runs on SM75-SM88 (reference oracle) and SM89+ (reference lowers to
@@ -241,9 +241,9 @@ def test_encode_sampled_edge_cases(
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
     x = _edge_case_inputs(dtype)
-    if not handle_nan:
+    if not propagate_nan:
         x = x[~x.isnan()]
-    actual = _run_encode(x, block, handle_nan)
+    actual = _run_encode(x, block, propagate_nan)
     ref = _saturating_fp8_ref(x)
     torch.testing.assert_close(
         actual.view(torch.uint8),
@@ -281,18 +281,18 @@ def test_encode_fp32_avoids_16bit_double_rounding(
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block", [256, 512])
-@pytest.mark.parametrize("handle_nan", [False, True])
+@pytest.mark.parametrize("propagate_nan", [False, True])
 def test_encode_full_barrage_matches_native_on_sm89(
-    dtype: torch.dtype, block: int, handle_nan: bool
+    dtype: torch.dtype, block: int, propagate_nan: bool
 ):
     """On SM89+, the RNE encode is cross-checked against the native float -> fp8 cvt
     over EVERY one of the 65,536 input bit patterns (normals, subnormals, signed
     zeros, overflow, +-inf, +-NaN -- overflow saturates, NaNs remain NaNs
     when handling is enabled)."""
     x = _all_uint16_as(dtype)
-    if not handle_nan:
+    if not propagate_nan:
         x = x[~x.isnan()]
-    actual = _run_encode(x, block, handle_nan)
+    actual = _run_encode(x, block, propagate_nan)
     native = _saturating_fp8_ref(x)  # native hardware cvt on SM89+ (clamped input)
     torch.testing.assert_close(
         actual.view(torch.uint8),
@@ -304,12 +304,12 @@ def test_encode_full_barrage_matches_native_on_sm89(
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block", [64, 128, 256, 512])
-@pytest.mark.parametrize("handle_nan", [False, True])
-def test_decode_partial_per_thread_packs(dtype, block, handle_nan):
+@pytest.mark.parametrize("propagate_nan", [False, True])
+def test_decode_partial_per_thread_packs(dtype, block, propagate_nan):
     if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
         pytest.skip("BF16 requires SM80+")
     raw = torch.arange(block, dtype=torch.int32, device="cuda").to(torch.uint8)
-    if not handle_nan:
+    if not propagate_nan:
         raw = torch.where((raw & 0x7F) == 0x7F, 0, raw)
     out = torch.empty(block, dtype=dtype, device="cuda")
     _decode_kernel[(1,)](
@@ -319,7 +319,7 @@ def test_decode_partial_per_thread_packs(dtype, block, handle_nan):
         IS_FP16=(dtype == torch.float16),
         IS_FP32=False,
         BLOCK=block,
-        HANDLE_NAN=handle_nan,
+        propagate_nan=propagate_nan,
         num_warps=4,
         extern_libs=FP8E4NV_EXTERN_LIBS,
     )
@@ -378,7 +378,11 @@ def test_software_conversion_requires_explicit_override_on_native_targets(
         "out_ptr": "*u8" if direction == "encode" else "*fp16",
         "n": "i32",
     }
-    constants = {"BLOCK": 128, "HANDLE_NAN": False, "FORCE_SOFTWARE_CONVERSION": force}
+    constants = {
+        "BLOCK": 128,
+        "propagate_nan": False,
+        "FORCE_SOFTWARE_CONVERSION": force,
+    }
     kernel = _encode_kernel if direction == "encode" else _decode_kernel
     if direction == "decode":
         constants.update(IS_FP16=True, IS_FP32=False)
@@ -410,32 +414,32 @@ def _policy_kernel(
     ENCODE: tl.constexpr,
     BF16: tl.constexpr,
     PACK: tl.constexpr,
-    HANDLE_NAN: tl.constexpr,
-    FLUSH_UNDERFLOW: tl.constexpr,
+    propagate_nan: tl.constexpr,
+    enable_ftz: tl.constexpr,
 ):
     """Exercise the direct PTX interface without caller-side packing."""
     offsets = tl.program_id(0) * 512 + tl.arange(0, 512)
     x = tl.load(src + offsets, offsets < n, other=0)
     if ENCODE:
-        y = ptx_convert_to(x, HANDLE_NAN, True, FLUSH_UNDERFLOW, PACK)
+        y = ptx_convert_to(x, PACK, propagate_nan, True, enable_ftz)
     else:
         y = ptx_convert_from(
             x,
             tl.bfloat16 if BF16 else tl.float16,
-            HANDLE_NAN,
-            True,
-            FLUSH_UNDERFLOW,
             PACK,
+            propagate_nan,
+            True,
+            enable_ftz,
         )
     tl.store(dst + offsets, y, offsets < n)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("pack", [1, 2, 4, None])
+@pytest.mark.parametrize("pack", [1, 2, 4])
 @pytest.mark.parametrize("encode", [False, True])
-@pytest.mark.parametrize("handle_nan", [False, True])
-@pytest.mark.parametrize("flush_underflow", [False, True])
-def test_packed_conversion_policies(dtype, pack, encode, handle_nan, flush_underflow):
+@pytest.mark.parametrize("propagate_nan", [False, True])
+@pytest.mark.parametrize("enable_ftz", [False, True])
+def test_packed_conversion_policies(dtype, pack, encode, propagate_nan, enable_ftz):
     """Check independent policies over every input encoding, including signed zeros."""
     if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
         pytest.skip("bf16 needs SM80+")
@@ -444,13 +448,13 @@ def test_packed_conversion_policies(dtype, pack, encode, handle_nan, flush_under
         src = bits.view(dtype)
         expected = _saturating_fp8_ref(src)
         finite = ~src.isnan()
-        if flush_underflow:
+        if enable_ftz:
             expected = torch.where(src.abs() < 2**-6, 0, expected)
     else:
         src = torch.arange(256, device="cuda", dtype=torch.int32).to(torch.uint8)
         expected = src.view(FP8_DTYPE).to(dtype)
         finite = (src & 0x7F) != 0x7F
-        if flush_underflow:
+        if enable_ftz:
             expected = torch.where(
                 (src & 0x78) == 0, torch.zeros_like(expected), expected
             )
@@ -462,14 +466,14 @@ def test_packed_conversion_policies(dtype, pack, encode, handle_nan, flush_under
         encode,
         dtype == torch.bfloat16,
         pack,
-        handle_nan,
-        flush_underflow,
+        propagate_nan,
+        enable_ftz,
         num_warps=4,
     )
     assert torch.equal(
         actual[finite].view(torch.uint8), expected[finite].view(torch.uint8)
     )
-    if handle_nan:
+    if propagate_nan:
         # PTX requires NaN output, not preservation of NaN sign or payload.
         if encode:
             assert torch.all((actual[~finite] & 0x7F) == 0x7F)

@@ -43,8 +43,8 @@ def _bench(
     MODE: tl.constexpr,
     ASM: tl.constexpr,
     CONSTRAINTS: tl.constexpr,
-    HANDLE_NAN: tl.constexpr,
-    FLUSH_UNDERFLOW: tl.constexpr,
+    propagate_nan: tl.constexpr,
+    enable_ftz: tl.constexpr,
     ITERS: tl.constexpr,
 ):
     """Measure conversion chains so load/store bandwidth cannot hide their cost."""
@@ -64,20 +64,20 @@ def _bench(
             )
         elif ENCODE:
             if MODE == 0:
-                y = convert_to_fp8e4m3(x, HANDLE_NAN, True)
+                y = convert_to_fp8e4m3(x, propagate_nan, True)
             else:
-                y = ptx_to(x, HANDLE_NAN, True, FLUSH_UNDERFLOW, PACK)
+                y = ptx_to(x, PACK, propagate_nan, True, enable_ftz)
         else:
             if MODE == 0:
-                y = convert_from_fp8e4m3(x, dtype, HANDLE_NAN, True)
+                y = convert_from_fp8e4m3(x, dtype, propagate_nan, True)
             else:
                 y = ptx_from(
                     x,
                     dtype,
-                    HANDLE_NAN,
-                    True,
-                    FLUSH_UNDERFLOW,
                     PACK,
+                    propagate_nan,
+                    True,
+                    enable_ftz,
                 )
         # A dependent finite input for the next iteration prevents conversion CSE.
         if ENCODE:
@@ -94,8 +94,8 @@ def main():
     parser.add_argument("--elements", type=int, default=1 << 20)
     parser.add_argument("--iterations", type=int, nargs="+", default=[1, 64])
     parser.add_argument("--rounds", type=int, default=5)
-    parser.add_argument("--handle-nan", action="store_true")
-    parser.add_argument("--flush-underflow", action="store_true")
+    parser.add_argument("--propagate-nan", action="store_true")
+    parser.add_argument("--enable-ftz", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -123,8 +123,8 @@ def main():
                     direction,
                     dtype_name,
                     pack,
-                    args.handle_nan,
-                    args.flush_underflow,
+                    args.propagate_nan,
+                    args.enable_ftz,
                 )
                 constraints = (
                     ("=h,h" if pack == 1 else "=r,r" if pack == 2 else "=r,r,r")
@@ -132,7 +132,7 @@ def main():
                     else ("=h,r" if pack == 1 else "=r,r" if pack == 2 else "=r,=r,r")
                 )
                 modes = [1, 2]
-                if not args.flush_underflow:
+                if not args.enable_ftz:
                     modes.insert(0, 0)
                 for iters in args.iterations:
                     calls, compiled, outputs = {}, {}, {}
@@ -165,8 +165,8 @@ def main():
                                 mode,
                                 asm,
                                 constraints,
-                                args.handle_nan,
-                                args.flush_underflow,
+                                args.propagate_nan,
+                                args.enable_ftz,
                                 iters,
                                 num_warps=4,
                                 extern_libs=FP8E4NV_EXTERN_LIBS,
@@ -203,8 +203,8 @@ def main():
                         "median_us": {
                             m: statistics.median(s) * 1000 for m, s in samples.items()
                         },
-                        "handle_nan": args.handle_nan,
-                        "flush_underflow": args.flush_underflow,
+                        "propagate_nan": args.propagate_nan,
+                        "enable_ftz": args.enable_ftz,
                     }
                     rows.append(row)
                     (args.output / "measurements.json").write_text(

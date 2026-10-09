@@ -404,14 +404,14 @@ def _convert(
     dtype,
     width,
     encode,
-    HANDLE_NAN,
-    FLUSH_UNDERFLOW,
+    propagate_nan,
+    enable_ftz,
     _semantic=None,
 ):
     """Pass packed tensors directly to inline PTX without caller repacking."""
     unwrap = tl.core._unwrap_if_constexpr
     dtype, width, encode, nan, flush = map(
-        unwrap, (dtype, width, encode, HANDLE_NAN, FLUSH_UNDERFLOW)
+        unwrap, (dtype, width, encode, propagate_nan, enable_ftz)
     )
     name = "fp16" if dtype == tl.float16 else "bf16"
     assert dtype in (tl.float16, tl.bfloat16)
@@ -435,14 +435,16 @@ def _convert(
 @triton.jit
 def convert_to_fp8e4m3(
     x,
-    HANDLE_NAN: tl.constexpr = False,
+    pack: tl.constexpr,
+    propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
-    FLUSH_UNDERFLOW: tl.constexpr = False,
-    PACK: tl.constexpr = None,
+    enable_ftz: tl.constexpr = False,
 ):
     """Encode FP16/BF16 to saturating RNE E4M3 bytes.
 
-    With FLUSH_UNDERFLOW=True, positive and negative underflows and negative
+    pack is required and must be 1, 2, or 4.
+
+    With enable_ftz=True, positive and negative underflows and negative
     zero all flush to +0. The input cutoff is |x| < 2**-6. With flushing
     disabled, subnormals and signed zeros are preserved. NaN sign/payload are
     unspecified; opt-in NaN handling guarantees a NaN output only.
@@ -451,31 +453,24 @@ def convert_to_fp8e4m3(
         x.dtype == tl.float16 or x.dtype == tl.bfloat16, "expected FP16 or BF16 input"
     )
     _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
-    width: tl.constexpr = (
-        PACK
-        if PACK is not None
-        else 4
-        if x.numel >= 4 * tl.extra.cuda.num_threads()
-        else 2
-        if x.numel >= 2 * tl.extra.cuda.num_threads()
-        else 1
-    )
-    tl.static_assert(width == 1 or width == 2 or width == 4, "PACK must be 1, 2, or 4")
-    return _convert(x, x.dtype, width, True, HANDLE_NAN, FLUSH_UNDERFLOW)
+    tl.static_assert(pack == 1 or pack == 2 or pack == 4, "pack must be 1, 2, or 4")
+    return _convert(x, x.dtype, pack, True, propagate_nan, enable_ftz)
 
 
 @triton.jit
 def convert_from_fp8e4m3(
     x,
     dtype: tl.constexpr,
-    HANDLE_NAN: tl.constexpr = False,
+    pack: tl.constexpr,
+    propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
-    FLUSH_UNDERFLOW: tl.constexpr = False,
-    PACK: tl.constexpr = None,
+    enable_ftz: tl.constexpr = False,
 ):
     """Decode E4M3 bytes to FP16/BF16 with optional compile-time flushing.
 
-    With FLUSH_UNDERFLOW=True, positive and negative E4M3 denormals and
+    pack is required and must be 1, 2, or 4.
+
+    With enable_ftz=True, positive and negative E4M3 denormals and
     negative zero all flush to +0. With flushing disabled, denormals and
     signed zeros are preserved. Opt-in NaN handling guarantees NaN output
     without a sign/payload preservation requirement:
@@ -486,14 +481,5 @@ def convert_from_fp8e4m3(
         dtype == tl.float16 or dtype == tl.bfloat16, "expected FP16 or BF16 output"
     )
     _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
-    width: tl.constexpr = (
-        PACK
-        if PACK is not None
-        else 4
-        if x.numel >= 4 * tl.extra.cuda.num_threads()
-        else 2
-        if x.numel >= 2 * tl.extra.cuda.num_threads()
-        else 1
-    )
-    tl.static_assert(width == 1 or width == 2 or width == 4, "PACK must be 1, 2, or 4")
-    return _convert(x, dtype, width, False, HANDLE_NAN, FLUSH_UNDERFLOW)
+    tl.static_assert(pack == 1 or pack == 2 or pack == 4, "pack must be 1, 2, or 4")
+    return _convert(x, dtype, pack, False, propagate_nan, enable_ftz)

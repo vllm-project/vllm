@@ -5,7 +5,7 @@
 The public Triton helpers dispatch on dtype at compile time. Conversion code
 lives in an always-inline CUDA C++ helper linked from portable SM75 LLVM
 bitcode. Scalar adapters support Triton layouts with partial packs. Inference assumes
-finite activations; pass HANDLE_NAN=True to produce NaNs for NaN inputs.
+finite activations; pass propagate_nan=True to produce NaNs for NaN inputs.
 SM89+ compilation requires FORCE_SOFTWARE_CONVERSION=True; prefer native conversion.
 """
 
@@ -36,7 +36,7 @@ def _check_software_conversion(FORCE_SOFTWARE_CONVERSION, _semantic=None):
 
 
 @tl.core.extern
-def _fp16x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
+def _fp16x1_to_fp8e4m3(arg0, propagate_nan=False, _semantic=None):
     """Link the scalar FP16-to-FP8 bitcode conversion."""
     u8 = tl.core.dtype("uint8")
     u16 = tl.core.dtype("uint16")
@@ -47,7 +47,7 @@ def _fp16x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
         {
             (u16,): (
                 "fp16x1_to_fp8e4m3"
-                + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
+                + ("_nan" if tl.core._unwrap_if_constexpr(propagate_nan) else ""),
                 u8,
             )
         },
@@ -57,7 +57,7 @@ def _fp16x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
 
 
 @tl.core.extern
-def _bf16x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
+def _bf16x1_to_fp8e4m3(arg0, propagate_nan=False, _semantic=None):
     """Link the scalar BF16-to-FP8 bitcode conversion."""
     u8 = tl.core.dtype("uint8")
     u16 = tl.core.dtype("uint16")
@@ -68,7 +68,7 @@ def _bf16x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
         {
             (u16,): (
                 "bf16x1_to_fp8e4m3"
-                + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
+                + ("_nan" if tl.core._unwrap_if_constexpr(propagate_nan) else ""),
                 u8,
             )
         },
@@ -78,7 +78,7 @@ def _bf16x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
 
 
 @tl.core.extern
-def _fp32x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
+def _fp32x1_to_fp8e4m3(arg0, propagate_nan=False, _semantic=None):
     """Link direct scalar FP32-to-FP8 conversion without intermediate rounding."""
     u8 = tl.core.dtype("uint8")
     u32 = tl.core.dtype("uint32")
@@ -89,7 +89,7 @@ def _fp32x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
         {
             (u32,): (
                 "fp32x1_to_fp8e4m3"
-                + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
+                + ("_nan" if tl.core._unwrap_if_constexpr(propagate_nan) else ""),
                 u8,
             )
         },
@@ -99,7 +99,7 @@ def _fp32x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
 
 
 @tl.core.extern
-def _fp8e4m3x1_to_float(arg0, dtype, HANDLE_NAN=False, _semantic=None):
+def _fp8e4m3x1_to_float(arg0, dtype, propagate_nan=False, _semantic=None):
     """Link direct scalar decoding to the requested floating-point dtype."""
     dtype = tl.core._unwrap_if_constexpr(dtype)
     name = {tl.float16: "fp16", tl.bfloat16: "bf16", tl.float32: "fp32"}[dtype]
@@ -111,7 +111,7 @@ def _fp8e4m3x1_to_float(arg0, dtype, HANDLE_NAN=False, _semantic=None):
         {
             (tl.core.dtype("uint8"),): (
                 f"fp8e4m3x1_to_{name}x1"
-                + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
+                + ("_nan" if tl.core._unwrap_if_constexpr(propagate_nan) else ""),
                 bits,
             )
         },
@@ -121,7 +121,7 @@ def _fp8e4m3x1_to_float(arg0, dtype, HANDLE_NAN=False, _semantic=None):
 
 
 @tl.core.extern
-def _fp8e4m3x4_to_fp16x4(arg0, HANDLE_NAN=False, _semantic=None):
+def _fp8e4m3x4_to_fp16x4(arg0, propagate_nan=False, _semantic=None):
     """Link packed conversion of four FP8 values to FP16."""
     u32 = tl.core.dtype("uint32")
     u64 = tl.core.dtype("uint64")
@@ -132,7 +132,7 @@ def _fp8e4m3x4_to_fp16x4(arg0, HANDLE_NAN=False, _semantic=None):
         {
             (u32,): (
                 "fp8e4m3x4_to_fp16x4"
-                + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
+                + ("_nan" if tl.core._unwrap_if_constexpr(propagate_nan) else ""),
                 u64,
             )
         },
@@ -142,7 +142,7 @@ def _fp8e4m3x4_to_fp16x4(arg0, HANDLE_NAN=False, _semantic=None):
 
 
 @tl.core.extern
-def _fp8e4m3x4_to_bf16x4(arg0, HANDLE_NAN=False, _semantic=None):
+def _fp8e4m3x4_to_bf16x4(arg0, propagate_nan=False, _semantic=None):
     """Link packed conversion of four FP8 values to BF16."""
     u32 = tl.core.dtype("uint32")
     u64 = tl.core.dtype("uint64")
@@ -153,7 +153,7 @@ def _fp8e4m3x4_to_bf16x4(arg0, HANDLE_NAN=False, _semantic=None):
         {
             (u32,): (
                 "fp8e4m3x4_to_bf16x4"
-                + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
+                + ("_nan" if tl.core._unwrap_if_constexpr(propagate_nan) else ""),
                 u64,
             )
         },
@@ -174,9 +174,9 @@ def _pack_fp8x4(x0, x1, x2, x3):
 
 
 @triton.jit
-def _decode_fp16_pack4(x0, x1, x2, x3, HANDLE_NAN: tl.constexpr = False):
+def _decode_fp16_pack4(x0, x1, x2, x3, propagate_nan: tl.constexpr = False):
     """Decode a four-byte FP8 pack into four FP16 values."""
-    decoded = _fp8e4m3x4_to_fp16x4(_pack_fp8x4(x0, x1, x2, x3), HANDLE_NAN)
+    decoded = _fp8e4m3x4_to_fp16x4(_pack_fp8x4(x0, x1, x2, x3), propagate_nan)
     return (
         (decoded & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True),
         ((decoded >> 16) & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True),
@@ -186,9 +186,9 @@ def _decode_fp16_pack4(x0, x1, x2, x3, HANDLE_NAN: tl.constexpr = False):
 
 
 @triton.jit
-def _decode_bf16_pack4(x0, x1, x2, x3, HANDLE_NAN: tl.constexpr = False):
+def _decode_bf16_pack4(x0, x1, x2, x3, propagate_nan: tl.constexpr = False):
     """Decode a four-byte FP8 pack into four BF16 values."""
-    decoded = _fp8e4m3x4_to_bf16x4(_pack_fp8x4(x0, x1, x2, x3), HANDLE_NAN)
+    decoded = _fp8e4m3x4_to_bf16x4(_pack_fp8x4(x0, x1, x2, x3), propagate_nan)
     return (
         (decoded & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True),
         ((decoded >> 16) & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True),
@@ -198,7 +198,7 @@ def _decode_bf16_pack4(x0, x1, x2, x3, HANDLE_NAN: tl.constexpr = False):
 
 
 @tl.core.extern
-def _fp16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
+def _fp16x4_to_fp8e4m3x4(arg0, arg1, propagate_nan=False, _semantic=None):
     """Encode four FP16 values from two packed words into four FP8 bytes."""
     u32 = tl.core.dtype("uint32")
     return tl.core.extern_elementwise(
@@ -208,7 +208,7 @@ def _fp16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
         {
             (u32, u32): (
                 "fp16x4_to_fp8e4m3x4"
-                + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
+                + ("_nan" if tl.core._unwrap_if_constexpr(propagate_nan) else ""),
                 u32,
             )
         },
@@ -218,7 +218,7 @@ def _fp16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
 
 
 @tl.core.extern
-def _bf16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
+def _bf16x4_to_fp8e4m3x4(arg0, arg1, propagate_nan=False, _semantic=None):
     """Encode four BF16 values from two packed words into four FP8 bytes."""
     u32 = tl.core.dtype("uint32")
     return tl.core.extern_elementwise(
@@ -228,7 +228,7 @@ def _bf16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
         {
             (u32, u32): (
                 "bf16x4_to_fp8e4m3x4"
-                + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
+                + ("_nan" if tl.core._unwrap_if_constexpr(propagate_nan) else ""),
                 u32,
             )
         },
@@ -238,7 +238,7 @@ def _bf16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
 
 
 @triton.jit
-def _encode_pack4(x0, x1, x2, x3, HANDLE_NAN: tl.constexpr = False):
+def _encode_pack4(x0, x1, x2, x3, propagate_nan: tl.constexpr = False):
     """Encode four FP16/BF16/FP32 values into four E4M3 bytes."""
     if x0.dtype == tl.float32:
         b0 = x0.to(tl.uint32, bitcast=True)
@@ -256,9 +256,9 @@ def _encode_pack4(x0, x1, x2, x3, HANDLE_NAN: tl.constexpr = False):
         b2 = x2.to(tl.uint16, bitcast=True).to(tl.uint32)
         b3 = x3.to(tl.uint16, bitcast=True).to(tl.uint32)
     if x0.dtype == tl.float16:
-        encoded = _fp16x4_to_fp8e4m3x4(b0 | (b1 << 16), b2 | (b3 << 16), HANDLE_NAN)
+        encoded = _fp16x4_to_fp8e4m3x4(b0 | (b1 << 16), b2 | (b3 << 16), propagate_nan)
     else:
-        encoded = _bf16x4_to_fp8e4m3x4(b0 | (b1 << 16), b2 | (b3 << 16), HANDLE_NAN)
+        encoded = _bf16x4_to_fp8e4m3x4(b0 | (b1 << 16), b2 | (b3 << 16), propagate_nan)
     return (
         encoded.to(tl.uint8),
         (encoded >> 8).to(tl.uint8),
@@ -285,7 +285,7 @@ def _encode_pack4_nan(x0, x1, x2, x3):
 @triton.jit
 def convert_to_fp8e4m3(
     x,
-    HANDLE_NAN: tl.constexpr = False,
+    propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
 ):
     """Encode float -> uint8 fp8e4m3 bytes (saturating RNE); NaNs are opt-in."""
@@ -297,23 +297,23 @@ def convert_to_fp8e4m3(
     # https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt
     _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
     if x.numel >= 4 * tl.extra.cuda.num_threads():
-        if HANDLE_NAN:
+        if propagate_nan:
             return tl.map_elementwise(_encode_pack4_nan, x, pack=4)[0]
         else:
             return tl.map_elementwise(_encode_pack4, x, pack=4)[0]
     elif x.dtype == tl.float32:
-        return _fp32x1_to_fp8e4m3(x.to(tl.uint32, bitcast=True), HANDLE_NAN)
+        return _fp32x1_to_fp8e4m3(x.to(tl.uint32, bitcast=True), propagate_nan)
     elif x.dtype == tl.float16:
-        return _fp16x1_to_fp8e4m3(x.to(tl.uint16, bitcast=True), HANDLE_NAN)
+        return _fp16x1_to_fp8e4m3(x.to(tl.uint16, bitcast=True), propagate_nan)
     else:
-        return _bf16x1_to_fp8e4m3(x.to(tl.uint16, bitcast=True), HANDLE_NAN)
+        return _bf16x1_to_fp8e4m3(x.to(tl.uint16, bitcast=True), propagate_nan)
 
 
 @triton.jit
 def convert_from_fp8e4m3(
     x,
     dtype: tl.constexpr,
-    HANDLE_NAN: tl.constexpr = False,
+    propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
 ):
     """Decode uint8 fp8e4m3 bytes to fp16, bf16, or fp32.
@@ -330,14 +330,14 @@ def convert_from_fp8e4m3(
     # Keep packed decoding when each thread has at least one complete pack.
     if dtype != tl.float32 and x.numel >= 4 * tl.extra.cuda.num_threads():
         if dtype == tl.float16:
-            if HANDLE_NAN:
+            if propagate_nan:
                 return tl.map_elementwise(_decode_fp16_pack4_nan, x, pack=4)[0]
             else:
                 return tl.map_elementwise(_decode_fp16_pack4, x, pack=4)[0]
         else:
-            if HANDLE_NAN:
+            if propagate_nan:
                 return tl.map_elementwise(_decode_bf16_pack4_nan, x, pack=4)[0]
             else:
                 return tl.map_elementwise(_decode_bf16_pack4, x, pack=4)[0]
     else:
-        return _fp8e4m3x1_to_float(x, dtype, HANDLE_NAN).to(dtype, bitcast=True)
+        return _fp8e4m3x1_to_float(x, dtype, propagate_nan).to(dtype, bitcast=True)
