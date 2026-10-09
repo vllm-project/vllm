@@ -10,11 +10,6 @@ from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import (
-    get_mixture_of_experts_model,
-    supports_multimodal_pruning,
-)
-from vllm.model_executor.offloader import get_offloader
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
@@ -42,16 +37,14 @@ _KV_CACHE_PROBE_MEMORY = 1 << 40  # 1 TiB
 
 def build_tuning_runner(
     vllm_config: VllmConfig,
-    model: torch.nn.Module,
     local_rank: int,
     *,
     is_draft: bool,
     model_config: "ModelConfig",
 ) -> "GPUModelRunner":
-    """Runner for the autotune dummy runs, around an already-loaded model."""
+    """Create model runner for the autotune dummy runs"""
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-    assert model is not None, "warmup ran before load_model"
     if is_draft:
         # The draft model is what this daemon holds: tune it as the runner's
         # own model, not as another model's drafter. replace() is a shallow
@@ -64,23 +57,6 @@ def build_tuning_runner(
     device = torch.device(current_platform.device_type, local_rank)
     with set_current_vllm_config(vllm_config):
         runner = GPUModelRunner(vllm_config, device)
-        runner.model = model
-        lookback_depth = getattr(model, "token_lookback_depth", 0)
-        if lookback_depth > 0:
-            runner.lookback_token_ids = runner._make_buffer(
-                runner.max_num_reqs, lookback_depth, dtype=torch.int32
-            )
-        runner._moe_model = get_mixture_of_experts_model(model)
-        mm_config = vllm_config.model_config.multimodal_config
-        runner.is_multimodal_pruning_enabled = (
-            supports_multimodal_pruning(model)
-            and mm_config is not None
-            and mm_config.is_multimodal_pruning_enabled()
-        )
-        runner.requires_sequential_video_encoding = hasattr(
-            model, "requires_sequential_video_encoding"
-        )
-        get_offloader().post_init()
     return runner
 
 

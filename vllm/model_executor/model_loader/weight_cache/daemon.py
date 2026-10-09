@@ -253,7 +253,6 @@ class WeightCacheDaemon:
         try:
             runner = build_tuning_runner(
                 vllm_config,
-                self.model,
                 self.local_rank,
                 is_draft=self.is_draft,
                 model_config=self.model_config,
@@ -271,6 +270,8 @@ class WeightCacheDaemon:
                     self.global_rank,
                 )
                 return
+            assert self.model is not None, "warmup ran before load_model"
+            runner.load_model(model=self.model)
             replicate_engine_cache_config(vllm_config, runner)
             flashinfer_autotune(runner)
             logger.info(
