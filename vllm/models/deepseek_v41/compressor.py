@@ -16,6 +16,7 @@ from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
     fused_save_compress_norm,
     rope_quant_insert,
+    save_ring_rows,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -27,7 +28,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
-from vllm.v1.worker.gpu.input_batch import PCPBatchMetadata
 
 
 class CompressorBackend(AttentionBackend):
@@ -61,7 +61,12 @@ class CompressorMetadata:
     slot_mapping: torch.Tensor
     query_start_loc: torch.Tensor  # [num_reqs + 1]
     token_to_req_indices: torch.Tensor  # [num_tokens]
-    pcp_metadata: PCPBatchMetadata | None = None
+    # PCP only: every rank gathers the last row of each rank's local requests.
+    gather_tokens: torch.Tensor | None = None  # [rows] this rank's rows
+    # [pcp * rows] ring slot of each request's newest row if it is open, else -1.
+    ring_write_slots: torch.Tensor | None = None
+    # [num_reqs] gathered row preceding each local chunk, or -1 to use the ring.
+    prev_row_indices: torch.Tensor | None = None
 
 
 @triton.jit(do_not_specialize=["block_table_stride", "num_actual_tokens", "num_tokens"])
@@ -108,17 +113,14 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         self.slot_mapping_buffer = torch.empty(
             max_num_batched_tokens, dtype=torch.int64, device=self.device
         )
-        if self.pcp_size > 1:
-            self.global_token_to_req_indices = torch.empty_like(
-                self.token_to_req_indices
-            )
+        # The ring keeps only the open row under PCP, too few for spec decoding.
+        assert self.pcp_size == 1 or self.vllm_config.speculative_config is None
 
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-        pcp_metadata: PCPBatchMetadata | None = None,
     ) -> CompressorMetadata:
         num_tokens = common_attn_metadata.slot_mapping.numel() // self.pcp_size
         positions = common_attn_metadata.positions
@@ -139,29 +141,66 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             CAPACITY=self.capacity,
             BLOCK=256,
         )
-        query_start_loc = common_attn_metadata.query_start_loc
-        if pcp_metadata is not None:
-            # Compress each request in token order so pairs crossing PCP chunks
-            # and the final ring state are identical on every rank.
-            slot_mapping = get_pcp_group().all_gather(slot_mapping, dim=0)
-            slot_mapping = slot_mapping[pcp_metadata.restore_indices]
-            batch = pcp_metadata.global_batch
-            query_start_loc = batch.query_start_loc
-            global_metadata = common_attn_metadata.replace(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=torch.from_numpy(batch.query_start_loc_np),
-                num_actual_tokens=batch.num_tokens,
-                _token_to_req_indices_cache=None,
-            )
-            token_to_req_indices = global_metadata.token_to_req_indices(
-                self.global_token_to_req_indices
-            )
-        return CompressorMetadata(
+        metadata = CompressorMetadata(
             slot_mapping=slot_mapping,
-            query_start_loc=query_start_loc,
+            query_start_loc=common_attn_metadata.query_start_loc,
             token_to_req_indices=token_to_req_indices,
-            pcp_metadata=pcp_metadata,
         )
+        if self.pcp_size > 1:
+            self._link_pcp_chunks(metadata, common_attn_metadata.num_reqs, positions)
+        return metadata
+
+    def _link_pcp_chunks(
+        self, metadata: CompressorMetadata, num_reqs: int, positions: torch.Tensor
+    ) -> None:
+        """Link ratio-2 groups split across PCP chunks and pick the ring writes.
+
+        Every rank gathers ``(ring block, position)`` of each local request's
+        last token; the ring block names a request on every rank. Sorted, they
+        give each local chunk's predecessor row and each request's newest row.
+        """
+        num_tokens = metadata.slot_mapping.numel()
+        # Equal on every rank, so the gathers line up.
+        num_rows = min(num_tokens, 2 * self.vllm_config.scheduler_config.max_num_seqs)
+        num_reqs = min(num_reqs, num_rows)
+        query_start_loc = metadata.query_start_loc.long()
+        starts = query_start_loc[:num_reqs].clamp(max=num_tokens - 1)
+        last = (query_start_loc[1 : num_reqs + 1] - 1).clamp(min=0)
+        nonempty = query_start_loc[1 : num_reqs + 1] > query_start_loc[:num_reqs]
+
+        def key(slots: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+            return torch.where(slots >= 0, (slots // self.capacity) << 32 | pos, -1)
+
+        local_keys = torch.full((num_rows,), -1, dtype=torch.int64, device=self.device)
+        local_keys[:num_reqs] = key(
+            torch.where(nonempty, metadata.slot_mapping[last], -1), positions[last]
+        )
+        sorted_keys, order = get_pcp_group().all_gather(local_keys, dim=0).sort()
+
+        blocks, sorted_positions = sorted_keys >> 32, sorted_keys & 0xFFFFFFFF
+        newest = torch.ones_like(sorted_keys, dtype=torch.bool)
+        newest[:-1] = blocks[:-1] != blocks[1:]
+        is_open = (sorted_keys >= 0) & newest & (sorted_positions % 2 == 0)
+        ring_write_slots = torch.empty_like(sorted_keys)
+        ring_write_slots[order] = torch.where(
+            is_open, blocks * self.capacity + sorted_positions % self.capacity, -1
+        )
+
+        first_positions = positions[starts]
+        wanted = key(metadata.slot_mapping[starts], first_positions - 1)
+        found = torch.searchsorted(sorted_keys, wanted).clamp_(max=order.numel() - 1)
+        has_prev = (
+            nonempty
+            & (wanted >= 0)
+            & (first_positions % 2 == 1)
+            & (sorted_keys[found] == wanted)
+        )
+
+        gather_tokens = torch.zeros_like(local_keys)
+        gather_tokens[:num_reqs] = last
+        metadata.gather_tokens = gather_tokens
+        metadata.ring_write_slots = ring_write_slots
+        metadata.prev_row_indices = torch.where(has_prev, order[found], -1)
 
 
 class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
@@ -286,18 +325,18 @@ class DeepseekCompressor(nn.Module):
         kv_score: torch.Tensor,
         # [num_tokens]
         positions: torch.Tensor,
-        return_global_latent: bool = False,
     ) -> torch.Tensor | None:
         """Save states and return the BF16 latent for cache insertion and indexing.
 
-        Ratio-2 PCP may also retain the already-computed global latent for
-        cache insertion. Only valid group-boundary rows are written.
+        Only valid group-boundary rows are written. Under PCP each rank pools
+        its own rows; the last row of every rank's chunks is gathered, both to
+        close groups split across chunks and to keep every rank's ring equal.
         """
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
             return None
 
-        pcp_metadata = None
+        prev_rows = prev_row_indices = ring_write_slots = None
         if self.state_cache is None:
             state_cache = query_start_loc = token_to_req_indices = None
             slot_mapping = cast(Any, attn_metadata[self.k_cache_prefix]).slot_mapping
@@ -311,12 +350,13 @@ class DeepseekCompressor(nn.Module):
             slot_mapping = state_metadata.slot_mapping
             query_start_loc = state_metadata.query_start_loc
             token_to_req_indices = state_metadata.token_to_req_indices
-            pcp_metadata = state_metadata.pcp_metadata
-            if pcp_metadata is not None:
-                kv_score = get_pcp_group().all_gather(kv_score.contiguous(), dim=0)
-                kv_score = kv_score[pcp_metadata.restore_indices]
-                batch = pcp_metadata.global_batch
-                positions = batch.positions[: batch.num_tokens]
+            if self.pcp_size > 1:
+                assert state_metadata.gather_tokens is not None
+                prev_rows = get_pcp_group().all_gather(
+                    kv_score[state_metadata.gather_tokens], dim=0
+                )
+                prev_row_indices = state_metadata.prev_row_indices
+                ring_write_slots = state_metadata.ring_write_slots
 
         latent = torch.empty(
             kv_score.shape[0],
@@ -335,11 +375,12 @@ class DeepseekCompressor(nn.Module):
             self.rms_norm_eps,
             self.compress_ratio,
             latent,
+            prev_rows=prev_rows,
+            prev_row_indices=prev_row_indices,
         )
-        if pcp_metadata is not None:
-            if return_global_latent:
-                return latent
-            return latent[pcp_metadata.local_indices]
+        if prev_rows is not None:
+            assert state_cache is not None and ring_write_slots is not None
+            save_ring_rows(prev_rows, ring_write_slots, state_cache)
         return latent
 
     def insert_cache(
@@ -347,7 +388,6 @@ class DeepseekCompressor(nn.Module):
         latent: torch.Tensor | None,
         positions: torch.Tensor,
         rotary_emb,
-        slot_mapping_indices: torch.Tensor | None = None,
     ) -> None:
         """Publish compressed main-cache rows after the latent becomes ready."""
         if latent is None:
@@ -355,9 +395,6 @@ class DeepseekCompressor(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         assert isinstance(attn_metadata, dict)
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
-        slot_mapping = k_cache_metadata.slot_mapping
-        if slot_mapping_indices is not None:
-            slot_mapping = slot_mapping[slot_mapping_indices]
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
         # Plain-row per-tensor fp8 caches (FlashInfer) carry the layer's scale;
@@ -373,7 +410,7 @@ class DeepseekCompressor(nn.Module):
             positions,
             rotary_emb.cos_sin_cache,
             kv_cache,
-            slot_mapping,
+            k_cache_metadata.slot_mapping,
             self.compress_ratio,
             fp8_scale=fp8_scale,
         )

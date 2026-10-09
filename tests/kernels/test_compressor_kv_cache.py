@@ -932,8 +932,8 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1, 2, 2]
 
 
-def test_v41_pcp_dummy_compressor_output_remains_local(monkeypatch):
-    """Dummy PCP metadata has no global layout, so ratio-2 output stays local."""
+def test_v41_pcp_compressor_latent_is_gathered_for_cache_writes(monkeypatch):
+    """PCP compresses locally and publishes the gathered latent to both caches."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41 import attention as attention_module
     from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -943,16 +943,11 @@ def test_v41_pcp_dummy_compressor_output_remains_local(monkeypatch):
     observed = {}
 
     class Compressor:
-        state_cache = SimpleNamespace(prefix="state")
-
-        def __call__(self, kv_score, positions, return_global_latent=False):
-            observed["return_global_latent"] = return_global_latent
+        def __call__(self, kv_score, positions):
             return local_latent
 
-        def insert_cache(
-            self, latent, positions, rotary_emb, slot_mapping_indices=None
-        ):
-            observed["insert"] = (latent, positions, slot_mapping_indices)
+        def insert_cache(self, latent, positions, rotary_emb):
+            observed["insert"] = (latent, positions)
 
     def prepare_indexer(qr, latent, weights, positions, rotary, qr_scale, **kwargs):
         observed["indexer"] = (latent, kwargs)
@@ -965,10 +960,7 @@ def test_v41_pcp_dummy_compressor_output_remains_local(monkeypatch):
             all_gather=lambda tensor, dim: torch.cat((tensor, tensor + 10), dim=dim)
         ),
     )
-    metadata = {
-        "state": SimpleNamespace(pcp_metadata=None),
-        "swa": SimpleNamespace(cache_positions=cache_positions),
-    }
+    metadata = {"swa": SimpleNamespace(cache_positions=cache_positions)}
     attention = SimpleNamespace(
         use_pcp=True,
         compressor=Compressor(),
@@ -992,16 +984,13 @@ def test_v41_pcp_dummy_compressor_output_remains_local(monkeypatch):
         )
 
     expected_global = torch.cat((local_latent, local_latent + 10))
-    assert observed["return_global_latent"] is False
-    insert_latent, insert_positions, insert_indices = observed["insert"]
+    insert_latent, insert_positions = observed["insert"]
     torch.testing.assert_close(insert_latent, expected_global)
     torch.testing.assert_close(insert_positions, cache_positions)
-    assert insert_indices is None
     indexer_latent, indexer_kwargs = observed["indexer"]
     torch.testing.assert_close(indexer_latent, local_latent)
     torch.testing.assert_close(indexer_kwargs["cache_latent"], expected_global)
     torch.testing.assert_close(indexer_kwargs["cache_positions"], cache_positions)
-    assert indexer_kwargs["cache_slot_mapping_indices"] is None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA stream coverage")
@@ -1036,7 +1025,6 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
             slot_mapping=state_slots,
             query_start_loc=torch.tensor([0, 19], dtype=torch.int32, device="cuda"),
             token_to_req_indices=torch.zeros(19, dtype=torch.int32, device="cuda"),
-            pcp_metadata=None,
         ),
         "main": SimpleNamespace(slot_mapping=cache_slots),
         "index": SimpleNamespace(slot_mapping=cache_slots),
@@ -1138,22 +1126,155 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         previous = expected
 
 
+@pytest.mark.parametrize("pcp_size", [2, 4])
+@pytest.mark.parametrize(
+    "lengths,prefilling,starts",
+    [
+        ([9, 1], [True, False], [1, 4]),
+        ([1, 1], [False, False], [16, 3]),
+        ([3, 1], [True, False], [1, 0]),
+    ],
+)
+def test_v41_pcp_ring_links_match_request_positions(
+    pcp_size, lengths, prefilling, starts, monkeypatch
+):
+    """Cross-chunk predecessors and open ring writes must belong to the request."""
+    from vllm.models.deepseek_v41 import compressor as compressor_module
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadata,
+        CompressorMetadataBuilder,
+    )
+    from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
+    monkeypatch.setattr(
+        pcp_manager_module,
+        "async_tensor_h2d",
+        lambda array, **kwargs: torch.from_numpy(array),
+    )
+    manager = PCPManager(pcp_size, 0, torch.device("cpu"), shard_decode_requests=True)
+    query_start = np.array([0, *np.cumsum(lengths)], dtype=np.int32)
+    segments, counts = manager._build_batch_layout(
+        np.array(lengths), np.array(starts), np.array(prefilling), query_start
+    )
+    width = max(counts)
+    capacity = 8
+    blocks = [1, (1 << 20) + 2]
+    num_rows = min(width, 2 * len(lengths))
+    metadata_by_rank = []
+    positions_by_rank = []
+    gathered_keys = []
+    for local_segments in segments:
+        positions = torch.zeros(width, dtype=torch.int64)
+        slots = torch.full((width,), -1, dtype=torch.int64)
+        local_query_start = [0]
+        keys = [-1] * num_rows
+        for row, segment in enumerate(local_segments):
+            req = segment.global_batch_req_idx
+            begin = starts[req] + segment.global_batch_slice.start - query_start[req]
+            local = segment.rank_local_batch_slice
+            positions[local] = torch.arange(begin, begin + segment.num_tokens)
+            slots[local] = blocks[req] * capacity + positions[local] % capacity
+            local_query_start.append(local.stop)
+            keys[row] = (blocks[req] << 32) | int(positions[local.stop - 1])
+        if not local_segments:
+            local_query_start.append(0)
+        metadata_by_rank.append(
+            CompressorMetadata(
+                slot_mapping=slots,
+                query_start_loc=torch.tensor(local_query_start, dtype=torch.int32),
+                token_to_req_indices=torch.empty(0, dtype=torch.int32),
+            )
+        )
+        positions_by_rank.append(positions)
+        gathered_keys.extend(keys)
+
+    keys = torch.tensor(gathered_keys, dtype=torch.int64)
+    contributed_keys = []
+
+    def all_gather(tensor, dim):
+        contributed_keys.append(tensor.clone())
+        return keys
+
+    monkeypatch.setattr(
+        compressor_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(all_gather=all_gather),
+    )
+    builder = SimpleNamespace(
+        capacity=capacity,
+        device=torch.device("cpu"),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=len(lengths))
+        ),
+    )
+    expected_rows = {
+        block: max(key for key in gathered_keys if key >> 32 == block)
+        for block in blocks
+    }
+    expected_slots = [
+        block * capacity + (key & 0xFFFFFFFF) % capacity
+        for block, key in expected_rows.items()
+        if key % 2 == 0
+    ]
+    for metadata, positions in zip(metadata_by_rank, positions_by_rank):
+        num_reqs = metadata.query_start_loc.numel() - 1
+        CompressorMetadataBuilder._link_pcp_chunks(
+            builder, metadata, num_reqs, positions
+        )
+        assert metadata.prev_row_indices is not None
+        assert metadata.gather_tokens is not None
+        assert metadata.ring_write_slots is not None
+        for row, token in enumerate(metadata.gather_tokens.tolist()):
+            key = int(contributed_keys[-1][row])
+            if key >= 0:
+                assert int(metadata.slot_mapping[token]) // capacity == key >> 32
+                assert int(positions[token]) == key & 0xFFFFFFFF
+        for start, prev in zip(
+            metadata.query_start_loc[:-1].tolist(), metadata.prev_row_indices.tolist()
+        ):
+            position = int(positions[start])
+            block = int(metadata.slot_mapping[start]) // capacity
+            wanted = (block << 32) | (position - 1)
+            if position % 2 == 1 and wanted in gathered_keys:
+                assert prev >= 0 and gathered_keys[prev] == wanted
+            else:
+                assert prev == -1
+        writes = metadata.ring_write_slots.tolist()
+        assert sorted(slot for slot in writes if slot >= 0) == sorted(expected_slots)
+        for row, slot in enumerate(writes):
+            if slot >= 0:
+                assert gathered_keys[row] == expected_rows[slot // capacity]
+                assert (gathered_keys[row] & 0xFFFFFFFF) % capacity == slot % capacity
+    torch.testing.assert_close(torch.cat(contributed_keys), keys)
+
+
+def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatch):
+    from vllm.models.deepseek_v41 import compressor as compressor_module
+    from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
+
+    monkeypatch.setattr(
+        compressor_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(all_gather=all_gather),
+    )
+    for local in ranks:
+        builder = CompressorMetadataBuilder(spec, ["ring"], config, device)
+        local.metadata = builder.build(0, local.common)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
 @pytest.mark.parametrize("pcp_size", [2, 4])
 def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypatch):
-    """Odd PCP boundaries and changing decode owners must preserve ring history."""
+    """Pairs split across PCP chunks and decode owner changes keep exact latents."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41 import compressor as compressor_module
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         fused_save_compress_norm,
     )
-    from vllm.models.deepseek_v41.compressor import (
-        CompressorMetadataBuilder,
-        DeepseekCompressor,
-    )
+    from vllm.models.deepseek_v41.compressor import DeepseekCompressor
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.kv_cache_interface import CircularBufferSpec
-    from vllm.v1.worker.gpu.input_batch import PCPBatchMetadata
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
     torch.manual_seed(42)
@@ -1163,8 +1284,9 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
     reference_state = torch.zeros(3, 8, 1024, device=device)
     rank_states = [reference_state.clone() for _ in range(pcp_size)]
     config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+        speculative_config=None,
     )
     spec = CircularBufferSpec(
         block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
@@ -1172,7 +1294,8 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
     starts = np.zeros(2, dtype=np.int32)
     for lengths, prefilling in [
         ([7, 3], [True, True]),
-        ([2, 1], [True, False]),
+        ([9, 1], [True, False]),
+        ([1, 1], [False, False]),
         ([1, 1], [False, False]),
     ]:
         lengths = np.array(lengths, dtype=np.int32)
@@ -1201,29 +1324,16 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
             expected,
         )
 
+        ranks = []
         for rank in range(pcp_size):
             manager = PCPManager(pcp_size, rank, device, shard_decode_requests=True)
             segments, counts = manager._build_batch_layout(
                 lengths, starts, np.array(prefilling), query_start
             )
             width = max(counts)
-            gathered_raw = raw[manager._padded_gather_idx]
-            gathered_slots = slots[manager._padded_gather_idx].masked_fill(
-                ~manager._gathered_kv_write_mask, -1
-            )
             local_indices = manager._padded_gather_idx[
                 rank * width : (rank + 1) * width
             ]
-            pcp = PCPBatchMetadata(
-                SimpleNamespace(
-                    positions=positions,
-                    num_tokens=len(raw),
-                    query_start_loc=qsl,
-                    query_start_loc_np=query_start,
-                ),
-                manager._hidden_restore_idx,
-                local_indices,
-            )
             local_lengths = [s.num_tokens for s in segments[rank]] or [0]
             local_qsl = torch.tensor([0, *np.cumsum(local_lengths)], dtype=torch.int32)
             local_reqs = [s.global_batch_req_idx for s in segments[rank]] or [0]
@@ -1241,26 +1351,40 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
                 slot_mapping=torch.full((width * pcp_size,), -1, device=device),
                 positions=positions[local_indices],
             )
-
-            def gather(
-                tensor,
-                dim,
-                rank=rank,
-                width=width,
-                raw=gathered_raw,
-                slots=gathered_slots,
-            ):
-                gathered = (slots if tensor.ndim == 1 else raw).clone()
-                gathered[rank * width : (rank + 1) * width] = tensor
-                return gathered
-
-            monkeypatch.setattr(
-                compressor_module,
-                "get_pcp_group",
-                lambda gather=gather: SimpleNamespace(all_gather=gather),
+            ranks.append(
+                SimpleNamespace(
+                    indices=local_indices[: counts[rank]],
+                    raw=raw[local_indices],
+                    positions=common.positions,
+                    common=common,
+                )
             )
-            builder = CompressorMetadataBuilder(spec, ["ring"], config, device)
-            metadata = builder.build(0, common, pcp_metadata=pcp)
+
+        # Each rank's builder contributes its last-row candidates to a gather.
+        candidates: list[torch.Tensor] = []
+        _build_pcp_ring_metadata(
+            ranks,
+            lambda t, dim, out=candidates: out.append(t.clone()) or t.repeat(pcp_size),
+            spec,
+            config,
+            device,
+            monkeypatch,
+        )
+        _build_pcp_ring_metadata(
+            ranks,
+            lambda t, dim, out=candidates: torch.cat(out),
+            spec,
+            config,
+            device,
+            monkeypatch,
+        )
+        gathered_rows = torch.cat([r.raw[r.metadata.gather_tokens] for r in ranks])
+        monkeypatch.setattr(
+            compressor_module,
+            "get_pcp_group",
+            lambda rows=gathered_rows: SimpleNamespace(all_gather=lambda t, dim: rows),
+        )
+        for rank, local in enumerate(ranks):
             compressor = SimpleNamespace(
                 pcp_size=pcp_size,
                 head_dim=512,
@@ -1269,33 +1393,21 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
                 norm=SimpleNamespace(weight=norm),
                 state_cache=SimpleNamespace(prefix="ring", kv_cache=rank_states[rank]),
             )
-            with override_forward_context(ForwardContext({}, {"ring": metadata}, {})):
-                result = DeepseekCompressor.forward(
-                    compressor,
-                    raw[local_indices],
-                    positions[local_indices],
-                    return_global_latent=True,
+            context = ForwardContext({}, {"ring": local.metadata}, {})
+            with override_forward_context(context):
+                actual = DeepseekCompressor.forward(
+                    compressor, local.raw, local.positions
                 )
-            assert isinstance(result, torch.Tensor)
-            global_actual = result
-            actual = global_actual[pcp.local_indices]
-            global_valid = (positions + 1) % 2 == 0
+            assert isinstance(actual, torch.Tensor)
+            valid = (positions[local.indices] + 1) % 2 == 0
             torch.testing.assert_close(
-                global_actual[global_valid],
-                expected[global_valid],
+                actual[: local.indices.numel()][valid],
+                expected[local.indices][valid],
                 rtol=0,
                 atol=0,
             )
-            valid = (positions[local_indices[: counts[rank]]] + 1) % 2 == 0
-            torch.testing.assert_close(
-                actual[: counts[rank]][valid],
-                expected[local_indices[: counts[rank]]][valid],
-                rtol=0,
-                atol=0,
-            )
-            torch.testing.assert_close(
-                rank_states[rank], reference_state, rtol=0, atol=0
-            )
+        for state in rank_states[1:]:
+            torch.testing.assert_close(state, rank_states[0], rtol=0, atol=0)
         starts += lengths
 
 

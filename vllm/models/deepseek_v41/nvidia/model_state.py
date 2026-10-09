@@ -12,7 +12,6 @@ from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, DPMetadata, create_forward_context
-from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
@@ -30,7 +29,7 @@ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, PCPBatchMetadata
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -158,24 +157,15 @@ def _gather_replay_batch_kernel(
 
 
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
-    """Supplies replay bounds and PCP compressor metadata to their builders."""
+    """Hands the batch's replay starts to the sliding-window builders."""
 
-    def __init__(
-        self,
-        replay_start: torch.Tensor | None,
-        pcp_metadata: PCPBatchMetadata | None = None,
-    ) -> None:
+    def __init__(self, replay_start: torch.Tensor) -> None:
         self.replay_start = replay_start
-        self.pcp_metadata = pcp_metadata
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
-        if isinstance(attn_metadata_builder, CompressorMetadataBuilder):
-            return {"pcp_metadata": self.pcp_metadata}
-        if self.replay_start is not None and isinstance(
-            attn_metadata_builder, DeepseekSparseSWAMetadataBuilder
-        ):
+        if isinstance(attn_metadata_builder, DeepseekSparseSWAMetadataBuilder):
             return {"replay_start": self.replay_start[:num_reqs]}
         return {}
 
@@ -383,10 +373,6 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
-        if input_batch.pcp_metadata is not None:
-            model_specific_attn_metadata = ReplayAttnMetadata(
-                replay_start, input_batch.pcp_metadata
-            )
         attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,

@@ -16,7 +16,6 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
-    PCPBatchMetadata,
 )
 
 if TYPE_CHECKING:
@@ -646,7 +645,6 @@ class PCPManager:
                 real_dcp_local_seq_lens_cpu_upper_bound
             )
 
-        assert self._hidden_restore_idx is not None
         self._local_batch = replace(
             input_batch,
             req_ids=local_req_ids,
@@ -684,9 +682,6 @@ class PCPManager:
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             prompt_lens=None,
-            pcp_metadata=PCPBatchMetadata(
-                global_batch, self._hidden_restore_idx, local_gather_idx
-            ),
         )
         return self._local_batch
 
