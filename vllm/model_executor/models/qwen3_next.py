@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from transformers import Qwen3NextConfig
 
-from vllm._aiter_ops import rocm_aiter_ops
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -401,14 +401,21 @@ class Qwen3NextAttention(nn.Module):
             and text_only
             and supports_prequantized_scheduler(max_num_seqs)
             and self.attn.supports_prequantized_qkv_input
-            and rocm_aiter_ops.fused_qk_norm_rope_gate_fp8_quant_available()
         )
         if self.use_prequantized_qkv:
             logger.info_once(
                 "Using fused AITER Q/K norm, RoPE, gate, and FP8 quantization"
             )
+        elif envs.VLLM_ROCM_USE_PREQUANTIZED_QKV and current_platform.is_rocm():
+            logger.warning_once(
+                "VLLM_ROCM_USE_PREQUANTIZED_QKV is set but an attention layer "
+                "cannot use it, so it runs BF16 attention. It needs a text-only "
+                "model with gated attention, max_num_seqs <= 256, and the "
+                "ROCM_AITER_FA backend on gfx950 with head size 256, full causal "
+                "attention and a BF16 or FP8 KV cache."
+            )
 
-    def _project_qkv_gate(
+    def _project_prequantized_qkv_gate(
         self,
         qkv: torch.Tensor,
         positions: torch.Tensor,
@@ -416,60 +423,63 @@ class Qwen3NextAttention(nn.Module):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
-        torch.Tensor | None,
-        PrequantizedQKV | None,
+        torch.Tensor,
+        PrequantizedQKV,
     ]:
+        """Like ``_project_qkv_gate``, plus FP8 Q/K/V and their descales."""
+        q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
+        pos = positions[0] if positions.ndim == 2 else positions
+        (
+            q,
+            k,
+            gate,
+            q_fp8,
+            k_fp8,
+            v_fp8,
+            q_descale,
+            k_descale,
+            v_descale,
+        ) = fused_qk_norm_rope_gate_fp8_quant(
+            q_gate,
+            k,
+            v,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.rotary_emb.cos_sin_cache,
+            pos,
+            self.attn.layer_name,
+            self.q_norm.variance_epsilon,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rotary_emb.rotary_dim,
+        )
+        return (
+            q,
+            k,
+            v,
+            gate,
+            PrequantizedQKV(
+                query=q_fp8,
+                key=k_fp8,
+                value=v_fp8,
+                query_descale=q_descale,
+                key_descale=k_descale,
+                value_descale=v_descale,
+            ),
+        )
+
+    def _project_qkv_gate(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
         Dispatches between the fused Triton kernel and the eager
         split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
         gating is disabled.
         """
-        if self.use_prequantized_qkv:
-            q_gate, k, v = qkv.split(
-                [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
-            )
-            pos = positions[0] if positions.ndim == 2 else positions
-            (
-                q,
-                k,
-                gate,
-                q_fp8,
-                k_fp8,
-                v_fp8,
-                q_descale,
-                k_descale,
-                v_descale,
-            ) = fused_qk_norm_rope_gate_fp8_quant(
-                q_gate,
-                k,
-                v,
-                self.q_norm.weight,
-                self.k_norm.weight,
-                self.rotary_emb.cos_sin_cache,
-                pos,
-                self.attn.layer_name,
-                self.q_norm.variance_epsilon,
-                self.num_heads,
-                self.num_kv_heads,
-                self.head_dim,
-                self.rotary_emb.rotary_dim,
-            )
-            return (
-                q,
-                k,
-                v,
-                gate,
-                PrequantizedQKV(
-                    query=q_fp8,
-                    key=k_fp8,
-                    value=v_fp8,
-                    query_descale=q_descale,
-                    key_descale=k_descale,
-                    value_descale=v_descale,
-                ),
-            )
-
         if self.use_fused_qk_norm_rope_gate:
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
@@ -497,7 +507,7 @@ class Qwen3NextAttention(nn.Module):
                     else None
                 ),
             )
-            return q, k, v, gate, None
+            return q, k, v, gate
 
         if self.attn_output_gate:
             q_gate, k, v = qkv.split(
@@ -519,7 +529,7 @@ class Qwen3NextAttention(nn.Module):
             -1, self.num_kv_heads * self.head_dim
         )
         q, k = self.rotary_emb(positions, q, k)
-        return q, k, v, gate, None
+        return q, k, v, gate
 
     def forward(
         self,
@@ -527,13 +537,14 @@ class Qwen3NextAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, gate, prequantized_qkv = self._project_qkv_gate(qkv, positions)
-        attn_output = self.attn(
-            q,
-            k,
-            v,
-            prequantized_qkv=prequantized_qkv,
-        )
+        if self.use_prequantized_qkv:
+            q, k, v, gate, prequantized_qkv = self._project_prequantized_qkv_gate(
+                qkv, positions
+            )
+            attn_output = self.attn(q, k, v, prequantized_qkv=prequantized_qkv)
+        else:
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            attn_output = self.attn(q, k, v)
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output, _ = self.o_proj(attn_output)

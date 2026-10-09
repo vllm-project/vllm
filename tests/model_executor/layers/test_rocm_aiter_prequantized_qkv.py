@@ -9,8 +9,13 @@ import torch
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import PrequantizedQKV
 from vllm.v1.attention.backends import rocm_aiter_fa
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm AITER attention backend"
+)
 
 
 def _make_tensors(num_kv_heads: int = 1):
@@ -71,7 +76,7 @@ def test_slice_prequantized_qkv_uses_mixed_batch_offsets():
     torch.testing.assert_close(prefill.value_descale, value_descale[2:3])
 
 
-def test_aiter_flash_attention_omits_unused_descales(monkeypatch):
+def test_aiter_flash_attention_passes_no_descales_by_default(monkeypatch):
     recorded_kwargs = None
     sentinel = object()
 
@@ -88,9 +93,9 @@ def test_aiter_flash_attention_omits_unused_descales(monkeypatch):
 
     assert _call_aiter_flash_attention() is sentinel
     assert recorded_kwargs is not None
-    assert "q_descale" not in recorded_kwargs
-    assert "k_descale" not in recorded_kwargs
-    assert "v_descale" not in recorded_kwargs
+    assert recorded_kwargs["q_descale"] is None
+    assert recorded_kwargs["k_descale"] is None
+    assert recorded_kwargs["v_descale"] is None
 
 
 def test_aiter_flash_attention_forwards_complete_descales(monkeypatch):

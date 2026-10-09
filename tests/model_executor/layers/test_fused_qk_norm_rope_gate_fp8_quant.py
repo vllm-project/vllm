@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -357,9 +358,8 @@ def test_qwen3_next_model_builds_prequantized_bundle(monkeypatch):
     )
 
     qkv = torch.cat((inputs[0], inputs[1], inputs[2]), dim=-1)
-    query, key, value, gate, prequantized_qkv = attention._project_qkv_gate(
-        qkv,
-        inputs[6],
+    query, key, value, gate, prequantized_qkv = (
+        attention._project_prequantized_qkv_gate(qkv, inputs[6])
     )
 
     assert query is expected_outputs[0]
@@ -370,3 +370,33 @@ def test_qwen3_next_model_builds_prequantized_bundle(monkeypatch):
     assert prequantized_qkv.query is expected_outputs[3]
     assert prequantized_qkv.key is expected_outputs[4]
     assert prequantized_qkv.value is expected_outputs[5]
+
+
+@pytest.mark.parametrize("use_prequantized_qkv", [False, True])
+def test_qwen3_next_forward_dispatches_projection(use_prequantized_qkv):
+    # Qwen4Exp's attention subclasses Qwen3NextAttention and unpacks four
+    # values from _project_qkv_gate, so the prequantized path must not change it.
+    q, k, v, gate = (torch.randn(2, 4) for _ in range(4))
+    bundle = object()
+    attn_calls = []
+
+    def attn(*args, **kwargs):
+        attn_calls.append((args, kwargs))
+        return q
+
+    attention: Any = SimpleNamespace(
+        use_prequantized_qkv=use_prequantized_qkv,
+        qkv_proj=lambda hidden_states: (hidden_states, None),
+        o_proj=lambda attn_output: (attn_output, None),
+        attn=attn,
+        _project_qkv_gate=lambda qkv, positions: (q, k, v, gate),
+        _project_prequantized_qkv_gate=lambda qkv, positions: (q, k, v, gate, bundle),
+    )
+
+    qwen3_next_model.Qwen3NextAttention.forward(
+        attention, torch.arange(2), torch.randn(2, 4)
+    )
+
+    ((args, kwargs),) = attn_calls
+    assert args == (q, k, v)
+    assert kwargs == ({"prequantized_qkv": bundle} if use_prequantized_qkv else {})

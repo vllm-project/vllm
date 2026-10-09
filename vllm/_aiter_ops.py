@@ -2261,19 +2261,6 @@ class rocm_aiter_ops:
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
     @classmethod
-    @functools.cache
-    def fused_qk_norm_rope_gate_fp8_quant_available(cls) -> bool:
-        if not is_aiter_found_and_supported():
-            return False
-        try:
-            from aiter.ops.triton.rope.fused_qk_norm_rope_gate_fp8_quant import (  # noqa: F401
-                fused_qk_norm_rope_gate_fp8_quant,
-            )
-        except (ImportError, ModuleNotFoundError):
-            return False
-        return True
-
-    @classmethod
     @if_aiter_supported
     def is_custom_all_reduce_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._CUSTOM_ALL_REDUCE_ENABLED
@@ -4115,13 +4102,6 @@ class rocm_aiter_ops:
                 "AITER FP8 attention requires q_descale, k_descale, and "
                 "v_descale together"
             )
-        extra_kwargs = {}
-        if q_descale is not None:
-            extra_kwargs = {
-                "q_descale": q_descale,
-                "k_descale": k_descale,
-                "v_descale": v_descale,
-            }
 
         return flash_attn_varlen_func(
             q=q,
@@ -4140,7 +4120,9 @@ class rocm_aiter_ops:
             return_lse=return_lse,
             out=out,
             sink_ptr=sink_ptr,
-            **extra_kwargs,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
     @staticmethod
