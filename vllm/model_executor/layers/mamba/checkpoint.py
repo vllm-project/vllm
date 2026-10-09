@@ -29,6 +29,7 @@ def compute_mamba_prefill_checkpoints(
     mamba_block_size: int,
     checkpoint_alignment: int | None,
     drop_eagle_block: bool,
+    cache_hit_alignment_tokens: int,
 ) -> tuple[list[int], list[int]]:
     """Per-row internal prefill checkpoint offsets and cache block columns.
 
@@ -47,7 +48,7 @@ def compute_mamba_prefill_checkpoints(
     for seq_len, query_len in zip(seq_lens, query_lens):
         query_start = seq_len - query_len
         position = get_mamba_prefill_checkpoint_position(
-            seq_len, hash_block_size, drop_eagle_block=drop_eagle_block
+            seq_len, cache_hit_alignment_tokens, drop_eagle_block=drop_eagle_block
         )
         valid = is_mamba_prefill_checkpoint_valid(
             query_start=query_start,
@@ -121,12 +122,17 @@ class MambaPrefillCheckpointBuilder:
             return None
         if self.kv_cache_spec.num_prefill_checkpoint_blocks == 0:
             return None
+        cache_config = self.vllm_config.cache_config
+        hash_block_size = cache_config.hash_block_size
+        cache_hit_alignment_tokens = cache_config.cache_hit_alignment_tokens
+        if hash_block_size is None or cache_hit_alignment_tokens is None:
+            # Unresolved only for the minimal KV cache built for profiling.
+            return None
         assert m.seq_lens_cpu_upper_bound is not None
         all_query_lens = m.query_start_loc_cpu.diff().tolist()
         query_lens = [all_query_lens[row] for row in request_rows]
         seq_lens = m.seq_lens_cpu_upper_bound.tolist()
         block_size = self.kv_cache_spec.block_size
-        hash_block_size = self.vllm_config.cache_config.prefix_match_unit or block_size
         checkpoint_offsets, checkpoint_cols = compute_mamba_prefill_checkpoints(
             [seq_lens[row] for row in request_rows],
             query_lens,
@@ -134,6 +140,7 @@ class MambaPrefillCheckpointBuilder:
             mamba_block_size=block_size,
             checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
             drop_eagle_block=self._drop_eagle_block,
+            cache_hit_alignment_tokens=cache_hit_alignment_tokens,
         )
         if not any(checkpoint_offsets):
             return None

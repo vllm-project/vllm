@@ -4389,6 +4389,60 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
     assert num_computed == 1248
 
 
+def test_lookahead_per_group_hits_stay_within_max_length():
+    """Lookahead groups drop no block, so the per-group lookup must not widen
+    by the EAGLE drop margin."""
+    block_size = 16
+    config = KVCacheConfig(
+        num_blocks=40,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_attention"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        use_lookahead_block_hashes=True,
+        hash_block_size=block_size,
+    )
+    token_ids = list(range(5 * block_size + 1))
+    first = make_request(
+        "first", token_ids, block_size, sha256, use_lookahead_hashes=True
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
+    manager.allocate_slots(first, len(token_ids), num_computed, computed_blocks)
+    manager.free(first)
+
+    probe = make_request(
+        "probe", token_ids, block_size, sha256, use_lookahead_hashes=True
+    )
+    _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+        probe.block_hashes, 2 * block_size
+    )
+
+    assert per_group_hits[0] == 2 * block_size
+
+
 def test_eagle_with_sliding_window():
     """Test Eagle behavior with sliding window."""
     block_size = 16
@@ -5232,19 +5286,10 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
 
 
 def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
-    """An identical resend and a longer sibling resume at DIFFERENT positions.
+    """EAGLE resend and extension reuse the same retained checkpoint.
 
-    How far a lookup matches depends on who is asking. A resend of the same
-    prompt caps its lookup at ``num_tokens - 1`` (the last token is recomputed
-    for logits), while a sibling whose prompt merely starts with this one caps
-    above the prompt. The two coincide unless the prompt length is an exact
-    multiple of the alignment -- there they differ by one alignment unit, and
-    under the EAGLE drop BOTH are reachable.
-
-    Retaining only the higher one leaves the resend with every retained state
-    above every candidate its lookup can produce, and the reconciled hit
-    collapses to 0 -- the same zero-hit failure sparse retention already fixes
-    at unaligned prompt lengths.
+    Attention may inspect the prompt's final block before dropping it, so an
+    aligned resend must not lose another block to the P - 1 lookup limit.
     """
     block_size = 32
     num_spec = 3
@@ -5282,16 +5327,12 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
         use_eagle=True,
     )
 
-    # 128 tokens, an exact multiple of the 32-token alignment. A longer sibling
-    # matches 128 and drops to 96; this prompt's own resend caps at 127, matches
-    # 96 and drops to 64. Both states must survive retention.
+    # Both requests prove 128 attention tokens, drop one block, and reuse 96.
     token_ids = [i for i in range(4) for _ in range(block_size)]
     req0 = make_request("0", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert num_computed_tokens == 0
-    # Prefill in block-aligned chunks the way the align-mode scheduler does: a
-    # state only materializes as a chunk's running-state block, so a
-    # single-shot prefill could not retain the lower one.
+    # Materialize the checkpoint through normal block-aligned prefill chunks.
     for chunk_end in (32, 64, 96, 128):
         blocks = manager.allocate_slots(
             req0,
@@ -5303,8 +5344,7 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
         assert blocks is not None
         req0.num_computed_tokens = chunk_end
 
-    # Block ``i`` ends at token ``(i + 1) * 32``, so positions 64 and 96 are
-    # mamba blocks 1 and 2.
+    # Both materialized replay checkpoints survive; resend and extension use 96.
     pool = manager.block_pool
     expected_mamba_cached = {1, 2}
     for i in range(4):
@@ -5315,15 +5355,13 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
             assert cached is None, f"mamba hash {i} should not be cached"
     manager.free(req0)
 
-    # The identical resend: full attention matches blocks 0-2 (96 tokens, capped
-    # by num_tokens - 1) and the EAGLE drop caps the candidate at 64. Without
-    # the lower state retained the reconciled hit would be 0.
+    # The identical resend must reuse the retained checkpoint, not miss to zero.
     req1 = make_request("1", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
-    assert num_computed_tokens == 2 * block_size
-    assert [len(blocks) for blocks in computed_blocks.blocks] == [2, 2]
+    assert num_computed_tokens == 3 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 3]
 
-    # The longer sibling resumes one alignment unit higher, off the same prompt.
+    # The longer sibling reuses that same checkpoint.
     longer = make_request("2", token_ids + [9] * block_size, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(longer)
     assert num_computed_tokens == 3 * block_size
