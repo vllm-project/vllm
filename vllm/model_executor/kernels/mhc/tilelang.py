@@ -759,8 +759,7 @@ def mhc_pre_broadcast_tilelang(
         residual_flat,
         fn_broadcast,
         hidden_size=hidden_size,
-        hc_mult=hc_mult,
-        use_tilelang_fallback=False,
+        hc_mult=1,
     )
     _MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
         gemm_out_mul,

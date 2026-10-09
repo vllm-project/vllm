@@ -1046,6 +1046,24 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
     torch.testing.assert_close(sqrsum, sqrsum_ref, atol=1e-2, rtol=1e-6)
 
 
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [1, 33, 128])
+def test_hc_broadcast_prenorm_without_deep_gemm(num_tokens, monkeypatch):
+    """First-layer broadcast projects H inputs, rather than hc_mult * H."""
+    from vllm.model_executor.kernels.mhc.tilelang import _hc_prenorm_gemm_outputs
+
+    monkeypatch.setattr("vllm.utils.deep_gemm.is_deep_gemm_supported", lambda: False)
+    set_random_seed(0)
+    hidden_size = 5120
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    fn = torch.randn(24, hidden_size, device=DEVICE) * 1e-4
+    out, sqrsum = _hc_prenorm_gemm_outputs(x, fn, hidden_size=hidden_size, hc_mult=1)
+    out_ref, sqrsum_ref = torch.empty_like(out), torch.empty_like(sqrsum)
+    _torch_hc_prenorm_gemm(x, fn, out_ref, sqrsum_ref)
+    torch.testing.assert_close(out, out_ref, atol=1e-5, rtol=1e-4)
+    torch.testing.assert_close(sqrsum, sqrsum_ref, atol=1e-2, rtol=1e-6)
+
+
 @pytest.mark.skipif(
     not HAS_TILELANG_MHC,
     reason="TileLang MHC support required",
