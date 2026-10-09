@@ -9,11 +9,9 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 # Modified by the vLLM project contributors (Apache-2.0 sec. 4(b)): import paths rewritten to this package;
 #   POLL_STAGES and the poll_err / poll_abort scratch words, scratch regions of the in-kernel indexer,
-#   a split_keys override of the sparse-MLA split task size.
+#   a split_keys override of the sparse-MLA split task size; the DCP region and unused helpers removed.
 
 """Compile-time storage layout and CTA schedule for the GLM-5 MonoKernel."""
-
-import math
 
 from vllm.models.deepseek_v32.amd.mono.kernel.config import (
     HIDDEN,
@@ -45,7 +43,6 @@ INDEX_DIM = 128
 INDEX_Q_ROWS = INDEX_HEADS * INDEX_DIM
 INDEX_TILE = 16
 INDEX_KEYS_PER_TASK = 64
-DCP_SUMMARY_PAIRS = KV_LORA // 2 + 2
 
 
 def split_acc_head(head_group, lane_group: int, element: int):
@@ -60,66 +57,18 @@ def split_score_column(wave: int, lane: int):
     return wave + 16 * ((lane % 16) // 4)
 
 
-def fp8_kv_upper_pair_lane(lane):
-    return (lane & -4) + 2
-
-
-def fp8_pe_upper_pair_lane(lane):
-    return (lane & -2) + 1
-
-
-def sparse_cache_rows(
-    sparse_kv_indices,
-    *,
-    sample: int,
-    topk: int,
-    cur_pos: int = 0,
-    sparse_kv_indptr=None,
-):
-    """Resolve the cache rows consumed by one flat or paged attention row."""
-
-    if sparse_kv_indptr is not None:
-        start, end = sparse_kv_indptr[sample : sample + 2]
-        return sparse_kv_indices[start:end]
-    context = cur_pos + sample + 1
-    count = min(context, topk)
-    if context <= topk:
-        return range(count)
-    start = sample * topk
-    return sparse_kv_indices[start : start + count]
-
-
-def paged_row_contract(
-    sparse_kv_indices, sparse_kv_indptr, sample: int, slot_mapping=None
-):
-    """Reference the device contract for one ATOM-layout request row."""
-
-    start, end = sparse_kv_indptr[sample : sample + 2]
-    active = end > start
-    rows = sparse_kv_indices[start:end] if active else ()
-    slot_owned = slot_mapping is None or slot_mapping[sample] >= 0
-    return {
-        "active": active,
-        "context": end - start,
-        "index_base": start if active else 0,
-        "safe_row": rows[0] if active else 0,
-        "write_cache": active if slot_mapping is None else slot_owned,
-    }
-
-
 N_QKV_A = QKV_A_ROWS // QKV_A_TILE
 N_ROW_TILES = HIDDEN // ROW_TILE
 N_ROUTER = N_EXPERTS // ROUTER_TILE
-N_UG_PER_SLOT = INTER // UG_TILE
 XQ_BLOCKS = HIDDEN // 128
 XQ_WAVES = (XQ_BLOCKS + N_ROUTER - 1) // N_ROUTER
 assert XQ_WAVES * 4 <= WAVES
 
 
-def dn_tile(samples: int, expert_mxfp4: bool = False) -> int:
-    """Return rows per expert-down/FFN-reduce task for the tuned schedule."""
+def dn_tile(samples: int) -> int:
+    """Rows per expert-down / FFN-reduce task."""
 
-    return 32 if samples == 1 or (samples > 4 and expert_mxfp4) else HIDDEN // BLOCKS
+    return 32 if samples == 1 or samples > 4 else HIDDEN // BLOCKS
 
 
 def sparse_keys_per_task(samples: int, heads: int = WAVES) -> int:
@@ -136,29 +85,8 @@ def ug_task_rounds(inter: int) -> int:
     return (inter + BLOCKS - 1) // BLOCKS
 
 
-def down_x_words(samples: int, inter: int, expert_mxfp4: bool) -> int:
-    return samples * MOE_SLOTS * inter // (2 if expert_mxfp4 else 4)
-
-
-def dcp_softmax_weights(maxima, sums):
-    global_max = max(maxima)
-    scaled = [
-        total * math.exp(maximum - global_max) for maximum, total in zip(maxima, sums)
-    ]
-    denominator = sum(scaled)
-    return [value / denominator if denominator else 0.0 for value in scaled]
-
-
-def dcp_summary_index(source, sample, tile, item, samples, n_uv):
-    return ((source * samples + sample) * n_uv + tile) * DCP_SUMMARY_PAIRS + item
-
-
-def dcp_uv_owner(tile, output_heads, rank):
-    return tile // (V_DIM // UV_TILE) // output_heads == rank
-
-
-def dcp_local_uv_tile(tile, output_heads):
-    return tile % (output_heads * V_DIM // UV_TILE)
+def down_x_words(samples: int, inter: int) -> int:
+    return samples * MOE_SLOTS * inter // 2
 
 
 def ug_split(samples: int, inter: int = INTER):
@@ -206,15 +134,12 @@ def layout(
     with_indexer: bool = False,
     index_max_seq: int = 4096,
     inter: int = INTER,
-    output_heads: int | None = None,
-    dcp_size: int = 1,
     split_keys: int | None = None,
 ):
     """Return byte offsets for per-rank scratch and symmetric peer buffers. ``split_keys``: keys per sparse-MLA
     split task (default ``sparse_keys_per_task``; 64 with ``split_keys64``)."""
 
     split_count = sparse_attention_topk // (split_keys or sparse_keys_per_task(samples, heads))
-    output_heads = heads if output_heads is None else output_heads
     pair_bytes = 8
     items = [
         ("q_a", samples * Q_LORA * pair_bytes),
@@ -228,7 +153,7 @@ def layout(
         ("sp_acc", samples * split_count * heads * KV_LORA * pair_bytes),
         ("sp_m", samples * split_count * heads * pair_bytes),
         ("sp_l", samples * split_count * heads * pair_bytes),
-        ("o", samples * output_heads * V_DIM * pair_bytes),
+        ("o", samples * heads * V_DIM * pair_bytes),
         ("a", samples * HIDDEN * pair_bytes),
         ("scores", samples * N_EXPERTS * pair_bytes),
         ("xq", samples * HIDDEN // 4 * pair_bytes),
@@ -272,20 +197,13 @@ def layout(
 
     part = npes * samples * HIDDEN * pair_bytes
     region = 2 * part
-    dcp_part = (
-        dcp_size * samples * (heads * V_DIM // UV_TILE) * DCP_SUMMARY_PAIRS * pair_bytes
-        if dcp_size > 1
-        else 0
-    )
     symmetric = {
         "attn": 0,
         "ffn": region,
-        "dcp": 2 * region,
         "_part_stride": part,
-        "_dcp_part_stride": dcp_part,
         # one word per source rank: set on rank 0 by a rank whose bounded wait expired
-        "poll_xrank": 2 * region + 2 * dcp_part,
-        "_bytes": 2 * region + 2 * dcp_part + _align(4 * npes),
+        "poll_xrank": 2 * region,
+        "_bytes": 2 * region + _align(4 * npes),
     }
     return scratch, symmetric
 
@@ -296,27 +214,18 @@ def stage_tasks(
     sparse_attention_topk: int,
     with_indexer: bool = False,
     index_max_seq: int = 4096,
-    expert_mxfp4: bool = False,
     inter: int = INTER,
     split_keys: int | None = None,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
-    tasks = [
-        ("qkv_a", N_QKV_A),
-        ("q_norm", samples),
-        ("cache", 1),
-        ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE),
-    ]
+    tasks = [("qkv_a", N_QKV_A), ("q_norm", samples), ("cache", 1), ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE)]
     if with_indexer:
         tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE)]
     tasks += [("uk", heads * KV_LORA // UK_TILE)]
     if with_indexer:
         tasks += [
-            (
-                "index_score",
-                samples * ((index_max_seq + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK),
-            ),
+            ("index_score", samples * ((index_max_seq + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK)),
             ("index_select", samples),
         ]
     tasks += [
@@ -334,13 +243,9 @@ def stage_tasks(
             (
                 BLOCKS
                 if samples == 1
-                else samples
-                * max(
-                    BLOCKS,
-                    ((MOE_SLOTS * inter // UG_TILE + BLOCKS - 1) // BLOCKS) * BLOCKS,
-                )
+                else samples * max(BLOCKS, ((MOE_SLOTS * inter // UG_TILE + BLOCKS - 1) // BLOCKS) * BLOCKS)
             ),
         ),
-        ("down", HIDDEN // dn_tile(samples, expert_mxfp4)),
+        ("down", HIDDEN // dn_tile(samples)),
     ]
     return tasks

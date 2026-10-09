@@ -206,7 +206,7 @@ def test_live_config_defaults():
     assert c.early_cache_checks and c.indexer_trim and c.poll_early_out and c.enabled
     assert c.attention_weight == "fp8_block128" and c.indexer_mode == "attn"
     assert c.fused_indexer is None  # AUTO: on when supported
-    assert c.fused_index_rowpar_cache and c.fused_index_batched_score and c.index_q_fp8
+    assert c.index_q_fp8
     assert c.fused_select_radix11 and c.fused_index_proj_spread
     assert c.cache_hoist and c.split_keys64 and c.step_sync and c.check_every == 1
     assert not c.device_nonfinite and not c.failstop_nonfinite

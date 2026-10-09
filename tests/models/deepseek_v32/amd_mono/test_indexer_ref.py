@@ -197,7 +197,7 @@ def test_pack_index_weights():
 
 
 def test_fused_kernel_addressing():
-    """The fused indexer's (kernel/glm/kernel.py, index_paged) index-cache addressing ==
+    """The fused indexer's (kernel/glm/kernel.py) index-cache addressing ==
     vLLM's SHUFFLE writer (deepseek_v32/common/kernels.py _fp8_quant_and_cache_write,
     BLOCK_TILE = HEAD_TILE = 16, block 16): cache-stage dword stores (even lane l: dims
     2l..2l+3), score-stage 8-byte key loads, fp32 scale words."""
@@ -523,8 +523,8 @@ def _lds_select(
 
 
 def test_barrier_after_select_digit_is_schedule_independent():
-    """CPU model of the fused paged indexer's select-stage LDS protocol (index_paged,
-    last radix digit through the gt / eq compaction scans): the 8 waves run one at a
+    """CPU model of the fused paged indexer's select-stage LDS protocol
+    (last radix digit through the gt / eq compaction scans): the 8 waves run one at a
     time between barriers in an adversarial order (a legal GPU interleaving). Without
     the barrier after select_digit some schedules corrupt the CSR; with it every
     schedule gives the canonical result."""

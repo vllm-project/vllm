@@ -95,8 +95,6 @@ class LiveConfig:
     # in-kernel indexer on indexer layers; None = on when supported (see MonoLive)
     fused_indexer: bool | None = None
     index_q_fp8: bool = True  # FP8 index q, as vLLM's fused_q
-    fused_index_rowpar_cache: bool = True
-    fused_index_batched_score: bool = True
     cache_hoist: bool = True
     fused_select_radix11: bool = True
     fused_index_proj_spread: bool = True  # widths <= 8 only
@@ -408,7 +406,6 @@ class MonoLive:
         """One Glm5MonoKernel per mono layer at width S, sharing the first op's runtime
         (scratch, peer buffer, step counter); the fused-indexer layers (another scratch
         geometry) share their own. Then one warm-up launch per runtime."""
-        from vllm.models.deepseek_v32.amd.mono.kernel.config import KvCacheLayout
         from vllm.models.deepseek_v32.amd.mono.kernel.glm.op import Glm5MonoKernel
 
         t0 = time.time()
@@ -419,11 +416,8 @@ class MonoLive:
         )
         fused: dict[str, Any] = dict(
             with_indexer=True,
-            index_paged=True,
             index_max_seq=self.index_max_seq,
             index_q_fp8=cfg.index_q_fp8,
-            index_cache_rowpar=cfg.fused_index_rowpar_cache,
-            index_score_batched=cfg.fused_index_batched_score,
             select_radix11=cfg.fused_select_radix11,
             index_proj_spread=cfg.fused_index_proj_spread and S <= 8,
         )
@@ -438,8 +432,6 @@ class MonoLive:
                 group=self.cpu_group,
                 topk=TOPK,
                 attention_weight=self._attn_fmt,
-                kv_cache_layout=KvCacheLayout.ATOM,
-                kv_cache_dtype="bf16",
                 poll_limit=cfg.poll_limit,
                 prepared_weights=self.packed[L],
                 runtime=runtimes.get(is_fused),

@@ -21,7 +21,7 @@ def test_poll_xrank_layout(with_indexer):
     moves), one int32 per rank; the target address has an 8-byte scratch slot."""
     for S, npes in itertools.product((1, 2, 4, 5, 6, 8, 10, 12), (1, 2, 4, 8)):
         scr, sym = layout(S, 8, npes, 2048, with_indexer=with_indexer)
-        old_end = 2 * sym["ffn"] + 2 * sym["_dcp_part_stride"]
+        old_end = 2 * sym["ffn"]
         assert sym["poll_xrank"] == old_end and sym["poll_xrank"] % 4 == 0
         assert all(
             v <= old_end
@@ -40,10 +40,7 @@ def test_poll_xrank_ir_fences(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYDSL_COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_DUMP_IR", "1")
     monkeypatch.setenv("FLYDSL_DUMP_DIR", str(tmp_path))
-    from vllm.models.deepseek_v32.amd.mono.kernel.config import (
-        AttentionWeight,
-        KvCacheLayout,
-    )
+    from vllm.models.deepseek_v32.amd.mono.kernel.config import AttentionWeight
     from vllm.models.deepseek_v32.amd.mono.kernel.glm.kernel import (
         build_glm5_monokernel,
     )
@@ -54,12 +51,8 @@ def test_poll_xrank_ir_fences(tmp_path, monkeypatch):
         8,
         2048,
         launches_per_step=1,
-        expert_mxfp4=True,
         attention_weight=AttentionWeight.FP8_BLOCK128,
-        kv_cache_layout=KvCacheLayout.ATOM,
-        kv_cache_dtype="bf16",
         inter=256,
-        output_heads=8,
         poll_limit=1000,
         poll_early_out=True,
     )
