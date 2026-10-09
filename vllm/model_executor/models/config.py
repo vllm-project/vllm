@@ -409,6 +409,9 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 model_config.override_generation_config["max_new_tokens"] = None
             return
 
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError("Nemotron diffusion requires PP=1.")
+
         attention_config = vllm_config.attention_config
         if attention_config.backend == AttentionBackendEnum.FLASHINFER:
             raise ValueError(

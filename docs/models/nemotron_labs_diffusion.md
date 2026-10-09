@@ -47,6 +47,12 @@ FlashAttention requires FA4. FlashInfer does not support the mixed
 causal/bidirectional attention. This implementation covers
 text-only masked diffusion; linear speculation and vision inputs are not included.
 
+Masked diffusion currently requires pipeline parallel size 1.
+Unsupported pipeline configurations are rejected during engine configuration.
+Returned token and top-k logprobs use the distribution at the step where each
+position is revealed, including when requests with different logprob settings
+share a batch.
+
 ## Autoregressive inference
 
 The same checkpoint also supports ordinary causal, token-by-token generation:

@@ -97,7 +97,10 @@ def test_arch_in_model_registry():
 
 
 @pytest.mark.parametrize("flash_version", [None, 3])
-def test_attention_backend_supports_mixed_causality(flash_version):
+@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
+def test_attention_backend_supports_mixed_causality(
+    flash_version, pipeline_parallel_size
+):
     from types import SimpleNamespace
     from typing import cast
 
@@ -124,9 +127,17 @@ def test_attention_backend_supports_mixed_causality(flash_version):
             ),
             diffusion_config=None,
             scheduler_config=None,
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=pipeline_parallel_size
+            ),
         ),
     )
-    if flash_version is not None:
+    if pipeline_parallel_size != 1:
+        with pytest.raises(ValueError, match="PP=1"):
+            NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
+                config
+            )
+    elif flash_version is not None:
         with pytest.raises(ValueError, match="requires FA4"):
             NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
                 config
@@ -675,6 +686,72 @@ def test_stochastic_rollouts(monkeypatch):
             lp = entry[tid]
             assert lp.rank is not None
             assert lp.logprob <= 1e-6 and lp.rank >= 1
+
+
+@requires_gpu
+@requires_weights
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_diffusion_logprobs_independent_of_batch_requests(monkeypatch, enforce_eager):
+    """A neighbour's top-k request must not change sampled-token logprobs."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    from vllm import LLM, SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.inputs import TokensPrompt
+
+    tok = _load_tokenizer()
+    prompt = TokensPrompt(prompt_token_ids=_prompt_ids(tok, device="cpu")[0].tolist())
+    budgets = (17, 41, 9)
+    llm = LLM(
+        model=MODEL_PATH,
+        attention_config={"backend": "TRITON_ATTN"},
+        trust_remote_code=True,
+        enforce_eager=enforce_eager,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=4,
+        gpu_memory_utilization=0.6,
+        diffusion_config={"selection_policy": "leftmost"},
+    )
+    try:
+        assert llm.reset_prefix_cache()
+        baseline = llm.generate(
+            [prompt] * 3,
+            [
+                SamplingParams(temperature=0, max_tokens=n, logprobs=0, ignore_eos=True)
+                for n in budgets
+            ],
+            use_tqdm=False,
+        )
+        assert llm.reset_prefix_cache()
+        mixed = llm.generate(
+            [prompt] * 3,
+            [
+                SamplingParams(temperature=0, max_tokens=n, logprobs=k, ignore_eos=True)
+                for n, k in zip(budgets, (None, 0, 2))
+            ],
+            use_tqdm=False,
+        )
+        assert mixed[0].outputs[0].logprobs is None
+        assert [len(out.outputs[0].token_ids) for out in mixed] == list(budgets)
+        for reference, result in zip(baseline[1:], mixed[1:]):
+            expected_completion = reference.outputs[0]
+            completion = result.outputs[0]
+            assert expected_completion.logprobs is not None
+            assert completion.token_ids == expected_completion.token_ids
+            assert completion.logprobs is not None
+            assert len(completion.logprobs) == len(completion.token_ids)
+            for token, expected, actual in zip(
+                expected_completion.token_ids,
+                expected_completion.logprobs,
+                completion.logprobs,
+            ):
+                assert expected is not None and token in expected
+                assert actual is not None and token in actual
+                assert actual[token].logprob == pytest.approx(
+                    expected[token].logprob, abs=0.02
+                )
+    finally:
+        del llm
+        cleanup_dist_env_and_memory()
 
 
 def _assert_ar_runner(obj):

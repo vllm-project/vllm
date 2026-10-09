@@ -231,7 +231,7 @@ def _filter_sampling_logits(
 ) -> torch.Tensor:
     """Select sampling candidates after temperature scaling, excluding masks."""
     logits = logits.float().clone()
-    logits[:, mask_token_id] = float("-inf")
+    logits[:, mask_token_id].fill_(-torch.inf)
     temperatures = torch.where(temperatures > 0, temperatures, 1.0)
     filtered = apply_top_k_top_p(logits / temperatures[:, None], top_k, top_p)
     # Retain unscaled logits for the confidence-based reveal policy.
@@ -299,6 +299,10 @@ def _compiled_masked_step(
         u = torch.rand_like(logits_3d).clamp_min(1e-20)
         gumbel = -torch.log(-torch.log(u))
         x0 = (logits_3d + req_temps[:, None, None] * gumbel).argmax(dim=-1)
+        # Keep the random argmax separate from downstream gather/reductions.
+        # Inductor can otherwise emit an out-of-scope reduction temporary
+        # for the checkpoint vocabulary on SM100.
+        torch._dynamo.graph_break()
     else:
         x0 = logits_3d.argmax(dim=-1)  # [num_decode, CL]
     chosen_logits = logits_3d.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
@@ -445,17 +449,20 @@ class NemotronLabsDiffusionRequestStates:
 
     def init_canvas(self, slot_indices) -> None:
         """Reset the canvas to all-mask for the given slots."""
-        self.canvas[slot_indices] = self.mask_token_id
+        if isinstance(slot_indices, int):
+            self.canvas[slot_indices : slot_indices + 1].fill_(self.mask_token_id)
+        else:
+            self.canvas.index_fill_(0, slot_indices, self.mask_token_id)
 
     def add_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = True
-        self.canvas[slot_idx] = self.mask_token_id
-        self.step[slot_idx] = 0
-        self.unmask_logprobs[slot_idx] = 0.0
-        self.unmask_ranks[slot_idx] = 0
+        self.is_encoder_phase[slot_idx : slot_idx + 1].fill_(True)
+        self.init_canvas(slot_idx)
+        self.step[slot_idx : slot_idx + 1].zero_()
+        self.unmask_logprobs[slot_idx : slot_idx + 1].zero_()
+        self.unmask_ranks[slot_idx : slot_idx + 1].zero_()
 
     def remove_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = False
+        self.is_encoder_phase[slot_idx : slot_idx + 1].fill_(False)
 
 
 class NemotronLabsDiffusionModelState(ModelState):
@@ -592,7 +599,7 @@ class NemotronLabsDiffusionModelState(ModelState):
             slots
         ]
         if actual_num_reqs < num_reqs:
-            self._causal_buf[actual_num_reqs:num_reqs] = False
+            self._causal_buf[actual_num_reqs:num_reqs].fill_(False)
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
 
         return build_attn_metadata(
@@ -624,7 +631,7 @@ class MaskedDiffusionSampler:
 
     The default threshold policy reveals all confident positions and guarantees
     at least one reveal per step. ``logprobs=0`` returns each token's logprob at
-    reveal time; top-k introspection uses the converged denoising distribution.
+    reveal time; top-k introspection uses that same distribution.
     """
 
     def __init__(
@@ -657,8 +664,7 @@ class MaskedDiffusionSampler:
         self._query_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self._num_logits = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
-        # Per-slot stash for top-k (logprobs>0) tensors computed on the
-        # converging denoise step; consumed on the subsequent commit step.
+        # Per-slot top-k scores captured when each position is revealed.
         self._pending_logprobs: dict[int, LogprobsTensors] = {}
 
     def add_request(self, req_idx: int, sampling_params: Any) -> None:
@@ -842,6 +848,9 @@ class MaskedDiffusionSampler:
         # Snapshot which slots are committing BEFORE the compiled step runs,
         # since it mutates is_encoder_phase (commit->False, converge->True).
         is_committing = states.is_encoder_phase[decode_slots].clone()
+        was_masked = (states.canvas[decode_slots] == self.mask_token_id) & (
+            ~is_committing[:, None]
+        )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
 
@@ -877,67 +886,70 @@ class MaskedDiffusionSampler:
             log_threshold=self.log_threshold,
         )
 
-        # Top-k introspection (logprobs>0): stash the converged denoise
-        # step's top-k (is_encoder_phase flipped False->True); attached on
-        # the commit. The logprobs==0 path reads the at-unmask buffers
-        # instead and needs no stash.
+        # Capture each position's distribution at reveal, independently of
+        # neighbouring requests' logprob settings and convergence steps.
         if max_num_logprobs > 0 and num_decode > 0:
-            converged_mask = states.is_encoder_phase[decode_slots]
-            just_converged = converged_mask & ~is_committing
-            if just_converged.any():
-                flat_logits = logits_3d.reshape(-1, logits_3d.shape[-1])
-                final_canvas = states.canvas[decode_slots]
-                for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                    li = int(local_idx.item())
-                    slot = int(decode_slots[local_idx].item())
-                    k_i = int(valid_canvas_len_np[li])
-                    row = li * CL
-                    self._pending_logprobs[slot] = compute_topk_scores(
-                        flat_logits[row : row + k_i],
-                        max_num_logprobs,
-                        final_canvas[local_idx][:k_i],
-                    )
-
-        # Commit steps: emit logprobs for the committed block. The sampled
-        # token's logprob/rank come from the at-unmask buffers when only
-        # they are needed (logprobs==0); top-k rows come from the stash.
-        logprobs_tensors = None
-        emit = max_num_logprobs >= 0 and num_decode > 0
-        committing_np = is_committing.cpu().numpy() if emit else None
-        if emit and committing_np is not None and committing_np.any():
-            decode_row_of_req = {
-                int(decode_indices_np[li]): li for li in range(num_decode)
-            }
-            parts_ids, parts_lp, parts_ranks = [], [], []
-            cu_gen: list[int] = []
-            flat_offset = 0
-            for i in range(num_reqs):
-                cu_gen.append(flat_offset)
-                decode_row = decode_row_of_req.get(i)
-                if decode_row is None or not committing_np[decode_row]:
+            revealed = was_masked & (states.canvas[decode_slots] != self.mask_token_id)
+            for li, slot in enumerate(decode_slots_np):
+                slot = int(slot)
+                requested = int(self.sampling_states.num_logprobs[slot])
+                if requested <= 0:
                     continue
-                slot = int(slots_np[i])
-                k_i = int(valid_canvas_len_np[decode_row])
-                if max_num_logprobs > 0:
-                    lp = self._pending_logprobs.pop(slot, None)
-                    if lp is None:
-                        continue
-                    parts_ids.append(lp.logprob_token_ids)
-                    parts_lp.append(lp.logprobs)
-                    parts_ranks.append(lp.selected_token_ranks)
-                    flat_offset += lp.logprobs.shape[0]
-                else:
-                    parts_ids.append(sampled[i, :k_i].to(torch.int64).unsqueeze(-1))
-                    parts_lp.append(states.unmask_logprobs[slot, :k_i].unsqueeze(-1))
-                    parts_ranks.append(states.unmask_ranks[slot, :k_i])
-                    flat_offset += k_i
-            if parts_ids:
-                logprobs_tensors = LogprobsTensors(
-                    logprob_token_ids=torch.cat(parts_ids),
-                    logprobs=torch.cat(parts_lp),
-                    selected_token_ranks=torch.cat(parts_ranks),
-                    cu_num_generated_tokens=cu_gen,
+                current = compute_topk_scores(
+                    logits_3d[li], requested, states.canvas[slot]
                 )
+                previous = self._pending_logprobs.get(slot)
+                if previous is None:
+                    previous = LogprobsTensors(
+                        logprob_token_ids=torch.zeros_like(current.logprob_token_ids),
+                        logprobs=torch.full_like(current.logprobs, -torch.inf),
+                        selected_token_ranks=torch.zeros_like(
+                            current.selected_token_ranks
+                        ),
+                    )
+                write = revealed[li, :, None]
+                self._pending_logprobs[slot] = LogprobsTensors(
+                    logprob_token_ids=torch.where(
+                        write, current.logprob_token_ids, previous.logprob_token_ids
+                    ),
+                    logprobs=torch.where(write, current.logprobs, previous.logprobs),
+                    selected_token_ranks=torch.where(
+                        revealed[li],
+                        current.selected_token_ranks,
+                        previous.selected_token_ranks,
+                    ),
+                )
+
+        # Fixed per-request offsets allow the output processor to select the
+        # emitted prefix using num_sampled without a host read of GPU phase flags.
+        logprobs_tensors = None
+        if max_num_logprobs >= 0 and num_decode > 0:
+            parts_ids, parts_lp, parts_ranks = [], [], []
+            for i, slot in enumerate(slots_np):
+                slot = int(slot)
+                lp = self._pending_logprobs.get(slot)
+                if self.sampling_states.num_logprobs[slot] > 0 and lp is not None:
+                    token_ids, scores, ranks = (
+                        lp.logprob_token_ids,
+                        lp.logprobs,
+                        lp.selected_token_ranks,
+                    )
+                else:
+                    token_ids = sampled[i].to(torch.int64).unsqueeze(-1)
+                    scores = states.unmask_logprobs[slot].unsqueeze(-1)
+                    ranks = states.unmask_ranks[slot]
+                padding = max_num_logprobs + 1 - scores.shape[1]
+                parts_ids.append(torch.nn.functional.pad(token_ids, (0, padding)))
+                parts_lp.append(
+                    torch.nn.functional.pad(scores, (0, padding), value=-torch.inf)
+                )
+                parts_ranks.append(ranks)
+            logprobs_tensors = LogprobsTensors(
+                logprob_token_ids=torch.cat(parts_ids),
+                logprobs=torch.cat(parts_lp),
+                selected_token_ranks=torch.cat(parts_ranks),
+                cu_num_generated_tokens=[i * CL for i in range(num_reqs)],
+            )
 
         return self._build_output(
             input_batch,
