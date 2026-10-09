@@ -237,9 +237,11 @@ pub enum ChatEvent {
         usage: ChatTokenUsage,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
-        kv_transfer_params: Option<serde_json::Value>,
+        /// Boxed, like `ec_transfer_params`, to keep the per-token variants of
+        /// this enum small.
+        kv_transfer_params: Option<Box<serde_json::Value>>,
         /// Connector-specific encoder cache transfer parameters for
         /// disaggregated serving.
-        ec_transfer_params: Option<serde_json::Value>,
+        ec_transfer_params: Option<Box<serde_json::Value>>,
     },
 }

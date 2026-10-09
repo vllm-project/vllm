@@ -1684,7 +1684,14 @@ def test_serving_chat_starts_without_tokenizer():
 @pytest.mark.asyncio
 async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     """Regression test: when the Mistral tokenizer path returns token IDs
-    directly, we must still apply input length + max_tokens validation.
+    directly, we must still apply input length validation and clamp the
+    generation budget to the context the prompt leaves over.
+
+    `max_tokens` is an upper bound on generation rather than a reservation off
+    the context window, so a 95-token prompt against `max_model_len=100` is
+    accepted even though the client asked for 10 output tokens. Genuine
+    overflow is covered by
+    test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected.
     """
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
@@ -1696,9 +1703,8 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
         MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
-    # Force the Mistral chat template renderer to return token IDs.
-    # Choose a prompt length that is < max_model_len, but large enough that
-    # adding max_tokens should exceed the model context window.
+    # Force the Mistral chat template renderer to return token IDs. The prompt
+    # fits the context on its own; only the naive prompt+output sum overflows.
     mock_renderer.render_messages_async = AsyncMock(
         return_value=(
             [],
@@ -1715,8 +1721,12 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
         max_tokens=10,
     )
 
-    with pytest.raises(VLLMValidationError):
-        await serving_chat.create_chat_completion(req)
+    # Must not raise: the prompt alone fits within max_model_len.
+    await serving_chat.create_chat_completion(req)
+
+    # get_max_tokens() clamps the sampling budget to the 5 tokens left over.
+    sampling_params = mock_engine.generate.call_args.args[1]
+    assert 1 <= sampling_params.max_tokens <= 5
 
 
 @pytest.mark.asyncio
