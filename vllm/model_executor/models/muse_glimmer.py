@@ -1123,9 +1123,6 @@ class MuseGlimmerMLP(nn.Module):
 
 
 def _muse_aiter_qk_rope_cache_impl(
-    q_out: torch.Tensor,
-    k_out: torch.Tensor,
-    v_out: torch.Tensor,
     qkv: torch.Tensor,
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
@@ -1133,7 +1130,10 @@ def _muse_aiter_qk_rope_cache_impl(
     q_scale: float,
     eps: float,
     layer_name: LayerNameType,
-) -> torch.Tensor:
+    qh: int,
+    kvh: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (
         fused_qkv_split_qk_norm_rope_cache,
     )
@@ -1142,13 +1142,13 @@ def _muse_aiter_qk_rope_cache_impl(
     _, attn_layer, kv_cache, slot_mapping = get_attention_context(layer_name)
     if slot_mapping is None:
         # Profiling has no cache slots, but attention still consumes these tensors.
-        q_out.zero_()
-        k_out.zero_()
-        v_out.zero_()
+        q = qkv.new_zeros((qkv.shape[0], qh, head_dim))
+        k = qkv.new_zeros((qkv.shape[0], kvh, head_dim))
+        v = qkv.new_zeros((qkv.shape[0], kvh, head_dim))
     else:
         key_cache, value_cache = attn_layer.impl._split_kv_cache(kv_cache)
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
-        fused_qkv_split_qk_norm_rope_cache(
+        q, k, v = fused_qkv_split_qk_norm_rope_cache(
             qkv,
             zero_weight,
             zero_weight,
@@ -1158,24 +1158,18 @@ def _muse_aiter_qk_rope_cache_impl(
             key_cache,
             value_cache,
             slot_mapping,
-            q_out.shape[1],
-            k_out.shape[1],
-            q_out.shape[2],
+            qh,
+            kvh,
+            head_dim,
             is_neox=True,
             eps=eps,
             q_scale=q_scale,
             kv_cache_layout="NHD",
-            q_out=q_out,
-            k_out=k_out,
-            v_out=v_out,
         )
-    return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
+    return q, k, v, qkv.new_empty(0)
 
 
 def _muse_aiter_qk_rope_cache_fake(
-    q_out: torch.Tensor,
-    k_out: torch.Tensor,
-    v_out: torch.Tensor,
     qkv: torch.Tensor,
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
@@ -1183,15 +1177,23 @@ def _muse_aiter_qk_rope_cache_fake(
     q_scale: float,
     eps: float,
     layer_name: LayerNameType,
-) -> torch.Tensor:
-    return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
+    qh: int,
+    kvh: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (
+        qkv.new_empty((qkv.shape[0], qh, head_dim)),
+        qkv.new_empty((qkv.shape[0], kvh, head_dim)),
+        qkv.new_empty((qkv.shape[0], kvh, head_dim)),
+        qkv.new_empty(0),
+    )
 
 
 if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="muse_aiter_qk_rope_cache",
         op_func=_muse_aiter_qk_rope_cache_impl,
-        mutates_args=["q_out", "k_out", "v_out"],
+        mutates_args=[],
         fake_impl=_muse_aiter_qk_rope_cache_fake,
     )
 
@@ -1326,27 +1328,13 @@ class MuseGlimmerAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         if self.use_aiter_qk_rope_cache and qkv.dtype == torch.bfloat16:
-            q = torch.empty(
-                (qkv.shape[0], self.num_heads, self.head_dim),
-                dtype=qkv.dtype,
-                device=qkv.device,
-            )
-            k = torch.empty(
-                (qkv.shape[0], self.num_kv_heads, self.head_dim),
-                dtype=qkv.dtype,
-                device=qkv.device,
-            )
-            v = torch.empty_like(k)
             encoded = _encode_layer_name(self.attn.layer_name)
             cos_sin_cache = (
                 self.rotary_emb.cos_sin_cache_bf16
                 if self.reuse_aiter_cos_sin_cache
                 else self.aiter_cos_sin_cache
             )
-            dummy = torch.ops.vllm.muse_aiter_qk_rope_cache(
-                q,
-                k,
-                v,
+            q, k, v, dummy = torch.ops.vllm.muse_aiter_qk_rope_cache(
                 qkv,
                 positions,
                 cos_sin_cache,
@@ -1354,6 +1342,9 @@ class MuseGlimmerAttention(nn.Module):
                 self.scale_query_by,
                 self.config.rms_norm_eps,
                 encoded,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
             )
             attn_output = torch.empty(
                 (qkv.shape[0], self.num_heads, self.head_dim),
