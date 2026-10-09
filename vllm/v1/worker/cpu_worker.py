@@ -268,7 +268,9 @@ class CPUWorker(Worker):
             self.model_runner.warming_up_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        set_random_seed(
+            self.model_config.seed, self.parallel_config.data_parallel_index
+        )
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,

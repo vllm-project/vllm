@@ -1,20 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ScoringIOProcessor post-tokenization helpers."""
+"""Unit tests for ScoringIOProcessor helpers."""
 
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from transformers import TokenizersBackend
 
 from vllm import TokensPrompt
 from vllm.entrypoints.pooling.scoring.io_processor import (
+    BiEncoderIOProcessor,
     CrossEncoderIOProcessor,
+    JinaRankingIOProcessor,
+    LateInteractionIOProcessor,
     _apply_post_tokenization_to_token_type_ids,
 )
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
+from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -113,3 +118,59 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     assert first_doc == 10
     assert prompt_token_ids[:first_doc] == list(range(10, num_query))
     assert prompt_token_ids[first_doc:40] == list(range(num_query, 50))
+
+
+def _pooling_output(
+    request_id: str,
+    data: torch.Tensor,
+    error: RequestError | None = None,
+) -> PoolingRequestOutput:
+    return PoolingRequestOutput(
+        request_id=request_id,
+        outputs=PoolingOutput(data),
+        prompt_token_ids=[1],
+        num_cached_tokens=0,
+        finished=True,
+        error=error,
+    )
+
+
+@pytest.mark.parametrize(
+    "processor_type", [BiEncoderIOProcessor, LateInteractionIOProcessor]
+)
+@pytest.mark.parametrize("failed_index", [0, 1])
+def test_paired_scoring_preserves_request_error(processor_type, failed_index):
+    processor = processor_type.__new__(processor_type)
+    processor.pad_token_id = None
+    error = RequestError(
+        code="multimodal_cache_miss",
+        message="Multi-modal processor cache miss.",
+        retryable=True,
+    )
+    outputs = [
+        _pooling_output("query", torch.tensor([1.0, 2.0])),
+        _pooling_output("document", torch.tensor([3.0, 4.0])),
+    ]
+    outputs[failed_index] = _pooling_output(
+        outputs[failed_index].request_id,
+        torch.empty(0),
+        error,
+    )
+
+    (result,) = processor._post_process(outputs, n_queries=1)
+
+    assert result.request_id == "query_document"
+    assert result.error is error
+    assert result.outputs is outputs[failed_index].outputs
+
+
+def test_jina_scoring_preserves_request_error_before_indexing_output():
+    processor = JinaRankingIOProcessor.__new__(JinaRankingIOProcessor)
+    error = RequestError(
+        code="multimodal_cache_miss",
+        message="Multi-modal processor cache miss.",
+        retryable=True,
+    )
+    failed = _pooling_output("request", torch.empty(0), error)
+
+    assert processor._post_process([failed], n_queries=1) == [failed]
