@@ -119,8 +119,9 @@ def type_label_ids(
     type. Raises ValueError as reply_label_ids does."""
     label_ids: dict[str, int] = {}
     for qtype in QUESTION_TYPES.values():
-        _, ids = reply_label_ids(tokenizer, prompt_ids, qtype.label_set)
-        label_ids.update(zip(qtype.label_set, ids))
+        spellings = qtype.label_set + qtype.label_aliases
+        _, ids = reply_label_ids(tokenizer, prompt_ids, spellings)
+        label_ids.update(zip(spellings, ids))
     return label_ids
 
 
@@ -229,7 +230,8 @@ class NextTokenStrategy(ReadStrategy):
                     "these chat options end the prompt differently, so the "
                     "labels' tokens are unknown"
                 )
-            slots.append([self.label_ids[label] for label in q.labels])
+            aliases = q.type.label_aliases[: len(q.labels)]
+            slots.append([self.label_ids[s] for s in q.labels + aliases])
             engine_inputs.append(self._read_input(engine_input, prompt_ids))
             params.append(self._sampling_params(slots[-1], prompt_ids))
 
@@ -244,11 +246,12 @@ class NextTokenStrategy(ReadStrategy):
         )
 
         reads = []
-        for ids, label_read in zip(slots, label_reads):
+        for q, ids, label_read in zip(questions, slots, label_reads):
             output = label_read.result.outputs[0]
+            weights, n = label_softmax(label_read.logprobs), len(q.labels)
             reads.append(
                 QuestionRead(
-                    probs=label_softmax(label_read.logprobs),
+                    probs=[sum(weights[i::n]) for i in range(n)],
                     label_mass=sum(math.exp(lp) for lp in label_read.logprobs),
                     argmax_is_label=bool(output.token_ids)
                     and output.token_ids[0] in ids,

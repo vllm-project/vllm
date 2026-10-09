@@ -114,8 +114,9 @@ whole vocabulary: its share of the labels times `label_mass`.
 ## Labels
 
 Labels follow the type: a `choice` labels its options `A` to `Z` in the order
-the request lists them, a `noul` labels its options `yes` and `no`, and a
-`score` labels its levels `0` to `9`, so a level's label is its score.
+the request lists them, a `noul` labels its options `yes` and `no` and also
+counts `Yes` and `No` toward them, and a `score` labels its levels `0` to `9`,
+so a level's label is its score.
 
 ## Limits
 

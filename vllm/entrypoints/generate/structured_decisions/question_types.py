@@ -42,6 +42,7 @@ class QuestionType(ABC):
     name: ClassVar[str]
     #: The labels of a question's options, in option order.
     label_set: ClassVar[tuple[str, ...]] = LABELS
+    label_aliases: ClassVar[tuple[str, ...]] = ()
     reply_instruction: ClassVar[str] = "Answer with the letter of one option only."
 
     @abstractmethod
@@ -175,6 +176,7 @@ class NoulQuestion(QuestionType):
 
     name = "noul"
     label_set = ("yes", "no")
+    label_aliases = ("Yes", "No")
     reply_instruction = "Answer with yes or no only."
 
     def parse_options(self, qid: str, criteria: Any) -> list[Option]:

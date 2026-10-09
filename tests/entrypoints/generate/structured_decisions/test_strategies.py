@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -114,8 +115,9 @@ def test_labels_start_the_reply(qwen):
     assert tokenizer.decode(tail) == "\n\n"
     assert [tokenizer.decode([i]) for i in ids] == list(LABELS)
     # A noul's and a score's labels are one token here too.
-    _, ids = reply_label_ids(tokenizer, prompt_ids, ("yes", "no", *"0123456789"))
-    assert len(set(ids)) == 12
+    labels = ("yes", "no", "Yes", "No", *"0123456789")
+    _, ids = reply_label_ids(tokenizer, prompt_ids, labels)
+    assert len(set(ids)) == 14
     # After a colon, Qwen writes ":A" as one token, so "A" is not one token.
     with pytest.raises(ValueError, match="not one distinct token"):
         reply_label_ids(tokenizer, tokenizer.encode("team:"))
@@ -245,3 +247,20 @@ def test_canvas_read():
         "type": "token",
         "prompt_token_ids": [1, 2, 3, 10, 11, 12, 13],
     }
+
+
+@pytest.mark.asyncio
+async def test_noul_reads_capitalized_replies(serving_and_engine):
+    serving, engine = serving_and_engine
+    request = StructuredDecisionRequest(
+        state="The sky is blue.",
+        questions={"q": {"type": "noul", "instructions": "Is it true?"}},
+    )
+    response = await serving.create_decision(request, None)
+    assert isinstance(response, StructuredDecisionResponse)
+    # The fake engine gives yes, no, Yes and No each logprob -1.
+    assert len(engine.generate.call_args.args[1].logprob_token_ids) == 4
+    assert response.answers["q"]["probabilities"] == pytest.approx(
+        {"yes": 0.5, "no": 0.5}
+    )
+    assert response.diagnostics["q"].label_mass == pytest.approx(4 * math.exp(-1))
