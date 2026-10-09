@@ -66,10 +66,8 @@ class BeamSearchSequence:
         """Rebuild the encoder-decoder inputs with the current beam search
         sequence's tokens.
 
-        FIXME (alex) - the encoder multimodal cache is not properly wired up
-        yet, which means that currently we are running the encoder on every
-        new beam because num_computed_tokens is 0 on each new request. This
-        will be fixed once the cache is correctly implemented.
+        The encoder prompt preserves its multimodal hashes so new beams can
+        reuse cached encoder outputs while building their own cross-attention K/V.
         """
         dec_prompt = prompt["decoder_prompt"]
 

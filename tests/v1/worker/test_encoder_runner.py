@@ -27,11 +27,65 @@ from vllm.multimodal.inputs import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.model_states.encoder_decoder import EncoderDecoderModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 pytestmark = pytest.mark.cpu_test
 
 HIDDEN = 4
+
+
+def test_encoder_decoder_warmup_uses_length_only_features():
+    feature = _feature("warmup", offset=0, length=8)
+    feature.modality = ""
+    runner = _make_runner([feature], cached=[])
+    state = EncoderDecoderModelState.__new__(EncoderDecoderModelState)
+    state.encoder_cache = runner.encoder_cache
+    state.encoder_runner = runner
+    batch = SimpleNamespace(req_ids=["req0"], num_computed_tokens_np=np.array([0]))
+
+    state.prepare_inputs_embeds({}, batch, None)
+    assert state.prepare_inputs(batch, None)["encoder_outputs"] == []
+
+    feature.modality = "audio"
+    with pytest.raises(KeyError, match="warmup"):
+        state.prepare_inputs_embeds({}, batch, None)
+
+
+def test_encoder_decoder_cache_hit_still_supplies_each_prefill():
+    """Shared encoder output must populate every beam's cross-attention K/V."""
+    feature = _feature("audio", offset=0, length=8)
+    feature.data = MultiModalKwargsItem.dummy()
+    runner = _make_runner([feature], cached=[])
+    cache = runner.encoder_cache
+    cache.add_request("beam1", [feature])
+    cache.add_request("beam2", [feature])
+    cache.add_request("other", [_feature("other_audio", offset=0, length=8)])
+    other_encoded = torch.zeros(8, HIDDEN)
+    cache.encoder_outputs["other_audio"] = other_encoded
+    state = EncoderDecoderModelState.__new__(EncoderDecoderModelState)
+    state.encoder_cache = cache
+    state.encoder_runner = runner
+    batch = SimpleNamespace(req_ids=["req0"], num_computed_tokens_np=np.array([0]))
+    encoded = torch.ones(8, HIDDEN)
+    with patch.object(runner, "execute_mm_encoder", return_value=[encoded]) as encode:
+        state.prepare_inputs_embeds({"req0": [0]}, batch, None)
+        assert state.prepare_inputs(batch, None)["encoder_outputs"] == [encoded]
+
+        batch.req_ids = ["beam2", "other", "req0", "beam1"]
+        batch.num_computed_tokens_np = np.array([0, 0, 10, 0])
+        state.prepare_inputs_embeds({}, batch, None)
+        outputs = state.prepare_inputs(batch, None)["encoder_outputs"]
+        assert len(outputs) == 3
+        assert all(
+            output is expected
+            for output, expected in zip(outputs, [encoded, other_encoded, encoded])
+        )
+        encode.assert_called_once()
+
+        cache.free_encoder_cache("audio")
+        state.prepare_inputs_embeds({"beam2": [0]}, batch, None)
+        assert encode.call_count == 2
 
 
 @pytest.mark.parametrize(
