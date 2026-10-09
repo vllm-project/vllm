@@ -144,6 +144,7 @@ def _shared_dp_dma_process(
                     worker.register_kv_caches(gpu_caches)
                 return
             worker.register_kv_caches(gpu_caches)
+        assert worker.shared_region is not None
         assert worker.shared_region.is_pinned
         assert not os.path.exists(worker.shared_region.mmap_path)
         pool = SharedCPUBlockPool(worker.handshake_metadata, BLOCK_SIZE)
