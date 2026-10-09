@@ -864,6 +864,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 index_group.prefill_staging_spec(self.index_group_index),
             )
             outputs = [] if decode_out is None else [decode_out]
+            lses: list[torch.Tensor] = []
             for (
                 tokens,
                 staged_cache,
@@ -887,11 +888,15 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     NUM_TOPK_TOKENS=topk_indices.shape[1],
                     return_valid_counts=True,
                 )
-                plan_out, _ = self._bf16_flash_mla_kernel(
+                plan_out, plan_lse = self._bf16_flash_mla_kernel(
                     q[tokens], staged_rows, plan_topk, plan_lengths, actual_num_heads
                 )
                 outputs.append(plan_out)
-            return torch.cat(outputs) if len(outputs) > 1 else outputs[0], None
+                lses.append(plan_lse)
+            output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
+            if decode_out is not None:
+                return output, None
+            return output, torch.cat(lses) if len(lses) > 1 else lses[0]
         # Convert per-request indices to global slots (decode) or workspace offsets.
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
