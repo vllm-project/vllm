@@ -472,7 +472,8 @@ def rocm_unquantized_gemm_impl(
         x_view = x.reshape(-1, x.size(-1)).contiguous()
         return ops.wvSplitKrc(x_view, weight, cu_count, bias)
 
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
+    # aiter's triton gemm_a16w16 only accepts 2D activations
+    if x.dim() == 2 and use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)

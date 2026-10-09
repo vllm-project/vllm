@@ -318,10 +318,14 @@ def select_unquantized_moe_backend(
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
+        from vllm.platforms.rocm import on_gfx1250
+
         skip_aiter_moe = (
             not envs.VLLM_ROCM_USE_AITER
             or not envs.VLLM_ROCM_USE_AITER_MOE
             or rocm_aiter_ops.is_rdna_aiter_enabled()
+            # aiter has no unquantized (bf16/fp16) MoE kernel on gfx1250; use triton
+            or (current_platform.is_rocm() and on_gfx1250())
         )
         if skip_aiter_moe:
             if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
