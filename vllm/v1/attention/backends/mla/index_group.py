@@ -269,41 +269,6 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             num_valid_rows=attn_metadata.query_start_loc[-1:],
         )
 
-    def _stage_prefill_rows(
-        self,
-        layer_index: int,
-        kv_cache: torch.Tensor,
-        attn_metadata: Any,
-        plan: HiSparsePrefillStagingPlan,
-        staging: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Stage one plan's prefill requests into ``staging``; returns the staged
-        cache, its block table, and plan-relative request ids for the plan's
-        query tokens."""
-        cache = self.cache(layer_index)
-        first_request = attn_metadata.num_decodes + plan.request_start
-        last_request = first_request + plan.block_table.shape[0]
-        resident_cache = None
-        if cache.view is not None and cache.block_table is not None:
-            plan.ensure_gpu_sources(
-                cache.block_table[first_request:last_request],
-                cache.view.block_size,
-            )
-            resident_cache = cache.view.cache
-        staged_cache = cache.runtime.gather_prefill_cache(
-            kv_cache,
-            plan,
-            staging,
-            resident_cache=resident_cache,
-        )
-        prefill_req_ids = attn_metadata.req_id_per_token[
-            attn_metadata.num_decode_tokens :
-        ]
-        req_ids = prefill_req_ids[plan.tokens]
-        if first_request > 0:
-            req_ids = req_ids - first_request
-        return staged_cache, plan.block_table, req_ids
-
     def staged_prefills(
         self,
         layer_index: int,
@@ -319,21 +284,35 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         converted to staged rows, and its valid counts. Every group reuses
         ``staging`` (default: the shared workspace), so consume each item before
         advancing."""
+        cache = self.cache(layer_index)
         if staging is None:
             (staging,) = current_workspace_manager().get_simultaneous(
-                self.prefill_staging_spec(layer_index)
+                cache.runtime.prefill_staging_spec
             )
         prefill = attn_metadata.prefill
         assert prefill is not None and prefill.host_staging_plans is not None
         num_decode_tokens = attn_metadata.num_decode_tokens
         for plan in prefill.host_staging_plans:
-            staged_cache, block_table, req_ids = self._stage_prefill_rows(
-                layer_index, kv_cache, attn_metadata, plan, staging
+            first_request = attn_metadata.num_decodes + plan.request_start
+            resident_cache = None
+            if cache.view is not None and cache.block_table is not None:
+                plan.ensure_gpu_sources(
+                    cache.block_table[
+                        first_request : first_request + plan.block_table.shape[0]
+                    ],
+                    cache.view.block_size,
+                )
+                resident_cache = cache.view.cache
+            staged_cache = cache.runtime.gather_prefill_cache(
+                kv_cache, plan, staging, resident_cache=resident_cache
             )
             tokens = slice(
                 num_decode_tokens + plan.tokens.start,
                 num_decode_tokens + plan.tokens.stop,
             )
+            req_ids = attn_metadata.req_id_per_token[tokens]
+            if first_request > 0:
+                req_ids = req_ids - first_request
             block_stride_rows = None
             if flat_rows:
                 staged_cache, block_stride_rows = flat_kv_row_view(
@@ -341,7 +320,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 )
             physical_topk, valid_counts = triton_convert_req_index_to_global_index(
                 req_ids,
-                block_table,
+                plan.block_table,
                 topk_indices[tokens],
                 BLOCK_SIZE=attn_metadata.block_size,
                 BLOCK_STRIDE_ROWS=block_stride_rows,
