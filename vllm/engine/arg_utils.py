@@ -2285,9 +2285,11 @@ class EngineArgs:
             )
 
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
-            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            # Sorted so the order does not depend on set iteration: the list is
+            # a CacheConfig hash factor. Entries can also be attention type
+            # names (e.g. "sliding_window"), so sort them as strings.
             cache_config.kv_cache_dtype_skip_layers = sorted(
-                existing | set(boundary), key=int
+                set(cache_config.kv_cache_dtype_skip_layers) | set(boundary)
             )
 
         ray_runtime_env = None

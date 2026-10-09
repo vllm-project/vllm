@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 
@@ -236,7 +237,6 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 
     block_tables = BlockTables.__new__(BlockTables)
     block_tables.num_kv_cache_groups = 1
-    block_tables.blocks_per_kv_block = [1]
     block_tables.block_tables = [_BlockTable()]
     block_tables.num_blocks = SimpleNamespace(
         np=torch.tensor([[0, 3]], dtype=torch.int32)
@@ -357,3 +357,12 @@ def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer
         assert torch.equal(out, buffer[:4])
     else:
         assert out is hidden_states
+
+
+def test_async_copy_to_np_does_not_alias_reused_buffer():
+    buffer = torch.zeros(4, dtype=torch.int64)
+
+    snapshot = async_copy_to_np(buffer)
+    buffer.fill_(1)
+
+    assert snapshot.tolist() == [0, 0, 0, 0]

@@ -53,6 +53,12 @@ def register_generate_api_routers(app: FastAPI):
 
     register_generative_scoring_api_router(app)
 
+    from .structured_decisions.api_router import (
+        register_structured_decisions_api_router,
+    )
+
+    register_structured_decisions_api_router(app)
+
 
 async def init_generate_state(
     engine_client: "EngineClient",
@@ -219,4 +225,32 @@ async def init_generate_state(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
+    )
+
+    from .structured_decisions.serving import ServingStructuredDecisions
+    from .structured_decisions.strategies import ReadContext, select_read_strategy
+
+    strategy = None
+    if "generate" in supported_tasks:
+        try:
+            strategy_cls = select_read_strategy(engine_client.model_config)
+            strategy = strategy_cls(
+                ReadContext(
+                    engine_client=engine_client,
+                    online_renderer=state.online_renderer,
+                    chat_template=resolved_chat_template,
+                    chat_template_content_format=args.chat_template_content_format,
+                    default_chat_template_kwargs=default_chat_template_kwargs,
+                )
+            )
+        except ValueError:
+            strategy = None
+    state.serving_structured_decisions = (
+        ServingStructuredDecisions(
+            state.openai_serving_models,
+            strategy,
+            request_logger=request_logger,
+        )
+        if strategy is not None
+        else None
     )
