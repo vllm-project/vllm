@@ -56,7 +56,6 @@ def parse_questions(
 
 
 class ServingStructuredDecisions(BaseServingDecisions):
-
     async def create_decision(
         self,
         request: StructuredDecisionRequest,

@@ -568,8 +568,9 @@ def test_winnow_route_uses_independent_fixed_prompts(decision_server, monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cache_salt", [None, "tenant-a"])
 async def test_winnow_temperature_preserves_full_vocabulary_confidence(
-    decision_server, monkeypatch
+    decision_server, monkeypatch, cache_salt
 ):
     from vllm.entrypoints.openai.decisions import winnow
     from vllm.entrypoints.openai.decisions.adapters import (
@@ -590,6 +591,8 @@ async def test_winnow_temperature_preserves_full_vocabulary_confidence(
     )
 
     async def read_labels(engine, inputs, params, request_id, **kwargs):
+        assert inputs[0].get("cache_salt") == cache_salt
+        assert kwargs["trace_headers"] == TRACE_HEADERS
         return [
             SimpleNamespace(
                 logprobs=[math.log(0.1), math.log(0.4)],
@@ -611,6 +614,8 @@ async def test_winnow_temperature_preserves_full_vocabulary_confidence(
         chat_template_kwargs=None,
         lora_request=None,
         priority=0,
+        cache_salt=cache_salt,
+        trace_headers=TRACE_HEADERS,
     )
     answer = make_answer(question, read.probs, read.label_mass, read.confidence)
     assert isinstance(answer, ChoiceAnswer)

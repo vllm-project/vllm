@@ -102,6 +102,8 @@ class WinnowStrategy(ReadStrategy):
         chat_template_kwargs,
         lora_request,
         priority,
+        cache_salt=None,
+        trace_headers=None,
     ):
         if instructions or chat_template_kwargs:
             raise StructuredDecisionError(
@@ -118,10 +120,14 @@ class WinnowStrategy(ReadStrategy):
         maximum = self.context.engine_client.model_config.max_model_len
         if any(len(prompt) + 1 > maximum for prompt in prompts):
             raise StructuredDecisionError("Winnow decision exceeds the model context")
+        engine_inputs = [tokens_input(p) for p in prompts]
+        if cache_salt is not None:
+            for engine_input in engine_inputs:
+                engine_input["cache_salt"] = cache_salt
         slots = [self.label_ids[: len(q.options)] for q in questions]
         reads = await next_token_label_reads(
             self.context.engine_client,
-            [tokens_input(p) for p in prompts],
+            engine_inputs,
             [
                 SamplingParams(max_tokens=1, temperature=0.0, logprob_token_ids=ids)
                 for ids in slots
@@ -129,6 +135,7 @@ class WinnowStrategy(ReadStrategy):
             request_id,
             lora_request=lora_request,
             priority=priority,
+            trace_headers=trace_headers,
         )
         return [
             QuestionRead(
