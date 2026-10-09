@@ -4,7 +4,7 @@
 
 NaN handling and E4M3 underflow flushing are independently opt-in.
 Flushing underflows also canonicalizes zero to positive zero.
-PACK selects one, two, or four elements per inline-assembly invocation.
+pack selects one, two, or four elements per inline-assembly invocation.
 Flushing removes subnormal work before compilation. The production helper remains
 unchanged while this implementation is benchmarked.
 """
@@ -442,7 +442,12 @@ def convert_to_fp8e4m3(
 ):
     """Encode FP16/BF16 to saturating RNE E4M3 bytes.
 
-    pack is required and must be 1, 2, or 4.
+    pack is required and must be 1, 2, or 4. Triton supplies packed input
+    registers and consumes every output; callers must not repack elements.
+    propagate_nan=False and enable_ftz=False are compile-time defaults,
+    preserving finite subnormals and signed zeros without NaN checking.
+    Software use on SM89+ requires FORCE_SOFTWARE_CONVERSION=True; the
+    default rejects accidental use where native conversion is available.
 
     With enable_ftz=True, positive and negative underflows and negative
     zero all flush to +0. The input cutoff is |x| < 2**-6. With flushing
@@ -468,7 +473,12 @@ def convert_from_fp8e4m3(
 ):
     """Decode E4M3 bytes to FP16/BF16 with optional compile-time flushing.
 
-    pack is required and must be 1, 2, or 4.
+    pack is required and must be 1, 2, or 4. Triton supplies packed input
+    registers and consumes every output; callers must not repack elements.
+    propagate_nan=False and enable_ftz=False are compile-time defaults,
+    preserving finite subnormals and signed zeros without NaN checking.
+    Software use on SM89+ requires FORCE_SOFTWARE_CONVERSION=True; the
+    default rejects accidental use where native conversion is available.
 
     With enable_ftz=True, positive and negative E4M3 denormals and
     negative zero all flush to +0. With flushing disabled, denormals and

@@ -6,6 +6,16 @@ The public Triton helpers dispatch on dtype at compile time. Conversion code
 lives in an always-inline CUDA C++ helper linked from portable SM75 LLVM
 bitcode. Scalar adapters support Triton layouts with partial packs. Inference assumes
 finite activations; pass propagate_nan=True to produce NaNs for NaN inputs.
+
+Contract: encode accepts FP16, BF16, or FP32 and returns uint8 E4M3
+bytes; decode accepts uint8 E4M3 bytes and returns the requested floating
+dtype. Unsupported floating dtypes are rejected. Encoding uses saturating
+round-to-nearest, ties-to-even, clamping overflow and infinities to +/-448.
+Decoding all finite E4M3 values is exact. Subnormals and signed zeros are
+preserved. NaN handling is disabled by default; NaN inputs then have
+unspecified outputs. Enabling propagate_nan guarantees a NaN result but
+does not preserve NaN sign or payload. The compile-time policy selects
+separate bitcode entry points, so the default has no NaN checking cost.
 SM89+ compilation requires FORCE_SOFTWARE_CONVERSION=True; prefer native conversion.
 """
 
@@ -269,16 +279,19 @@ def _encode_pack4(x0, x1, x2, x3, propagate_nan: tl.constexpr = False):
 
 @triton.jit
 def _decode_fp16_pack4_nan(x0, x1, x2, x3):
+    """Decode four E4M3 bytes to FP16 with explicit NaN propagation."""
     return _decode_fp16_pack4(x0, x1, x2, x3, True)
 
 
 @triton.jit
 def _decode_bf16_pack4_nan(x0, x1, x2, x3):
+    """Decode four E4M3 bytes to BF16 with explicit NaN propagation."""
     return _decode_bf16_pack4(x0, x1, x2, x3, True)
 
 
 @triton.jit
 def _encode_pack4_nan(x0, x1, x2, x3):
+    """Encode four floating values with explicit NaN propagation."""
     return _encode_pack4(x0, x1, x2, x3, True)
 
 
@@ -288,7 +301,16 @@ def convert_to_fp8e4m3(
     propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
 ):
-    """Encode float -> uint8 fp8e4m3 bytes (saturating RNE); NaNs are opt-in."""
+    """Encode FP16/BF16/FP32 to uint8 E4M3 bytes using saturating RNE.
+
+    Finite overflow and infinities saturate to +/-448; ties round to even.
+    Subnormals and signed zeros are preserved. propagate_nan defaults to
+    False, leaving NaN inputs unspecified without NaN-checking overhead.
+    True maps NaN inputs to NaN outputs, without a sign/payload guarantee.
+    FORCE_SOFTWARE_CONVERSION=False rejects software conversion on SM89+
+    to catch accidental use where native conversion is available. Setting
+    it to True permits deliberate software-path tests on those targets.
+    """
     tl.static_assert(
         (x.dtype == tl.float16) or (x.dtype == tl.bfloat16) or (x.dtype == tl.float32),
         "convert_to_fp8e4m3 expects fp16, bf16, or fp32 input",
@@ -318,7 +340,12 @@ def convert_from_fp8e4m3(
 ):
     """Decode uint8 fp8e4m3 bytes to fp16, bf16, or fp32.
 
-    Scalar adapters accept partial per-thread packs. NaN handling is opt-in.
+    Every finite E4M3 encoding decodes exactly, including subnormals and
+    signed zeros. Scalar adapters accept partial per-thread packs.
+    propagate_nan=False leaves NaN inputs unspecified and incurs no NaN
+    checking; True guarantees NaN output without sign/payload preservation.
+    FORCE_SOFTWARE_CONVERSION defaults to False; set True only to explicitly
+    permit software conversion on CUDA targets with native FP8 support.
     """
     tl.static_assert(
         (dtype == tl.float16) or (dtype == tl.bfloat16) or (dtype == tl.float32),
