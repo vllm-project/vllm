@@ -362,6 +362,7 @@ class DeepseekCompressor(nn.Module):
     ) -> None:
         # Each of shape [num_tokens, coff * self.head_dim]
         # input bf16, output are fp32
+        """Compress projected keys and scores into the rotary-encoded key cache."""
         kv, score = kv_score.split(
             [self.coff * self.head_dim, self.coff * self.head_dim], dim=-1
         )
@@ -477,8 +478,9 @@ class DeepseekCompressor(nn.Module):
             # the portable Triton sparse compressor for fp8_ds_mla.
             if current_platform.is_cuda() and self.head_dim == 512 and store_full_kv:
                 raise NotImplementedError(
-                    "DeepSeek V4 full-row KV cache on CUDA requires the CuTeDSL "
-                    "sparse compressor; install cutlass or use fp8_ds_mla KV cache"
+                    "DeepSeek V4 full-row KV cache on CUDA requires SM90+ and the "
+                    "CuTeDSL sparse compressor; install cutlass or use fp8_ds_mla "
+                    "KV cache"
                 )
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}

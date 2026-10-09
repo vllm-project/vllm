@@ -23,6 +23,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def kv_cache():
+    """Create a deterministic BF16 cache for sparse attention comparisons."""
     torch.manual_seed(0)
     return torch.randn(32768, 1, _DIM_QK, dtype=torch.bfloat16, device="cuda")
 
@@ -34,6 +35,7 @@ def _assert_split_matches_single_pass(
     num_kv_splits: int | None,
     kv_cache: torch.Tensor,
 ) -> None:
+    """Compare split-KV sparse attention with its single-pass result."""
     torch.manual_seed(0)
     q = torch.randn(num_tokens, num_heads, _DIM_QK, dtype=torch.bfloat16, device="cuda")
     indices = torch.randint(
@@ -70,6 +72,7 @@ def _assert_split_matches_single_pass(
 def test_split_kv_matches_single_pass(
     num_tokens, num_heads, topk, num_kv_splits, kv_cache
 ):
+    """Verify explicit split counts preserve sparse attention results."""
     _assert_split_matches_single_pass(
         num_tokens,
         num_heads,
@@ -81,6 +84,7 @@ def test_split_kv_matches_single_pass(
 
 @pytest.mark.parametrize("num_tokens", [1, 8, 32, 128])
 def test_auto_split_matches_single_pass(num_tokens, kv_cache):
+    """Verify automatic split selection preserves sparse attention results."""
     _assert_split_matches_single_pass(
         num_tokens,
         num_heads=128,
