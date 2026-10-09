@@ -361,6 +361,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed/test_pynccl
+  - tests/distributed/test_nccl2.py
   - tests/distributed/test_events
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
@@ -368,6 +369,7 @@ steps:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_pynccl.py
+  - pytest -v -s distributed/test_nccl2.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # test multi-node TP with multiproc executor (simulated on single node)
