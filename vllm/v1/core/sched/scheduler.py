@@ -37,7 +37,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVBlockTail, KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -363,6 +363,7 @@ class Scheduler(SchedulerInterface):
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
+        self._kv_block_tails_to_zero: list[KVBlockTail] = []
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -1515,6 +1516,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
+            kv_block_tails_to_zero=self._take_kv_block_tails_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
@@ -1567,6 +1569,11 @@ class Scheduler(SchedulerInterface):
         if not self.needs_kv_cache_zeroing:
             return None
         return new_block_ids_to_zero or None
+
+    def _take_kv_block_tails_to_zero(self) -> list[KVBlockTail] | None:
+        tails = self._kv_block_tails_to_zero
+        self._kv_block_tails_to_zero = []
+        return tails or None
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
@@ -3162,8 +3169,20 @@ class Scheduler(SchedulerInterface):
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
-            # Now that the blocks are ready, actually cache them.
-            # This will cache the blocks iff caching is enabled.
+            if self.needs_kv_cache_zeroing:
+                # Queue tails before caching can give partial blocks a hash.
+                # Admission skipped their zeroing to avoid racing the load.
+                tails = self.kv_cache_manager.get_partial_last_blocks(
+                    request.request_id, request.num_computed_tokens
+                )
+                self._kv_block_tails_to_zero.extend(tails)
+                if tails and self.defer_block_free:
+                    # The zeroing runs with this step even if the request is
+                    # not scheduled in it; fence its blocks like a scheduled
+                    # request's (see _free_cow_retained_blocks).
+                    request.last_sched_seq = max(
+                        request.last_sched_seq, self.sched_step_seq + 1
+                    )
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
         # DSV41 SWA bounded replay recomputes the tail of a hit loaded without

@@ -41,7 +41,11 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import (
+    KVBlockTail,
+    get_request_block_hasher,
+    init_none_hash,
+)
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
     DiffusionScheduler,
@@ -2721,6 +2725,106 @@ def test_kv_connector_honors_skip_reading_prefix_cache():
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
     assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
+
+
+@pytest.mark.parametrize(
+    "block_size,num_tokens,num_loaded,tail_block",
+    [
+        pytest.param(16, 50, 40, 2, id="dcp1"),
+        # The scheduler sees DCP only through the block span: DCP8 with
+        # 1536-slot rank-local blocks spans 12,288 tokens.
+        pytest.param(12_288, 275_090, 275_089, 22, id="dcp8_span"),
+        pytest.param(16, 50, 48, None, id="block_aligned"),
+    ],
+)
+def test_async_load_queues_last_block_tail_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    block_size: int,
+    num_tokens: int,
+    num_loaded: int,
+    tail_block: int | None,
+):
+    """An async load (e.g. MooncakeStore, offloading) writes only the leading
+    slots of its last block, whose alloc-time zeroing was skipped. Its tail is
+    queued for zeroing exactly once, in the step that first schedules the
+    request, with the loaded token count."""
+    monkeypatch.setattr(
+        KVCacheConfig, "needs_kv_cache_zeroing", property(lambda _: True)
+    )
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt", '
+        '"max_position_embeddings": 300000}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=300_000,
+        use_kv_connector=mock_kv(matched_tokens=num_loaded, is_async=True),
+        block_size=block_size,
+        num_blocks=100,
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=num_tokens, block_size=block_size
+    )
+    scheduler.add_request(request)
+    _step_until_kv_transfer_finished(scheduler, [request.request_id])
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[request.request_id] == num_tokens - num_loaded
+    if tail_block is None:
+        assert output.kv_block_tails_to_zero is None
+    else:
+        block_ids = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        assert output.kv_block_tails_to_zero == [
+            KVBlockTail(0, block_ids[0][tail_block], num_loaded % block_size)
+        ]
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert scheduler.schedule().kv_block_tails_to_zero is None
+
+
+def test_async_load_tail_fences_block_free(monkeypatch: pytest.MonkeyPatch):
+    """A tail is zeroed by the step that queues it, even when that step does
+    not schedule the request. With overlapping batches, aborting the request
+    must not return its blocks before that step is processed, or a new async
+    load into them could race the zeroing."""
+    monkeypatch.setattr(
+        KVCacheConfig, "needs_kv_cache_zeroing", property(lambda _: True)
+    )
+    block_size = 16
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=40, is_async=True),
+        block_size=block_size,
+        num_blocks=100,
+    )
+    scheduler.defer_block_free = True
+    (request,) = create_requests(num_requests=1, num_tokens=50, block_size=block_size)
+    scheduler.add_request(request)
+    _step_until_kv_transfer_finished(scheduler, [request.request_id])
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager, "allocate_slots", lambda *args, **kwargs: None
+    )
+
+    output = scheduler.schedule()
+    assert output.kv_block_tails_to_zero
+    assert request.request_id not in output.num_scheduled_tokens
+
+    block_pool = scheduler.kv_cache_manager.block_pool
+    num_free_blocks = block_pool.get_num_free_blocks()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert block_pool.get_num_free_blocks() == num_free_blocks
+    assert scheduler.deferred_frees
 
 
 @pytest.mark.parametrize("is_async", [False, True])

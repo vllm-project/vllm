@@ -26,7 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
-from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import KVBlockTail, KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -56,13 +57,39 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
 
 
+def _tail_slot_stride(kv: torch.Tensor, page_slots: int) -> int | None:
+    """The token slot stride of a ``[B, H, N, C]`` view in int32 words, if every
+    word of a kernel page belongs to slot ``word // stride % page_slots``: dims
+    laid out inside a slot stay within it and dims laid out outside it step over
+    whole pages of slots. Otherwise None."""
+    el = kv.element_size()
+    slot_bytes = kv.stride(-2) * el
+    if kv.shape[-2] != page_slots or slot_bytes == 0 or slot_bytes % 4:
+        return None
+    block_stride_bytes = kv.stride(0) * el
+    inside_slot_bytes = el
+    for d in range(1, kv.ndim):
+        stride_bytes = kv.stride(d) * el
+        if d == kv.ndim - 2 or kv.shape[d] == 1 or stride_bytes > block_stride_bytes:
+            continue
+        if stride_bytes < slot_bytes:
+            inside_slot_bytes += (kv.shape[d] - 1) * stride_bytes
+        elif stride_bytes % (page_slots * slot_bytes):
+            return None
+    if inside_slot_bytes > slot_bytes:
+        return None
+    return slot_bytes // 4
+
+
 @triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     seg_block_strides_ptr,
     seg_page_sizes_ptr,
     block_ids_ptr,
+    seg_tail_layouts_ptr,
     BLOCK_SIZE: tl.constexpr,
+    HAS_TAILS: tl.constexpr,
 ):
     """Zero KV cache blocks across all segments in a single launch.
 
@@ -81,6 +108,13 @@ def _zero_kv_blocks_kernel(
 
     Programs are mapped directly onto a 3-D grid as
     (block_index, seg_index, chunk_index).
+
+    With HAS_TAILS, block_ids_ptr is a [3, n_blocks] table of block ids, KV
+    cache groups (-1: zero the whole block) and valid rank-local slots. Those
+    entries only touch segments holding a layer of their group and keep the
+    valid slots, located with seg_tail_layouts_ptr ([n_groups, 3, n_segs]:
+    kernel page index within the logical block, slots per kernel page (0: no
+    layer of the group) and slot stride in int32 words).
     """
     block_index = tl.program_id(0)
     seg_index = tl.program_id(1)
@@ -95,10 +129,26 @@ def _zero_kv_blocks_kernel(
     ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
     block_offset = block_id.to(tl.int64) * block_stride_el.to(tl.int64)
     cols = chunk_offset + tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    mask = cols < page_size_el
+    if HAS_TAILS:
+        n_blocks = tl.num_programs(0)
+        n_segs = tl.num_programs(1)
+        group = tl.load(block_ids_ptr + n_blocks + block_index)
+        if group >= 0:
+            layout = seg_tail_layouts_ptr + group * 3 * n_segs + seg_index
+            page_slots = tl.load(layout + n_segs)
+            if page_slots == 0:
+                return
+            valid = tl.load(block_ids_ptr + 2 * n_blocks + block_index)
+            valid -= tl.load(layout) * page_slots
+            if valid >= page_slots:
+                return
+            slot_el = tl.load(layout + 2 * n_segs)
+            mask &= (cols // slot_el) % page_slots >= valid
     tl.store(
         ptr + block_offset + cols,
         tl.zeros([BLOCK_SIZE], dtype=tl.int32),
-        mask=cols < page_size_el,
+        mask=mask,
     )
 
 
@@ -118,6 +168,9 @@ class KVBlockZeroer:
         static_forward_context: dict[str, Any],
         num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
+        dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_kv_cache_interleave_size: int = 1,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
 
@@ -141,6 +194,16 @@ class KVBlockZeroer:
         self._meta: (
             tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None
         ) = None
+        self.dcp_rank = dcp_rank
+        self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
+        # DCP ranks sharing each group's blocks.
+        self.group_dcp_sizes: dict[int, int] = {}
+        # Per segment, the groups with a layer in it whose tails it zeroes:
+        # (kernel page index within the logical block, slots per kernel page,
+        # slot stride in int32 words). Groups share segments when they share a
+        # KV cache tensor; a block belongs to one group at a time.
+        self.seg_tail_layouts: list[dict[int, tuple[int, int, int]]] = []
+        no_tail_segs: set[tuple[int, int]] = set()
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
@@ -160,6 +223,9 @@ class KVBlockZeroer:
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             assert spec.block_size % kernel_bs == 0
+            self.group_dcp_sizes[group.kv_cache_group_id] = (
+                dcp_world_size if spec.dcp_sharded else 1
+            )
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
@@ -192,6 +258,20 @@ class KVBlockZeroer:
                 )
                 assert kernel_page_bytes % 4 == 0
                 logical_block_stride_bytes = block_stride_bytes * ratio
+                slot_el = (
+                    None
+                    # Indexer pages pack values and scales separately.
+                    if getattr(spec, "cache_role", None) == SparseCacheRole.INDEXER
+                    else _tail_slot_stride(kv, kernel_bs)
+                )
+                if slot_el is None:
+                    logger.warning_once(
+                        "Not zeroing never-written KV tails of a cache with "
+                        "shape %s and strides %s: its token slots do not tile "
+                        "its kernel pages.",
+                        tuple(kv.shape),
+                        kv.stride(),
+                    )
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
                     assert (dp + off_bytes) % 4 == 0
@@ -205,11 +285,22 @@ class KVBlockZeroer:
                             seg_page_sizes[idx] = max(
                                 seg_page_sizes[idx], kernel_page_bytes // 4
                             )
-                            continue
-                        seen_ptrs[addr] = len(seg_addrs)
-                        seg_addrs.append(addr)
-                        seg_block_strides.append(logical_block_stride_bytes // 4)
-                        seg_page_sizes.append(kernel_page_bytes // 4)
+                        else:
+                            idx = seen_ptrs[addr] = len(seg_addrs)
+                            seg_addrs.append(addr)
+                            seg_block_strides.append(logical_block_stride_bytes // 4)
+                            seg_page_sizes.append(kernel_page_bytes // 4)
+                            self.seg_tail_layouts.append({})
+                        group_id = group.kv_cache_group_id
+                        layouts = self.seg_tail_layouts[idx]
+                        layout = (virtual_index, kernel_bs, slot_el or 0)
+                        if slot_el is None or layouts.get(group_id, layout) != layout:
+                            # Without one token layout per group, skip its tails.
+                            no_tail_segs.add((idx, group_id))
+                        if (idx, group_id) in no_tail_segs:
+                            layouts.pop(group_id, None)
+                        else:
+                            layouts[group_id] = layout
 
         if not seg_addrs:
             self._meta = None
@@ -217,6 +308,14 @@ class KVBlockZeroer:
 
         max_page_size_el = max(seg_page_sizes)
         blk_size = min(1 << (max_page_size_el - 1).bit_length(), 1024)
+        tail_layouts = torch.zeros(
+            (max(self.group_dcp_sizes, default=0) + 1, 3, len(seg_addrs)),
+            dtype=torch.int64,
+        )
+        for seg_index, layouts in enumerate(self.seg_tail_layouts):
+            for group_id, layout in layouts.items():
+                tail_layouts[group_id, :, seg_index] = torch.tensor(layout)
+        self._seg_tail_layouts = tail_layouts.to(self.device)
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
             torch.tensor(seg_block_strides, dtype=torch.int64, device=self.device),
@@ -226,9 +325,19 @@ class KVBlockZeroer:
             len(seg_addrs),
         )
 
-    def zero_block_ids(self, block_ids: list[int]) -> None:
-        """Zero the KV cache memory for the given block IDs."""
-        if not block_ids or self._meta is None:
+    def zero_block_ids(
+        self, block_ids: list[int], tails: Sequence[KVBlockTail] = ()
+    ) -> None:
+        """Zero new blocks whole and, in the same launch, the never-written
+        tails of async-loaded blocks.
+
+        An async KV load writes only the leading slots of a request's last
+        block, whose alloc-time zeroing was skipped so it would not race the
+        load. The remaining slots keep stale bytes (in hybrid pools, possibly
+        another group's state), which attention reads with weight 0 and
+        0 * NaN = NaN.
+        """
+        if (not block_ids and not tails) or self._meta is None:
             return
         (
             seg_addrs,
@@ -238,21 +347,55 @@ class KVBlockZeroer:
             blk_size,
             n_segs,
         ) = self._meta
-        n_blocks = len(block_ids)
-        idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
+        # Groups without segments have nothing to zero.
+        tails = [t for t in tails if t.group_id in self.group_dcp_sizes]
+        n_blocks = len(block_ids) + len(tails)
+        if not n_blocks:
+            return
+        if tails:
+            # Block ids, then each entry's group (-1: whole block) and valid
+            # rank-local slots, in one copy.
+            entries = [
+                [*block_ids, *(tail.block_id for tail in tails)],
+                [-1] * len(block_ids) + [tail.group_id for tail in tails],
+                [0] * len(block_ids) + [self.local_valid_slots(t) for t in tails],
+            ]
+            idx = async_tensor_h2d(entries, device=self.device, dtype=torch.int64)
+        else:
+            idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
         grid = (n_blocks, n_segs, max_chunks)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
             seg_block_strides,
             seg_page_sizes,
             idx,
+            self._seg_tail_layouts if tails else None,
             BLOCK_SIZE=blk_size,
+            HAS_TAILS=bool(tails),
+        )
+
+    def local_valid_slots(self, tail: KVBlockTail) -> int:
+        """This rank's slots holding the first ``tail.num_valid_tokens`` tokens
+        of its block, which deals ``block_size * dcp`` tokens to the DCP ranks
+        in runs of ``cp_kv_cache_interleave_size``."""
+        dcp_size = self.group_dcp_sizes.get(tail.group_id, 1)
+        if dcp_size == 1:
+            return tail.num_valid_tokens
+        interleave = self.cp_kv_cache_interleave_size
+        rounds, remainder = divmod(tail.num_valid_tokens, dcp_size * interleave)
+        return rounds * interleave + min(
+            max(remainder - self.dcp_rank * interleave, 0), interleave
         )
 
     def warmup(self, num_kv_blocks: int) -> None:
         """JIT-compile the zeroing kernel before the first real request."""
-        if num_kv_blocks > 0:
-            self.zero_block_ids([0])
+        if num_kv_blocks <= 0 or self._meta is None:
+            return
+        self.zero_block_ids([0])
+        # A tail past its block's end compiles the tail variant as a no-op.
+        groups = [group for layouts in self.seg_tail_layouts for group in layouts]
+        if groups:
+            self.zero_block_ids([], [KVBlockTail(groups[0], 0, 1 << 40)])
 
 
 @dataclass

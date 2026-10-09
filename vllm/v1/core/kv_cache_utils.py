@@ -244,6 +244,14 @@ class KVCacheBlockCopy(NamedTuple):
     dst_block_id: int
 
 
+class KVBlockTail(NamedTuple):
+    """A loaded block's valid prefix, counted across DCP ranks within the block."""
+
+    group_id: int
+    block_id: int
+    num_valid_tokens: int
+
+
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python

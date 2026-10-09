@@ -8,11 +8,14 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.v1.core.kv_cache_utils import KVBlockTail
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheLayout,
+    MLAAttentionSpec,
     SlidingWindowSpec,
+    SparseCacheRole,
 )
 from vllm.v1.worker import utils as worker_utils
 from vllm.v1.worker.utils import (
@@ -309,6 +312,7 @@ def test_warmup_compiles_for_all_block_counts():
         page_size_el,  # blk_size
         1,  # n_segs
     )
+    zeroer.seg_tail_layouts = [{}]
 
     def compiled_variants() -> set:
         return {
@@ -395,3 +399,206 @@ def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
             assert (view[b].view(torch.int8) == 1).all(), layout
     zero_bytes = int((raw == 0).sum().item())
     assert zero_bytes == num_layers * spec.page_size_bytes, layout
+
+
+def _tail_zeroer(spec, caches, kernel_block_size, num_blocks, **dcp):
+    return KVBlockZeroer(
+        next(iter(caches.values())).device,
+        attn_groups_iter=[AttentionGroup(None, list(caches), spec, 0)],
+        kernel_block_sizes=[kernel_block_size],
+        static_forward_context={
+            name: SimpleNamespace(kv_cache=cache) for name, cache in caches.items()
+        },
+        num_blocks=num_blocks,
+        **dcp,
+    )
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2, 8])
+@pytest.mark.parametrize("interleave", [1, 4, 16])
+def test_tail_local_valid_slots_follow_token_ownership(dcp_size, interleave):
+    """Every prefix of a block keeps exactly the slots of this rank's tokens,
+    where token ``t`` of a block lives on rank ``t // interleave % dcp``."""
+    block_size = 16
+    zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
+    zeroer.group_dcp_sizes = {0: dcp_size, 1: 1}
+    zeroer.cp_kv_cache_interleave_size = interleave
+    for rank in range(dcp_size):
+        zeroer.dcp_rank = rank
+        for num_valid in range(block_size * dcp_size + 1):
+            owned = sum(t // interleave % dcp_size == rank for t in range(num_valid))
+            assert zeroer.local_valid_slots(KVBlockTail(0, 0, num_valid)) == owned
+            # A group whose blocks are replicated across DCP ranks.
+            assert zeroer.local_valid_slots(KVBlockTail(1, 0, num_valid)) == num_valid
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+@pytest.mark.parametrize("kernel_block_size", [8, 4])
+@pytest.mark.parametrize("num_valid", [3, 6])
+def test_zero_tails_keep_exactly_the_valid_slots(layout, kernel_block_size, num_valid):
+    """A tail zeroes the slots past ``num_valid`` of its block in every layer,
+    in every layout and across kernel pages, and nothing else."""
+    device = torch.device("cuda")
+    num_blocks, num_layers, block_size = 4, 2, 8
+    spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=2, head_size=8, dtype=torch.float32
+    )
+    raw = torch.ones(
+        num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8, device=device
+    )
+    expected = raw.clone()
+    try:
+        views = dense_kv_cache_views(
+            raw, spec, num_blocks, num_layers, layout, kernel_block_size
+        )
+    except ValueError:
+        pytest.skip(f"{layout.name} cannot split blocks into kernel pages")
+    ratio = block_size // kernel_block_size
+    for view in dense_kv_cache_views(
+        expected, spec, num_blocks, num_layers, layout, kernel_block_size
+    ):
+        pages = view.unflatten(0, (num_blocks, ratio))
+        for token in range(num_valid, block_size):
+            page, slot = divmod(token, kernel_block_size)
+            pages[2, page, :, slot] = 0
+    zeroer = _tail_zeroer(
+        spec,
+        {f"layer.{i}": view for i, view in enumerate(views)},
+        kernel_block_size,
+        num_blocks,
+    )
+    assert all(zeroer.seg_tail_layouts)
+
+    zeroer.zero_block_ids([], [KVBlockTail(0, 2, num_valid)])
+    torch.accelerator.synchronize()
+
+    assert torch.equal(raw, expected), layout
+
+
+def _mla_cache(num_blocks, pages_per_block, page, slot_bytes):
+    return torch.full(
+        (num_blocks * pages_per_block, 1, page, slot_bytes),
+        7,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dcp_rank", range(8))
+def test_zero_tails_dcp8_mla(dcp_rank):
+    """DCP8 with 1536-slot rank-local blocks of 24 64-slot FP8 MLA pages: a
+    275,089-token load ends in block 22 with 4,753 tokens, i.e. 595 slots on
+    rank 0 and 594 on the others. Exactly the rest of that block is zeroed."""
+    block_size, page, slot_bytes, num_blocks = 1536, 64, 576, 3
+    spec = MLAAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=slot_bytes, dtype=torch.uint8
+    )
+    cache = _mla_cache(num_blocks, block_size // page, page, slot_bytes)
+    zeroer = _tail_zeroer(
+        spec, {"attn": cache}, page, num_blocks, dcp_world_size=8, dcp_rank=dcp_rank
+    )
+
+    zeroer.zero_block_ids([], [KVBlockTail(0, 1, 275_089 % (block_size * 8))])
+    torch.accelerator.synchronize()
+
+    valid = 595 if dcp_rank == 0 else 594
+    slots = cache.unflatten(0, (num_blocks, block_size // page)).transpose(2, 3)
+    slots = slots.flatten(1, 2)
+    assert (slots[1, :valid] == 7).all()
+    assert (slots[1, valid:] == 0).all()
+    assert (slots[0] == 7).all() and (slots[2] == 7).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_zero_new_blocks_and_tails_in_one_launch():
+    """New blocks are zeroed whole and tails past their valid slots in the same
+    call; a tail of a group without segments touches nothing."""
+    block_size, page, slot_bytes, num_blocks = 256, 64, 576, 4
+    spec = MLAAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=slot_bytes, dtype=torch.uint8
+    )
+    cache = _mla_cache(num_blocks, block_size // page, page, slot_bytes)
+    zeroer = _tail_zeroer(spec, {"attn": cache}, page, num_blocks)
+
+    zeroer.zero_block_ids([3], [KVBlockTail(0, 1, 100), KVBlockTail(1, 2, 5)])
+    torch.accelerator.synchronize()
+
+    slots = cache.unflatten(0, (num_blocks, block_size // page)).flatten(1, 3)
+    assert (slots[1, :100] == 7).all() and (slots[1, 100:] == 0).all()
+    assert (slots[3] == 0).all()
+    assert (slots[0] == 7).all() and (slots[2] == 7).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_tails_skip_layouts_whose_slots_are_not_word_aligned():
+    """bf16 with the token axis innermost puts two slots in one int32 word, so
+    tails leave the cache alone while whole-block zeroing still works."""
+    device = torch.device("cuda")
+    num_blocks, block_size, head_size = 3, 8, 4
+    spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=head_size, dtype=torch.bfloat16
+    )
+    cache = torch.ones(
+        (num_blocks, 1, head_size, block_size), dtype=torch.bfloat16, device=device
+    ).transpose(2, 3)
+    zeroer = _tail_zeroer(spec, {"attn": cache}, block_size, num_blocks)
+    assert zeroer.seg_tail_layouts == [{}]
+
+    zeroer.zero_block_ids([], [KVBlockTail(0, 1, 3)])
+    torch.accelerator.synchronize()
+    assert (cache[1:] == 1).all()
+
+    zeroer.zero_block_ids([1])
+    torch.accelerator.synchronize()
+    assert (cache[1] == 0).all()
+    assert (cache[0] == 1).all() and (cache[2] == 1).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("group_id", [0, 1])
+def test_zero_tails_of_groups_sharing_a_tensor(group_id):
+    """Hybrid groups share KV cache tensors and a block belongs to one group at
+    a time, so each group's tails must reach the shared segments."""
+    block_size, page, slot_bytes, num_blocks = 128, 64, 576, 3
+    spec = MLAAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=slot_bytes, dtype=torch.uint8
+    )
+    cache = _mla_cache(num_blocks, block_size // page, page, slot_bytes)
+    zeroer = KVBlockZeroer(
+        cache.device,
+        attn_groups_iter=[
+            AttentionGroup(None, ["layer.0"], spec, 0),
+            AttentionGroup(None, ["layer.1"], spec, 1),
+        ],
+        kernel_block_sizes=[page, page],
+        static_forward_context={
+            "layer.0": SimpleNamespace(kv_cache=cache),
+            "layer.1": SimpleNamespace(kv_cache=cache),
+        },
+        num_blocks=num_blocks,
+    )
+
+    zeroer.zero_block_ids([], [KVBlockTail(group_id, 1, 70)])
+    torch.accelerator.synchronize()
+
+    slots = cache.unflatten(0, (num_blocks, block_size // page)).flatten(1, 3)
+    assert (slots[1, :70] == 7).all() and (slots[1, 70:] == 0).all()
+    assert (slots[0] == 7).all() and (slots[2] == 7).all()
+
+
+def test_tails_skip_indexer_caches():
+    """Indexer pages store all values, then all scales, so their token slots
+    are not what the [B, N, C] view says."""
+    block_size, head_size = 64, 132
+    spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=torch.uint8,
+        cache_role=SparseCacheRole.INDEXER,
+    )
+    cache = torch.zeros((2, block_size, head_size), dtype=torch.uint8)
+    zeroer = _tail_zeroer(spec, {"indexer": cache}, block_size, 2)
+    assert zeroer.seg_tail_layouts == [{}]

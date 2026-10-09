@@ -23,12 +23,13 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+    from vllm.v1.core.kv_cache_utils import KVBlockTail, KVCacheBlockCopy
     from vllm.v1.request import Request
 else:
     AuxOutputConnectorMetadata = object
     ECConnectorMetadata = object
     KVConnectorMetadata = object
+    KVBlockTail = object
     KVCacheBlockCopy = object
     LoRARequest = object
     MultiModalFeatureSpec = object
@@ -300,6 +301,9 @@ class SchedulerOutput:
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
+    # Last blocks of finished async KV loads; the worker zeroes their slots past
+    # the loaded tokens before the requests' first forward.
+    kv_block_tails_to_zero: list[KVBlockTail] | None = None
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
