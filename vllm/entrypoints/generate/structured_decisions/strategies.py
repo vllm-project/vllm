@@ -296,6 +296,7 @@ class CanvasStrategy(NextTokenStrategy):
                 f"and the served canvas is {served}"
             )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
+        self.max_model_len = vllm_config.model_config.max_model_len
 
     def _sampling_params(
         self, label_ids: list[int], prompt_ids: list[int]
@@ -319,6 +320,12 @@ class CanvasStrategy(NextTokenStrategy):
     def _read_input(
         self, engine_input: EngineInput, prompt_ids: list[int]
     ) -> EngineInput:
+        extra = len(self.thought) + self.width
+        if len(prompt_ids) + extra > self.max_model_len:
+            raise StructuredDecisionError(
+                f"the prompt has {len(prompt_ids)} tokens and a canvas read adds "
+                f"{extra}; together they exceed max_model_len={self.max_model_len}"
+            )
         salt = engine_input.get("cache_salt")
         # The thought block _must_ appear outside of the canvas (far worse results
         # otherwise)
