@@ -43,6 +43,26 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config.cache_dtype == "auto"
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            cache_config.cache_dtype = "fp8_e4m3"
+            logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
+            # MTP shares the target's KV cache layout; a separate draft model
+            # must not inherit a default it was never validated with.
+            spec_config = vllm_config.speculative_config
+            if (
+                spec_config is not None
+                and spec_config.method != "mtp"
+                and spec_config.kv_cache_dtype is None
+            ):
+                spec_config.kv_cache_dtype = "auto"
+
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
         vllm_config.parallel_config.set_dcp_defaults(
@@ -268,6 +288,31 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 "%s. FA4 not available, forcing TRITON_ATTN backend.",
                 head_dims,
             )
+
+
+class EmbeddingGemma2ModelConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Gemma4Config.verify_and_update_config(vllm_config)
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attn_config = vllm_config.attention_config
+        if attn_config.backend is None:
+            attn_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "EmbeddingGemma2: attention backend not specified; defaulting to "
+                "TRITON_ATTN (validated backend for heterogeneous head dimensions)."
+            )
+        else:
+            logger.info(
+                "EmbeddingGemma2: using attention backend %s", attn_config.backend
+            )
+
+        model_config = vllm_config.model_config
+        if model_config.max_model_len > 8192 and getattr(
+            model_config, "original_max_model_len", None
+        ) in (None, -1):
+            model_config.max_model_len = 8192
 
 
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
@@ -646,20 +691,9 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
-            if (
-                cache_config.mamba_cache_mode == "all"
-                and not model_config.supports_mamba_prefix_caching
-            ):
-                cache_config.mamba_cache_mode = "align"
-                logger.warning(
-                    "Hybrid or mamba-based model detected without support "
-                    "for prefix caching with Mamba cache 'all' mode: "
-                    "falling back to 'align' mode."
-                )
-            if cache_config.mamba_cache_mode == "align":
-                assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                    "Chunked prefill is required for mamba cache mode 'align'."
-                )
+            assert vllm_config.scheduler_config.enable_chunked_prefill, (
+                "Chunked prefill is required for mamba cache mode 'align'."
+            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -885,37 +919,13 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
         parallel_config = vllm_config.parallel_config
+        # MoE SP also enables HC SP without the explicit HC flag.
         if (
             current_platform.is_cuda()
-            and parallel_config.tensor_parallel_size > 1
-            and (
-                parallel_config.enable_hc_sp
-                or parallel_config.use_sequence_parallel_moe
-            )
+            and parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size != 1
         ):
-            # MoE SP also enables HC SP without the explicit HC flag.
-            if (
-                parallel_config.use_sequence_parallel_moe
-                and parallel_config.pipeline_parallel_size != 1
-            ):
-                raise ValueError("Qwen4Exp MoE SP requires PP=1")
-            layer_indices = range(text_config.num_hidden_layers)
-            if vllm_config.model_config.architecture == "Qwen4ExpMTP":
-                # MTP decoder indices follow the target model's layers.
-                start_layer = text_config.num_hidden_layers
-                layer_indices = range(
-                    start_layer,
-                    start_layer + getattr(text_config, "mtp_num_hidden_layers", 1),
-                )
-            num_experts = getattr(text_config, "num_experts", 0) or 0
-            mlp_only_layers = getattr(text_config, "mlp_only_layers", [])
-            if any(
-                num_experts <= 0
-                or layer_idx in mlp_only_layers
-                or (layer_idx + 1) % text_config.decoder_sparse_step != 0
-                for layer_idx in layer_indices
-            ):
-                raise ValueError("Qwen4Exp SP does not support dense MLP layers")
+            raise ValueError("Qwen4Exp MoE SP requires PP=1")
 
         uses_ple_or_qsa = bool(text_config.ple_layer_ids) or (
             getattr(text_config, "indexer_n_heads", None) is not None
@@ -1058,6 +1068,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
+    "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,

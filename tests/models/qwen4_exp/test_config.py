@@ -7,16 +7,13 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm.config import CacheConfig, ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.models.config import (
     Qwen3_5ForConditionalGenerationConfig,
     Qwen4ExpForConditionalGenerationConfig,
-)
-from vllm.models.qwen4_exp.config import (
-    Qwen4ExpConfig,
-    Qwen4ExpTextConfig,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -38,7 +35,10 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
         "linear_num_value_heads": 2,
         "linear_key_head_dim": 8,
         "linear_value_head_dim": 8,
-        "num_experts": 0,
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+        # `Qwen4ExpTextConfig` requires an EOS token whenever PLE is enabled.
+        "eos_token_id": 1,
         "hc_count": 2,
         "hc_lowrank": 4,
         "ple_layer_ids": [1],
@@ -69,47 +69,6 @@ def test_moe_sp_rejects_pipeline_parallel() -> None:
         pytest.raises(ValueError, match="MoE SP requires PP=1"),
     ):
         Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
-
-
-@pytest.mark.parametrize(
-    "sp_mode,layer_config,is_mtp,has_dense_layers",
-    [
-        ("hc", {"num_experts": 0}, False, True),
-        ("moe", {"mlp_only_layers": [0]}, False, True),
-        ("hc", {"decoder_sparse_step": 2}, False, True),
-        ("moe", {}, False, False),
-        ("off", {"num_experts": 0}, False, True),
-        ("hc", {"mlp_only_layers": [2]}, True, True),
-        ("moe", {"mlp_only_layers": [0]}, True, False),
-    ],
-)
-def test_sp_dense_layer_validation(
-    sp_mode, layer_config, is_mtp, has_dense_layers
-) -> None:
-    """Reject SP with active dense layers before constructing target or MTP modules."""
-    text_config = _text_config(ple_layer_ids=[], **({"num_experts": 4} | layer_config))
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture="Qwen4ExpMTP" if is_mtp else "Qwen4ExpForCausalLM",
-            hf_text_config=text_config,
-            multimodal_config=None,
-        ),
-        cache_config=CacheConfig(),
-        parallel_config=ParallelConfig(
-            tensor_parallel_size=2,
-            data_parallel_size=2 if sp_mode == "moe" else 1,
-            enable_expert_parallel=sp_mode == "moe",
-            enable_hc_sp=sp_mode == "hc",
-            all2all_backend="allgather_reducescatter",
-        ),
-        speculative_config=None,
-    )
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=True):
-        if has_dense_layers and sp_mode != "off":
-            with pytest.raises(ValueError, match="does not support dense MLP"):
-                Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
-        else:
-            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
 
 
 @pytest.mark.parametrize("use_sp", [False, True])

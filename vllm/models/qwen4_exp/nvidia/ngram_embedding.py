@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_etp_group, get_tp_group
@@ -16,9 +17,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -28,7 +26,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
-from .ops.ple import ple_ngram_ids
+from ..common.ops.ple import ple_ngram_ids
 
 logger = init_logger(__name__)
 

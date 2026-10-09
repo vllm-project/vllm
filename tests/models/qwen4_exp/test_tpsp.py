@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.platforms import current_platform
 
@@ -37,7 +38,6 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
 from vllm.models.qwen4_exp.nvidia import model as qwen4_model
 from vllm.models.qwen4_exp.nvidia.model import Qwen4ExpDecoderLayer
 from vllm.utils.network_utils import get_open_port
@@ -60,7 +60,7 @@ class _TPAttentionProjection(nn.Module):
             reduce_results=reduce_results,
         )
 
-    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor):
         return self.proj(hidden_states)[0]
 
 
@@ -79,6 +79,7 @@ def _make_config(rank: int, *, hc_sp: bool = False, moe_sp: bool = False) -> Vll
     config.model_config = SimpleNamespace(
         architecture="Qwen4ExpForCausalLM",
         is_moe=True,
+        sleep_mode_offload_cudagraph=False,
         hf_text_config=Qwen4ExpTextConfig(
             vocab_size=128,
             eos_token_id=0,
@@ -86,7 +87,7 @@ def _make_config(rank: int, *, hc_sp: bool = False, moe_sp: bool = False) -> Vll
             hc_count=2,
             hc_lowrank=16,
             num_hidden_layers=1,
-            layer_types=["full_attention"],
+            layer_types=["linear_attention"],
             num_experts=4,
             num_experts_per_tok=2,
             moe_intermediate_size=256,
@@ -107,14 +108,16 @@ def _make_decoder(config: VllmConfig, rank: int) -> Qwen4ExpDecoderLayer:
     """Use the production constructor and identical initial weights for both modes."""
     with (
         set_current_vllm_config(config),
-        patch.object(qwen4_model, "Qwen3NextAttention", _TPAttentionProjection),
+        patch.object(qwen4_model, "QwenGatedDeltaNetAttention", _TPAttentionProjection),
     ):
-        layer = Qwen4ExpDecoderLayer(config, "full_attention", "model.layers.0")
+        layer = Qwen4ExpDecoderLayer(
+            config, config.model_config.hf_text_config.layer_types[0], "model.layers.0"
+        )
         torch.manual_seed(12)
         for param in layer.parameters():
             param.normal_(std=0.08)
         # Distinct rank contributions expose missing or duplicate reductions.
-        layer.self_attn.proj.weight.add_(rank * 0.01)
+        layer.linear_attn.proj.weight.add_(rank * 0.01)
         experts = layer.mlp.experts.routed_experts
         if config.parallel_config.enable_expert_parallel:
             experts.w13_weight.add_(rank * 0.01)
@@ -204,9 +207,7 @@ def _check_moe_sp(rank: int, config: VllmConfig) -> None:
     ):
         # The reference keeps full GR rows. MoE handles its own chunk and gather.
         full_hidden, attn_input, injection = layer.attn_hyper_connection.mix(hidden)
-        attn_output = tensor_model_parallel_all_reduce(
-            layer.self_attn(attn_input, positions)
-        )
+        attn_output = tensor_model_parallel_all_reduce(layer.linear_attn(attn_input))
         full_hidden, moe_input, injection = layer.mlp_hyper_connection.combine_and_mix(
             full_hidden, attn_output, injection
         )
