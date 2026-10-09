@@ -22,7 +22,6 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
         max_num_batched_tokens=64,
         max_num_blocks_per_group=[8, 8, 8],
         device=device,
-        kernel_block_sizes=[16, 16, 8],
     )
 
     def fail_if_apply_write_called():
@@ -48,33 +47,31 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
         block_tables.block_tables[0].gpu[0, :2],
         torch.tensor([1, 2], dtype=torch.int32, device=device),
     )
-    # Group 1 has blocks_per_kv_block == 2, so each KV block expands to two
-    # kernel block IDs.
     assert torch.equal(
-        block_tables.block_tables[1].gpu[0, :4],
-        torch.tensor([20, 21, 22, 23], dtype=torch.int32, device=device),
+        block_tables.block_tables[1].gpu[0, :2],
+        torch.tensor([10, 11], dtype=torch.int32, device=device),
     )
     assert torch.equal(
         block_tables.block_tables[0].gpu[1, :1],
         torch.tensor([3], dtype=torch.int32, device=device),
     )
     assert torch.equal(
-        block_tables.block_tables[1].gpu[1, :2],
-        torch.tensor([24, 25], dtype=torch.int32, device=device),
+        block_tables.block_tables[1].gpu[1, :1],
+        torch.tensor([12], dtype=torch.int32, device=device),
     )
     assert torch.equal(
         block_tables.block_tables[2].gpu[1, :2],
         torch.tensor([5, 6], dtype=torch.int32, device=device),
     )
     assert block_tables.num_blocks.np[0, 0] == 2
-    assert block_tables.num_blocks.np[1, 0] == 4
+    assert block_tables.num_blocks.np[1, 0] == 2
     assert block_tables.num_blocks.np[2, 0] == 0
     assert block_tables.num_blocks.np[0, 1] == 1
-    assert block_tables.num_blocks.np[1, 1] == 2
+    assert block_tables.num_blocks.np[1, 1] == 1
     assert block_tables.num_blocks.np[2, 1] == 2
     assert torch.equal(
         block_tables.num_blocks.gpu[:, :2],
-        torch.tensor([[2, 1], [4, 2], [0, 2]], dtype=torch.int32, device=device),
+        torch.tensor([[2, 1], [2, 1], [0, 2]], dtype=torch.int32, device=device),
     )
 
     for block_table in block_tables.block_tables:
@@ -96,15 +93,15 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
         torch.tensor([1, 2, 7], dtype=torch.int32, device=device),
     )
     assert torch.equal(
-        block_tables.block_tables[1].gpu[0, :6],
-        torch.tensor([20, 21, 22, 23, 26, 27], dtype=torch.int32, device=device),
+        block_tables.block_tables[1].gpu[0, :3],
+        torch.tensor([10, 11, 13], dtype=torch.int32, device=device),
     )
     assert torch.equal(
         block_tables.block_tables[2].gpu[0, :1],
         torch.tensor([8], dtype=torch.int32, device=device),
     )
     assert block_tables.num_blocks.np[0, 0] == 3
-    assert block_tables.num_blocks.np[1, 0] == 6
+    assert block_tables.num_blocks.np[1, 0] == 3
     assert block_tables.num_blocks.np[2, 0] == 1
 
 
@@ -116,7 +113,6 @@ def test_block_tables_apply_staged_writes_single_group():
         max_num_batched_tokens=16,
         max_num_blocks_per_group=[4],
         device=device,
-        kernel_block_sizes=[16],
     )
 
     block_tables.append_block_ids(
@@ -141,7 +137,6 @@ def test_block_tables_skip_custom_slot_mapping_groups():
         max_num_batched_tokens=4,
         max_num_blocks_per_group=[1, 1],
         device=device,
-        kernel_block_sizes=[8, 262144],
         slot_mapping_enabled=[False, True],
     )
     block_tables.append_block_ids(
@@ -170,7 +165,7 @@ def test_block_tables_skip_custom_slot_mapping_groups():
 
 
 @pytest.mark.parametrize("cp_rank", range(4))
-def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
+def test_dcp_slot_mapping_only_shards_sharded_groups(cp_rank: int):
     """Only sharded groups use DCP interleave in logical-block coordinates."""
     device = torch.device("cuda")
     block_tables = BlockTables(
@@ -179,7 +174,6 @@ def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
         max_num_batched_tokens=1024,
         max_num_blocks_per_group=[2, 8],
         device=device,
-        kernel_block_sizes=[64, 64],
         dcp_sharded=[True, False],
         cp_size=4,
         cp_rank=cp_rank,
@@ -230,7 +224,6 @@ def test_v1_block_table_move_row_clears_vacated_row():
         max_num_batched_tokens=64,
         pin_memory=False,
         device=torch.device("cuda"),
-        kernel_block_size=16,
         cp_kv_cache_interleave_size=1,
     )
     block_table.add_row([7, 8, 9], row_idx=0)
@@ -260,7 +253,6 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
         max_num_batched_tokens=64,
         max_num_blocks_per_group=[8],
         device=device,
-        kernel_block_sizes=[16],
     )
     # Simulate a real step: stage a request's blocks and gather them into
     # the persistent input block tables.
@@ -292,7 +284,6 @@ def test_dummy_request_slot_mapping_is_pad():
         max_num_batched_tokens=16,
         max_num_blocks_per_group=[4],
         device=device,
-        kernel_block_sizes=[4],
     )
     block_tables.append_block_ids(req_index=0, new_block_ids=([7, 8],), overwrite=True)
     block_tables.apply_staged_writes()
