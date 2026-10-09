@@ -477,8 +477,8 @@ class DeepseekCompressor(nn.Module):
             # the portable Triton sparse compressor for fp8_ds_mla.
             if current_platform.is_cuda() and self.head_dim == 512 and store_full_kv:
                 raise NotImplementedError(
-                    "DeepSeek V4 full-row KV cache on CUDA requires the CuTeDSL "
-                    "sparse compressor; install cutlass or use fp8_ds_mla KV cache"
+                    "DeepSeek V4 full-row KV cache requires an SM90+ CUDA GPU and "
+                    "the CuTeDSL sparse compressor; use fp8_ds_mla KV cache otherwise"
                 )
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}

@@ -154,7 +154,11 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.TRITON_MLA,
                 *sparse_tail,
-                AttentionBackendEnum.TRITON_MLA_SPARSE,
+                *(
+                    [AttentionBackendEnum.TRITON_MLA_SPARSE]
+                    if device_capability.major >= 8
+                    else []
+                ),
             ]
     else:
         # SM100f defaults to FlashInfer for TRTLLM causal attention, but its non-causal

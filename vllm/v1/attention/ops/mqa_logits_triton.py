@@ -393,7 +393,9 @@ def fp8_mqa_logits_triton(
 
     """
     k_fp8, k_scales = kv
-    k_scales = k_scales.reshape(-1)
+    k_scales = k_scales.reshape(-1).contiguous()
+    cu_seqlen_ks = cu_seqlen_ks.contiguous()
+    cu_seqlen_ke = cu_seqlen_ke.contiguous()
 
     M, num_heads, head_dim = q.shape
     N = k_fp8.shape[0]

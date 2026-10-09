@@ -91,7 +91,8 @@ def test_auto_split_matches_single_pass(num_tokens, kv_cache):
 
 
 @pytest.mark.parametrize("num_kv_splits", [1, 2, 4, 8])
-def test_short_prefill_no_nan(num_kv_splits, kv_cache):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_short_prefill_no_nan(num_kv_splits, kv_cache, dtype):
     """Regression: short prefill where most topk slots are -1 sentinels.
 
     The indexer fills 2048 topk positions with only a handful of valid
@@ -101,7 +102,7 @@ def test_short_prefill_no_nan(num_kv_splits, kv_cache):
     """
     torch.manual_seed(0)
     num_tokens, num_heads, topk = 5, 16, 2048
-    q = torch.randn(num_tokens, num_heads, _DIM_QK, dtype=torch.bfloat16, device="cuda")
+    q = torch.randn(num_tokens, num_heads, _DIM_QK, dtype=dtype, device="cuda")
     indices = torch.full((num_tokens, 1, topk), -1, dtype=torch.int32, device="cuda")
     # Only the first `t+1` slots of each query hold valid indices; the
     # remaining ~2045 slots are -1, producing many all-invalid BLOCK_N tiles.
@@ -112,5 +113,6 @@ def test_short_prefill_no_nan(num_kv_splits, kv_cache):
     out = triton_mla_sparse_attention(
         q, kv_cache, indices, sm_scale=0.0417, num_kv_splits=num_kv_splits
     )
+    assert out.dtype == dtype
     assert not torch.isnan(out).any()
     assert not torch.isinf(out).any()
