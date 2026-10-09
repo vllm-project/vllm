@@ -3,29 +3,28 @@
 
 //! Applies parser-built xgrammar structural-tag constraints.
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputBackend, StructuredOutputConstraint, StructuredOutputOptions,
-    StructuredOutputsParams,
+    StructuredOutputBackend, StructuredOutputConstraint, StructuredOutputsParams,
 };
 use vllm_parser::output_grammar::{BuiltOutputGrammar, GrammarCoverage};
 use vllm_text::TextRequest;
 use xgrammar_structural_tag::StructuralTag;
-use xgrammar_structural_tag::format::{Format, GrammarFormat};
+use xgrammar_structural_tag::format::{Format, GrammarFormat, TagFormat};
 
 use crate::{Error, Result};
 
 /// Normalize the user's structured-output constraint to the answer format a
 /// parser may compose into its output grammar.
 ///
+/// Like Python's `structured_outputs_to_format`, this ignores the request's
+/// options: no backend reads them per request, only from the engine config.
+///
 /// Returns `None` when the constraint must stay on its own wire field, so the
-/// request keeps today's behavior: any option set (guidance applies them per
-/// request, while XGrammar has no per-request equivalent), a grammar that is
-/// not XGrammar EBNF (such as Lark), or a structural tag that does not parse.
+/// request keeps today's behavior: a grammar that is not XGrammar EBNF (such
+/// as Lark), or a structural tag that does not parse.
 pub(crate) fn answer_format(params: &StructuredOutputsParams) -> Option<Format> {
-    if params.options != StructuredOutputOptions::default() {
-        return None;
-    }
     Some(match &params.constraint {
         StructuredOutputConstraint::Json(Value::String(schema)) => {
             Format::json_schema(serde_json::from_str(schema).ok()?)
@@ -43,10 +42,45 @@ pub(crate) fn answer_format(params: &StructuredOutputsParams) -> Option<Format> 
             })
         }
         StructuredOutputConstraint::Grammar(_) => return None,
-        StructuredOutputConstraint::StructuralTag(tag) => {
-            serde_json::from_str::<StructuralTag>(tag).ok()?.format
-        }
+        StructuredOutputConstraint::StructuralTag(tag) => structural_tag_format(tag)?,
     })
+}
+
+/// The legacy structural tag shape: free text with JSON tags behind triggers.
+#[derive(Deserialize)]
+struct LegacyStructuralTag {
+    structures: Vec<LegacyStructure>,
+    triggers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct LegacyStructure {
+    begin: String,
+    schema: Value,
+    end: String,
+}
+
+/// Read a structural tag in its current (`format`) or legacy
+/// (`structures`/`triggers`) shape.
+fn structural_tag_format(tag: &str) -> Option<Format> {
+    let value: Value = serde_json::from_str(tag).ok()?;
+    if value.get("structures").is_none() {
+        return Some(serde_json::from_value::<StructuralTag>(value).ok()?.format);
+    }
+    let legacy: LegacyStructuralTag = serde_json::from_value(value).ok()?;
+    let triggers: Vec<&str> = legacy.triggers.iter().map(String::as_str).collect();
+    let tags = legacy
+        .structures
+        .into_iter()
+        .map(|structure| {
+            TagFormat::new(
+                structure.begin,
+                Format::json_schema(structure.schema),
+                structure.end,
+            )
+        })
+        .collect();
+    Some(Format::triggered_tags(&triggers, tags))
 }
 
 /// Apply one parser-built output grammar to the prepared text request.
@@ -82,8 +116,10 @@ pub(crate) fn apply_output_grammar(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputOptions;
+
+    use super::*;
 
     #[test]
     fn answer_format_normalizes_composable_constraints() {
@@ -124,6 +160,30 @@ mod tests {
                 ),
                 Format::const_string("x"),
             ),
+            (
+                StructuredOutputsParams::structural_tag(
+                    r#"{"type": "structural_tag", "structures": [{"begin": "<a>", "schema": {"type": "object"}, "end": "</a>"}], "triggers": ["<a"]}"#,
+                ),
+                Format::triggered_tags(
+                    &["<a"],
+                    vec![TagFormat::new(
+                        "<a>",
+                        Format::json_schema(json!({ "type": "object" })),
+                        "</a>",
+                    )],
+                ),
+            ),
+            (
+                StructuredOutputsParams {
+                    options: StructuredOutputOptions {
+                        disable_any_whitespace: true,
+                        disable_additional_properties: true,
+                        whitespace_pattern: Some(" ?".to_string()),
+                    },
+                    ..StructuredOutputsParams::json_object()
+                },
+                Format::json_schema(json!({ "type": "object" })),
+            ),
         ];
         for (params, expected) in cases {
             assert_eq!(answer_format(&params), Some(expected), "{params:?}");
@@ -132,26 +192,11 @@ mod tests {
 
     #[test]
     fn answer_format_leaves_other_constraints_on_their_wire_field() {
-        let with_option = |options: StructuredOutputOptions| StructuredOutputsParams {
-            options,
-            ..StructuredOutputsParams::json_object()
-        };
         let cases = [
             StructuredOutputsParams::json(Value::String("{".to_string())),
             StructuredOutputsParams::grammar("start: \"a\""),
-            StructuredOutputsParams::structural_tag(r#"{"structures": [], "triggers": []}"#),
-            with_option(StructuredOutputOptions {
-                disable_any_whitespace: true,
-                ..Default::default()
-            }),
-            with_option(StructuredOutputOptions {
-                disable_additional_properties: true,
-                ..Default::default()
-            }),
-            with_option(StructuredOutputOptions {
-                whitespace_pattern: Some(" ?".to_string()),
-                ..Default::default()
-            }),
+            StructuredOutputsParams::structural_tag(r#"{"structures": [{"begin": "<a>"}]}"#),
+            StructuredOutputsParams::structural_tag(r#"{"format": {"type": "unknown"}}"#),
         ];
         for params in cases {
             assert_eq!(answer_format(&params), None, "{params:?}");
