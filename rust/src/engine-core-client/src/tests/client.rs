@@ -2986,6 +2986,15 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             "vllm:nixl_bytes_transferred_sum{model_name=\"test-model\",engine=\"0\"} 12288"
         )
     );
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_transfers_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_notifications_total{model_name=\"test-model\",engine=\"0\"} 1"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
         match decode_value(bytes) {
