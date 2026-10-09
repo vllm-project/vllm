@@ -53,8 +53,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Advertise TP/PP sizes for peer topology validation
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass
@@ -85,6 +86,10 @@ class NixlAgentMetadata:
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Actual topology sizes, checked before peer-provided values drive
+    # rank-list construction.
+    tp_size: int = 1
+    pp_size: int = 1
 
 
 @dataclass
