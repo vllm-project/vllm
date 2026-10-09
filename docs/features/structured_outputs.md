@@ -218,13 +218,18 @@ See also: [full example](../../examples/features/structured_outputs/README.md)
 
 ### Custom grammars and parser boundary tokens
 
-When a custom grammar includes reasoning or tool-call delimiters, its token
-constraints must agree with the configured parser. For example, the Qwen3
-streaming parser recognizes `<think>`, `</think>`, `<tool_call>`, and
-`</tool_call>` by their dedicated token IDs. A text EBNF literal with the same
-spelling can also accept a sequence of ordinary vocabulary tokens. Identical
-decoded text does not guarantee identical parsing: a tool invocation can remain
-in `reasoning` without producing `tool_calls`.
+!!! warning
+    Some reasoning and tool-call parsers identify protocol boundaries by token ID.
+    A text-only grammar can emit ordinary vocabulary tokens with the same decoded
+    spelling as a boundary token. When a custom grammar includes these boundaries,
+    require the token IDs expected by the configured parser; matching decoded text
+    alone does not ensure that parsing succeeds.
+
+For example, the Qwen3 streaming parser recognizes `<think>`, `</think>`,
+`<tool_call>`, and `</tool_call>` by their dedicated token IDs. A text EBNF
+literal with the same spelling can also accept a sequence of ordinary vocabulary
+tokens. A tool invocation can then remain in `reasoning` without producing
+`tool_calls`.
 
 For the XGrammar backend, use token-level structural-tag elements for these
 boundaries. For example, replace a text-only `</think>` element:
@@ -240,8 +245,8 @@ with the dedicated-token element:
 ```
 
 Both can decode to `</think>`, but only the second requires its dedicated token
-ID. Apply the same replacement to any other Qwen3 parser boundary included in
-the grammar. Compose these elements with the rest of your grammar using a
+ID. Apply the same approach to each boundary that the configured parser expects
+as a dedicated token. Compose these elements with the rest of your grammar using a
 structural-tag `sequence`, and pass the complete structure through
 `structured_outputs.structural_tag` or `response_format.type="structural_tag"`.
 A token string is resolved against the configured tokenizer; if you use numeric

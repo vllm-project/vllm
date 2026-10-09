@@ -175,6 +175,10 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
+When a custom structured-output grammar includes reasoning or tool-call
+delimiters, its token constraints must match the configured parser. See
+[Custom grammars and parser boundary tokens](structured_outputs.md#custom-grammars-and-parser-boundary-tokens).
+
 ### Checkpoint Response Templates (`hf`)
 
 Checkpoints can define a `response_template` in `tokenizer_config.json` to describe their reasoning, content, and tool-call wire format. Select the
@@ -508,9 +512,6 @@ Supported models:
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 
 Flags: `--tool-call-parser qwen3_xml`
-
-When a custom structured-output grammar includes the reasoning or tool-call
-delimiters, see [Custom grammars and parser boundary tokens](structured_outputs.md#custom-grammars-and-parser-boundary-tokens).
 
 ### MiMo-V2.6 Models (`mimo`)
 
