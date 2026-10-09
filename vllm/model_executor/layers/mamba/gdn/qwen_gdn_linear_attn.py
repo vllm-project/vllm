@@ -925,7 +925,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
         """
-        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = self.norm(core_attn_out, z).to(z.dtype)
         output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
