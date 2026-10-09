@@ -120,6 +120,7 @@ def create_vllm_config(
     kv_connector: str = "NixlConnector",
     kv_connector_module_path: str | None = None,
     kv_role: str = "kv_consumer",
+    kv_buffer_device: str | None = None,
     disable_hybrid_kv_cache_manager: bool | None = None,
     num_speculative_tokens: int | None = None,
 ) -> VllmConfig:
@@ -153,8 +154,15 @@ def create_vllm_config(
         kv_connector_module_path=kv_connector_module_path,
         kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
-        kv_connector_extra_config=kv_connector_extra_config or {},
+        # The P/D hidden-state handoff is on by default with NIXL; tests of
+        # the paths without it get it off unless they configure the connector.
+        kv_connector_extra_config=(
+            kv_connector_extra_config
+            if kv_connector_extra_config is not None
+            else {"hidden_state_handoff": False}
+        ),
         kv_load_failure_policy=kv_load_failure_policy,
+        **({"kv_buffer_device": kv_buffer_device} if kv_buffer_device else {}),
     )
     attention_config = AttentionConfig(backend=attention_backend)
     speculative_config = (

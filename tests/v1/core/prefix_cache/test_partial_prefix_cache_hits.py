@@ -1127,6 +1127,7 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
             return False, None
 
     scheduler = object.__new__(Scheduler)
+    scheduler.hidden_state_record_tail_tokens = 0
     scheduler.connector = _Connector()
     scheduler.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_producer=True)
@@ -1144,6 +1145,7 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
         num_computed_tokens=12,
         num_in_flight_tokens=0,
         num_prompt_tokens=12,
+        kv_transfer_params=None,
     )
 
     delay_free, kv_xfer_params = scheduler._connector_finished(request)

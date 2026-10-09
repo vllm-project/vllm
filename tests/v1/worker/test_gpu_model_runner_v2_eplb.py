@@ -191,6 +191,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         routed_experts=None,
         cudagraph_stats=None,
         num_spec_tokens_to_schedule=0,
+        has_structured_output_reqs=False,
     )
     runner.req_states = SimpleNamespace()
 

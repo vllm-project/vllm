@@ -20,10 +20,18 @@ from .utils import (
     create_model_runner_output,
     create_request,
     create_scheduler,
-    create_vllm_config,
 )
+from .utils import create_vllm_config as _create_vllm_config
 
 pytestmark = pytest.mark.cpu_test
+
+
+def create_vllm_config(**kwargs):
+    # The handoff does not support NIXL host buffers, the default on CPU
+    # platforms; where NIXL buffers live does not matter to these tests.
+    kwargs.setdefault("kv_buffer_device", "cuda")
+    return _create_vllm_config(**kwargs)
+
 
 # opt-125m: a 768-wide fp16 hidden state, 1536 bytes, stored as 3072 (a nibble
 # per byte). Each token slot holds (96 + 96) * 2 bytes per head per layer, 768
@@ -428,3 +436,42 @@ def test_record_layers_of_pipelined_prefiller(pp_size):
     assert get_record_tail_tokens(d_config, d_kv_cache_config) == cdiv(
         3072, 384 * len(last_stage)
     )
+
+
+def test_handoff_on_by_default_where_supported(monkeypatch):
+    """With NIXL as producer or consumer the handoff is on unless configured
+    off; elsewhere it stays off; one-sided unsupported features are errors."""
+    from vllm.v1.core.hidden_state_record import resolve_hidden_state_handoff
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+    def resolved(**kwargs):
+        # An empty extra config leaves the handoff to its default.
+        kwargs.setdefault("kv_connector_extra_config", {})
+        vllm_config = create_vllm_config(**kwargs)
+        assert vllm_config.kv_transfer_config is not None
+        return vllm_config.kv_transfer_config.hidden_state_handoff
+
+    assert resolved(kv_role="kv_producer")
+    assert resolved(kv_role="kv_consumer")
+    assert not resolved(kv_role="kv_both")
+    assert not resolved(
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"hidden_state_handoff": False},
+    )
+
+    vllm_config = create_vllm_config(
+        kv_role="kv_consumer", kv_connector_extra_config={}
+    )
+    assert vllm_config.kv_transfer_config is not None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    del extra_config["hidden_state_handoff"]
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    resolve_hidden_state_handoff(vllm_config)
+    assert extra_config["hidden_state_handoff"] is False
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    del extra_config["hidden_state_handoff"]
+    vllm_config.parallel_config.decode_context_parallel_size = 2
+    with pytest.raises(ValueError, match="decode context parallelism"):
+        resolve_hidden_state_handoff(vllm_config)
