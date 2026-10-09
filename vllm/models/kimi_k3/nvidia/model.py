@@ -100,6 +100,7 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MLP,
 )
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.kimi_k3 import envs as kimi_k3_envs
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
@@ -145,9 +146,9 @@ def shard_sequence_parallel_mlp(
     """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
 
     Opt-in via ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT``; see :class:`KimiMLP` for
-    the trade-off and :mod:`vllm.envs` for when it is worth enabling.
+    the trade-off and :mod:`vllm.models.kimi_k3.envs` for when it is worth enabling.
     """
-    enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
+    enabled = kimi_k3_envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
     if not (use_sequence_parallel and eligible and enabled):
         return False
     tp_size = get_tensor_model_parallel_world_size()
@@ -175,7 +176,10 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
     # its singleton to exactly one mode.
     all_reduce = not use_sequence_parallel
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
-    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_ENABLE_GEMM_RS
+    if all_reduce:
+        enabled = kimi_k3_envs.VLLM_KIMI_K3_GEMM_AR
+    else:
+        enabled = envs.VLLM_ENABLE_GEMM_RS
     if not enabled:
         return False
 
@@ -1241,7 +1245,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
     @property
     def _aux_attn_res_stream(self) -> bool:
-        return envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM
+        return kimi_k3_envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM
 
     def _capture_aux_hidden_stream(
         self,

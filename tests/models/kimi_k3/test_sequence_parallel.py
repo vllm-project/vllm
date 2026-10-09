@@ -285,7 +285,9 @@ def test_shard_sequence_parallel_mlp_gating(
     tp_size: int,
     expected: bool,
 ):
-    monkeypatch.setattr(kimi_model.envs, "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", enabled)
+    monkeypatch.setattr(
+        kimi_model.kimi_k3_envs, "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", enabled
+    )
     monkeypatch.setattr(
         kimi_model, "get_tensor_model_parallel_world_size", lambda: tp_size
     )
