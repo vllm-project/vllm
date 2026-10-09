@@ -1398,6 +1398,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 num_qo_heads=self.num_qo_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_dim_qk=self.head_dim,
+                head_dim_vo=self.head_dim // self.vo_split,
                 page_size=self.page_size,
                 causal=mode,
                 custom_mask=mask,
@@ -2534,15 +2535,30 @@ class FlashInferImpl(AttentionImpl):
                         for group in causal_groups:
                             group_query = prefill_query[group.token_indices]
                             group_output = torch.empty_like(group_query)
-                            group.wrapper.run(
-                                group_query,
-                                kv_cache_for_fi,
-                                q_scale=1.0 if self.nvfp4_fa2 else layer._q_scale_float,
-                                k_scale=layer._k_scale_float,
-                                v_scale=layer._v_scale_float,
-                                out=group_output,
-                                kv_cache_sf=kv_cache_sf,
-                            )
+                            if self.vo_split > 1:
+                                assert isinstance(kv_cache_for_fi, tuple)
+                                assert isinstance(kv_cache_sf, tuple)
+                                self._run_vo_split_prefill(
+                                    group.wrapper,
+                                    group_query,
+                                    kv_cache_for_fi,
+                                    kv_cache_sf,
+                                    group_output,
+                                    k_scale=layer._k_scale_float,
+                                    v_scale=layer._v_scale_float,
+                                )
+                            else:
+                                group.wrapper.run(
+                                    group_query,
+                                    kv_cache_for_fi,
+                                    q_scale=1.0
+                                    if self.nvfp4_fa2
+                                    else layer._q_scale_float,
+                                    k_scale=layer._k_scale_float,
+                                    v_scale=layer._v_scale_float,
+                                    out=group_output,
+                                    kv_cache_sf=kv_cache_sf,
+                                )
                             out_prefill.index_copy_(
                                 0, group.token_indices, group_output
                             )

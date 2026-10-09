@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU coverage for mixed-causal native FlashInfer planning."""
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -71,3 +74,61 @@ def test_invalid_causal_flags_rejected(flags):
         causal_group_indices(
             torch.tensor(flags), torch.tensor([0, 1, 2]), torch.tensor([0, 1, 2])
         )
+
+
+def test_group_plans_use_disjoint_pages_and_symmetric_window():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    wrappers = {True: Mock(), False: Mock()}
+    builder = SimpleNamespace(
+        _get_prefill_wrapper=lambda causal: wrappers[causal],
+        window_left=1,
+        device=torch.device("cpu"),
+        num_qo_heads=4,
+        num_kv_heads=2,
+        head_dim=512,
+        vo_split=2,
+        page_size=4,
+        sm_scale=512**-0.5,
+        logits_soft_cap=0.0,
+        q_data_type_prefill=torch.bfloat16,
+        kv_cache_dtype=torch.uint8,
+        prefill_fixed_split_size=-1,
+        disable_split_kv=True,
+    )
+    groups = FlashInferMetadataBuilder._plan_causal_groups(
+        builder,
+        torch.tensor([True, False, True]),
+        torch.tensor([0, 1, 4, 6], dtype=torch.int32),
+        torch.tensor([2, 4, 6, 8], dtype=torch.int32),
+        torch.tensor([1, 2, 3], dtype=torch.int32),
+        torch.tensor([90, 91, 10, 11, 20, 21, 30, 31], dtype=torch.int32),
+        torch.tensor([5, 6, 7], dtype=torch.int32),
+        torch.bfloat16,
+    )
+    causal_plan = wrappers[True].plan.call_args.kwargs
+    noncausal_plan = wrappers[False].plan.call_args.kwargs
+    assert causal_plan["qo_indptr"].tolist() == [0, 1, 3]
+    assert causal_plan["paged_kv_indices"].tolist() == [10, 11, 30, 31]
+    assert causal_plan["paged_kv_last_page_len"].tolist() == [1, 3]
+    assert causal_plan["causal"] is True
+    assert causal_plan["window_left"] == 1
+    assert causal_plan["custom_mask"] is None
+    assert noncausal_plan["qo_indptr"].tolist() == [0, 3]
+    assert noncausal_plan["paged_kv_indices"].tolist() == [20, 21]
+    assert noncausal_plan["causal"] is False
+    assert noncausal_plan["window_left"] == -1
+    assert noncausal_plan["custom_mask"].reshape(3, 6)[0].tolist() == [
+        False,
+        False,
+        True,
+        True,
+        True,
+        False,
+    ]
+    for plan in (causal_plan, noncausal_plan):
+        assert plan["head_dim_qk"] == 512
+        assert plan["head_dim_vo"] == 256
+    assert groups[0].token_indices.tolist() == [0, 4, 5]
+    assert groups[1].token_indices.tolist() == [1, 2, 3]
