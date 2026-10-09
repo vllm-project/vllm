@@ -86,14 +86,15 @@ def get_record_layout(vllm_config: VllmConfig) -> RecordLayout:
         # The drafter reads only token ids (its own KV comes with the transfer).
         return RecordLayout(hidden_size)
     # Hidden-state drafters: EAGLE, EAGLE3, MTP (incl. multi-module and Gemma4),
-    # DFlash (incl. DFlash2/LiLiCorr) and DSpark.
-    if not spec_config.use_eagle():
+    # DFlash (incl. DFlash2/LiLiCorr), DSpark, and the hidden-state extractor
+    # (which reads only the auxiliary ones).
+    if not (spec_config.use_eagle() or spec_config.method == "extract_hidden_states"):
         raise NotImplementedError(
             "P/D hidden-state handoff does not support "
             f"{spec_config.method!r} speculative decoding."
         )
     num_aux = 0
-    if spec_config.method in ("eagle3", "dflash", "dspark"):
+    if spec_config.method in ("eagle3", "dflash", "dspark", "extract_hidden_states"):
         # The target model outputs auxiliary hidden states for these drafters
         # (see GPUModelRunner.use_aux_hidden_state_outputs). The worker checks
         # the count against the model's.
