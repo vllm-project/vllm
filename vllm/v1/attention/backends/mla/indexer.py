@@ -678,6 +678,7 @@ class DeepseekV32IndexerMetadata:
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
     positions: torch.Tensor | None = None
+    block_table: torch.Tensor | None = None
 
 
 @triton.jit(do_not_specialize=["num_reqs", "num_actual_tokens", "num_tokens"])
@@ -701,11 +702,15 @@ def _kpool_tail_slot_mapping_kernel(
         end = tl.load(query_start_loc_ptr + pid + 1)
         end = tl.where(pid == num_reqs - 1, num_actual_tokens, end)
         own_block = tl.load(block_table_ptr + pid * block_table_stride).to(tl.int64)
+        # Every scheduled request owns a tail block; the runners give dummy and
+        # padding requests the null block, which must never be written.
+        has_block = own_block != 0
         for i in range(start, end, BLOCK):
             offs = i + tl.arange(0, BLOCK)
             mask = offs < end
             pos = tl.load(positions_ptr + offs, mask=mask, other=0).to(tl.int64)
-            tl.store(out_ptr + offs, own_block * kpool + pos % kpool, mask=mask)
+            slot = tl.where(has_block, own_block * kpool + pos % kpool, -1)
+            tl.store(out_ptr + offs, slot, mask=mask)
     else:
         offs = num_actual_tokens + (pid - num_reqs) * BLOCK + tl.arange(0, BLOCK)
         mask = offs < num_tokens
@@ -758,7 +763,8 @@ def compute_kpool_tail_slot_mapping(
     req = req.clamp_(min=0, max=num_reqs - 1)
     own_block = block_table[:num_reqs, 0].index_select(0, req).to(torch.int64)
     pos = positions[:num_actual_tokens].to(torch.int64)
-    out[:num_actual_tokens] = own_block * kpool + torch.remainder(pos, kpool)
+    slots = own_block * kpool + torch.remainder(pos, kpool)
+    out[:num_actual_tokens] = torch.where(own_block != 0, slots, -1)
     return out
 
 
@@ -1713,6 +1719,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            block_table=common_attn_metadata.block_table_tensor,
         )
 
         return attn_metadata
@@ -1728,7 +1735,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert metadata.num_prefills == 0
         assert metadata.num_decodes == metadata.num_decode_tokens
         assert decode.seq_lens.numel() == metadata.num_decode_tokens
+        assert metadata.block_table is not None
         assert self.dcp_world_size == 1
+
+        # One query token per request, so the per-token decode block table is
+        # the request block table (at the indexer kernel's page size). build()
+        # may copy it into a builder buffer, so re-derive it for this batch.
+        block_table = metadata.block_table[: metadata.num_decode_tokens]
+        kernel_block_size = self.kernel_block_size
+        if (
+            self.compress_ratio > 1
+            and kernel_block_size is not None
+            and self.kv_cache_spec.block_size != kernel_block_size
+            and self.kv_cache_spec.block_size % kernel_block_size == 0
+        ):
+            factor = self.kv_cache_spec.block_size // kernel_block_size
+            block_table = block_table[:, ::factor] // factor
+        decode.block_table.copy_(block_table)
+        if decode.indices is not None:
+            decode.indices.copy_(self.arange_buffer[: metadata.num_decode_tokens])
+        if decode.per_req_decode_lens is not None:
+            decode.per_req_decode_lens.fill_(1)
 
         if self.compress_ratio > 1:
             get_compressed_slot_mapping(

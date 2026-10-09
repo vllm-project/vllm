@@ -115,7 +115,11 @@ class ECCPUScheduler:
         self._element_size: int = 0
         self._ack_timeout_s: float = 0.0
         if self._nixl_enabled:
-            self._setup_nixl(vllm_config)
+            try:
+                self._setup_nixl(vllm_config)
+            except Exception:
+                self.shutdown()
+                raise
 
     def _setup_nixl(self, vllm_config: "VllmConfig") -> None:
         # Lazy imports keep nixl/zmq off the gate-off path.
@@ -165,35 +169,26 @@ class ECCPUScheduler:
             self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
             self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
 
-        # Registering the region with NIXL and binding the control sockets are
-        # the first side effects here. __init__ propagates a failure, so the
-        # caller never receives a scheduler it could shut down: unwind through
-        # the same teardown shutdown() uses.
-        try:
-            self._data = NixlDataTransport(
-                agent_name=engine_id,
-                base_ptr=self._region.blocks.data_ptr(),
-                num_blocks=self._region.num_blocks,
-                block_size_bytes=self._region.block_size_bytes,
-                total_size_bytes=self._region.num_blocks
-                * self._region.block_size_bytes,
+        self._data = NixlDataTransport(
+            agent_name=engine_id,
+            base_ptr=self._region.blocks.data_ptr(),
+            num_blocks=self._region.num_blocks,
+            block_size_bytes=self._region.block_size_bytes,
+            total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
+        )
+        if self._is_producer:
+            assert self._peer_host is not None
+            assert self._peer_port is not None
+            self._producer_session = ProducerSession(
+                transport=ZmqServerTransport(
+                    host=self._peer_host, port=self._peer_port
+                ),
+                data=self._data,
+                cache=self._cache,
+                compat_hash=self._compat_hash,
             )
-            if self._is_producer:
-                assert self._peer_host is not None
-                assert self._peer_port is not None
-                self._producer_session = ProducerSession(
-                    transport=ZmqServerTransport(
-                        host=self._peer_host, port=self._peer_port
-                    ),
-                    data=self._data,
-                    cache=self._cache,
-                    compat_hash=self._compat_hash,
-                )
-            if self._is_consumer:
-                self._transport = ZmqClientTransport()
-        except Exception:
-            self._teardown_nixl()
-            raise
+        if self._is_consumer:
+            self._transport = ZmqClientTransport()
 
     def has_cache_item(self, identifier: str) -> bool:
         if not self._is_consumer:
