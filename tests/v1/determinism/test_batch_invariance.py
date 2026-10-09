@@ -6,6 +6,7 @@ import random
 
 import pytest
 import torch
+from transformers import AutoTokenizer
 from utils import (
     BACKENDS,
     TEST_MODEL,
@@ -17,6 +18,7 @@ from utils import (
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
 
 
 @skip_unsupported
@@ -154,7 +156,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
         # Ensure engines are shutdown to free GPU/VRAM across test sessions
         if llm is not None:
             with contextlib.suppress(Exception):
-                llm.shutdown()
+                llm.llm_engine.engine_core.shutdown()
 
 
 @skip_unsupported
@@ -175,17 +177,6 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    # For batch invariance, disable custom all-reduce to ensure deterministic
-    # all-reduce operations (custom all-reduce may not be deterministic)
-    import vllm.envs as envs
-
-    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
-
-    if disable_custom_ar:
-        print(f"\n{'=' * 80}")
-        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
-        print(f"{'=' * 80}\n")
-
     llm = LLM(
         model=TEST_MODEL,
         tensor_parallel_size=tp_size,
@@ -203,13 +194,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     # Use more realistic prompts for better token generation
     prompts = [_random_prompt(10, 50) for _ in range(32)]
 
-    # TODO: Update prompts to have ragged lengths in order to test chunked prefill
-    #       The above tests are not currently long enough to exercise chunking.
-    # prompts = (
-    #     [_random_prompt(10, 50) for _ in range(28)]
-    #     + [_random_prompt(256, 512) for _ in range(50)]
-    #     + [_random_prompt(2048, 4096) for _ in range(50)]
-    # )
+    # Chunked prefill is covered by
+    # test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill below.
 
     sp = SamplingParams(
         temperature=0.6,
@@ -394,6 +380,80 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     "backend",
     BACKENDS,
 )
+def test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill(backend):
+    """Batch invariance must hold when a prefill is split across chunks."""
+    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
+
+    prompts = (
+        [_random_prompt(10, 50) for _ in range(8)]
+        + [_random_prompt(300, 450) for _ in range(4)]
+        + [_random_prompt(800, 1200) for _ in range(2)]
+    )
+    random.shuffle(prompts)
+
+    # _random_prompt takes a word target, not a token count, and the ratio
+    # depends on the tokenizer, so derive the budget rather than hardcode it:
+    # half the longest prompt splits that prefill whatever TEST_MODEL is, while
+    # the shorter prompts are still co-scheduled whole. Floor is max_num_seqs.
+    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL)
+    prompt_lens = [len(tokenizer(p).input_ids) for p in prompts]
+    max_num_batched_tokens = max(len(prompts), max(prompt_lens) // 2)
+    assert max_num_batched_tokens < max(prompt_lens), (
+        f"a {max_num_batched_tokens}-token budget does not split the longest "
+        f"prompt ({max(prompt_lens)} tokens), so nothing would be chunked"
+    )
+
+    sp = SamplingParams(
+        temperature=0.6, top_p=1.0, max_tokens=16, seed=1234, logprobs=5
+    )
+    llm = LLM_with_max_seqs(
+        model=TEST_MODEL,
+        max_num_seqs=len(prompts),
+        gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.5")),
+        max_model_len=4096,
+        attention_config={"backend": backend},
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+
+    try:
+        bs1 = []
+        for p in prompts:
+            out = llm.generate([p], sp, use_tqdm=False)[0]
+            bs1.append(_extract_step_logprobs(out))
+        if any(logprobs is None for logprobs, _ in bs1):
+            pytest.skip("Logprobs are not available on RequestOutput.")
+
+        outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+        assert len(outs_batched) == len(prompts)
+
+        mismatches = []
+        for i, out in enumerate(outs_batched):
+            logprobs, tokens = _extract_step_logprobs(out)
+            bs1_logprobs, bs1_tokens = bs1[i]
+            n = prompt_lens[i]
+            if tokens != bs1_tokens:
+                mismatches.append(f"prompt {i} ({n} tokens): tokens differ")
+            elif not torch.equal(bs1_logprobs, logprobs):
+                delta = torch.max(torch.abs(bs1_logprobs - logprobs)).item()
+                mismatches.append(
+                    f"prompt {i} ({n} tokens): logprobs differ, max|delta|={delta:.3e}"
+                )
+
+        assert not mismatches, (
+            "Batch invariance violated under chunked prefill "
+            f"(max_num_batched_tokens={max_num_batched_tokens}): "
+            + "; ".join(mismatches)
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+
+@skip_unsupported
+@pytest.mark.parametrize(
+    "backend",
+    BACKENDS,
+)
 def test_simple_generation(backend):
     """Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
@@ -435,7 +495,7 @@ def test_simple_generation(backend):
 
     finally:
         with contextlib.suppress(Exception):
-            llm.shutdown()
+            llm.llm_engine.engine_core.shutdown()
 
 
 @skip_unsupported
@@ -674,15 +734,6 @@ def test_decode_logprobs_match_prefill_logprobs(
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    import vllm.envs as envs
-
-    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
-
-    if disable_custom_ar:
-        print(f"\n{'=' * 80}")
-        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
-        print(f"{'=' * 80}\n")
-
     llm = LLM(
         model=TEST_MODEL,
         tensor_parallel_size=tp_size,
@@ -728,39 +779,16 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"[Prompt {prompt_idx}] Generated {len(token_ids)} tokens: {token_ids}")
         print(f"[Prompt {prompt_idx}] Decode logprobs: {decode_logprobs.tolist()}")
 
-        # Step 2: For each token position, run prefill and compare
+        # Step 2: For each token position, run prefill and compare.
+        prompt_token_ids = list(decode_output.prompt_token_ids or [])
+
         print(f"\n[Prompt {prompt_idx}] Verifying each token via prefill...")
 
         for token_idx in range(len(token_ids)):
-            # Construct the prefix up to (but not including) this token
+            # Construct the prefix up to (but not including) this token using
+            # token ids directly.
             current_token = token_ids[token_idx]
-
-            # We need to detokenize to get the text prefix
-            # For this, we'll use the tokenizer from the LLM
-            # However, the LLM API doesn't expose tokenizer easily, so we'll
-            # construct the prefix by decoding from the original prompt
-
-            # Get text up to this point by using the output text
-            # This is approximate but should work for verification
-            if token_idx == 0:
-                prefix_prompt = prompt
-            else:
-                # Use the partial output text up to this token
-                # We'll need to construct this from the full output
-                prefix_output = decode_output.outputs[0]
-                # Get the text for tokens 0 to token_idx-1
-                # Unfortunately, we don't have per-token text, so we'll use
-                # a different approach: run prefill with prompt + tokens[0:token_idx]
-
-                # Actually, we need to get the actual text. Let's use a workaround:
-                # Run a generation with max_tokens = token_idx to get that prefix
-                prefix_sp = SamplingParams(
-                    temperature=0.0,
-                    max_tokens=token_idx,
-                    logprobs=1,
-                )
-                prefix_output = llm.generate([prompt], prefix_sp, use_tqdm=False)[0]
-                prefix_prompt = prompt + prefix_output.outputs[0].text
+            prefix_token_ids = prompt_token_ids + list(token_ids[:token_idx])
 
             # Now run prefill with max_tokens=1 to get the logprob of the next token
             prefill_sp = SamplingParams(
@@ -771,19 +799,23 @@ def test_decode_logprobs_match_prefill_logprobs(
 
             print(
                 f"  [Token {token_idx}] Running prefill for prefix "
-                f"(len={len(prefix_prompt)})..."
+                f"(num_tokens={len(prefix_token_ids)})..."
             )
-            prefill_output = llm.generate([prefix_prompt], prefill_sp, use_tqdm=False)[
-                0
-            ]
-            prefill_logprobs, prefill_token_ids = _extract_step_logprobs(prefill_output)
+            prefill_output = llm.generate(
+                [TokensPrompt(prompt_token_ids=prefix_token_ids)],
+                prefill_sp,
+                use_tqdm=False,
+            )[0]
+            prefill_logprobs, prefill_token_ids_out = _extract_step_logprobs(
+                prefill_output
+            )
 
             if prefill_logprobs is None:
                 print(f"  [Token {token_idx}] Warning: No prefill logprobs available")
                 continue
 
             # The first token from prefill should match the current token
-            prefill_token = prefill_token_ids[0]
+            prefill_token = prefill_token_ids_out[0]
             prefill_logprob = prefill_logprobs[0].item()
             decode_logprob = decode_logprobs[token_idx].item()
 
@@ -808,7 +840,7 @@ def test_decode_logprobs_match_prefill_logprobs(
                         "decode_logprob": decode_logprob,
                         "prefill_logprob": prefill_logprob,
                         "prompt_text": prompt[:100],
-                        "prefix_text": prefix_prompt[:100],
+                        "prefix_token_ids": prefix_token_ids[:50],
                     }
                 )
                 print(f"  [Token {token_idx}] ✗ TOKEN MISMATCH!")
@@ -828,7 +860,7 @@ def test_decode_logprobs_match_prefill_logprobs(
                         "prefill_logprob": prefill_logprob,
                         "diff": diff,
                         "prompt_text": prompt[:100],
-                        "prefix_text": prefix_prompt[:100],
+                        "prefix_token_ids": prefix_token_ids[:50],
                         "decode_all_tokens": token_ids,
                         "decode_all_logprobs": decode_logprobs.tolist(),
                     }
@@ -865,7 +897,7 @@ def test_decode_logprobs_match_prefill_logprobs(
             for i, fail in enumerate(failures[:5]):  # Show first 5 failures per prompt
                 print(f"\n  [Failure {i + 1}] Token position {fail['token_idx']}:")
                 print(f"    Reason: {fail['reason']}")
-                print(f"    Prefix text: '{fail['prefix_text']}...'")
+                print(f"    Prefix token ids: {fail['prefix_token_ids']}...")
                 print(
                     f"    Decode:  token={fail['decode_token']}, "
                     f"logprob={fail['decode_logprob']:.10f}"
@@ -923,6 +955,7 @@ def LLM_with_max_seqs(
     max_model_len: int,
     attention_config: dict | None = None,
     kernel_config: dict | None = None,
+    max_num_batched_tokens: int | None = None,
 ) -> LLM:
     """Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
     using the high-level v1 LLM API, while constraining memory usage.
@@ -930,6 +963,8 @@ def LLM_with_max_seqs(
     extra_kwargs: dict = {}
     if kernel_config is not None:
         extra_kwargs["kernel_config"] = kernel_config
+    if max_num_batched_tokens is not None:
+        extra_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     return LLM(
         model=model,
         max_num_seqs=max_num_seqs,

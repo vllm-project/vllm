@@ -2,8 +2,70 @@ group: Miscellaneous Intel
 depends_on:
   - image-build-xpu
 steps:
+- label: XPU Batch Invariance
+  key: xpu-batch-invariance
+  timeout_in_minutes: 60
+  num_devices: 2
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/determinism/test_xpu_batch_invariant_ut.py
+    - .buildkite/scripts/hardware_ci/run-xpu-batch-invariance.sh
+    - .buildkite/intel_jobs/misc_intel.yaml
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_BATCH_INVARIANT=1 &&
+      cd tests &&
+      pytest -v -s v1/determinism/test_xpu_batch_invariant_ut.py &&
+      bash ../.buildkite/scripts/hardware_ci/run-xpu-batch-invariance.sh'
+
 - label: V1 Core + KV + Metrics
   key: v1-core-kv-metrics-intel
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/core
+    - tests/v1/executor
+    - tests/v1/kv_offload
+    - tests/v1/worker
+    - tests/v1/kv_connector/unit
+    - tests/v1/ec_connector/unit
+    - tests/v1/metrics
+    - tests/entrypoints/openai/correctness/test_lmeval.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'pip install -r requirements/kv_connectors.txt &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      cd tests &&
+      pytest -v -s v1/executor &&
+      VLLM_BATCH_INVARIANT=1 pytest -v -s -m "not cpu_test" v1/ec_connector/unit
+      --ignore=v1/ec_connector/unit/test_ec_cpu_connector.py'
+
+- label: EC CPU Connector (XPU)
+  key: ec-cpu-connector-xpu
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
@@ -32,8 +94,7 @@ steps:
       'pip install -r requirements/kv_connectors.txt &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
-      pytest -v -s v1/executor &&
-      VLLM_BATCH_INVARIANT=1 pytest -v -s -m "not cpu_test" v1/ec_connector/unit'
+      pytest -v -s v1/ec_connector/unit/test_ec_cpu_connector.py'
 
 - label: V1 Sample + Logits
   key: v1-sample-logits-intel
@@ -42,7 +103,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -237,7 +298,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -265,9 +326,46 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s detokenizer &&
+    pytest -v -s detokenizer --ignore=detokenizer/test_stop_strings.py &&
     pytest -v -s -m "not cpu_test" ./multimodal &&
     pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'
+
+- label: Detokenizer Stop Strings (XPU)
+  key: detokenizer-stop-strings-xpu
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/tokenizers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/detokenizer
+  - tests/multimodal
+  - tests/utils_
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s detokenizer/test_stop_strings.py'
 
 - label: Fusion Unit Tests
   key: fusion-unit-tests

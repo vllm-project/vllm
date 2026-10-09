@@ -284,7 +284,7 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
 def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     """Resolve the label count for a sequence classification head.
 
-    ``PretrainedConfig.num_labels`` is derived from ``id2label``, which always
+    ``PreTrainedConfig.num_labels`` is derived from ``id2label``, which always
     carries a default of two entries. Composite configs (such as multimodal
     checkpoints) declare their label space on the top-level config, so reading
     ``num_labels`` from ``get_text_config()`` silently returns that default and
@@ -297,9 +297,9 @@ def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     if text_config is hf_config:
         return hf_config.num_labels
 
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    if hf_config.num_labels != PretrainedConfig().num_labels:
+    if hf_config.num_labels != PreTrainedConfig().num_labels:
         return hf_config.num_labels
     return text_config.num_labels
 

@@ -9,7 +9,13 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    CompilationConfig,
+    ModelConfig,
+    config,
+)
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -84,6 +90,26 @@ def test_watermark_config_cli():
     assert config is not None
     assert config.deduplicate_contexts == "none"
     assert config.deduplicate_contexts_max_history == 32
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["--gpu-memory-utilization", "--device-memory-utilization"],
+)
+def test_memory_utilization_cli_aliases(option):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args([option, "0.8"]))
+
+    assert args.gpu_memory_utilization == 0.8
+
+
+def test_device_memory_utilization_property():
+    config = CacheConfig(gpu_memory_utilization=0.8)
+
+    assert config.device_memory_utilization == 0.8
+
+    config.device_memory_utilization = 0.7
+    assert config.gpu_memory_utilization == 0.7
 
 
 @pytest.mark.parametrize(
@@ -454,6 +480,18 @@ def test_compilation_config():
     )
 
 
+def test_trust_request_mm_kwargs_cli():
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+
+    parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    assert not args.trust_request_mm_kwargs
+
+    args = parser.parse_args(["--trust-request-mm-kwargs"])
+    assert args.trust_request_mm_kwargs
+
+
 def test_attention_config():
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -819,13 +857,14 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
 
 
 class TestDeviceIds:
-    def test_device_ids_with_cvd_out_of_range(self, monkeypatch):
+    @pytest.mark.parametrize("device_ids", [[0, 2], [-1]])
+    def test_device_ids_with_cvd_out_of_range(self, monkeypatch, device_ids):
         """--device-ids index beyond the CVD set raises ValueError."""
         from vllm.platforms import current_platform
 
         key = current_platform.device_control_env_var
         monkeypatch.setenv(key, "4,5")
-        args = EngineArgs(model="m", device_ids=[0, 2])
+        args = EngineArgs(model="m", device_ids=device_ids)
         with pytest.raises(ValueError, match="out of range"):
             args._resolve_device_ids()
 
