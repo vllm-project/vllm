@@ -191,6 +191,27 @@ class ScoringIOProcessor(PoolingIOProcessor):
         scoring_data = self.valid_inputs(data_1, data_2)
         return scoring_data
 
+    def _pair_error_output(
+        self,
+        output_1: PoolingRequestOutput,
+        output_2: PoolingRequestOutput,
+    ) -> PoolingRequestOutput | None:
+        failed = output_1 if output_1.error is not None else output_2
+        if failed.error is None:
+            return None
+
+        padding = [self.pad_token_id] if self.pad_token_id is not None else []
+        return PoolingRequestOutput(
+            request_id=f"{output_1.request_id}_{output_2.request_id}",
+            outputs=failed.outputs,
+            prompt_token_ids=(
+                output_1.prompt_token_ids + padding + output_2.prompt_token_ids
+            ),
+            num_cached_tokens=(output_1.num_cached_tokens + output_2.num_cached_tokens),
+            finished=failed.finished,
+            error=failed.error,
+        )
+
 
 class BiEncoderIOProcessor(ScoringIOProcessor):
     name = "bi-encoder"
@@ -310,6 +331,10 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
         final_res_batch: list[PoolingRequestOutput] = []
         for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
+            if error_output := self._pair_error_output(emb_1, emb_2):
+                final_res_batch.append(error_output)
+                continue
+
             pair_score = F.cosine_similarity(
                 emb_1.outputs.data.float(), emb_2.outputs.data.float(), dim=0
             )
@@ -352,6 +377,10 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
 
         # Compute MaxSim scores
         for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
+            if error_output := self._pair_error_output(emb_1, emb_2):
+                final_res_batch.append(error_output)
+                continue
+
             # emb_1.outputs.data: [query_len, dim]
             # emb_2.outputs.data: [doc_len, dim]
             q_emb = emb_1.outputs.data
@@ -907,6 +936,10 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         final_res_batch: list[PoolingRequestOutput] = []
 
         for i in range(len(outputs)):
+            if outputs[i].error is not None:
+                final_res_batch.append(outputs[i])
+                continue
+
             embeds = outputs[i].outputs.data.float()
 
             # The JinaForRanking model concatenates docs first, then query.

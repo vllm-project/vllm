@@ -87,6 +87,8 @@ def get_missing_precompiled_rust_extension_modules() -> list[str]:
 
 
 def has_precompiled_rust_extensions() -> bool:
+    if not rust_build.rust_py_extension_module_names():
+        return False
     return not get_missing_precompiled_rust_extension_modules()
 
 
@@ -266,8 +268,8 @@ class cmake_build_ext(build_ext):
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
         cmake_args = [
-            "-DCMAKE_BUILD_TYPE={}".format(cfg),
-            "-DVLLM_TARGET_DEVICE={}".format(VLLM_TARGET_DEVICE),
+            f"-DCMAKE_BUILD_TYPE={cfg}",
+            f"-DVLLM_TARGET_DEVICE={VLLM_TARGET_DEVICE}",
         ]
 
         verbose = envs.VERBOSE
@@ -291,7 +293,7 @@ class cmake_build_ext(build_ext):
 
         # Pass the python executable to cmake so it can find an exact
         # match.
-        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(sys.executable)]
+        cmake_args += [f"-DVLLM_PYTHON_EXECUTABLE={sys.executable}"]
 
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
@@ -303,7 +305,7 @@ class cmake_build_ext(build_ext):
         # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
-        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
+        cmake_args += [f"-DFETCHCONTENT_BASE_DIR={fc_base_dir}"]
 
         #
         # Setup parallelism and build tool
@@ -311,13 +313,13 @@ class cmake_build_ext(build_ext):
         num_jobs, nvcc_threads = self.compute_num_jobs()
 
         if nvcc_threads:
-            cmake_args += ["-DNVCC_THREADS={}".format(nvcc_threads)]
+            cmake_args += [f"-DNVCC_THREADS={nvcc_threads}"]
 
         if is_ninja_available():
             build_tool = ["-G", "Ninja"]
             cmake_args += [
                 "-DCMAKE_JOB_POOL_COMPILE:STRING=compile",
-                "-DCMAKE_JOB_POOLS:STRING=compile={}".format(num_jobs),
+                f"-DCMAKE_JOB_POOLS:STRING=compile={num_jobs}",
             ]
         else:
             # Default build tool to whatever cmake picks.
@@ -1309,6 +1311,74 @@ def get_vllm_version() -> str:
     return version
 
 
+def _check_requirements_preinstalled(requirements: list[str]) -> None:
+    """`python setup.py develop` satisfies missing `install_requires` via
+    setuptools' legacy easy_install path instead of pip's wheel-aware
+    resolver. That path has repeatedly tried (and failed) to compile old
+    sdists of fast-moving C-extension packages such as aiohttp from source
+    against the running Python's headers, e.g.
+    https://github.com/vllm-project/vllm/issues/34073. Fail fast with an
+    actionable message instead of a cryptic compiler error.
+
+    Skipped under `--no-deps`, which makes setuptools skip `install_requires`
+    processing entirely, so the easy_install path this guards against is
+    unreachable anyway.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import requires as installed_requires
+    from importlib.metadata import version as installed_version
+
+    from packaging.requirements import Requirement
+
+    missing = []
+    checked = set()
+
+    def _check(req_str: str, extra: str | None = None) -> None:
+        # Strip inline "# comment" suffixes (as pip does when reading
+        # requirements files); packaging.Requirement cannot parse them.
+        req_str = re.split(r"\s+#", req_str, maxsplit=1)[0].strip()
+        try:
+            req = Requirement(req_str)
+        except Exception:
+            return
+        # `extra` is only set when recursing into an extra's own deps
+        # below; it selects which `; extra == "..."` markers apply.
+        if req.marker is not None and not req.marker.evaluate(
+            {"extra": extra} if extra else None
+        ):
+            return
+        if (req.name, extra) in checked:
+            return
+        checked.add((req.name, extra))
+        try:
+            installed = installed_version(req.name)
+        except PackageNotFoundError:
+            missing.append(req_str)
+            return
+        if req.specifier and not req.specifier.contains(installed, prereleases=True):
+            missing.append(f"{req_str} (found {req.name}=={installed})")
+            return
+        # A requested extra (e.g. "fastapi[standard]") pulls in packages
+        # that easy_install resolves too, so check those as well.
+        for extra_name in req.extras:
+            for dep in installed_requires(req.name) or []:
+                _check(dep, extra=extra_name)
+
+    for req_str in requirements:
+        _check(req_str)
+
+    if missing:
+        raise RuntimeError(
+            "The following dependencies are missing or outdated:\n  "
+            + "\n  ".join(missing)
+            + "\n\n`python setup.py develop` cannot reliably install these "
+            "itself (see https://github.com/vllm-project/vllm/issues/34073). "
+            "Install them with pip first, e.g.:\n"
+            "  pip install -r requirements/rocm.txt\n"
+            "then re-run `python setup.py develop`."
+        )
+
+
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
     requirements_dir = ROOT_DIR / "requirements"
@@ -1339,10 +1409,10 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
-            if "flashinfer-cubin" in req:
-                # Not on PyPI since 0.6.14 (only https://flashinfer.ai/whl), so
-                # it cannot be a wheel dependency; flashinfer falls back to
-                # fetching cubins at runtime when the package is absent.
+            if "flashinfer-cubin" in req or "flashinfer-jit-cache" in req:
+                # Not on PyPI (only https://flashinfer.ai/whl), so they
+                # cannot be wheel dependencies; flashinfer handles the
+                # absence of pre-compiled cubins/jit-cache at runtime.
                 continue
             if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
                 # [cu13] extra is the default; strip it on CUDA 12 builds.
@@ -1353,6 +1423,8 @@ def get_requirements() -> list[str]:
         requirements = modified_requirements
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
+        if "develop" in sys.argv[1:] and "--no-deps" not in sys.argv[1:]:
+            _check_requirements_preinstalled(requirements)
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -1372,7 +1444,7 @@ if _is_cuda() or _is_hip():
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
-if not _is_xpu() and sys.version_info >= (3, 11):
+if not _is_xpu():
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
     ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 

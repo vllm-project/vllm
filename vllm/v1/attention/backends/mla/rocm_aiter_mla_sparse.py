@@ -37,7 +37,9 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,
+    rocm_sparse_decode_bf16_num_splits,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -70,6 +72,50 @@ def _use_rocm_sparse_triton(
     )
 
 
+@triton.jit
+def _fit_kpool_indices_kernel(
+    token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS + TAIL_WIDTH]
+    out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+    ti_stride0,
+    ti_stride1,
+    out_stride0,
+    out_stride1,
+    NUM_TOPK_TOKENS: tl.constexpr,
+    TAIL_WIDTH: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_TAIL: tl.constexpr,
+):
+    row_ptr = token_indices_ptr + tl.program_id(0) * ti_stride0
+    columns = tl.arange(0, BLOCK_T)
+    column_mask = columns < NUM_TOPK_TOKENS
+    history = tl.load(row_ptr + columns * ti_stride1, mask=column_mask, other=-1)
+
+    tail_columns = tl.arange(0, BLOCK_TAIL)
+    tail = tl.load(
+        row_ptr + (NUM_TOPK_TOKENS + tail_columns) * ti_stride1,
+        mask=tail_columns < TAIL_WIDTH,
+        other=-1,
+    )
+
+    valid_history = tl.sum((history >= 0).to(tl.int32))
+    valid_tail = tl.sum((tail >= 0).to(tl.int32))
+    keep_history = tl.minimum(valid_history, NUM_TOPK_TOKENS - valid_tail)
+
+    tail_offsets = columns - keep_history
+    tail_values = tl.load(
+        row_ptr + (NUM_TOPK_TOKENS + tail_offsets) * ti_stride1,
+        mask=column_mask & (tail_offsets >= 0) & (tail_offsets < TAIL_WIDTH),
+        other=-1,
+    )
+    fitted = tl.where(columns < keep_history, history, tail_values)
+    fitted = tl.where(columns < keep_history + valid_tail, fitted, -1)
+    tl.store(
+        out_ptr + tl.program_id(0) * out_stride0 + columns * out_stride1,
+        fitted,
+        mask=column_mask,
+    )
+
+
 def fit_kpool_indices_to_aiter(
     token_indices: torch.Tensor, topk_tokens: int
 ) -> torch.Tensor:
@@ -79,20 +125,29 @@ def fit_kpool_indices_to_aiter(
     if token_indices.shape[1] == topk_tokens:
         return token_indices
 
-    history = token_indices[:, :topk_tokens]
-    tail = token_indices[:, topk_tokens:]
-    valid_history = (history >= 0).sum(dim=1)
-    valid_tail = (tail >= 0).sum(dim=1)
-    keep_history = torch.minimum(valid_history, topk_tokens - valid_tail)
-
-    columns = torch.arange(topk_tokens, device=token_indices.device).unsqueeze(0)
-    tail_offsets = columns - keep_history.unsqueeze(1)
-    tail_values = torch.gather(
-        tail, 1, tail_offsets.clamp(min=0, max=tail.shape[1] - 1)
+    num_tokens, width = token_indices.shape
+    tail_width = width - topk_tokens
+    output = torch.empty(
+        (num_tokens, topk_tokens),
+        dtype=token_indices.dtype,
+        device=token_indices.device,
     )
-    output = torch.where(columns < keep_history.unsqueeze(1), history, tail_values)
-    valid_output = columns < (keep_history + valid_tail).unsqueeze(1)
-    return torch.where(valid_output, output, -1)
+    if num_tokens == 0:
+        return output
+
+    _fit_kpool_indices_kernel[(num_tokens,)](
+        token_indices,
+        output,
+        token_indices.stride(0),
+        token_indices.stride(1),
+        output.stride(0),
+        output.stride(1),
+        NUM_TOPK_TOKENS=topk_tokens,
+        TAIL_WIDTH=tail_width,
+        BLOCK_T=triton.next_power_of_2(topk_tokens),
+        BLOCK_TAIL=triton.next_power_of_2(tail_width),
+    )
+    return output
 
 
 @triton.jit
@@ -851,20 +906,45 @@ class ROCMAiterMLASparseImpl(
                     self.sinks.reshape(1, self.num_heads, 1),
                     q.shape[1],
                 ).reshape(-1)
-            rocm_sparse_attn_prefill(
-                q=q,
-                kv=kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1]),
-                indices=None,
-                topk_length=None,
-                scale=self.scale,
-                head_dim=q.shape[-1],
-                nope_head_dim=self.kv_lora_rank,
-                rope_head_dim=q.shape[-1] - self.kv_lora_rank,
-                attn_sink=triton_sinks,
-                output=output,
-                ragged_indices=attn_metadata.paged_kv_indices,
-                ragged_indptr=attn_metadata.paged_kv_indptr,
+            kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
+            decode_num_splits = (
+                rocm_sparse_decode_bf16_num_splits(
+                    num_tokens,
+                    q.shape[1],
+                    min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
+                )
+                if attn_metadata.num_decode_tokens == num_tokens
+                else 1
             )
+            if decode_num_splits > 1:
+                rocm_sparse_attn_decode_bf16(
+                    q=q,
+                    kv=kv,
+                    scale=self.scale,
+                    head_dim=q.shape[-1],
+                    nope_head_dim=self.kv_lora_rank,
+                    rope_head_dim=q.shape[-1] - self.kv_lora_rank,
+                    attn_sink=triton_sinks,
+                    output=output,
+                    ragged_indices=attn_metadata.paged_kv_indices,
+                    ragged_indptr=attn_metadata.paged_kv_indptr,
+                    num_splits=decode_num_splits,
+                )
+            else:
+                rocm_sparse_attn_prefill(
+                    q=q,
+                    kv=kv,
+                    indices=None,
+                    topk_length=None,
+                    scale=self.scale,
+                    head_dim=q.shape[-1],
+                    nope_head_dim=self.kv_lora_rank,
+                    rope_head_dim=q.shape[-1] - self.kv_lora_rank,
+                    attn_sink=triton_sinks,
+                    output=output,
+                    ragged_indices=attn_metadata.paged_kv_indices,
+                    ragged_indptr=attn_metadata.paged_kv_indptr,
+                )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
 
