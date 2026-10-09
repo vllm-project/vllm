@@ -37,6 +37,13 @@ class TestPlotFilters:
             }
         )
 
+        self.df_boolean = pd.DataFrame(
+            {
+                "enable_prefix_caching": [True, False],
+                "request_rate": [10, 20],
+            }
+        )
+
     @pytest.mark.parametrize(
         "target,expected_count",
         [
@@ -77,6 +84,45 @@ class TestPlotFilters:
         result = filter_obj.apply(self.df_inf_float)
         # Should exclude float('inf') entries
         assert len(result) == 3
+
+    def test_equal_to_boolean(self):
+        """Boolean filter targets should match JSON boolean columns."""
+        filter_obj = PlotFilters.parse_str("enable_prefix_caching==true")
+
+        result = filter_obj.apply(self.df_boolean)
+
+        assert result["request_rate"].tolist() == [10]
+
+    def test_not_equal_to_boolean(self):
+        """Boolean inequality should exclude only the matching rows."""
+        filter_obj = PlotFilters.parse_str("enable_prefix_caching!=true")
+
+        result = filter_obj.apply(self.df_boolean)
+
+        assert result["request_rate"].tolist() == [20]
+
+    def test_boolean_target_is_literal_for_string_column(self):
+        """String labels named true/false must keep string comparisons."""
+        df = pd.DataFrame({"label": ["true", "false"]})
+
+        result = PlotFilters.parse_str("label==true").apply(df)
+
+        assert result["label"].tolist() == ["true"]
+
+    def test_boolean_filter_with_missing_values(self):
+        """Nullable boolean columns keep missing rows out of either match."""
+        df = pd.DataFrame(
+            {
+                "enabled": pd.Series([True, False, None], dtype="boolean"),
+                "request_rate": [10, 20, 30],
+            }
+        )
+
+        equal = PlotFilters.parse_str("enabled==false").apply(df)
+        not_equal = PlotFilters.parse_str("enabled!=false").apply(df)
+
+        assert equal["request_rate"].tolist() == [20]
+        assert not_equal["request_rate"].tolist() == [10]
 
     @pytest.mark.parametrize(
         "target,expected_count",
