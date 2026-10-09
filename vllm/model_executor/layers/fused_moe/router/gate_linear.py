@@ -81,6 +81,11 @@ class GateLinear(ReplicatedLinear):
             current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
         )
 
+        # If fp32 compute is required and no specialized kernel is available,
+        # store weights in fp32 so the fallback linear path computes in fp32.
+        if force_fp32_compute and not can_use_specialized_kernels:
+            params_dtype = torch.float32
+
         super().__init__(
             input_size,
             output_size,
@@ -96,16 +101,6 @@ class GateLinear(ReplicatedLinear):
         # A quantized gate exposes no plain ``weight``, so every specialized
         # tier below is disabled and forward falls back to ReplicatedLinear.
         self.is_unquantized = isinstance(self.quant_method, UnquantizedLinearMethod)
-        # FP32 storage applies only to the unquantized compute path.
-        if (
-            self.is_unquantized
-            and force_fp32_compute
-            and not can_use_specialized_kernels
-        ):
-            self.params_dtype = torch.float32
-            self.weight.data = self.weight.data.to(torch.float32)
-            if self.bias is not None:
-                self.bias.data = self.bias.data.to(torch.float32)
         can_use_specialized_kernels &= self.is_unquantized
 
         self.allow_specialized_router_gemm = can_use_specialized_kernels
