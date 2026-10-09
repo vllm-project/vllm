@@ -2644,7 +2644,8 @@ class NixlBaseConnectorWorker:
                 raise NotImplementedError(
                     "NIXL cannot transfer a head-sharded draft's KV under an MLA "
                     "target when prefill TP exceeds decode TP or with DCP: "
-                    f"local TP={self.transfer_topo.tp_size}, remote TP={remote_tp_size}, "
+                    f"local TP={self.transfer_topo.tp_size}, "
+                    f"remote TP={remote_tp_size}, "
                     f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
                     f"transfer_mode={self._TRANSFER_MODE}."
                 )
