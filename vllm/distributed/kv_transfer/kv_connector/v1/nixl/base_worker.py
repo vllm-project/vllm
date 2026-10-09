@@ -3055,14 +3055,6 @@ class NixlBaseConnectorWorker:
                 if self._transfer_layer_names
                 else self.region_members
             )
-            expected_groups = (
-                list(self._transfer_layer_group_ids)
-                if self._transfer_layer_group_ids
-                else self.region_group_ids
-            )
-            expected_strides = [
-                self.block_stride_per_layer[index] for index in local_regions
-            ]
             expected_mem_types = [
                 self.region_mem_types[index] for index in local_regions
             ]
@@ -3071,12 +3063,6 @@ class NixlBaseConnectorWorker:
                 raise RuntimeError(
                     "NIXL packed-cache region membership/order differs between P/D"
                 )
-            if nixl_agent_meta.region_group_ids != expected_groups:
-                raise RuntimeError(
-                    "NIXL packed-cache transfer groups differ between P/D"
-                )
-            if nixl_agent_meta.block_strides != expected_strides:
-                raise RuntimeError("NIXL packed-cache block strides differ between P/D")
             if nixl_agent_meta.region_mem_types != expected_mem_types:
                 raise RuntimeError("NIXL packed-cache memory types differ between P/D")
             if nixl_agent_meta.packed_member_layouts != expected_layouts:

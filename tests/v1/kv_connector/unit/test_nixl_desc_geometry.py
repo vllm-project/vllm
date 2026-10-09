@@ -393,6 +393,67 @@ def test_pull_span_coalescing_is_group_scoped_and_keeps_alias_regions_distinct()
 
 
 @pytest.mark.cpu_test
+def test_packed_mla_handshake_allows_group_remapping_and_endpoint_strides():
+    worker, _ = _make_packed_mla_view_worker(
+        {
+            "L0": (0, 64),
+            "L1": (64, 64),
+            "L2": (128, 64),
+            "L3": (192, 64),
+        },
+        256,
+        worker_cls=NixlPullConnectorWorker,
+        transfer_group_ids={"L0": 0, "L1": 0, "L2": 1, "L3": 1},
+        force_cuda_span_eligibility=True,
+    )
+    assert worker._nixl_packed_cache_span_active
+    assert worker.region_group_ids == [0, 1]
+
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    metadata.engine_id = "remote-engine"
+    metadata.region_group_ids = [1, 0]
+    metadata.block_strides = [512, 512]
+
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_tp_size=1, remote_dcp_size=1
+    )
+    worker.transfer_topo.tp_ratio.return_value = 1
+    worker.transfer_topo.block_size_ratio.return_value = 1
+    worker.dst_num_blocks[metadata.engine_id] = metadata.num_blocks
+
+    worker._validate_remote_agent_handshake(
+        metadata, remote_tp_size=1, remote_packed_span_active=True
+    )
+
+    assert worker._block_ids_by_region(([10], [11]), worker.region_group_ids) == [
+        [10],
+        [11],
+    ]
+    assert worker._block_ids_by_region(([20], [21]), metadata.region_group_ids) == [
+        [21],
+        [20],
+    ]
+
+    local_bases = worker.kv_caches_base_addr[worker.engine_id][worker.tp_rank]
+    local_descs = worker._build_fa_local(local_bases, block_size_ratio=1)
+    remote_descs = worker._build_fa_remote(
+        SimpleNamespace(source_ranks_per_group=((0,), (0,))),
+        metadata,
+        block_size_ratio=1,
+    )
+    assert local_descs[:, 0].tolist() == worker.src_blocks_data[:, 0].tolist()
+    assert remote_descs[:, 0].tolist() == [
+        address + block * 512
+        for address in metadata.kv_caches_base_addr
+        for block in range(metadata.num_blocks)
+    ]
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "remote_backends, compatible",
     [
