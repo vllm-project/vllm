@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.worker.tpsp_utils import TPSPProjectionContext
 else:
     VllmConfig = None
     CacheDType = None
@@ -1283,28 +1284,60 @@ class CudaTPSPBackend(TPSPBackend):
             raise ValueError("CUDA TPSP context belongs to another backend")
         return context
 
+    @classmethod
     def fused_gemm_rs_norm_ag(
-        self,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        weight: torch.Tensor,
+        cls,
+        projection_context: TPSPProjectionContext,
+        x: torch.Tensor,
+        projection: torch.nn.Module,
         residual: torch.Tensor,
-        eps: float,
-        config: object,
+        norm: torch.nn.Module,
+        residual_is_sharded: bool,
         *,
+        config: object | None = None,
         norm_type: str = "rms_norm",
-        projection_bias: torch.Tensor | None = None,
-        norm_bias: torch.Tensor | None = None,
-        context: CudaTPSPContext | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self._closed:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        backend = projection_context.backend
+        if not isinstance(backend, cls):
+            raise ValueError("TPSP projection context belongs to another backend")
+        if backend._closed:
             raise RuntimeError("TPSP backend is closed")
-        if type(config) is not int or config <= 0:
+        context = backend._profile_context(projection_context.context)
+        rows = (x.size(0) + context.tp_size - 1) // context.tp_size
+        if residual_is_sharded:
+            if residual.shape != (rows, projection_context.hidden_size):
+                raise RuntimeError("TPSP residual shard has an unexpected shape")
+            local_residual = residual
+        else:
+            if residual.shape != (x.size(0), projection_context.hidden_size):
+                raise RuntimeError("TPSP full residual has an unexpected shape")
+            start = context.rank * rows
+            count = min(rows, max(0, x.size(0) - start))
+            if count == rows:
+                local_residual = residual[start : start + rows].contiguous()
+            else:
+                local_residual = residual.new_zeros(
+                    (rows, projection_context.hidden_size)
+                )
+                local_residual[:count] = residual[start : start + count]
+
+        weight = projection.weight
+        key = (weight.data_ptr(), weight._version)
+        cached = getattr(projection, "_tpsp_transposed_weight", None)
+        if cached is None or cached[0] != key:
+            cached = (key, weight.T.contiguous())
+            projection._tpsp_transposed_weight = cached
+        a, b = x.contiguous(), cached[1]
+        norm_weight = norm.weight
+        eps = norm.eps if norm_type == "layer_norm" else norm.variance_epsilon
+        projection_bias = projection.bias
+        norm_bias = getattr(norm, "bias", None)
+        chunk = projection_context.config if config is None else config
+        if type(chunk) is not int or chunk <= 0:
             raise ValueError("CUDA TPSP requires a positive microchunk size")
-        context = self._profile_context(context)
         if (
             context.workspace is not None
-            and min((a.size(0) + context.tp_size - 1) // context.tp_size, config)
+            and min((a.size(0) + context.tp_size - 1) // context.tp_size, chunk)
             > context.max_chunk_rows
         ):
             raise ValueError("CUDA TPSP microchunk exceeds P2P workspace capacity")
@@ -1317,42 +1350,47 @@ class CudaTPSPBackend(TPSPBackend):
         if (
             any(
                 t.dtype != torch.bfloat16 or t.device != context.device
-                for t in (a, b, weight, residual)
+                for t in (a, b, norm_weight, local_residual)
             )
             or a.ndim != 2
             or b.ndim != 2
-            or weight.ndim != 1
-            or residual.ndim != 2
+            or norm_weight.ndim != 1
+            or local_residual.ndim != 2
             or a.shape[1] != b.shape[0]
-            or b.shape[1] != weight.numel()
+            or b.shape[1] != norm_weight.numel()
         ):
             raise ValueError("CUDA TPSP requires compatible CUDA BF16 inputs")
         for bias in (projection_bias, norm_bias):
             if bias is not None and (
                 bias.dtype != torch.bfloat16
                 or bias.device != context.device
-                or bias.shape != weight.shape
+                or bias.shape != norm_weight.shape
                 or not bias.is_contiguous()
             ):
                 raise ValueError("CUDA TPSP bias must match the BF16 norm weight")
         use_p2p = context.workspace is not None
-        return torch.ops._C.tpsp_fused_matmul_reduce_scatter_norm_all_gather(
-            a,
-            b,
-            weight,
-            residual,
-            projection_bias,
-            norm_bias,
-            eps,
-            1 if norm_type == "layer_norm" else 0,
-            config,
-            context.comm_address,
-            context.tp_size,
-            context.workspace if use_p2p else None,
-            [peer.data_ptr() for peer in context.peer_workspaces] if use_p2p else [],
-            context.signal_one if use_p2p else None,
-            context.rank if use_p2p else -1,
+        reduced, _, gathered = (
+            torch.ops._C.tpsp_fused_matmul_reduce_scatter_norm_all_gather(
+                a,
+                b,
+                norm_weight,
+                local_residual,
+                projection_bias,
+                norm_bias,
+                eps,
+                1 if norm_type == "layer_norm" else 0,
+                chunk,
+                context.comm_address,
+                context.tp_size,
+                context.workspace if use_p2p else None,
+                [peer.data_ptr() for peer in context.peer_workspaces]
+                if use_p2p
+                else [],
+                context.signal_one if use_p2p else None,
+                context.rank if use_p2p else -1,
+            )
         )
+        return gathered, reduced
 
     def close(self, context: CudaTPSPContext | None = None) -> None:
         if context is not None:

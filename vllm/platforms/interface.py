@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
-    from vllm.v1.worker.tpsp_profile import SPProfile
+    from vllm.v1.worker.tpsp_utils import TPSPProfile, TPSPProjectionContext
 else:
     FlexibleArgumentParser = object
 
@@ -157,64 +157,33 @@ class TPSPBackend(ABC):
 
     def profile(
         self,
-        *,
-        projection: torch.nn.Module,
-        norm: torch.nn.Module,
-        tp_size: int,
-        hidden_size: int,
-        input_width: int,
+        o_proj: torch.nn.Module,
+        o_norm: torch.nn.Module,
+        down_proj: torch.nn.Module,
+        down_norm: torch.nn.Module,
         max_batched_tokens: int,
-        norm_eps: float,
-        time_budget_s: float,
-        context: Any | None = None,
-        config_only: bool = False,
-    ) -> "SPProfile":
-        """Benchmark fused projections and return a chunk/threshold plan.
+    ) -> "TPSPProfile":
+        """Select independent chunks and a shared threshold for two projections."""
+        from vllm.v1.worker.tpsp_utils import profile_tpsp
 
-        Returns:
-            SPProfile with ``status``, measured candidates, and token timings.
-            When enabled, ``config`` holds the chosen chunk size and
-            ``threshold_tokens`` marks when to use the fused op. If
-            ``config_only`` is set, only select a chunk size; the caller
-            profiles the combined path to determine the threshold.
-
-        """
-        from vllm.v1.worker.tpsp_profile import profile_sp_config
-
-        return profile_sp_config(
-            self,
-            projection=projection,
-            norm=norm,
-            tp_size=tp_size,
-            hidden_size=hidden_size,
-            input_width=input_width,
-            max_batched_tokens=max_batched_tokens,
-            time_budget_s=time_budget_s,
-            norm_eps=norm_eps,
-            context=context,
-            config_only=config_only,
+        return profile_tpsp(
+            self, o_proj, o_norm, down_proj, down_norm, max_batched_tokens
         )
 
-    def _profile_context(self, context: Any | None) -> Any:
-        if context is None:
-            raise ValueError("TPSP requires a projection context")
-        return context
-
+    @classmethod
     @abstractmethod
     def fused_gemm_rs_norm_ag(
-        self,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        weight: torch.Tensor,
+        cls,
+        projection_context: "TPSPProjectionContext",
+        x: torch.Tensor,
+        projection: torch.nn.Module,
         residual: torch.Tensor,
-        eps: float,
-        config: object,
+        norm: torch.nn.Module,
+        residual_is_sharded: bool,
         *,
+        config: object | None = None,
         norm_type: str = "rms_norm",
-        projection_bias: torch.Tensor | None = None,
-        norm_bias: torch.Tensor | None = None,
-        context: Any | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
     @abstractmethod
     def close(self, context: Any | None = None) -> None: ...

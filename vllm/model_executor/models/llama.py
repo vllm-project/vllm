@@ -54,12 +54,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.worker.tpsp_profile import (
-    TPSPProfile,
-    profile_tpsp,
-)
+from vllm.v1.worker.tpsp_utils import TPSPProfile
 
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
@@ -345,7 +343,11 @@ class LlamaDecoderLayer(nn.Module):
             tpsp_active=tpsp_active,
         )
         if tpsp_active:
-            hidden_states, residual = self.tpsp.o_proj.fused_gemm_norm(
+            backend_cls = current_platform.get_tpsp_backend_cls()
+            if backend_cls is None:
+                raise RuntimeError("TPSP backend is unavailable")
+            hidden_states, residual = backend_cls.fused_gemm_rs_norm_ag(
+                self.tpsp.o_proj,
                 hidden_states,
                 self.self_attn.o_proj,
                 residual,
@@ -353,7 +355,8 @@ class LlamaDecoderLayer(nn.Module):
                 residual_is_sharded,
             )
             hidden_states = self.mlp(hidden_states, tpsp_active=True)
-            return self.tpsp.down_proj.fused_gemm_norm(
+            return backend_cls.fused_gemm_rs_norm_ag(
+                self.tpsp.down_proj,
                 hidden_states,
                 self.mlp.down_proj,
                 residual,
@@ -451,13 +454,29 @@ class LlamaModel(nn.Module, EagleModelMixin):
         **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if self.tpsp_requested and self.tpsp is None:
+            from vllm.distributed.parallel_state import get_tp_group
+
             first_layer = self.layers[0]
-            new_profile = profile_tpsp(
+            backend_cls = current_platform.get_tpsp_backend_cls()
+            backend = (
+                backend_cls(
+                    get_tp_group().device_group.group_name,
+                    first_layer.self_attn.o_proj.weight.device,
+                )
+                if backend_cls is not None
+                else None
+            )
+            args = (
                 first_layer.self_attn.o_proj,
                 first_layer.post_attention_layernorm,
                 first_layer.mlp.down_proj,
                 self.layers[1].input_layernorm,
                 self.max_tpsp_batched_tokens,
+            )
+            new_profile = (
+                backend.profile(*args)
+                if backend is not None
+                else TPSPProfile.without_backend(*args)
             )
             if new_profile.enabled:
                 for layer in islice(self.layers, self.start_layer, self.end_layer):
