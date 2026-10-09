@@ -160,7 +160,7 @@ class WinnowStrategy(ReadStrategy):
                 content.extend(images)
                 content.append(dict(type="text", text="State:\n" + body + suffix))
                 _, (engine_input,) = await self.context.online_renderer.preprocess_chat(
-                    ReadPromptRequest(),
+                    ReadPromptRequest(cache_salt=cache_salt),
                     [{"role": "user", "content": content}],
                     default_template=VISION_TEMPLATE,
                     default_template_content_format="openai",
@@ -178,13 +178,10 @@ class WinnowStrategy(ReadStrategy):
             ]
         else:
             prompts = [prompt_tokens(self.tokenizer, state, q) for q in questions]
-            engine_inputs = [tokens_input(p) for p in prompts]
+            engine_inputs = [tokens_input(p, cache_salt=cache_salt) for p in prompts]
         maximum = self.context.engine_client.model_config.max_model_len
         if any(len(prompt) + 1 > maximum for prompt in prompts):
             raise StructuredDecisionError("Winnow decision exceeds the model context")
-        if cache_salt is not None:
-            for engine_input in engine_inputs:
-                engine_input["cache_salt"] = cache_salt
         slots = [self.label_ids[: len(q.options)] for q in questions]
         reads = await next_token_label_reads(
             self.context.engine_client,
