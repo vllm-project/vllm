@@ -16,9 +16,8 @@ from typing import TypeGuard
 import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
@@ -32,6 +31,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -157,7 +157,7 @@ def _get_kda_state_shape_for_config(
     return shapes
 
 
-def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
+def _build_rope_parameters(config: PreTrainedConfig) -> dict | None:
     rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
     if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
         rope_parameters["rope_theta"] = config.rope_theta
@@ -178,7 +178,7 @@ def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
 
 
 def _build_mla_rotary_embedding(
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     head_size: int,
 ) -> nn.Module:
     rope_parameters = _build_rope_parameters(config)
@@ -229,7 +229,7 @@ def _is_block_fp8_config(
 
 def _configure_ling_fp8_quant_config(
     quant_config: QuantizationConfig | None,
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
 ) -> None:
     if not _is_block_fp8_config(quant_config):
         return
@@ -378,7 +378,7 @@ def _pad_block_fp8_mlp_checkpoint_tensor(
 
 def _maybe_pad_block_fp8_shared_expert_checkpoint_tensor(
     quant_config: QuantizationConfig | None,
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     name: str,
     loaded_weight: torch.Tensor,
 ) -> torch.Tensor:
@@ -416,7 +416,7 @@ class BailingMoeV3MLP(nn.Module):
     def __init__(
         self,
         intermediate_size: int,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
@@ -452,7 +452,7 @@ class BailingMoeV3MLP(nn.Module):
 class BailingMoeV3MLAAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "attention",
@@ -631,7 +631,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "attention",
@@ -1124,32 +1124,10 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             core_attn_out[0, :num_actual_tokens] = out[0, :num_actual_tokens]
 
 
-class BailingMoeV3Gate(nn.Module):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        params_dtype: torch.dtype | None = None,
-    ) -> None:
-        super().__init__()
-        if params_dtype is None:
-            params_dtype = torch.float32
-        self.weight = nn.Parameter(
-            torch.empty((config.num_experts, config.hidden_size), dtype=params_dtype)
-        )
-        self.expert_bias = nn.Parameter(
-            torch.empty((config.num_experts,), dtype=torch.float32)
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return F.linear(hidden_states.to(self.weight.dtype), self.weight).to(
-            hidden_states.dtype
-        )
-
-
 class BailingMoeV3MoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "",
@@ -1159,7 +1137,16 @@ class BailingMoeV3MoE(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.hidden_size = config.hidden_size
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.gate = BailingMoeV3Gate(config)
+        self.gate = GateLinear(
+            config.hidden_size,
+            config.num_experts,
+            out_dtype=torch.float32,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
+        )
+        self.gate.expert_bias = nn.Parameter(
+            torch.empty((config.num_experts,), dtype=torch.float32)
+        )
         self.expert_swiglu_limit = _get_layer_swiglu_limit(
             getattr(config, "expert_swiglu_limit_list", None), layer_id
         )
@@ -1202,7 +1189,7 @@ class BailingMoeV3MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.contiguous().view(-1, hidden_size)
-        router_logits = self.gate(hidden_states.to(torch.float32))
+        router_logits, _ = self.gate(hidden_states)
         hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
@@ -1212,7 +1199,7 @@ class BailingMoeV3MoE(nn.Module):
 class BailingMoeV3DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "layer",
