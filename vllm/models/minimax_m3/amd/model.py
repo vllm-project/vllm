@@ -88,6 +88,7 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.amd.fused_decode import MiniMaxM3FusedDecode
 from vllm.models.minimax_m3.amd.indexer_aiter import (
     MiniMaxM3AiterIndexer,
     select_aiter_indexer_impl_cls,
@@ -895,6 +896,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self._ensure_aiter_sparse_pa_kv_cache()
         return self.kv_cache_k, self.kv_cache_v
 
+    def get_aiter_sparse_pa_block_page_stride(self) -> int:
+        """Page-16 ids one cache block spans in the K-side numbering."""
+        self._ensure_aiter_sparse_pa_kv_cache()
+        return self._aiter_sparse_pa_block_page_stride
+
+    def get_kv_scales(self) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._k_scale, self._v_scale
+
     def _get_aiter_sparse_pa_slot_mapping(
         self,
         slot_mapping: torch.Tensor,
@@ -1463,6 +1472,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ["hidden_states", "residual"], config.hidden_size
         )
 
+        self.fused_decode: MiniMaxM3FusedDecode | None = None
+        if vllm_config.attention_config.minimax_m3_fused_decode:
+            self.fused_decode = MiniMaxM3FusedDecode(self, vllm_config)
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1473,6 +1486,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if self.fused_decode is not None and self.fused_decode.eligible(
+            input_ids, inputs_embeds
+        ):
+            assert input_ids is not None
+            return self.fused_decode.forward(input_ids, positions)
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
