@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -60,7 +60,7 @@ class NemotronLabsDiffusionAttention(LlamaAttention):
     """Llama attention + YaRN RoPE (HF attention factor) + per-token
     llama-4 Q scaling applied after RoPE."""
 
-    def __init__(self, *, config: PretrainedConfig, **kwargs: Any) -> None:
+    def __init__(self, *, config: PreTrainedConfig, **kwargs: Any) -> None:
         super().__init__(config=config, **kwargs)
         rope_parameters = getattr(config, "rope_parameters", None) or {}
         self.llama4_scaling_beta: float | None = rope_parameters.get(
@@ -73,7 +73,7 @@ class NemotronLabsDiffusionAttention(LlamaAttention):
 
     def _init_rotary_emb(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
     ) -> None:
         rope_parameters = dict(getattr(config, "rope_parameters", None) or {})
@@ -127,7 +127,7 @@ class NemotronLabsDiffusionDecoderLayer(LlamaDecoderLayer):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        config: PretrainedConfig | None = None,
+        config: PreTrainedConfig | None = None,
     ) -> None:
         super().__init__(
             vllm_config,

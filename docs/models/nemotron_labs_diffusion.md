@@ -65,6 +65,7 @@ attention and vLLM's standard scheduler, KV cache, and sampler. Sampling
 parameters such as temperature, top-p, and top-k are set per request. Do not
 pass `diffusion_config` in AR mode; denoising policies and thresholds do not
 apply. The default, without either override, remains block diffusion.
+
 ## 8B checkpoints
 
 Point the server at the 8B checkpoint directly, using the same decoding options:
