@@ -20,7 +20,6 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
-    RowParallelLinear,
     UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
@@ -70,16 +69,7 @@ GLM52_QKV_A_PROJECTION = GLM52ProjectionSpec(
     dsv3_tokens=frozenset(range(3, 17)),
 )
 
-# Dense gate_up (layers 0-2 of GLM-5.2): [2*intermediate_size/TP, hidden] =
-# [2*12288/4, 6144] = [6144, 6144] at TP=4.  There is deliberately NO
-# dsv3_tokens entry: the C++ dsv3_fused_a_gemm kernel has no (6144,6144)
-# specialization, so adding one would HARD-ERROR at prefill ("unsupported DSV3
-# fused-A GEMM shape").  The cute M=1 config is the only winner.
-#
-# COLLISION RULE: GLM52_PROJECTIONS is keyed on (n, k).  If two specs ever
-# share (n, k), the second silently overwrites the first with no error.  In this
-# run dense gate_up (6144,6144) and o_proj (6144,4096) do NOT collide, but
-# the rule is TP-dependent and must be kept in mind when adding specs.
+# Dense gate_up (layers 0-2 at TP=4): cute M=1 only, no dsv3 specialization.
 GLM52_DENSE_GATE_UP_PROJECTION = GLM52ProjectionSpec(
     n=6144,
     k=6144,
@@ -109,8 +99,6 @@ GLM52_PROJECTIONS = {
 
 
 def _is_sm10x() -> bool:
-    # Widened from is_device_capability((10, 3)): the tuned kernels are valid on
-    # the whole SM10x family, which includes B200 (10, 0).
     return current_platform.is_device_capability_family(100)
 
 
@@ -139,9 +127,7 @@ def run_glm52_plan(
 ) -> torch.Tensor | None:
     if plan is None or not _runtime_ok(x, weight):
         return None
-    # Guard-safe dispatch: only a RANGE guard (allowed on the dynamic token
-    # dim), never an equality specialization.  An equality guard here makes
-    # torch.compile raise ConstraintViolationError when the token dim is dynamic.
+    # Range guard (not equality): avoids ConstraintViolationError under torch.compile.
     if x.shape[0] > 16:
         return None
     entry = plan.get(x.shape[0])
@@ -229,27 +215,11 @@ def enable_glm52_low_latency_gemm(
         spec = GLM52_PROJECTIONS.get(tuple(weight.shape))
         if spec is None:
             continue
-        # Step-0 diagnostic: log every layer the plan touches.  Uses the module
-        # prefix (LinearBase exposes no name accessor) so the shape key can be audited
-        # against the log before trusting any timing.
         logger.debug(
-            "GLM-5.2 low-latency GEMM: installing plan on %s (%s) shape=%s "
-            "dtype=%s quant_method=%s",
+            "GLM-5.2 low-latency GEMM: %s shape=%s",
             child.prefix,
-            child.__class__.__name__,
             tuple(weight.shape),
-            weight.dtype,
-            type(child.quant_method).__name__,
         )
-        if (
-            isinstance(child, RowParallelLinear)
-            and getattr(child, "bias", None) is not None
-        ):
-            logger.warning(
-                "GLM-5.2 low-latency GEMM: %s is a RowParallelLinear with a "
-                "bias; the plan bypasses biased layers silently.",
-                child.prefix,
-            )
         child.quant_method = GLM52LowLatencyLinearMethod(spec.build_plan())
         installed += 1
         warmup_configs.update(config for _, config in spec.cute_configs)

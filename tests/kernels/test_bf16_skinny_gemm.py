@@ -500,8 +500,6 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
                 )
             )
             self.quant_method = quant_method
-            # The enabler's Step-0 diagnostic reads ``child.prefix`` (LinearBase
-            # has no public name accessor), so the fixture provides one.
             self.prefix = "fake.proj"
 
     qkv_a = glm52_gemm.GLM52_QKV_A_PROJECTION
@@ -880,12 +878,7 @@ def _require_sm103_and_cute() -> None:
 
 
 def _require_sm10x_and_cute() -> None:
-    """Skip unless the GLM-5.2 low-latency GEMM plan can actually run.
-
-    Unlike the Kimi-K3 helpers (which are pinned to SM103), the GLM-5.2 plan
-    targets the whole SM10x family (including B200 / SM100), so the gate is
-    ``is_device_capability_family(100)`` rather than an exact (10, 3) match.
-    """
+    """Skip unless SM10x + CuTe DSL are available."""
     if (
         not torch.cuda.is_available()
         or not current_platform.is_device_capability_family(100)

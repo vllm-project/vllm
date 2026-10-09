@@ -929,9 +929,7 @@ def _min_latency_fused_qkv_a_proj_impl(
             dtype=torch.bfloat16,
             device=input_.device,
         )
-        # Programmatic Dependent Launch (PDL) overlaps the fused-A GEMM with the
-        # dependent kernels on SM90+/SM100.  Strict latency win at M<=16; ignored
-        # on older arches by the kernel.
+        # PDL: overlap with dependent kernels on SM90+/SM100.
         ops.dsv3_fused_a_gemm(
             output,
             input_,
@@ -959,18 +957,10 @@ direct_register_custom_op(
 
 
 def _can_use_min_latency_fused_qkv_a_gemm(weight: torch.Tensor) -> bool:
-    """Whether ``weight`` belongs to a fused QKV-A projection the min-latency GEMM
-    kernel (``dsv3_fused_a_gemm``) can serve.
+    """Check if weight qualifies for the dsv3_fused_a_gemm min-latency path.
 
-    The kernel is a small-batch (M<=16) BF16 GEMM specialised for the
-    DeepSeek-V3 and GLM-5.2 fused QKV-A shapes.  The dispatch itself lives
-    inside the ``min_latency_fused_qkv_a_proj`` custom op so torch.compile /
-    CUDA-graph capture freezes the eager branch into the graph (a Python-level
-    quant_method dispatch would silently no-op, see the GLM-5.2 P-3 incident).
-
-    The GLM-5.2 shape is gated by the ``VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM``
-    env var so that the feature-toggle A/B comparison captures the full benefit
-    of this path.  The DeepSeek-V3 shape is always-on.
+    GLM-5.2 shape is gated by VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM;
+    DeepSeek-V3 shape is always-on.
     """
     if weight.dtype != torch.bfloat16 or not current_platform.is_cuda():
         return False
@@ -980,13 +970,11 @@ def _can_use_min_latency_fused_qkv_a_gemm(weight: torch.Tensor) -> bool:
     ):
         return False
 
-    # DeepSeek-V3 fused-QKV-A: always-on (no feature toggle).
+    # DeepSeek-V3 fused-QKV-A: always-on.
     if weight.shape[0] == 2112 and weight.shape[1] == 7168:
         return True
 
-    # GLM-5.2 fused-QKV-A: gated by the GLM-5.2 kill switch so the toggle
-    # A/B comparison measures the full optimisation, not just the secondary
-    # CuTe-DSL projections.
+    # GLM-5.2 fused-QKV-A: gated by the kill switch.
     if weight.shape[0] == 2624 and weight.shape[1] == 6144:
         return os.getenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", "0") != "1"
 
@@ -1010,19 +998,10 @@ class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
             prefix=prefix,
         )
 
-        # Check if the DeepSeek V3 fused A GEMM kernel can be used.
-        # This kernel supports PDL and is optimized for low batch size.
-        #
-        # Supported (hd_in, hd_out) pairs served by dsv3_fused_a_gemm:
-        #   DeepSeek-V3 QKV-A : (7168, 2112) -> weight (2112, 7168)
-        #   GLM-5.2   QKV-A   : (6144, 2624) -> weight (2624, 6144)
-        # The kernel dispatches on num_tokens inside the custom op, so this is
-        # safe under torch.compile / CUDA-graph capture (unlike a Python-level
-        # quant_method dispatch, which is frozen out of the captured graph).
-        self._use_min_latency_gemm = (
-            hasattr(self, "weight")
-            and _can_use_min_latency_fused_qkv_a_gemm(self.weight)
-        )
+        # Use the dsv3_fused_a_gemm min-latency kernel when the weight qualifies.
+        self._use_min_latency_gemm = hasattr(
+            self, "weight"
+        ) and _can_use_min_latency_fused_qkv_a_gemm(self.weight)
 
     def forward(
         self,
