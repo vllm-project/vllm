@@ -392,6 +392,27 @@ def test_hisparse_reports_when_context_is_fully_resident():
     assert update[request.request_id].block_ids[0] == resident_ids[lost[0] :]
 
 
+def test_hisparse_readmitted_request_resends_its_full_residency():
+    """A preempted request may resume in a worker state row holding another
+    request's residency, so its first update must cover every page again."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    coordinator = get_hisparse_coordinator(manager)
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, len(tokens)) is not None
+    assert request.request_id in coordinator.take_residency_updates(
+        [request.request_id]
+    )
+    manager.free(request)
+
+    assert _allocate_scheduled(manager, request, len(tokens)) is not None
+    update = coordinator.take_residency_updates([request.request_id])
+    assert update[request.request_id].start_page == 0
+    assert update[request.request_id].block_ids[0] == _resident_block_ids(
+        manager, request.request_id
+    )
+
+
 def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     """Restore the final host page when completing an indexer-only import."""
     manager = make_hisparse_kv_cache_manager(

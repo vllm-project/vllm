@@ -28,7 +28,6 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
-    HiSparseResidencyTable,
     release_pinned_state,
     update_hisparse_residency,
 )
@@ -339,8 +338,9 @@ class HiSparseConnectorWorker:
                 "HiSparse request-state mapping does not match max_num_seqs."
             )
         self.hot_backing = hot_backing
-        self.residency: HiSparseResidencyTable | None = next(
-            (cache.residency for cache in cache_handles if cache.residency), None
+        self.residency: torch.Tensor | None = next(
+            (cache.residency for cache in cache_handles if cache.residency is not None),
+            None,
         )
         self._pending_invalid_block_ids: list[int] = []
         # Destination block ids of host copies this worker has run.
@@ -445,17 +445,15 @@ class HiSparseConnectorWorker:
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
-            if (
-                self.residency is not None
-                and request_ids is not None
-                and not torch.cuda.is_current_stream_capturing()
-            ):
-                update_hisparse_residency(
-                    self.residency,
-                    metadata.residency_updates,
-                    request_ids,
-                    request_state_indices,
-                )
+        if metadata.residency_updates:
+            assert self.residency is not None
+            assert request_state_indices is not None and request_ids is not None
+            update_hisparse_residency(
+                self.residency,
+                metadata.residency_updates,
+                request_ids,
+                request_state_indices,
+            )
 
     def _clear_forward_mirror_state(self) -> None:
         self._per_layer_mirrored.clear()

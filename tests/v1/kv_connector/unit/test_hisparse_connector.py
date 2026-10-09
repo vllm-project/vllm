@@ -29,7 +29,6 @@ from vllm.v1.hisparse import runtime as runtime_module
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
-    HiSparseResidencyTable,
     update_hisparse_residency,
 )
 from vllm.v1.hisparse.types import (
@@ -425,7 +424,7 @@ def test_residency_updates_persist_by_state_row():
     A suffix update for a lost page must leave the earlier pages and the other
     request's row intact across steps that reorder the batch.
     """
-    table = HiSparseResidencyTable(4, 2, 4, torch.device("cpu"))
+    table = torch.zeros((4, 2, 4), dtype=torch.int32)
     update_hisparse_residency(
         table,
         {
@@ -442,5 +441,5 @@ def test_residency_updates_persist_by_state_row():
         torch.tensor([0, 2], dtype=torch.int32),
     )
 
-    assert table.state_rows[[0, 2], 0].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
-    assert table.state_rows[[0, 2], 1].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
+    assert table[[0, 2], 0].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
+    assert table[[0, 2], 1].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]

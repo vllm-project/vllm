@@ -1115,31 +1115,17 @@ class HiSparseRuntime:
         return physical_topk_indices
 
 
-class HiSparseResidencyTable:
-    """GPU block of each resident page for every resident group, by request
-    state row. Block 0 means host-only."""
-
-    def __init__(
-        self,
-        max_num_reqs: int,
-        num_groups: int,
-        max_num_pages: int,
-        device: torch.device,
-    ) -> None:
-        self.state_rows = torch.zeros(
-            (max_num_reqs, num_groups, max_num_pages),
-            dtype=torch.int32,
-            device=device,
-        )
-
-
 def update_hisparse_residency(
-    table: HiSparseResidencyTable,
+    residency: torch.Tensor,
     updates: Mapping[str, SparseKVResidencyUpdate],
     request_ids: Sequence[str],
     request_state_indices: torch.Tensor,
 ) -> None:
-    """Apply scheduled requests' residency changes."""
+    """Apply scheduled requests' residency changes.
+
+    ``residency`` is ``[state rows, resident groups, pages]``: the GPU block of
+    each page, or block 0 when the page is read from the host.
+    """
     if not updates:
         return
     batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
@@ -1157,7 +1143,7 @@ def update_hisparse_residency(
         dtype=torch.int32,
     )
     state_rows = request_state_indices[values[:, 0]]
-    table.state_rows[state_rows, :, values[:, 1]] = values[:, 2:]
+    residency[state_rows, :, values[:, 1]] = values[:, 2:]
 
 
 class HiSparseCacheHandle:
@@ -1165,7 +1151,7 @@ class HiSparseCacheHandle:
 
     def __init__(self, runtime: HiSparseRuntime) -> None:
         self.view: PagedCacheView | None = None
-        self.residency: HiSparseResidencyTable | None = None
+        self.residency: torch.Tensor | None = None
         self.block_table: torch.Tensor | None = None
         self.source_block_table: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None
@@ -1182,6 +1168,7 @@ class HiSparseCacheHandle:
         # Speculator layers write their rows after the target forward.
         self.draft_layer = False
         self.index_group_caches: list[HiSparseCacheHandle] = [self]
+        self._batch_block_table: torch.Tensor | None = None
 
     def prepare_group_for_batch(self, attn_metadata: Any | None) -> None:
         assert self.runtime.is_group_leader
@@ -1190,6 +1177,7 @@ class HiSparseCacheHandle:
 
     def _prepare_for_batch(self, attn_metadata: Any | None) -> None:
         self.dummy_batch = attn_metadata is None
+        self._batch_block_table = None
         self.runtime.begin_forward()
         self.num_actual_tokens = (
             attn_metadata.num_actual_tokens if attn_metadata is not None else 0
@@ -1207,10 +1195,14 @@ class HiSparseCacheHandle:
 
     def batch_block_table(self) -> torch.Tensor:
         """Resident rows by this step's batch row, for the prefill paths."""
-        assert self.block_table is not None
-        indices = self.runtime.request_state_indices
-        assert indices is not None
-        return self.block_table.index_select(0, indices.clamp(min=0))
+        if self._batch_block_table is None:
+            assert self.block_table is not None
+            indices = self.runtime.request_state_indices
+            assert indices is not None
+            self._batch_block_table = self.block_table.index_select(
+                0, indices.clamp(min=0)
+            )
+        return self._batch_block_table
 
     def write_target(
         self, num_input_rows: int, num_slot_rows: int

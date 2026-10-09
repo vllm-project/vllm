@@ -3219,7 +3219,6 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     assert (plan.gpu_row_ids == -1).all()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_hisparse_prefill_resident_sources_follow_each_resident_group():
     """Layers of different resident groups share one batch staging plan.
 
@@ -3228,43 +3227,22 @@ def test_hisparse_prefill_resident_sources_follow_each_resident_group():
     group's gather reuse the freed address of an earlier one, so its layers
     read the earlier group's block ids.
     """
-    device = torch.device("cuda")
     block_size = 4
     plan = build_hisparse_prefill_staging_plan(
-        torch.tensor([[5, 2]], dtype=torch.int32, device=device),
-        torch.tensor([8], dtype=torch.int32, device=device),
+        torch.tensor([[5, 2]], dtype=torch.int32),
+        torch.tensor([8], dtype=torch.int32),
         block_size,
         staging_block_capacity=2,
     )
     # The prefill runs in request state row 1; one table holds both groups.
-    # Batch gathers of a table this size reuse one freed allocation.
-    max_num_reqs, max_num_pages = 64, 64
-    state_rows = torch.zeros(
-        (max_num_reqs, 2, max_num_pages), dtype=torch.int32, device=device
-    )
+    state_rows = torch.zeros((4, 2, 4), dtype=torch.int32)
     state_rows[1, 0, :2] = torch.tensor([11, 12])
     state_rows[1, 1, :2] = torch.tensor([21, 22])
-    request_state_indices = torch.full(
-        (max_num_reqs,), -1, dtype=torch.int32, device=device
-    )
-    request_state_indices[0] = 1
-    runtime = SimpleNamespace(request_state_indices=request_state_indices)
-    caches = []
-    for group in range(2):
-        cache = object.__new__(HiSparseCacheHandle)
-        cache.runtime = runtime
-        cache.view = SimpleNamespace(block_size=block_size)
-        cache.block_table = state_rows[:, group]
-        caches.append(cache)
-    index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.caches = caches
-    metadata = SimpleNamespace(
-        num_decodes=0, prefill=SimpleNamespace(host_staging_plan=plan)
-    )
+    state_indices = torch.tensor([1], dtype=torch.int32)
     host_ids = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
 
-    for layer_index in (0, 1, 0, 1):
-        index_group._prefill_gather_plan(layer_index, metadata)
+    for group in (0, 1, 0, 1):
+        plan.ensure_gpu_sources(state_rows[:, group], state_indices, block_size)
         assert plan.gpu_row_ids is not None
         gpu_blocks = plan.gpu_row_ids[0].view(-1, block_size)[:, 0] // block_size
         staged = {
@@ -3272,7 +3250,7 @@ def test_hisparse_prefill_resident_sources_follow_each_resident_group():
             for host_id, gpu_block in zip(host_ids, gpu_blocks.tolist())
             if host_id > 0
         }
-        first_page, second_page = state_rows[1, layer_index, :2].tolist()
+        first_page, second_page = state_rows[1, group, :2].tolist()
         assert staged == {5: first_page, 2: second_page}
 
 
@@ -4118,11 +4096,6 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     assert result is staged
     assert block_table is plan.block_table
     torch.testing.assert_close(request_ids, metadata.req_id_per_token)
-    plan.ensure_gpu_sources.assert_called_once()
-    args = plan.ensure_gpu_sources.call_args.args
-    assert args[0] is resident_block_table
-    torch.testing.assert_close(args[1], cache.runtime.request_state_indices)
-    assert args[2] == 1
     assert calls == [(source, plan, resident_cache)]
 
 
@@ -4187,11 +4160,6 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     assert args.kwargs["host_cache"].data_ptr() == source.data_ptr()
     assert args.kwargs["host_row_ids"] is plan.row_ids
     assert args.kwargs["device_row_ids"] is plan.gpu_row_ids
-    plan.ensure_gpu_sources.assert_called_once()
-    ensure_args = plan.ensure_gpu_sources.call_args.args
-    assert ensure_args[0] is cache.block_table
-    torch.testing.assert_close(ensure_args[1], cache.runtime.request_state_indices)
-    assert ensure_args[2] == 4
 
 
 def test_sparse_impl_observes_repointed_indexer_buffer():

@@ -17,7 +17,6 @@ from vllm.v1.hisparse.layout import (
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseHostPool,
-    HiSparseResidencyTable,
     initialize_hisparse_runtime_buffers,
     release_pinned_state,
 )
@@ -222,7 +221,7 @@ def bind_hisparse_kv_caches(
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
     ]
-    residency: HiSparseResidencyTable | None = None
+    residency: torch.Tensor | None = None
     if resident_groups:
         table_shapes = {
             block_tables.input_block_tables[group_id].shape
@@ -230,11 +229,10 @@ def bind_hisparse_kv_caches(
         }
         assert len(table_shapes) == 1
         max_num_reqs, max_num_pages = table_shapes.pop()
-        residency = HiSparseResidencyTable(
-            max_num_reqs,
-            len(resident_groups),
-            max_num_pages,
-            block_tables.input_block_tables[resident_groups[0][0]].device,
+        residency = torch.zeros(
+            (max_num_reqs, len(resident_groups), max_num_pages),
+            dtype=torch.int32,
+            device=block_tables.input_block_tables[resident_groups[0][0]].device,
         )
     for resident_source_index, (group_id, group) in enumerate(resident_groups):
         assert residency is not None
@@ -250,7 +248,7 @@ def bind_hisparse_kv_caches(
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
-                block_table=residency.state_rows[:, resident_source_index],
+                block_table=residency[:, resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
             cache_handle.residency = residency
