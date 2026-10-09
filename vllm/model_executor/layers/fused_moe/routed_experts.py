@@ -20,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    UnquantizedMoeBackend,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsSink,
 )
@@ -30,6 +33,11 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
+)
+from vllm.model_executor.model_loader.sharded_weight import (
+    ShardedWeightRequest,
+    ShardedWeightSpec,
+    ShardedWeightTarget,
 )
 from vllm.utils.math_utils import cdiv
 
@@ -60,6 +68,22 @@ def _index_expert_mapping(
         if expert_key.isdecimal():
             mapping_by_expert.setdefault(expert_key, []).append(entry)
     return mapping_by_expert
+
+
+def _fused_w13_checkpoint_name(
+    ckpt_gate_proj_name: str,
+    ckpt_up_proj_name: str | None,
+    *,
+    is_gated: bool,
+) -> str | None:
+    """Return the stacked checkpoint name already supported by the loader."""
+    if not is_gated:
+        return ckpt_gate_proj_name
+    if ckpt_gate_proj_name == "gate_proj" and ckpt_up_proj_name == "up_proj":
+        return "gate_up_proj"
+    if ckpt_gate_proj_name == "w1" and ckpt_up_proj_name == "w3":
+        return "w13"
+    return None
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -317,6 +341,153 @@ class RoutedExperts(PluggableLayer):
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         """Map global expert ID to local expert ID."""
         return self.expert_map_manager.map_global_to_local(expert_id)
+
+    def _logical_expert_kind(self, relative_name: str) -> Literal["w13", "w2"] | None:
+        fused_w13_name = _fused_w13_checkpoint_name(
+            self.ckpt_gate_proj_name,
+            self.ckpt_up_proj_name,
+            is_gated=self.moe_config.is_act_and_mul,
+        )
+        if fused_w13_name is None:
+            return None
+        if relative_name == f"{fused_w13_name}.weight":
+            return "w13"
+        if relative_name == f"{self.ckpt_down_proj_name}.weight":
+            return "w2"
+        return None
+
+    def _logical_expert_shard_shape(
+        self,
+        kind: Literal["w13", "w2"],
+        num_experts: int,
+    ) -> tuple[int, ...]:
+        assert self.moe_config.hidden_dim_unpadded is not None
+        assert self.moe_config.intermediate_size_per_partition_unpadded is not None
+        hidden_size = self.moe_config.hidden_dim_unpadded
+        intermediate_size = self.moe_config.intermediate_size_per_partition_unpadded
+        if kind == "w13":
+            return (
+                num_experts,
+                self.moe_config.w13_num_shards * intermediate_size,
+                hidden_size,
+            )
+        return (num_experts, hidden_size, intermediate_size)
+
+    def _local_global_expert_ids(self) -> tuple[int, ...]:
+        return tuple(self.expert_map_manager.get_local_expert_ids())
+
+    def resolve_sharded_weight_target(
+        self,
+        relative_name: str,
+        request: ShardedWeightRequest,
+    ) -> ShardedWeightTarget | None:
+        """Resolve one unquantized, linearly EP-sharded logical expert weight.
+
+        Decline unsupported destination capabilities so a transfer backend may
+        use its full-tensor path; reject malformed logical checkpoint tensors.
+        """
+        if relative_name in {
+            "w13_weight",
+            "w2_weight",
+        }:
+            raise ValueError(
+                f"{request.name!r} names kernel-formatted expert storage; "
+                "load a logical w13 or w2 tensor instead"
+            )
+
+        kind = self._logical_expert_kind(relative_name)
+        if kind is None:
+            return None
+
+        if self.quant_config is not None or not isinstance(
+            self.quant_method, UnquantizedFusedMoEMethod
+        ):
+            return None
+        if request.dtype not in (torch.bfloat16, torch.float16):
+            return None
+        if request.dtype != self.params_dtype:
+            return None
+        if self.is_fused_checkpoint_transposed:
+            return None
+
+        config = self.moe_config
+        parallel = config.moe_parallel_config
+        if parallel.tp_size != 1:
+            return None
+        if not parallel.use_ep or parallel.ep_size <= 1:
+            return None
+        if parallel.enable_eplb:
+            return None
+        if self.expert_map_manager.placement_strategy != "linear":
+            return None
+        if config.num_experts != config.num_logical_experts:
+            return None
+        if self.expert_map_manager.num_fused_shared_experts:
+            return None
+        if config.has_bias:
+            return None
+        if (
+            config.hidden_dim != config.hidden_dim_unpadded
+            or config.intermediate_size_per_partition
+            != config.intermediate_size_per_partition_unpadded
+        ):
+            return None
+
+        num_experts = config.num_logical_experts
+        if num_experts % parallel.ep_size:
+            return None
+        experts_per_rank = num_experts // parallel.ep_size
+        expected_ids = tuple(
+            range(
+                parallel.ep_rank * experts_per_rank,
+                (parallel.ep_rank + 1) * experts_per_rank,
+            )
+        )
+        local_ids = self._local_global_expert_ids()
+        if local_ids != expected_ids:
+            return None
+        if config.num_local_experts != experts_per_rank:
+            return None
+
+        expected_shape = self._logical_expert_shard_shape(kind, num_experts)
+        if request.global_shape != expected_shape:
+            raise ValueError(
+                f"sharded expert target {request.name!r} is malformed: "
+                f"global shape {request.global_shape} does not match {expected_shape}"
+            )
+        if self.quant_method.unquantized_backend is UnquantizedMoeBackend.MOONEP:
+            raise ValueError(
+                f"sharded expert target {request.name!r} is unsupported: "
+                "MoonEP does not support in-place weight reloads yet"
+            )
+        local_shape = self._logical_expert_shard_shape(kind, experts_per_rank)
+
+        def consume(weight: torch.Tensor) -> bool:
+            from vllm.model_executor.model_loader.reload.layerwise import (
+                get_layerwise_info,
+            )
+
+            info = get_layerwise_info(self)
+            if not info.can_load():
+                raise RuntimeError(
+                    "sharded expert loading requires active layerwise reload"
+                )
+            self.load_fused_expert_shard(relative_name, weight)
+            return not info.can_load()
+
+        return ShardedWeightTarget(
+            spec=ShardedWeightSpec(
+                semantic_id=f"routed_experts.{kind}.v1",
+                dtype=request.dtype,
+                shard_dim=0,
+                local_shape=local_shape,
+                shard_index=parallel.ep_rank,
+                num_shards=parallel.ep_size,
+            ),
+            retention_key=self,
+            consume=consume,
+            retention_group_size=2,
+        )
 
     #
     # Weight Loading Methods
@@ -978,6 +1149,79 @@ class RoutedExperts(PluggableLayer):
 
         return False if return_success else None
 
+    def load_fused_expert_shard(
+        self,
+        relative_name: str,
+        loaded_weight: torch.Tensor,
+    ) -> None:
+        """Load one complete EP-local logical expert tensor."""
+        kind = self._logical_expert_kind(relative_name)
+        if kind is None:
+            raise ValueError(f"unsupported logical expert weight {relative_name!r}")
+
+        local_ids = self._local_global_expert_ids()
+        expected_shape = self._logical_expert_shard_shape(kind, len(local_ids))
+        if tuple(loaded_weight.shape) != expected_shape:
+            raise ValueError(
+                f"logical expert shard shape {tuple(loaded_weight.shape)} "
+                f"does not match {expected_shape}"
+            )
+        if loaded_weight.dtype != self.params_dtype:
+            raise ValueError(
+                f"logical expert shard dtype {loaded_weight.dtype} does not "
+                f"match {self.params_dtype}"
+            )
+
+        if kind == "w13":
+            param_name = "w13_weight"
+            if self.moe_config.is_act_and_mul:
+                assert (
+                    self.moe_config.intermediate_size_per_partition_unpadded is not None
+                )
+                intermediate_size = (
+                    self.moe_config.intermediate_size_per_partition_unpadded
+                )
+                logical_shards: tuple[tuple[str, torch.Tensor], ...] = (
+                    ("w1", loaded_weight.narrow(1, 0, intermediate_size)),
+                    (
+                        "w3",
+                        loaded_weight.narrow(
+                            1,
+                            intermediate_size,
+                            intermediate_size,
+                        ),
+                    ),
+                )
+            else:
+                logical_shards = (("w1", loaded_weight),)
+        else:
+            param_name = "w2_weight"
+            logical_shards = (("w2", loaded_weight),)
+
+        param = getattr(self, param_name)
+        loader = getattr(param, "weight_loader", None)
+        if not callable(loader):
+            raise RuntimeError(f"{param_name} does not have a callable weight loader")
+        for shard_id, expert_weights in logical_shards:
+            for global_expert_id, expert_weight in zip(
+                local_ids,
+                expert_weights.unbind(0),
+                strict=True,
+            ):
+                success = loader(
+                    param=param,
+                    loaded_weight=expert_weight,
+                    weight_name=relative_name,
+                    shard_id=shard_id,
+                    expert_id=global_expert_id,
+                    return_success=True,
+                )
+                if success is not True:
+                    raise RuntimeError(
+                        f"failed to load global expert {global_expert_id} "
+                        f"of {relative_name!r}"
+                    )
+
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
@@ -1195,18 +1439,15 @@ class RoutedExperts(PluggableLayer):
 
         fused_mapping = []
         if include_fused:
-            gate_up = None
+            gate_up = _fused_w13_checkpoint_name(
+                ckpt_gate_proj_name,
+                ckpt_up_proj_name,
+                is_gated=is_gated,
+            )
             w13_shards: tuple[str, ...] = ("w1", "w3")
             if not is_gated:
-                # Non-gated: the stacked checkpoint tensor is the up projection
-                # itself, nothing to split into gate and up.
-                gate_up = ckpt_gate_proj_name
                 w13_shards = ("w1",)
-            elif ckpt_gate_proj_name == "gate_proj" and ckpt_up_proj_name == "up_proj":
-                gate_up = "gate_up_proj"
-            elif ckpt_gate_proj_name == "w1" and ckpt_up_proj_name == "w3":
-                gate_up = "w13"
-            else:
+            if gate_up is None:
                 logger.warning(
                     "Unexpected gate/up projection names: %s, %s. "
                     "Fused gate/up mapping will be skipped.",
