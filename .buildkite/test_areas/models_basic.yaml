@@ -262,8 +262,8 @@ steps:
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
   dind: false
-  device: mi355_2
-  num_devices: 2
+  device: mi355_4
+  num_devices: 4
   timeout_in_minutes: 40
   working_dir: /vllm-workspace/
   depends_on:
