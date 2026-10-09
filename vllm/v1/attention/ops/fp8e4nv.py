@@ -292,7 +292,7 @@ def convert_to_fp8e4m3(
         (x.dtype == tl.float16) or (x.dtype == tl.bfloat16) or (x.dtype == tl.float32),
         "convert_to_fp8e4m3 expects fp16, bf16, or fp32 input",
     )
-    # NaN sign/payload are unspecified; opt-in handling requires NaN output only.
+    # NaN sign/payload need not be preserved; opt-in handling requires NaN output.
     # https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt
     _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
     if x.numel >= 4 * tl.extra.cuda.num_threads():
@@ -323,7 +323,7 @@ def convert_from_fp8e4m3(
         (dtype == tl.float16) or (dtype == tl.bfloat16) or (dtype == tl.float32),
         "convert_from_fp8e4m3 expects fp16 or bf16, or fp32 output",
     )
-    # NaN sign/payload are unspecified; opt-in handling requires NaN output only.
+    # NaN sign/payload need not be preserved; opt-in handling requires NaN output.
     # https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt
     _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
     # Keep packed decoding when each thread has at least one complete pack.
