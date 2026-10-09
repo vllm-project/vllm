@@ -135,6 +135,11 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | `questions` | question id to `{type, instructions, criteria}`, asked in this order |
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
+| `cache_salt` | optional [prefix-cache salt](../../usage/security.md#cache-salting) applied to every question |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.
+
+When [tracing](../../../examples/observability/opentelemetry/README.md) is enabled
+with `--otlp-traces-endpoint`, the HTTP `traceparent` and `tracestate` headers are
+forwarded to every question's generation request.
