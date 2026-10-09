@@ -111,9 +111,6 @@ def initialize_kv_cache(runner: GPUModelRunner):
         device=runner.device,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
-        kernel_block_sizes=[
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
-        ],
         max_num_blocks_per_req=[NUM_BLOCKS],
     )
     runner.initialize_attn_backend(kv_cache_config)
@@ -303,7 +300,7 @@ def _make_mock_backend_for_kernel_block_size(
             return "MOCK"
 
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
             return supported_sizes
 
     return _MockBackend()
@@ -441,7 +438,7 @@ def _mock_backend(supported: list, *, exact: bool = False):
             return "MOCK_EXACT" if exact else "MOCK"
 
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
             return list(supported)
 
         if exact:
@@ -1625,7 +1622,6 @@ def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch)
     runner.device = torch.device("cpu")
     runner.is_pooling_model = False
     runner._init_block_sizes = [16]
-    runner._init_kernel_block_sizes = [16]
     runner._init_max_num_blocks = [4]
     runner._init_slot_mapping_modes = [
         gpu_model_runner_module.SlotMappingMode.TOKEN_TO_KV_SLOT
@@ -1653,7 +1649,7 @@ def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch)
         lambda _: gpu_model_runner_module.KVCacheSpecKind.FULL_ATTENTION,
     )
 
-    runner.may_reinitialize_input_batch(kv_cache_config, [16])
+    runner.may_reinitialize_input_batch(kv_cache_config)
 
     assert input_batch_cls.call_count == 1
     assert input_batch_cls.call_args.kwargs["cp_kv_cache_interleave_size"] == 16
@@ -1681,66 +1677,8 @@ def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
     assert runner.cp_interleave == 16
 
 
-def test_hybrid_block_table_initialization():
-    """Test hybrid block table with different kernel and kvcache_manager block
-    sizes."""
-    from vllm.v1.worker.block_table import BlockTable
-
-    # Test configuration: kvcache_manager block size = 32,
-    # kernel block size = 16
-    block_size = 32
-    kernel_block_sizes = [16]
-    max_num_reqs = 10
-    max_num_blocks_per_req = 20
-    max_num_batched_tokens = 512
-    cp_kv_cache_interleave_size = 8
-
-    block_table = BlockTable(
-        block_size=block_size,
-        max_num_reqs=max_num_reqs,
-        max_num_blocks_per_req=max_num_blocks_per_req,
-        max_num_batched_tokens=max_num_batched_tokens,
-        pin_memory=False,
-        device=torch.device(DEVICE_TYPE),
-        kernel_block_size=kernel_block_sizes[0],
-        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
-    )
-
-    # Verify hybrid block configuration
-    assert block_table.use_hybrid_blocks is True
-    assert block_table.block_size == kernel_block_sizes[0]
-    assert block_table.blocks_per_kv_block == (
-        block_size // kernel_block_sizes[0]
-    )  # Changed to use first element
-
-    # Test block table conversion logic
-    # One kvcache_manager block should map to multiple kernel blocks
-    kvcache_manager_blocks = [0, 1, 2]
-
-    # Verify that kvcache_manager blocks can be converted to kernel blocks
-    # and that block table operations work correctly.
-    req_index = 0
-    block_table.append_row(kvcache_manager_blocks, req_index)
-    # Get expected kernel blocks from the implementation for verification.
-    expected_kernel_blocks = block_table.map_to_kernel_blocks(
-        np.array(kvcache_manager_blocks),
-        block_table.blocks_per_kv_block,
-        block_table._kernel_block_arange,
-    )
-    # Verify block table state
-    assert block_table.num_blocks_per_row[req_index] == len(expected_kernel_blocks)
-    assert np.array_equal(
-        block_table.block_table.np[req_index, : len(expected_kernel_blocks)],
-        expected_kernel_blocks,
-    )
-
-
 def test_get_block_table_width_aligns_to_128_tokens():
     assert get_block_table_width(1875, 64) == 1876
-
-
-def test_get_block_table_width_splits_virtual_blocks():
-    assert get_block_table_width(235, 256, 64) == 940
 
 
 def test_mamba_state_table_width_is_not_aligned():
@@ -1750,48 +1688,11 @@ def test_mamba_state_table_width_is_not_aligned():
         pin_memory=False,
         device=torch.device("cpu"),
         block_sizes=[39664],
-        kernel_block_sizes=[39664],
         max_num_blocks=[1],
         slot_mapping_modes=[SlotMappingMode.NONE],
     )
 
     assert block_tables[0].max_num_blocks_per_req == 1
-
-
-def test_input_batch_with_kernel_block_sizes():
-    """Test InputBatch initialization with kernel_block_sizes parameter."""
-    max_num_reqs = 10
-    max_model_len = 512
-    max_num_batched_tokens = 512
-    device = torch.device(DEVICE_TYPE)
-    vocab_size = 50272
-
-    # Test with different kernel block sizes
-    block_sizes = [32, 64]
-    kernel_block_sizes = [16, 32]
-
-    input_batch = InputBatch(
-        max_num_reqs=max_num_reqs,
-        max_model_len=max_model_len,
-        max_num_batched_tokens=max_num_batched_tokens,
-        device=device,
-        vocab_size=vocab_size,
-        block_sizes=block_sizes,
-        kernel_block_sizes=kernel_block_sizes,
-        max_num_blocks_per_req=[16, 8],
-    )
-
-    # Verify that block tables were created with kernel block sizes
-    assert len(input_batch.block_table.block_tables) == len(block_sizes)
-
-    for i, (kv_size, kernel_size) in enumerate(zip(block_sizes, kernel_block_sizes)):
-        block_table = input_batch.block_table.block_tables[i]
-        if kv_size != kernel_size:
-            assert block_table.use_hybrid_blocks is True
-            assert block_table.block_size == kernel_size
-        else:
-            assert block_table.use_hybrid_blocks is False
-            assert block_table.block_size == kernel_size
 
 
 def test_hybrid_cache_integration(default_vllm_config, dist_init):
@@ -1843,9 +1744,8 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
         device=runner.device,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[NUM_BLOCKS],
-    )  # Use kernel block size
+    )
 
     runner.initialize_attn_backend(kv_cache_config)
 
