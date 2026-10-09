@@ -114,14 +114,6 @@ class WorkerBase:
         """Adopt the KV cache layout resolved by the engine core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
 
-        kv_transfer_config = self.vllm_config.kv_transfer_config
-        parallel_config = self.vllm_config.parallel_config
-        if (
-            kv_transfer_config is None
-            or parallel_config.decode_context_parallel_size == 1
-        ):
-            return
-
         # Group geometry can depend on the resolved layout. Finalize related
         # configuration before profiling builds a temporary cache and CUDA graphs.
         kv_cache_groups = get_kv_cache_groups(
