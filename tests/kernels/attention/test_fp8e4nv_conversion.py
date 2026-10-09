@@ -17,6 +17,10 @@ Oracle (per the test plan):
 Decode is exact; the RNE encode is bit-exact vs the saturating reference.
 """
 
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -308,14 +312,22 @@ def test_software_conversion_selects_only_e4m3_aliases(kv_cache_dtype: str):
     reason="native fp8e4nv cast cross-check requires SM89+",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_decode_matches_native_on_sm89(dtype: torch.dtype):
-    """On SM89+, the software decode equals the native fp8 -> float cast,
-    exhaustively over every finite fp8 byte."""
-    x_u8 = _finite_fp8_bytes()
-    actual = _run_decode(x_u8, dtype)
-    native = x_u8.view(FP8_DTYPE).to(dtype)  # native hardware cvt on SM89+
+def test_decode_nan_and_signed_zero_match_native_on_sm89(dtype: torch.dtype):
+    """Check mixed NaNs and signed zeros across conversion lanes."""
+    raw = torch.tensor(
+        [0x7F, 0xFF, 0x00, 0x80, 0x7E, 0xFE, 0x7F, 0xFF],
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    actual = _run_decode(raw, dtype)
+    native = raw.view(FP8_DTYPE).to(dtype)
+    torch.testing.assert_close(actual, native, atol=0, rtol=0, equal_nan=True)
+    finite = ~torch.isnan(native)
     torch.testing.assert_close(
-        actual.view(torch.uint8), native.view(torch.uint8), atol=0.0, rtol=0.0
+        actual[finite].view(torch.uint8),
+        native[finite].view(torch.uint8),
+        atol=0,
+        rtol=0,
     )
 
 
@@ -337,3 +349,59 @@ def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype):
         atol=0.0,
         rtol=0.0,
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("block", [64, 128, 256])
+def test_decode_partial_per_thread_packs(dtype, block):
+    if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
+        pytest.skip("BF16 requires SM80+")
+    raw = torch.arange(block, dtype=torch.int32, device="cuda").to(torch.uint8)
+    out = torch.empty(block, dtype=dtype, device="cuda")
+    _decode_kernel[(1,)](
+        raw,
+        out,
+        block,
+        IS_FP16=(dtype == torch.float16),
+        IS_FP32=False,
+        BLOCK=block,
+        num_warps=4,
+        extern_libs=FP8E4NV_EXTERN_LIBS,
+    )
+    expected = raw.view(FP8_DTYPE).to(dtype)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0, equal_nan=True)
+    finite = ~torch.isnan(expected)
+    torch.testing.assert_close(
+        out[finite].view(torch.uint8),
+        expected[finite].view(torch.uint8),
+        atol=0,
+        rtol=0,
+    )
+
+
+def test_packaged_bitcode_matches_cuda_source(tmp_path):
+    compiler = shutil.which("clang++-18")
+    if compiler is None:
+        pytest.skip("bitcode regeneration requires the documented clang++-18 compiler")
+    assert compiler is not None
+    helper = Path(FP8E4NV_EXTERN_LIBS["fp8e4nv"])
+    rebuilt = tmp_path / helper.name
+    subprocess.run(
+        [
+            compiler,
+            "--cuda-device-only",
+            "-nocudainc",
+            "-nocudalib",
+            "--cuda-gpu-arch=sm_75",
+            "-fcuda-flush-denormals-to-zero",
+            "-O3",
+            "-emit-llvm",
+            "-c",
+            "fp8e4nv_helper.cu",
+            "-o",
+            str(rebuilt),
+        ],
+        cwd=helper.parent,
+        check=True,
+    )
+    assert rebuilt.read_bytes() == helper.read_bytes()
