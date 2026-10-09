@@ -224,7 +224,7 @@ def _sparse_mla_kernel_final(
         + cur_q * stride_out_token
         + cur_head[:, None] * stride_out_head
         + offs_dv[None, :],
-        (acc / e_sum_safe[:, None]).to(tl.bfloat16),
+        (acc / e_sum_safe[:, None]).to(out_ptr.dtype.element_ty),
         mask=mask_h[:, None],
     )
 
@@ -398,7 +398,7 @@ def _sparse_mla_merge_kernel(
         + cur_q * stride_out_token
         + cur_head[:, None] * stride_out_head
         + offs_dv[None, :],
-        (acc / e_sum_safe[:, None]).to(tl.bfloat16),
+        (acc / e_sum_safe[:, None]).to(out_ptr.dtype.element_ty),
         mask=mask_h[:, None] & mask_dv[None, :],
     )
 
@@ -469,7 +469,7 @@ def triton_mla_sparse_attention(
 
     out = torch.empty(
         (num_tokens, num_heads_q, _BLOCK_DV),
-        dtype=torch.bfloat16,
+        dtype=q.dtype,
         device=q.device,
     )
 

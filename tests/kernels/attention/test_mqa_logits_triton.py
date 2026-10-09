@@ -176,6 +176,12 @@ def test_fp8_mqa_logits_triton_matches_torch(
         ks = torch.zeros(M, dtype=torch.int32, device=device)
         ke = torch.full((M,), N, dtype=torch.int32, device=device)
 
+    # Strided inputs must retain the same per-row scales and masking ranges.
+    k_scales, ks, ke = [
+        torch.stack((tensor, torch.zeros_like(tensor)), dim=-1)[:, 0]
+        for tensor in (k_scales, ks, ke)
+    ]
+
     out_torch = _fp8_mqa_logits_ref(q_fp8, (k_fp8, k_scales), weights, ks, ke)
     out_triton = fp8_mqa_logits_triton(
         q_fp8, (k_fp8, k_scales), weights, ks, ke, clean_logits=clean_logits
@@ -358,6 +364,16 @@ def test_fp8_paged_mqa_logits_triton_strided_pool_no_int32_overflow():
     # stride to 2 MiB so int32 wraps at block_idx >= 2**31 / 2**21 = 1024.
     pool_stride = 2**21
     total_blocks = 1040
+    required_bytes = (
+        total_blocks * pool_stride
+        + total_blocks * block_size * head_dim * 2
+        + total_blocks * block_size * (head_dim + 4)
+        + 2 * total_blocks * block_size * head_dim * 4
+        + 64 * 2**20  # headroom for kernel workspace and reference temporaries
+    )
+    free_bytes, _ = torch.accelerator.get_memory_info()
+    if free_bytes < required_bytes:
+        pytest.skip(f"needs {required_bytes / 2**30:.3f} GiB free device memory")
 
     row_elems = block_size * (head_dim + 4)
     kv_bf16 = torch.randn(
