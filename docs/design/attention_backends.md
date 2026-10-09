@@ -145,9 +145,15 @@ Priority is **1 = highest** (tried first).
 
 ### MLA Attention (DeepSeek-style)
 
+The generic Triton sparse-MLA kernel preserves the query's FP16 or BF16 output
+dtype. DeepSeek V4's separate sparse-MLA backend accepts BF16 model activations.
+This PR retains the existing DeepSeek V4 SM90/SM100 routing gate and does not
+expand routing to SM8x. That integration is provided by a separate PR for DeepSeek V4 sparse MLA on
+pre-SM90 GPUs.
+
 --8<-- "gen:priority-mla"
 
-> **\*** For sparse MLA, FP8 KV cache always prefers `FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASHINFER_MLA_SPARSE` is preferred for low query-head counts (<= 16), while `FLASHMLA_SPARSE` is preferred otherwise.
+> **\*** For sparse MLA, FP8 KV cache always prefers `FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASHINFER_MLA_SPARSE` is preferred for low query-head counts (<= 16), while `FLASHMLA_SPARSE` is preferred otherwise. On SM90, `FLASHINFER_MLA_SPARSE_SM90` precedes the other sparse backends when `head_size == 512` and follows them otherwise. `TRITON_MLA_SPARSE` remains the final fallback at priority 8 in both cases.
 >
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 

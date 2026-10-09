@@ -4,11 +4,105 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize(
+    "major,minor,expected",
+    [(8, 0, False), (8, 6, False), (8, 9, False), (9, 0, True), (10, 0, True)],
+)
+def test_deepseek_v4_sparse_mla_supports_cuda_architectures(
+    major: int, minor: int, expected: bool
+):
+    """Verify the focused fix retains the existing SM90/SM100 routing gate."""
+    from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+    from vllm.platforms.interface import DeviceCapability
+
+    assert (
+        DeepseekV4SparseMLABackend.supports_compute_capability(
+            DeviceCapability(major, minor)
+        )
+        is expected
+    )
+
+
+def test_deepseek_v4_sparse_mla_rejects_sm75():
+    """Verify sparse MLA rejects unsupported SM75 devices."""
+    from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+    from vllm.platforms.interface import DeviceCapability
+
+    assert not DeepseekV4SparseMLABackend.supports_compute_capability(
+        DeviceCapability(7, 5)
+    )
+
+
+@pytest.mark.parametrize("major,expected", [(7, False), (8, True), (12, True)])
+def test_triton_sparse_mla_requires_sm80(major: int, expected: bool):
+    """Verify the Triton sparse backend requires SM80 or newer."""
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla.triton_mla_sparse import (
+        TritonMLASparseBackend,
+    )
+
+    assert (
+        TritonMLASparseBackend.supports_compute_capability(DeviceCapability(major, 0))
+        is expected
+    )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "model_dtype,cache_dtype,expected_kv_dtype",
+    [
+        (torch.float16, "auto", torch.float16),
+        (torch.bfloat16, "auto", torch.bfloat16),
+        (torch.float16, "bfloat16", torch.bfloat16),
+        (torch.bfloat16, "float16", torch.float16),
+    ],
+)
+def test_triton_sparse_mla_warmup_uses_configured_dtypes(
+    monkeypatch, model_dtype, cache_dtype, expected_kv_dtype
+):
+    """Verify sparse attention warmup uses the configured model and cache dtypes."""
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.mla import triton_mla_sparse
+
+    calls = set()
+    monkeypatch.setattr(
+        triton_mla_sparse,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(
+            model_config=SimpleNamespace(dtype=model_dtype),
+            cache_config=SimpleNamespace(block_size=64),
+        ),
+    )
+    monkeypatch.setattr(
+        triton_mla_sparse,
+        "triton_mla_sparse_attention",
+        lambda q, kv, *args, **kwargs: calls.add((q.dtype, kv.dtype)),
+    )
+    for name in (
+        "warmup_fp8_mqa_logits_triton",
+        "warmup_fp8_paged_mqa_logits_triton",
+    ):
+        monkeypatch.setattr(triton_mla_sparse, name, lambda **kwargs: None)
+    impl = SimpleNamespace(
+        topk_indices_buffer=torch.empty(1, 1, 16),
+        num_heads=16,
+        softmax_scale=1.0,
+        _sm_count=1,
+        kv_cache_dtype=cache_dtype,
+    )
+
+    triton_mla_sparse.TritonMLASparseImpl._warmup_autotune(impl, SimpleNamespace())
+
+    assert calls == {(model_dtype, expected_kv_dtype)}
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,
     sm120: bool,
 ):
+    """Verify adaptive compression keeps its cache stride stable during capture."""
     from vllm.models.deepseek_v4 import sparse_mla
     from vllm.platforms.interface import DeviceCapability
 
@@ -24,6 +118,7 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
         (2, capacity_width), dtype=torch.int32, device=device
     )
     prefill_buffer = torch.empty_like(global_decode_buffer)
+    decode_lens_buffer = torch.empty(2, dtype=torch.int32, device=device)
     kwargs = dict(
         positions=torch.tensor([255, 511, 383, 639], device=device),
         compress_ratio=128,
@@ -33,9 +128,9 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
         ),
         block_table=torch.tensor([[3], [5]], dtype=torch.int32, device=device),
         block_size=capacity_width,
-        slot_mapping=torch.arange(4, dtype=torch.int64, device=device),
+        slot_mapping=torch.tensor([0, -1, 2, 3], dtype=torch.int64, device=device),
         global_decode_buffer=global_decode_buffer,
-        decode_lens_buffer=torch.empty(2, dtype=torch.int32, device=device),
+        decode_lens_buffer=decode_lens_buffer,
         prefill_buffer=prefill_buffer,
     )
     captured_decode, _, captured_prefill = sparse_mla.build_c128a_topk_metadata(
@@ -70,10 +165,11 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
 
     assert captured_rows.cpu().tolist() == [
         [1536, 1537, -1, -1],
-        [2560, 2561, 2562, 2563],
+        [-1, -1, -1, -1],
         [0, 1, 2, -1],
         [0, 1, 2, 3],
     ]
+    assert decode_lens_buffer.cpu().tolist() == [2, 0]
     assert torch.all(global_decode_buffer[:, 128:] == -99)
     assert torch.all(prefill_buffer[:, 128:] == -99)
 
@@ -840,3 +936,88 @@ def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
             attention[token].float(), weights @ keys, atol=0.05, rtol=0.05
         )
     _assert_projects_alike(z_unfused, z_fused)
+
+
+@pytest.mark.parametrize("capability", [80, 89, 90])
+@pytest.mark.parametrize(
+    "cache_dtype", [torch.bfloat16, torch.float8_e4m3fn, torch.uint8]
+)
+@pytest.mark.parametrize("cutedsl_available", [False, True])
+def test_full_row_compressor_routes_to_cutedsl(
+    monkeypatch, capability, cache_dtype, cutedsl_available
+):
+    """Full-row CUDA caches reach CuTeDSL independently of the SM routing gate."""
+    import sys
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v4 import compressor
+
+    calls = []
+    monkeypatch.setattr(
+        compressor,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda=lambda: True,
+            is_rocm=lambda: False,
+            is_xpu=lambda: False,
+            has_device_capability=lambda minimum: capability >= minimum,
+        ),
+    )
+    monkeypatch.setattr(compressor, "has_cutedsl", lambda: cutedsl_available)
+    monkeypatch.setattr(compressor, "_SAVE_PARTIAL_STATES_KERNEL", lambda **kw: None)
+    monkeypatch.setattr(
+        compressor,
+        "compress_norm_rope_store_triton",
+        lambda **kw: calls.append("triton"),
+    )
+    module_name = "vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl"
+    module = SimpleNamespace(
+        _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL=lambda **kw: calls.append("cutedsl")
+    )
+    monkeypatch.setitem(sys.modules, module_name, module if cutedsl_available else None)
+    metadata = SimpleNamespace(
+        token_to_req_indices=None,
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+        block_table=None,
+        block_size=1,
+    )
+    monkeypatch.setattr(
+        compressor,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"state": metadata, "key": metadata}),
+    )
+    layer = SimpleNamespace(kv_cache=torch.zeros((1, 1, 512), dtype=cache_dtype))
+    impl = SimpleNamespace(
+        coff=1,
+        head_dim=512,
+        state_cache=SimpleNamespace(prefix="state", kv_cache=torch.zeros(1, 1024)),
+        ape=None,
+        compress_ratio=4,
+        k_cache_prefix="key",
+        _static_forward_context={"key": layer},
+        _use_two_stage_fused_compressor=False,
+        rope_head_dim=64,
+        overlap=False,
+        use_fp4_cache=False,
+        norm=SimpleNamespace(weight=None, eps=1e-6),
+        _quant_block=128,
+        _token_stride=512,
+        _scale_dim=4,
+    )
+    args = (
+        impl,
+        torch.zeros(1, 1024),
+        torch.zeros(1, dtype=torch.int64),
+        SimpleNamespace(cos_sin_cache=None),
+    )
+    if cache_dtype != torch.uint8 and not cutedsl_available:
+        with pytest.raises(ModuleNotFoundError, match="sparse_attn_compress_cutedsl"):
+            compressor.DeepseekCompressor.forward(*args)
+    else:
+        compressor.DeepseekCompressor.forward(*args)
+        expected = (
+            "cutedsl"
+            if cutedsl_available and (cache_dtype != torch.uint8 or capability >= 90)
+            else "triton"
+        )
+        assert calls == [expected]

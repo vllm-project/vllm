@@ -956,9 +956,11 @@ class DeepseekV4Indexer(nn.Module):
             "MXFP4" if self.use_fp4_kv else "FP8",
         )
         if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.utils.import_utils import has_cutedsl
+            from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
+                _can_use_cutedsl,
+            )
 
-            if current_platform.is_cuda() and has_cutedsl():
+            if _can_use_cutedsl():
                 from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (  # noqa: E501
                     _INDEXER_Q_FP8_KERNEL,
                     _INDEXER_Q_MXFP4_KERNEL,
