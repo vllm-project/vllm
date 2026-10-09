@@ -385,7 +385,9 @@ class AnthropicCountTokensRequest(BaseModel):
 
     model: str
     messages: list[AnthropicMessage]
+    output_config: AnthropicOutputConfig | None = None
     system: str | list[AnthropicContentBlock] | None = None
+    thinking: AnthropicThinkingConfig | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
 
