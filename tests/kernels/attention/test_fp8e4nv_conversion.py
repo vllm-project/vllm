@@ -58,6 +58,7 @@ def _decode_kernel(
     IS_FP32: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    """Decode FP8 test inputs into the selected floating-point dtype."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0)
@@ -67,6 +68,7 @@ def _decode_kernel(
 
 @triton.jit
 def _encode_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    """Encode floating-point test inputs into FP8 bytes."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
@@ -82,6 +84,7 @@ def _software_kv_cast_kernel(
     n,
     BLOCK: tl.constexpr,
 ):
+    """Exercise software FP8 cache decoding and FP32 scale multiplication."""
     offs = tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0)
@@ -97,6 +100,7 @@ def _finite_fp8_bytes() -> torch.Tensor:
 
 
 def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Launch software decoding and return its output tensor."""
     out = torch.empty(x_u8.numel(), dtype=dtype, device="cuda")
     n = x_u8.numel()
     _decode_kernel[(triton.cdiv(n, 256),)](
@@ -113,6 +117,7 @@ def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 
 def _run_encode(x: torch.Tensor) -> torch.Tensor:
+    """Launch software encoding and return the resulting FP8 bytes."""
     out = torch.empty(x.numel(), dtype=torch.uint8, device="cuda")
     n = x.numel()
     _encode_kernel[(triton.cdiv(n, 256),)](
@@ -250,6 +255,7 @@ def test_encode_fp32_avoids_16bit_double_rounding(
     rounded_byte: int,
     min_cap: int,
 ):
+    """Verify direct FP32 encoding avoids rounding through FP16 or BF16."""
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
     x = torch.tensor([value], dtype=torch.float32, device="cuda")
@@ -262,6 +268,7 @@ def test_encode_fp32_avoids_16bit_double_rounding(
     [(torch.float16, 75), (torch.bfloat16, 80), (torch.float32, 75)],
 )
 def test_software_kv_cast_multiplies_scale_in_fp32(dtype: torch.dtype, min_cap: int):
+    """Verify cache scaling preserves FP32 intermediates before the output cast."""
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
     x = _finite_fp8_bytes()
@@ -295,6 +302,7 @@ def test_software_kv_cast_multiplies_scale_in_fp32(dtype: torch.dtype, min_cap: 
     ],
 )
 def test_software_conversion_selects_only_e4m3_aliases(kv_cache_dtype: str):
+    """Verify software conversion is selected only for supported E4M3 aliases."""
     is_e4m3 = kv_cache_dtype in ("fp8", "fp8_e4m3")
     has_sm75 = current_platform.has_device_capability(75)
     has_sm89 = current_platform.has_device_capability(89)

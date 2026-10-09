@@ -502,6 +502,7 @@ class TritonAttentionImpl(AttentionImpl):
         use_alibi_sqrt: bool = False,
         chunk_lookback: int = -1,
     ) -> None:
+        """Initialize Triton attention and its cache quantization configuration."""
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -844,6 +845,7 @@ class TritonAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
+        """Write keys and values into the cache using the configured quantization."""
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
