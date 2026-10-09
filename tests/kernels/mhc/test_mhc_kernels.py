@@ -439,13 +439,16 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
         return
 
     # The post mapping and the collapse are what the unfused kernels produce.
+    # The two kernels may round a near-midpoint residual differently (FMA
+    # contraction is up to the compiler), so allow one bf16 ulp there and
+    # check the collapse against the fused kernel's own residual.
     residual_ref = torch.ops.vllm.mhc_post_tilelang(
         x, residual, post_layer_mix, comb_res_mix
     )
     layer_input_ref = mhc_pre_delayed_tilelang(
-        residual_ref, *mix_args, pre_mix=pre_mix, norm_weight=weight, norm_eps=1e-6
+        residual_cur, *mix_args, pre_mix=pre_mix, norm_weight=weight, norm_eps=1e-6
     )[2]
-    torch.testing.assert_close(residual_cur, residual_ref, atol=0, rtol=0)
+    torch.testing.assert_close(residual_cur, residual_ref, atol=0, rtol=2**-7)
     torch.testing.assert_close(layer_input, layer_input_ref, atol=0, rtol=0)
 
     post_ref, comb_ref, _, next_pre_ref = mhc_fused_post_pre_delayed_ref(
