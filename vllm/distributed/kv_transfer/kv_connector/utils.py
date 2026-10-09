@@ -160,8 +160,10 @@ class KVOutputAggregator:
                     combined_kv_cache_events,
                     type(kv_cache_events),
                 )
-                worker_kv_cache_events = kv_cache_events.get_all_events()
-                combined_kv_cache_events.add_events(worker_kv_cache_events)
+                # Merge rather than re-add the flattened events: a connector may
+                # attach per-contribution metadata that decides when an event is
+                # complete, and flattening would drop it.
+                combined_kv_cache_events.merge(kv_cache_events)
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids

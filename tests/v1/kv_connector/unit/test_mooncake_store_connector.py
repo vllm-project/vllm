@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pickle
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -9,7 +10,8 @@ import pytest
 import torch
 
 from vllm.config import set_current_vllm_config
-from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_events import AllBlocksCleared, BlockStored, KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
@@ -23,9 +25,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    BlockKey,
+    KeyMetadata,
+    LBHNCStoreLayout,
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
+    PoolKey,
+    RankLocalStoreLayout,
+    StoreResidency,
     TailKeyBoundary,
+    store_block_key,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -39,7 +48,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 from .utils import create_vllm_config
 
@@ -364,10 +373,128 @@ def test_build_kv_connector_stats_reconstructs_mooncake_stats():
     assert stats.data["save_put"][0]["num_bytes"] == 2048
 
 
+def _make_scheduler_connector() -> mooncake_store_connector.MooncakeStoreConnector:
+    vllm_config = _make_vllm_config()
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ),
+    ):
+        return mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+
+
+def _namespace(
+    group_idx: int = 0,
+    *,
+    tp_rank: int = 0,
+    pcp_rank: int = 0,
+    dcp_rank: int = 0,
+    pp_rank: int = 0,
+) -> str:
+    """A Store key namespace, spelled the way the lookup table spells it."""
+    return PoolKey.build_prefix(
+        KeyMetadata(
+            "test-model", tp_rank, pcp_rank, dcp_rank, pp_rank, group_id=group_idx
+        )
+    )
+
+
+def _rank_local_required(
+    group_idx: int, *rank_namespaces: tuple[int, int, int, int]
+) -> tuple[str, ...]:
+    """The namespaces a lookup probes for a rank-local group."""
+    layout = RankLocalStoreLayout(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_idx), 16, 16
+    )
+    return layout.lookup_key_prefixes(rank_namespaces)
+
+
+def _residency(
+    events: list[BlockStored],
+    covered: dict[BlockKey, list[str] | tuple[str, ...] | frozenset[str]],
+) -> StoreResidency:
+    """The blocks one rank reports for one poll."""
+    return StoreResidency(
+        events=list(events),
+        covered={key: frozenset(names) for key, names in covered.items()},
+    )
+
+
+def _worker_container(
+    residency: StoreResidency,
+    required: dict[int, list[str] | tuple[str, ...] | frozenset[str]],
+) -> mooncake_store_connector.MooncakeStoreKVEvents:
+    """What a worker's connector polls for one engine step."""
+    container = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
+    container.add_residency(
+        residency, {group: frozenset(names) for group, names in required.items()}
+    )
+    return container
+
+
+def _clear_container() -> mooncake_store_connector.MooncakeStoreKVEvents:
+    container = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
+    container.add_events([AllBlocksCleared()])
+    return container
+
+
+def _step_output(
+    container: mooncake_store_connector.MooncakeStoreKVEvents | None,
+) -> ModelRunnerOutput:
+    """One worker's step output; None is a worker that reported no output."""
+    if container is None:
+        return ModelRunnerOutput(
+            req_ids=[], req_id_to_index={}, kv_connector_output=KVConnectorOutput()
+        )
+    return ModelRunnerOutput.with_kv_conn_output_only(
+        KVConnectorOutput(kv_cache_events=container)
+    )
+
+
+def _run_engine_step(
+    connector: mooncake_store_connector.MooncakeStoreConnector,
+    *containers: mooncake_store_connector.MooncakeStoreKVEvents | None,
+) -> list[KVCacheEvent]:
+    """Push one engine step through the real aggregation hops.
+
+    Every worker polls a container of its own, ``KVOutputAggregator`` merges
+    them into the step's accumulator, and the scheduler connector folds that
+    into the accumulator it keeps for the connector's lifetime before draining
+    whatever is ready.
+    """
+    outputs = [_step_output(container) for container in containers]
+    aggregator = KVOutputAggregator(expected_finished_count=len(outputs))
+    aggregated = aggregator.aggregate(outputs)
+    assert aggregated is not None
+    assert aggregated.kv_connector_output is not None
+    connector.update_connector_output(aggregated.kv_connector_output)
+    return list(connector.take_events())
+
+
+def _contribute(
+    connector: mooncake_store_connector.MooncakeStoreConnector,
+    event: BlockStored,
+    namespaces: list[str] | tuple[str, ...],
+    required: dict[int, list[str] | tuple[str, ...]],
+) -> list[KVCacheEvent]:
+    """Run one step in which a single rank covers ``namespaces`` of ``event``."""
+    return _run_engine_step(
+        connector,
+        _worker_container(
+            _residency([event], {store_block_key(event): namespaces}),
+            required,
+        ),
+    )
+
+
 def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
-    event = _make_block_stored()
+    event = _make_block_stored(group_idx=0)
 
     with (
         set_current_vllm_config(vllm_config),
@@ -380,15 +507,48 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
 
-    mock_worker_cls.return_value.get_kv_events.return_value = [event]
     mock_worker_cls.return_value.enable_kv_events = True
     mock_worker_cls.return_value.kv_send_thread = MagicMock()
-    mock_worker_cls.return_value.group_tp_replication_factors = (1,)
+    mock_worker_cls.return_value.lookup_key_prefixes = ((_namespace(),),)
+    mock_worker_cls.return_value.drain_residency.return_value = _residency(
+        [event],
+        {store_block_key(event): [_namespace()]},
+    )
     kv_events = connector.get_kv_connector_kv_cache_events()
 
     assert isinstance(kv_events, mooncake_store_connector.MooncakeStoreKVEvents)
     assert kv_events.get_number_of_workers() == 1
     assert kv_events.get_all_events() == [event]
+
+
+def test_get_kv_connector_kv_cache_events_checks_coverage_against_the_lookup_table():
+    """A rank's reported coverage is checked against the namespaces a lookup
+    probes for its group, which the worker's own table supplies."""
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+    event = _make_block_stored(group_idx=0)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ) as mock_worker_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+
+    mock_worker_cls.return_value.enable_kv_events = True
+    mock_worker_cls.return_value.kv_send_thread = MagicMock()
+    mock_worker_cls.return_value.lookup_key_prefixes = ((_namespace(),),)
+    mock_worker_cls.return_value.drain_residency.return_value = _residency(
+        [event],
+        {store_block_key(event): [_namespace(tp_rank=1)]},
+    )
+
+    with pytest.raises(ValueError, match="never probes"):
+        connector.get_kv_connector_kv_cache_events()
 
 
 def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
@@ -409,8 +569,8 @@ def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
     worker = mock_worker_cls.return_value
     worker.enable_kv_events = True
     worker.kv_send_thread = MagicMock()
-    worker.group_tp_replication_factors = (2,)
-    worker.get_kv_events.return_value = []
+    worker.lookup_key_prefixes = ((_namespace(),),)
+    worker.drain_residency.return_value = _residency([], {})
 
     kv_events = connector.get_kv_connector_kv_cache_events()
 
@@ -419,140 +579,339 @@ def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
     assert kv_events.get_all_events() == []
 
 
-def _aggregate_store_events(
-    worker_events: list[list[BlockStored]],
-    replication_factors: tuple[int, ...],
-) -> list[BlockStored]:
-    combined = mooncake_store_connector.MooncakeStoreKVEvents(
-        num_workers=1,
-        group_tp_replication_factors=replication_factors,
+def test_block_waits_for_every_lookup_namespace_across_engine_steps():
+    """Two ranks completing the same block in different steps announce it once,
+    when the last of the group's lookup namespaces reports."""
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+    first, second = _namespace(0, tp_rank=0), _namespace(0, tp_rank=1)
+    required = {0: [first, second]}
+
+    assert _contribute(connector, event, [first], required) == []
+    assert _contribute(connector, event, [second], required) == [event]
+    # A further report of the same block adds nothing once it is announced.
+    assert _contribute(connector, event, [first], required) == []
+    assert _contribute(connector, event, list(required[0]), required) == []
+
+
+def test_repeated_namespace_report_does_not_cover_another_namespace():
+    """One namespace reporting twice is still one namespace."""
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+    first, second = _namespace(0, tp_rank=0), _namespace(0, tp_rank=1)
+    required = {0: [first, second]}
+
+    for _ in range(3):
+        assert _contribute(connector, event, [first], required) == []
+
+    assert _contribute(connector, event, [second], required) == [event]
+
+
+def test_empty_poll_neither_completes_nor_resets_pending_coverage():
+    """A worker with nothing to report, or no connector output at all, leaves
+    the coverage another rank already reported untouched."""
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+    first, second = _namespace(0, tp_rank=0), _namespace(0, tp_rank=1)
+    required = {0: [first, second]}
+
+    assert _contribute(connector, event, [first], required) == []
+
+    assert _run_engine_step(connector, None) == []
+    assert (
+        _run_engine_step(connector, _worker_container(_residency([], {}), required))
+        == []
     )
-    combined.add_events(worker_events[0])
-    for events in worker_events[1:]:
-        combined.add_events(events)
-        combined.increment_workers()
-    combined.aggregate()
-    return combined.get_all_events()
+    assert _run_engine_step(connector, _worker_container(_residency([], {}), {})) == []
+
+    assert _contribute(connector, event, [second], required) == [event]
 
 
-def test_gqa_store_events_follow_tp_replica_striping():
-    block_a = _make_block_stored(b"a", group_idx=0)
-    block_b = _make_block_stored(b"b", group_idx=0)
+@pytest.mark.parametrize(
+    "rank_namespaces",
+    [
+        # Replicated GQA: four ranks in two byte-identical replicas each, so a
+        # lookup probes one namespace per shard rank.
+        pytest.param(tuple((shard, 0, 0, 0) for shard in range(2)), id="replicated"),
+        # Rank-specific bytes: a lookup needs every rank's namespace.
+        pytest.param(tuple((rank, 0, 0, 0) for rank in range(4)), id="rank-specific"),
+        # PCP splits a sequence across ranks, each with its own namespace.
+        pytest.param(tuple((0, pcp, 0, 0) for pcp in range(2)), id="pcp"),
+        # PP: a lookup needs every pipeline stage's objects.
+        pytest.param(tuple((0, 0, 0, pp) for pp in range(3)), id="pp"),
+    ],
+)
+def test_block_needs_every_namespace_its_group_lookup_probes(rank_namespaces):
+    """A block is announced only once every namespace a lookup probes for its
+    group has reported, and draining between those reports releases nothing."""
+    required = {0: list(_rank_local_required(0, *rank_namespaces))}
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
 
-    events = _aggregate_store_events(
-        [[block_a], [block_b], [block_a], [block_b]],
-        replication_factors=(2,),
+    for namespace in required[0][:-1]:
+        assert _contribute(connector, event, [namespace], required) == []
+
+    assert _contribute(connector, event, required[0][-1:], required) == [event]
+    # Draining again without a contribution yields nothing.
+    assert list(connector.take_events()) == []
+
+
+def test_groups_require_their_own_namespaces():
+    """Per-group coverage follows each group's lookup prefixes: a replicated
+    attention group completes on fewer reports than a rank-specific one."""
+    connector = _make_scheduler_connector()
+    replicated = _make_block_stored(b"replicated", group_idx=0)
+    rank_specific = _make_block_stored(b"rank-specific", group_idx=1)
+    required = {
+        0: list(_rank_local_required(0, *((shard, 0, 0, 0) for shard in range(2)))),
+        1: list(_rank_local_required(1, *((rank, 0, 0, 0) for rank in range(4)))),
+    }
+
+    # Rank 0 and rank 1 cover shard 0 and shard 1: enough for group 0 only.
+    events = _run_engine_step(
+        connector,
+        _worker_container(
+            _residency(
+                [replicated, rank_specific],
+                {
+                    store_block_key(replicated): [required[0][0]],
+                    store_block_key(rank_specific): [required[1][0]],
+                },
+            ),
+            required,
+        ),
+        _worker_container(
+            _residency(
+                [replicated, rank_specific],
+                {
+                    store_block_key(replicated): [required[0][1]],
+                    store_block_key(rank_specific): [required[1][1]],
+                },
+            ),
+            required,
+        ),
     )
 
-    assert events == [block_a, block_b]
+    assert events == [replicated]
 
-
-def test_mqa_store_events_require_one_replica():
-    blocks = [_make_block_stored(bytes([index]), group_idx=0) for index in range(4)]
-
-    events = _aggregate_store_events(
-        [[block] for block in blocks],
-        replication_factors=(4,),
+    # The two remaining ranks complete the rank-specific group.
+    events = _run_engine_step(
+        connector,
+        _worker_container(
+            _residency(
+                [rank_specific],
+                {store_block_key(rank_specific): required[1][2:]},
+            ),
+            required,
+        ),
     )
 
-    assert events == blocks
+    assert events == [rank_specific]
 
 
-def test_store_events_require_every_non_replicated_worker():
-    complete = _make_block_stored(b"complete", group_idx=0)
-    incomplete = _make_block_stored(b"incomplete", group_idx=0)
+def test_store_tp_shards_need_every_store_namespace():
+    """With a shared Store-TP layout each rank covers the shards it holds, and
+    the block is announced once every store shard namespace has reported."""
+    metadata = KeyMetadata("test-model", 0, 0, 0, 0, store_namespace="@store_tp:4")
+    layouts = {
+        tp_rank: LBHNCStoreLayout(
+            metadata,
+            16,
+            16,
+            local_tp_size=2,
+            store_tp_size=4,
+            tp_rank=tp_rank,
+            num_kv_heads=8,
+        )
+        for tp_rank in range(2)
+    }
+    rank_namespaces = [(0, 0, 0, 0), (1, 0, 0, 0)]
+    required = {0: list(layouts[0].lookup_key_prefixes(rank_namespaces))}
+    covered = {
+        tp_rank: frozenset(
+            PoolKey.build_prefix(metadata, tp_rank=shard_id)
+            for shard_id in layout.local_shard_ids
+        )
+        for tp_rank, layout in layouts.items()
+    }
 
-    events = _aggregate_store_events(
-        [
-            [complete, incomplete],
-            [complete],
-            [complete],
-            [complete],
-        ],
-        replication_factors=(1,),
+    assert len(required[0]) == 4
+    assert covered[0] | covered[1] == set(required[0])
+
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+
+    assert _contribute(connector, event, list(covered[0]), required) == []
+    assert _contribute(connector, event, list(covered[1]), required) == [event]
+
+
+def test_residency_outside_the_lookup_namespaces_is_rejected():
+    container = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
+    event = _make_block_stored(b"block", group_idx=0)
+
+    with pytest.raises(ValueError, match="never probes"):
+        container.add_residency(
+            _residency([event], {store_block_key(event): [_namespace(0, tp_rank=7)]}),
+            {0: frozenset({_namespace(0, tp_rank=0)})},
+        )
+
+
+def test_ranks_must_agree_on_a_groups_lookup_namespaces():
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+    namespaces = [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]
+
+    _contribute(connector, event, namespaces[:1], {0: namespaces})
+
+    with pytest.raises(ValueError, match="lookup namespaces differ between ranks"):
+        _contribute(connector, event, namespaces[:1], {0: namespaces[:1]})
+
+
+def test_one_block_is_announced_once_with_the_first_payload():
+    """A rank's retry covers the token range of an earlier failed attempt, so
+    the two reports of a block can carry different payloads; the block is still
+    one block, announced once, with the payload seen first.
+    """
+    connector = _make_scheduler_connector()
+    first = _make_block_stored(b"block", group_idx=0)
+    retried = BlockStored(
+        block_hashes=[b"block"],
+        parent_block_hash=None,
+        token_ids=[1, 2, 3, 4, 5, 6],
+        block_size=16,
+        lora_id=None,
+        medium="cpu",
+        lora_name=None,
+        group_idx=0,
     )
+    required = {0: [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]}
 
-    assert events == [complete]
+    assert _contribute(connector, first, required[0][:1], required) == []
+    assert _contribute(connector, retried, required[0][1:], required) == [first]
 
 
-def test_store_events_reject_incomplete_replica_coverage():
-    complete = _make_block_stored(b"complete", group_idx=0)
-    incomplete = _make_block_stored(b"incomplete", group_idx=0)
+def test_completed_block_leaves_no_pending_state_behind():
+    """A step container that completes a block's coverage arrives with the event
+    already released; folding it in must also drop the partial coverage an
+    earlier step left, so no stale payload stays behind.
+    """
+    accumulator = mooncake_store_connector.MooncakeStoreKVEvents()
+    event = _make_block_stored(b"block", group_idx=0)
+    required = [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]
 
-    events = _aggregate_store_events(
-        [[complete, incomplete], [complete], [], []],
-        replication_factors=(2,),
+    accumulator.add_residency(
+        _residency([event], {store_block_key(event): required[:1]}),
+        {0: frozenset(required)},
     )
+    assert accumulator.pop_ready_events() == []
 
-    assert events == [complete]
-
-
-def test_store_events_use_each_groups_replication_factor():
-    full_attention = _make_block_stored(b"full", group_idx=0)
-    replicated_attention = _make_block_stored(b"replicated", group_idx=1)
-
-    events = _aggregate_store_events(
-        [
-            [full_attention, replicated_attention],
-            [full_attention],
-            [full_attention, replicated_attention],
-            [full_attention],
-        ],
-        replication_factors=(1, 2),
+    completed = _worker_container(
+        _residency([event], {store_block_key(event): required}), {0: required}
     )
+    assert completed.get_all_events() == [event]
 
-    assert events == [full_attention, replicated_attention]
+    accumulator.merge(completed)
+
+    assert accumulator.pop_ready_events() == [event]
+    # Neither the partial payload nor a released copy is held any more, and a
+    # further report of the announced block is not counted again.
+    assert accumulator.get_all_events() == []
+    accumulator.merge(
+        _worker_container(
+            _residency([event], {store_block_key(event): required}), {0: required}
+        )
+    )
+    assert accumulator.pop_ready_events() == []
+
+
+def test_worker_container_survives_the_engine_transport_pickle():
+    """Worker containers are pickled into the engine's step output, so their
+    state must survive the trip and stay mergeable on the engine side.
+    """
+    event = _make_block_stored(b"block", group_idx=0)
+    required = [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]
+
+    container = _worker_container(
+        _residency([event], {store_block_key(event): required[:1]}), {0: required}
+    )
+    restored = pickle.loads(pickle.dumps(container))
+
+    assert restored.get_all_events() == [event]
+    accumulator = mooncake_store_connector.MooncakeStoreKVEvents()
+    accumulator.merge(restored)
+    accumulator.merge(
+        _worker_container(
+            _residency([event], {store_block_key(event): required[1:]}), {0: required}
+        )
+    )
+    assert accumulator.pop_ready_events() == [event]
+
+
+def test_clear_event_retires_pending_coverage():
+    """Coverage reported before the Store was wiped cannot complete a block."""
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+    required = {0: [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]}
+
+    assert _contribute(connector, event, required[0][:1], required) == []
+    assert _run_engine_step(connector, _clear_container()) == [AllBlocksCleared()]
+
+    # The first namespace was reported before the clear, so it is gone: the
+    # second one alone does not complete the block.
+    assert _contribute(connector, event, required[0][1:], required) == []
+    # Both namespaces reporting after the clear do announce it.
+    assert _contribute(connector, event, required[0][:1], required) == [event]
+
+
+def test_clear_event_lets_an_announced_block_be_announced_again():
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+    required = {0: [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]}
+
+    assert _contribute(connector, event, required[0], required) == [event]
+    assert _contribute(connector, event, required[0], required) == []
+
+    assert _run_engine_step(connector, _clear_container()) == [AllBlocksCleared()]
+
+    # A block stored again after the reset is announced again.
+    assert _contribute(connector, event, required[0], required) == [event]
+
+
+def test_block_released_before_a_clear_is_published_before_it():
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+    required = {0: [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]}
+
+    assert _run_engine_step(
+        connector,
+        _worker_container(
+            _residency([event], {store_block_key(event): required[0]}), required
+        ),
+        _clear_container(),
+    ) == [event, AllBlocksCleared()]
 
 
 def test_update_connector_output_and_take_events():
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-    event = _make_block_stored()
+    connector = _make_scheduler_connector()
+    event = _make_block_stored(b"block", group_idx=0)
+    required = {0: [_namespace(0, tp_rank=0)]}
 
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-
-    kv_events = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
-    kv_events.add_events([event])
-    output = KVConnectorOutput(kv_cache_events=kv_events)
+    container = _worker_container(
+        _residency([event], {store_block_key(event): required[0]}), required
+    )
+    output = KVConnectorOutput(kv_cache_events=container)
     connector.update_connector_output(output)
 
-    assert connector._kv_cache_events is kv_events
     connector.connector_scheduler.update_connector_output.assert_called_once_with(
         output
     )
     assert list(connector.take_events()) == [event]
-    assert connector._kv_cache_events is None
-
-
-def test_store_events_persist_across_polls():
-    connector = object.__new__(mooncake_store_connector.MooncakeStoreConnector)
-    connector.connector_scheduler = MagicMock()
-    connector._kv_cache_events = None
-    complete = _make_block_stored(b"complete", group_idx=0)
-    pending = _make_block_stored(b"pending", group_idx=0)
-
-    def poll(worker_events: list[BlockStored]) -> list[BlockStored]:
-        events = mooncake_store_connector.MooncakeStoreKVEvents(
-            num_workers=4,
-            group_tp_replication_factors=(2,),
-        )
-        events.add_events(worker_events)
-        connector.update_connector_output(KVConnectorOutput(kv_cache_events=events))
-        return list(connector.take_events())
-
-    assert poll([complete, pending]) == []
-    assert poll([complete]) == [complete]
-    assert poll([pending, pending]) == [pending]
-    assert connector._kv_cache_events is None
+    # The accumulator is kept for the connector's lifetime so a block whose
+    # coverage completes in a later step can still be announced.
+    assert isinstance(
+        connector._kv_cache_events, mooncake_store_connector.MooncakeStoreKVEvents
+    )
+    assert connector._kv_cache_events.get_all_events() == []
 
 
 # ============================================================
@@ -889,8 +1248,8 @@ def test_scheduler_reset_connector_cache_invokes_connector_reset():
 
 def test_reset_cache_scheduler_role_clears_local_state():
     """SCHEDULER reset_cache() must clear scheduler-side state that points
-    at master keys we're about to wipe -- pending load_specs and
-    accumulated _kv_cache_events both reference keys whose blobs are
+    at master keys we're about to wipe -- pending load_specs and the
+    accumulated Store residency both reference keys whose blobs are
     about to be remove_all'd, so reading them after reset would surface
     stale references to wiped keys.
     """
@@ -924,101 +1283,100 @@ def test_reset_cache_scheduler_role_clears_local_state():
 
     assert conn.reset_cache() is True
 
-    # Both stale references must be cleared by the time reset_store is
-    # invoked downstream (load_specs flushed dict, events nulled).
+    # Both stale references must be cleared (load_specs flushed dict, residency
+    # accumulator dropped) so nothing learned before the wipe survives it.
     assert sched_inst.load_specs == {}
     assert conn._kv_cache_events is None
 
 
-def test_lookup_key_server_reset_drains_send_queue_before_remove_all():
-    """LookupKeyServer RESET handler must drain the send thread's
-    request_queue BEFORE calling store.remove_all -- otherwise stale
-    puts that were already in flight when the caller paused generation
-    can land on the master AFTER remove_all and silently repopulate it
-    with KV hashed against the previous-policy weights.
-    """
-    # Exercise the handler logic directly with mocks for the send thread
-    # and store. We assert (a) join() is called, (b) remove_all is called,
-    # and (c) join() comes BEFORE remove_all in the call order. The full
-    # LookupKeyServer is heavy (binds a real ZMQ REP socket), so we drive
-    # just the dispatch branch here via a stub equivalent.
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
-        protocol,
-    )
+def test_successful_store_reset_starts_a_new_residency_epoch():
+    """A block stored again after a successful reset is announced again."""
+    conn = _make_scheduler_connector()
+    conn.connector_scheduler.reset_store.return_value = True
+    event = _make_block_stored(b"block", group_idx=0)
+    required = {0: [_namespace(0, tp_rank=0)]}
 
+    assert _contribute(conn, event, required[0], required) == [event]
+    assert _contribute(conn, event, required[0], required) == []
+
+    assert conn.reset_cache() is True
+
+    assert _contribute(conn, event, required[0], required) == [event]
+
+
+def test_failed_store_reset_keeps_what_it_announced():
+    """A reset that failed leaves the Store holding what it announced, so the
+    residency ledger must survive it and no block may be announced twice."""
+    conn = _make_scheduler_connector()
+    conn.connector_scheduler.reset_store.return_value = False
+    event = _make_block_stored(b"block", group_idx=0)
+    required = {0: [_namespace(0, tp_rank=0)]}
+
+    assert _contribute(conn, event, required[0], required) == [event]
+
+    assert conn.reset_cache() is False
+
+    assert _contribute(conn, event, required[0], required) == []
+
+
+def _make_lookup_key_server_for_reset(
+    send_thread: MagicMock | None,
+) -> tuple[worker.LookupKeyServer, list[str]]:
+    """A LookupKeyServer with mocked store objects, ready for _reset_store().
+
+    Bypasses __init__ so the test drives the handler the RESET message reaches
+    instead of binding a real ZMQ REP socket.
+    """
     call_order: list[str] = []
 
-    fake_send_queue = MagicMock()
-    fake_send_queue.join.side_effect = lambda: call_order.append("join")
-
-    fake_store = MagicMock()
-    fake_store.remove_all.side_effect = lambda force: call_order.append(
+    store = MagicMock()
+    store.remove_all.side_effect = lambda force: call_order.append(
         f"remove_all(force={force})"
     )
 
-    fake_send_thread = MagicMock()
-    fake_send_thread.request_queue = fake_send_queue
+    if send_thread is not None:
+        send_thread.request_queue.join.side_effect = lambda: call_order.append("join")
 
-    fake_store_worker = MagicMock()
-    fake_store_worker.kv_send_thread = fake_send_thread
-    fake_store_worker.store = fake_store
-
-    fake_socket = MagicMock()
-    sent: list[bytes] = []
-    fake_socket.send.side_effect = lambda frame: sent.append(frame)
-
-    # Mirror the body of LookupKeyServer.process_request RESET_MSG branch.
-    # Keeping this inline (instead of importing the closure) keeps the
-    # test independent of the live thread lifecycle.
-    msg_type = protocol.RESET_MSG
-    if msg_type == protocol.RESET_MSG:
-        try:
-            if fake_store_worker.kv_send_thread is not None:
-                fake_store_worker.kv_send_thread.request_queue.join()
-            fake_store_worker.store.remove_all(force=True)
-            fake_socket.send(protocol.RESP_OK)
-        except Exception:
-            fake_socket.send(protocol.RESP_ERR)
-
-    # Drain must happen before remove_all.
-    assert call_order == ["join", "remove_all(force=True)"]
-    # Worker reported success.
-    assert sent == [protocol.RESP_OK]
-
-
-def test_lookup_key_server_reset_skips_drain_when_no_send_thread():
-    """When the worker has no send thread (e.g. consumer-only role
-    configurations), the RESET handler must still call remove_all
-    instead of dereferencing a None send thread.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
-        protocol,
+    store_worker = MagicMock()
+    store_worker.kv_send_thread = send_thread
+    store_worker.store = store
+    store_worker.retire_residency.side_effect = lambda: call_order.append(
+        "retire_residency"
     )
 
-    call_order: list[str] = []
-    fake_store = MagicMock()
-    fake_store.remove_all.side_effect = lambda force: call_order.append("remove_all")
+    server = object.__new__(worker.LookupKeyServer)
+    server.store_worker = store_worker
+    return server, call_order
 
-    fake_store_worker = MagicMock()
-    fake_store_worker.kv_send_thread = None
-    fake_store_worker.store = fake_store
 
-    fake_socket = MagicMock()
-    sent: list[bytes] = []
-    fake_socket.send.side_effect = lambda frame: sent.append(frame)
+def test_reset_drains_puts_then_wipes_then_retires_reports():
+    """RESET must drain in-flight puts before remove_all, and drop the reports
+    buffered for the objects it wipes before this rank's next poll reports
+    them as residency of the fresh Store.
+    """
+    server, call_order = _make_lookup_key_server_for_reset(MagicMock())
 
-    msg_type = protocol.RESET_MSG
-    if msg_type == protocol.RESET_MSG:
-        try:
-            if fake_store_worker.kv_send_thread is not None:
-                fake_store_worker.kv_send_thread.request_queue.join()
-            fake_store_worker.store.remove_all(force=True)
-            fake_socket.send(protocol.RESP_OK)
-        except Exception:
-            fake_socket.send(protocol.RESP_ERR)
+    assert server._reset_store() == protocol.RESP_OK
+    assert call_order == ["join", "remove_all(force=True)", "retire_residency"]
 
-    assert call_order == ["remove_all"]
-    assert sent == [protocol.RESP_OK]
+
+def test_reset_skips_drain_when_no_send_thread():
+    """A worker with no send thread (e.g. consumer-only) still wipes the store."""
+    server, call_order = _make_lookup_key_server_for_reset(None)
+
+    assert server._reset_store() == protocol.RESP_OK
+    assert call_order == ["remove_all(force=True)", "retire_residency"]
+
+
+def test_failed_reset_keeps_buffered_reports():
+    """A wipe that failed leaves the Store holding what it held, so the reports
+    buffered for those objects stay valid and must not be dropped.
+    """
+    server, call_order = _make_lookup_key_server_for_reset(MagicMock())
+    server.store_worker.store.remove_all.side_effect = RuntimeError("master down")
+
+    assert server._reset_store() == protocol.RESP_ERR
+    assert call_order == ["join"]
 
 
 def test_shutdown_closes_worker_store():

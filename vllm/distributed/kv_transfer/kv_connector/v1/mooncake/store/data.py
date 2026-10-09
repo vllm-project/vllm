@@ -6,12 +6,13 @@
 """Data classes for MooncakeStoreConnector."""
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import cast
 
 import numpy as np
 import torch
 
+from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
@@ -22,6 +23,7 @@ from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashListWithBlockSize,
+    ExternalBlockHash,
 )
 
 logger = init_logger(__name__)
@@ -827,6 +829,70 @@ class ReqMeta:
             token_ids=token_ids,
             token_ids_start=token_ids_start,
             num_prompt_tokens=tracker.prefill_end_tokens,
+        )
+
+
+BlockKey = tuple[int, ExternalBlockHash]
+"""Identity of one logical Store block: its cache group and its block hash."""
+
+
+def store_block_key(event: BlockStored) -> BlockKey:
+    """Identity of the logical block a Store residency event names."""
+    assert event.group_idx is not None, "Store residency events name their group"
+    assert len(event.block_hashes) == 1, (
+        "Store residency events announce exactly one logical block"
+    )
+    return event.group_idx, event.block_hashes[0]
+
+
+@dataclass
+class StoreResidency:
+    """The Store objects one rank committed, and the namespaces they cover.
+
+    ``events`` announces the logical blocks this rank finished writing, one per
+    ``BlockKey``. ``covered`` maps each of them to the Store key namespaces this
+    rank's objects for it occupy, whether this write created them or found them
+    already present. A block is reusable once the union of the reporting ranks'
+    coverage spans the namespaces a lookup probes for its group, which is
+    ``MooncakeStoreWorker._lookup_key_prefixes``.
+    """
+
+    events: list[BlockStored]
+    covered: dict[BlockKey, frozenset[str]]
+
+
+@dataclass
+class BoundaryStoreStats:
+    """Cumulative counters for the mamba boundary-state hand-offs.
+
+    ``store_mask`` keeps mamba groups out of the positional save, so a hand-off
+    is the only way a mamba state is ever persisted. Every branch that declines
+    one is silent: the state is simply not written and a later request misses on
+    that group, with nothing in the logs. Each decline reason is counted here so
+    that a lower hit rate can be attributed.
+
+    Counters are in hand-off entries as offered by the core, not in store keys:
+    rank striping drops a key on every rank but one, and a sub-block tail entry
+    contributes keys for every group. Never cleared.
+    """
+
+    published: int = 0
+    accepted: int = 0
+    dropped_consumer_role: int = 0
+    dropped_request_gone: int = 0
+    dropped_past_prefill_end: int = 0
+    dropped_null_block: int = 0
+    dropped_group_not_boundary: int = 0
+
+    @property
+    def dropped(self) -> int:
+        return self.published - self.accepted
+
+    def summary(self) -> str:
+        return ", ".join(
+            f"{f.name}={getattr(self, f.name)}"
+            for f in fields(self)
+            if getattr(self, f.name)
         )
 
 
