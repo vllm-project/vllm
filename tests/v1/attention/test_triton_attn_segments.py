@@ -24,6 +24,7 @@ def _build(
     query_lens,
     max_num_seqs=16,
     num_speculative_tokens=None,
+    parallel_drafting=False,
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
@@ -44,7 +45,7 @@ def _build(
             if num_speculative_tokens is None
             else SimpleNamespace(
                 num_speculative_tokens=num_speculative_tokens,
-                parallel_drafting=False,
+                parallel_drafting=parallel_drafting,
             )
         ),
         compilation_config=SimpleNamespace(
@@ -128,3 +129,35 @@ def test_split_k_segment_rows_cover_verify_queries(
     )
     assert builder.softmax_segm_max.shape[:2] == (rows, 8)
     assert metadata.num_par_softmax_segments == segments
+
+
+# Without SM12.0 64-segment reuse, the scratch holds exactly
+# min(seq_threshold_3D, max_num_seqs) * query_len rows for split-K query_lens.
+@pytest.mark.parametrize(
+    "num_speculative_tokens,parallel_drafting,max_num_seqs,rows",
+    [
+        (None, False, 8, 8),
+        (4, False, 8, 40),
+        (7, False, 8, 64),
+        (8, False, 8, 8),
+        (3, True, 8, 56),
+        (4, True, 8, 8),
+        (5, False, 1, 6),
+    ],
+)
+def test_split_k_scratch_rows_follow_speculative_config(
+    monkeypatch, num_speculative_tokens, parallel_drafting, max_num_seqs, rows
+):
+    builder, _ = _build(
+        monkeypatch,
+        TritonAttentionMetadataBuilder,
+        (9, 0),
+        1,
+        [1],
+        max_num_seqs,
+        num_speculative_tokens,
+        parallel_drafting,
+    )
+    assert builder.softmax_segm_output.shape == (rows, 8, 16, 128)
+    assert builder.softmax_segm_max.shape == (rows, 8, 16)
+    assert builder.softmax_segm_expsum.shape == (rows, 8, 16)

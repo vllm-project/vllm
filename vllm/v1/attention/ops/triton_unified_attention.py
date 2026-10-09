@@ -1060,7 +1060,8 @@ def unified_attention(
         )
 
     # Launch the 2D kernel if
-    # 1. No split-K threshold or scratch buffers, or they are invalid, or
+    # 1. No split-K threshold or scratch buffers, or the scratch has fewer
+    #    rows than query tokens, or
     # 2. max_seqlen_q > 1 and either it exceeds MAX_3D_QUERY_LEN, masking is
     #    non-causal, per-sequence causal, or mm-prefix, or the tuned
     #    large-head path applies, or
@@ -1072,7 +1073,6 @@ def unified_attention(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or num_par_softmax_segments <= 0
         or (
             max_seqlen_q > 1
             and (
@@ -1086,23 +1086,7 @@ def unified_attention(
         or num_seqs * triton.cdiv(max_seqlen_q, BLOCK_Q) > seq_threshold_3D
         or is_batch_invariant
     )
-    if use_3d:
-        # Both kernels use packed FP32 offsets, without scratch stride arguments.
-        scalar_shape = (num_query_heads, num_par_softmax_segments)
-        use_3d = all(
-            buffer.ndim == len(shape) + 1
-            and buffer.shape[0] >= q.shape[0]
-            and buffer.shape[1:-1] == shape[:-1]
-            and buffer.shape[-1] >= shape[-1]
-            and buffer.dtype == torch.float32
-            and buffer.device == q.device
-            and buffer.is_contiguous()
-            for buffer, shape in (
-                (softmax_segm_output, (*scalar_shape, head_size_padded)),
-                (softmax_segm_max, scalar_shape),
-                (softmax_segm_expsum, scalar_shape),
-            )
-        )
+    use_3d = use_3d and softmax_segm_max.shape[0] >= q.shape[0]
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
