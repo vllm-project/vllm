@@ -31,24 +31,6 @@ if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
 
-def prepare_fp8_moe_layer_for_xpu(
-    w13: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if w13_scale is not None and w13_scale.ndim == 3:
-        w13_scale = w13_scale.transpose(-1, -2).contiguous()
-    if w2_scale is not None and w2_scale.ndim == 3:
-        w2_scale = w2_scale.transpose(-1, -2).contiguous()
-    return (
-        w13.transpose(-1, -2).contiguous(),
-        w13_scale,
-        w2.transpose(-1, -2).contiguous(),
-        w2_scale,
-    )
-
-
 class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
@@ -65,12 +47,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
-        is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
-        if not is_xe2_or_xe3:
-            raise NotImplementedError(
-                "XPUExperts is only supported on Intel Xe2/Xe3 GPUs"
-            )
-        self._expects_unquantized_inputs = is_xe2_or_xe3
+        is_xe3p = torch.ops._xpu_C.is_cri(0) or torch.ops._xpu_C.is_nvl_p(0)
+        self._expects_unquantized_inputs = not is_xe3p
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -111,6 +89,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             (None, None),
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -159,6 +138,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             ):
                 w1 = w1.view(torch.float4_e2m1fn_x2)
                 w2 = w2.view(torch.float4_e2m1fn_x2)
+            # XpuFusedMoe relayouts the loaded [E, N, K] weights and scales
+            # in place for this device's grouped GEMM.
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
@@ -175,12 +156,15 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
+        if a1q_scale is not None and a1q_scale.ndim == 0:
+            a1q_scale = a1q_scale.reshape(1)
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             a1q_scale=a1q_scale,
+            a2_scale=a2_scale,
         )
 
 
@@ -207,6 +191,7 @@ class XPUExpertsFp8(XPUExperts):
         SUPPORTED_W_A = [
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
