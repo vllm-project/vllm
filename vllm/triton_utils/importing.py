@@ -122,7 +122,9 @@ class TritonPlaceholder(types.ModuleType):
 
 class TritonLanguagePlaceholder(types.ModuleType):
     def __init__(self):
+        """Initialize import-safe placeholders for Triton language symbols."""
         super().__init__("triton.language")
+        self.core = types.SimpleNamespace(extern=lambda fn: fn, builtin=lambda fn: fn)
         self.constexpr = lambda value: value
         self.dtype = None
         self.int64 = None
