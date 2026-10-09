@@ -17,6 +17,7 @@ use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
+use crate::protocol::tensor::WireNdArray;
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
 /// The stop reason associated with a finished output.
@@ -81,6 +82,10 @@ pub struct EngineCoreEvent {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/d3af8c18317c0dc008d42e4367fbb9045cfb7bf6/vllm/v1/engine/__init__.py#L154-L184>
+///
+/// Fields that are set on few outputs (first or final output, or opt-in
+/// features) are boxed: outputs are moved by value through the dispatcher and
+/// the request stream once per engine step, so their inline size matters.
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutput {
     pub request_id: String,
@@ -94,7 +99,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub new_prompt_logprobs_tensors: Option<MaybeWireLogprobs>,
     #[serde(default)]
-    pub pooling_output: Option<OpaqueValue>,
+    pub pooling_output: Option<Box<OpaqueValue>>,
     #[serde(default)]
     pub finish_reason: Option<EngineCoreFinishReason>,
     #[serde(default)]
@@ -102,17 +107,17 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub events: Option<Vec<EngineCoreEvent>>,
     #[serde(default)]
-    pub kv_transfer_params: Option<serde_json::Value>,
+    pub kv_transfer_params: Option<Box<serde_json::Value>>,
     #[serde(default)]
-    pub ec_transfer_params: Option<serde_json::Value>,
+    pub ec_transfer_params: Option<Box<serde_json::Value>>,
     #[serde(default)]
-    pub trace_headers: Option<OpaqueValue>,
+    pub trace_headers: Option<Box<OpaqueValue>>,
     /// Breakdown of the scheduled prefill computation, set on the first output
     /// of a newly scheduled prefill and elided for subsequent decode outputs.
     #[serde(default)]
-    pub prefill_stats: Option<PrefillStats>,
+    pub prefill_stats: Option<Box<PrefillStats>>,
     #[serde(default)]
-    pub routed_experts: Option<OpaqueValue>,
+    pub routed_experts: Option<Box<OpaqueValue>>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
@@ -132,7 +137,11 @@ pub struct EngineCoreOutput {
     /// Per-request speculative-decoding acceptance metrics, set on the final
     /// output when `--per-request-spec-decode-metrics` is enabled.
     #[serde(default)]
-    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
+    /// Log probabilities of `SamplingParams.prompt_logprob_token_ids`, set on
+    /// the first output of a request that asked for them.
+    #[serde(default)]
+    pub prompt_token_id_logprobs: Option<Box<WireNdArray>>,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -180,6 +189,11 @@ impl EngineCoreOutput {
         self.new_sampling_mask = (self.new_sampling_mask.take())
             .map(|value| value.resolve(frames, "new_sampling_mask"))
             .transpose()?;
+        if let Some(value) = self.prompt_token_id_logprobs.as_mut() {
+            value
+                .resolve_aux_frame(frames)
+                .map_err(|message| ext_value_decode!("prompt_token_id_logprobs: {message}"))?;
+        }
         Ok(())
     }
 }
@@ -531,6 +545,7 @@ mod tests {
                             mm_cache_miss_hashes: None,
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
+                            prompt_token_id_logprobs: None,
                         },
                     ],
                     scheduler_stats: None,

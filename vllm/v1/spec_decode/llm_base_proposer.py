@@ -25,6 +25,7 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models import (
     supports_multimodal,
     supports_multimodal_embeddings,
@@ -1311,7 +1312,7 @@ class SpecDecodeBaseProposer:
             model = get_model(
                 vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
-                load_config=self.speculative_config.draft_load_config,
+                load_config=get_draft_load_config(draft_vllm_config),
             )
         return model
 

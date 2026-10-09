@@ -18,7 +18,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.models.phi4mm_utils import (
     AbsolutePositionalEncoding,
@@ -129,7 +129,7 @@ class ConformerEncoderLayer(nn.Module):
               default False.
         use_pt_scaled_dot_product_attention: bool, optional
             if set to True, use pytorch's scaled dot product attention
-            implementation in training.
+            implementation in training. Default: True.
         attn_group_sizes: int, optional
             the number of groups to use for attention, default 1
             (Multi-Head Attention),
@@ -163,7 +163,7 @@ class ConformerEncoderLayer(nn.Module):
         attention_glu_type: str = "swish",
         activation_checkpointing: str = "",
         export: bool = False,
-        use_pt_scaled_dot_product_attention: bool = False,
+        use_pt_scaled_dot_product_attention: bool = True,
         attn_group_sizes: int = 1,
     ) -> None:
         super().__init__()
@@ -808,7 +808,7 @@ class ConformerEncoder(TransformerEncoderBase):
             default 4
         use_pt_scaled_dot_product_attention: whether to use pytorch scaled
             dot product attention in training.
-            Default: False
+            Default: True
         nemo_conv_settings: dict, optional
             A dictionary of settings for NeMo Subsampling.
             default: None
@@ -873,7 +873,7 @@ class ConformerEncoder(TransformerEncoderBase):
         activation_checkpointing: str = "",
         relative_attention_bias_args: dict[str, Any] | None = None,
         time_reduction: int = 4,
-        use_pt_scaled_dot_product_attention: bool = False,
+        use_pt_scaled_dot_product_attention: bool = True,
         nemo_conv_settings: dict[str, Any] | None = None,
         conv2d_extra_padding: Literal["feat", "feat_time", "none", True] = "none",
         replication_pad_for_subsample_embedding: bool = False,
@@ -1152,7 +1152,7 @@ class WindowQformer(nn.Module):
 class AudioEmbedding(nn.Module):
     """Image embedding."""
 
-    def __init__(self, config: PretrainedConfig, **kwargs: Any) -> None:
+    def __init__(self, config: PreTrainedConfig, **kwargs: Any) -> None:
         super().__init__()
         self.config = config
         # n_embed or hidden_size for text LM

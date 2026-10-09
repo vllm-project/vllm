@@ -16,11 +16,13 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -275,12 +277,10 @@ class Cohere2Moe(nn.Module):
         else:
             self.custom_routing_function = None
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -402,20 +402,6 @@ class Cohere2MoeModel(nn.Module, EagleModelMixin):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
-
-        # Decoder layers read per-layer MLP layout from config.mlp_layer_types
-        # (dense MLP vs MoE) and use it for weight loading. Transformers >=5.10
-        # populates this field; older versions only expose first_k_dense_replace.
-        # Normalize here so layer construction below sees a consistent layout.
-        if getattr(config, "mlp_layer_types", None) is None:
-            first_k_dense_replace = getattr(config, "first_k_dense_replace", None)
-            n = config.num_hidden_layers
-            if first_k_dense_replace is not None:
-                config.mlp_layer_types = ["dense"] * first_k_dense_replace + [
-                    "sparse"
-                ] * (n - first_k_dense_replace)
-            else:
-                config.mlp_layer_types = ["sparse"] * n
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
