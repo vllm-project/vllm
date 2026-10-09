@@ -238,6 +238,8 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int, handle_nan: bo
     if handle_nan:
         nan_bytes = torch.tensor([0x7F, 0xFF], dtype=torch.uint8, device="cuda")
         decoded_nan = _run_decode(nan_bytes, dtype, handle_nan=True)
+        # NaN sign and payload are not part of this contract; only NaN output
+        # is required.
         assert torch.isnan(decoded_nan).all()
     x_u8 = _finite_fp8_bytes()
     actual = _run_decode(x_u8, dtype, handle_nan=handle_nan)
