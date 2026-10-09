@@ -92,8 +92,8 @@ fn request_output_with_logprobs_and_kv(
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
         finish_reason,
-        kv_transfer_params,
-        ec_transfer_params,
+        kv_transfer_params: kv_transfer_params.map(Box::new),
+        ec_transfer_params: ec_transfer_params.map(Box::new),
         ..Default::default()
     }
 }
@@ -280,11 +280,11 @@ async fn generate_streams_outputs() {
     assert_eq!(first.request_id, internal_id);
     assert_eq!(
         first.prompt_info,
-        Some(GeneratePromptInfo {
+        Some(Box::new(GeneratePromptInfo {
             prompt_token_ids: vec![11, 22].into(),
             prompt_logprobs: Some(prompt_logprobs()),
             prompt_token_id_logprobs: None,
-        })
+        }))
     );
     assert_eq!(first.token_ids, vec![1, 2]);
     assert_eq!(
@@ -330,12 +330,12 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                     RequestBatchOutputs {
                         outputs: vec![
                             EngineCoreOutput {
-                                prefill_stats: Some(PrefillStats {
+                                prefill_stats: Some(Box::new(PrefillStats {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
                                     num_local_cached_tokens: 1,
                                     ..Default::default()
-                                }),
+                                })),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
                                     SamplingMask {
                                         rows: vec![vec![1, 33, 99]],
@@ -409,11 +409,11 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
 async fn collect_output_rejects_partial_sampling_mask() {
     let output = vllm_llm::GenerateOutput {
         request_id: "req-partial-mask".to_string(),
-        prompt_info: Some(GeneratePromptInfo {
+        prompt_info: Some(Box::new(GeneratePromptInfo {
             prompt_token_ids: Arc::from([11_u32, 22]),
             prompt_logprobs: None,
             prompt_token_id_logprobs: None,
-        }),
+        })),
         token_ids: vec![33, 44],
         logprobs: None,
         finish_reason: Some(FinishReason::Length),
@@ -763,11 +763,11 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                         engine_index: 4,
                         timestamp: 10.0,
                         outputs: vec![EngineCoreOutput {
-                            prefill_stats: Some(PrefillStats {
+                            prefill_stats: Some(Box::new(PrefillStats {
                                 num_prompt_tokens: 2,
                                 num_computed_tokens: 2,
                                 ..Default::default()
-                            }),
+                            })),
                             ..request_output_with_events(
                                 &request.request_id,
                                 vec![1],

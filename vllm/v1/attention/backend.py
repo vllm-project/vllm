@@ -70,11 +70,9 @@ class PrequantizedQKV(NamedTuple):
     value_descale: torch.Tensor
 
 
+@dataclass(frozen=True)
 class MultipleOf:
     base: int
-
-    def __init__(self, base: int):
-        self.base = base
 
     def __repr__(self) -> str:
         return f"MultipleOf({self.base})"
@@ -644,10 +642,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
-        self.kernel_block_size: int | None = None
-
-    def set_kernel_block_size(self, kernel_block_size: int) -> None:
-        self.kernel_block_size = kernel_block_size
 
     @classmethod
     def get_cudagraph_support(
