@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
@@ -327,6 +327,30 @@ class AttentionGroup:
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
+def _block_size_is_supported(
+    backends: list[type[AttentionBackend]], block_size: int
+) -> bool:
+    """Check if the block size is supported by all backends.
+
+    An exact ``int`` declaration must match exactly; a ``MultipleOf``
+    declaration accepts any multiple of its base.
+    """
+    for backend in backends:
+        is_supported = False
+        for supported_size in backend.get_supported_kernel_block_sizes():
+            if isinstance(supported_size, int):
+                if block_size == supported_size:
+                    is_supported = True
+            elif isinstance(supported_size, MultipleOf):
+                if block_size % supported_size.base == 0:
+                    is_supported = True
+            else:
+                raise ValueError(f"Unknown supported size: {supported_size}")
+        if not is_supported:
+            return False
+    return True
+
+
 def select_common_block_size(
     kv_manager_block_size: int,
     backends: list[type[AttentionBackend]],
@@ -348,27 +372,7 @@ def select_common_block_size(
         ValueError: If no valid block size found.
 
     """
-
-    def block_size_is_supported(
-        backends: list[type[AttentionBackend]], block_size: int
-    ) -> bool:
-        """Check if the block size is supported by all backends."""
-        for backend in backends:
-            is_supported = False
-            for supported_size in backend.get_supported_kernel_block_sizes():
-                if isinstance(supported_size, int):
-                    if block_size == supported_size:
-                        is_supported = True
-                elif isinstance(supported_size, MultipleOf):
-                    if block_size % supported_size.base == 0:
-                        is_supported = True
-                else:
-                    raise ValueError(f"Unknown supported size: {supported_size}")
-            if not is_supported:
-                return False
-        return True
-
-    if block_size_is_supported(backends, kv_manager_block_size):
+    if _block_size_is_supported(backends, kv_manager_block_size):
         return kv_manager_block_size
 
     # MultipleOf constraints also accept the manager size if they accept a divisor.
@@ -381,9 +385,15 @@ def select_common_block_size(
     }
 
     for size in sorted(candidates, reverse=True):
-        if block_size_is_supported(backends, size):
+        if _block_size_is_supported(backends, size):
             return size
-    raise ValueError(f"No common block size for {kv_manager_block_size}.")
+    raise ValueError(
+        f"No common block size for {kv_manager_block_size} ("
+        + "; ".join(
+            f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}" for b in backends
+        )
+        + ")."
+    )
 
 
 def allocate_kv_cache(
@@ -487,9 +497,24 @@ def prepare_kernel_block_sizes(
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
-            selected_kernel_size = select_common_block_size(
-                kv_manager_block_size, group_backends
+            storage_block_size = (
+                kv_cache_spec.storage_block_size
+                if isinstance(kv_cache_spec, MLAAttentionSpec)
+                else None
             )
+            if storage_block_size is not None and _block_size_is_supported(
+                group_backends, storage_block_size
+            ):
+                # Storage-block specs (e.g. the GLM-5.3-Flash kpool indexer
+                # cache) address the cache in pool pages, and every other
+                # consumer (cache views, metadata builders, hisparse) already
+                # uses storage_block_size as the kernel block. Fall back to the
+                # backend vote when the group's backends do not accept it.
+                selected_kernel_size = storage_block_size
+            else:
+                selected_kernel_size = select_common_block_size(
+                    kv_manager_block_size, group_backends
+                )
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.
@@ -530,13 +555,50 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
-def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
+def request_memory(
+    init_snapshot: MemorySnapshot,
+    cache_config: CacheConfig,
+    external_weight_memory: int = 0,
+) -> int:
     """Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
     """
     requested_memory = math.ceil(
         init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
+
+    if external_weight_memory > 0:
+        engine_memory = requested_memory - external_weight_memory
+        if engine_memory <= 0:
+            raise ValueError(
+                f"Externally held weights on device {init_snapshot.device_} "
+                f"({format_gib(external_weight_memory)}/"
+                f"{format_gib(init_snapshot.total_memory)} GiB) exceed the "
+                "desired GPU memory utilization "
+                f"({cache_config.gpu_memory_utilization}, "
+                f"{format_gib(requested_memory)} GiB). Increase GPU memory "
+                "utilization or reduce GPU memory used by other processes."
+            )
+        if init_snapshot.free_memory < engine_memory:
+            raise ValueError(
+                f"Free memory on device {init_snapshot.device_} "
+                f"({format_gib(init_snapshot.free_memory)}/"
+                f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
+                "is less than the engine's budget after excluding "
+                "external process's weights "
+                f"({cache_config.gpu_memory_utilization}, "
+                f"{format_gib(engine_memory)} GiB). Decrease GPU memory "
+                "utilization or reduce GPU memory used by other processes."
+            )
+        logger.info_once(
+            "Weights are held outside this process: of the %s GiB "
+            "utilization budget, %s GiB is externally held and "
+            "%s GiB remains for the engine's own allocations.",
+            format_gib(requested_memory),
+            format_gib(external_weight_memory),
+            format_gib(engine_memory),
+        )
+        return engine_memory
 
     if init_snapshot.free_memory < requested_memory:
         raise ValueError(
@@ -741,41 +803,14 @@ def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> 
 
 
 def get_uniform_decode_token_count(
-    num_reqs: int, num_tokens: int, max_query_len: int, has_prefill: bool
+    num_reqs: int, num_tokens: int, max_query_len: int, decode_graph_eligible: bool
 ) -> int | None:
     """Per-request token count of a uniform decode batch, or None."""
-    if not has_prefill and is_uniform_query_len(num_reqs, num_tokens, max_query_len):
+    if decode_graph_eligible and is_uniform_query_len(
+        num_reqs, num_tokens, max_query_len
+    ):
         return max_query_len
     return None
-
-
-def is_residual_scattered_for_sp(
-    vllm_config: VllmConfig, num_input_tokens: int
-) -> bool:
-    """Check if the residual tensor is scattered for sequence parallelism.
-
-    The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled. SP is only supported in
-    full-graph compilation mode.
-    """
-    if not vllm_config.compilation_config.pass_config.enable_sp:
-        return False
-
-    tp = vllm_config.parallel_config.tensor_parallel_size
-
-    if tp == 1:
-        return False
-
-    assert (
-        vllm_config.compilation_config.use_inductor_graph_partition
-        or not vllm_config.compilation_config.splitting_ops
-    ), "Sequence parallelism requires full-graph compilation"
-
-    # When sequence parallelism is enabled, we always pad num_input_tokens
-    # to be a multiple of tensor_parallel_size (tp) earlier.
-    assert num_input_tokens % tp == 0
-
-    return True
 
 
 @dataclass

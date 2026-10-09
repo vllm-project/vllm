@@ -35,6 +35,9 @@ from vllm.models.deepseek_v41.common.ops import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
+        RocmSparseMQAIndexer,
+    )
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -261,6 +264,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Return whether this instance stores fp8 KV in fp8_ds_mla layout."""
         return self.use_fp8_ds_mla_layout
 
+    def _indexer_cls(
+        self, k_cache: "DeepseekV4IndexerCache | None"
+    ) -> type["DeepseekV4Indexer"]:
+        """The indexer for this layer's index K cache. A platform subclass
+        returns one that writes and scores its own cache layout."""
+        return DeepseekV4Indexer
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -449,7 +459,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     )
             is_candidate_source = layer_id == self.candidate_source_layer
             uses_candidates = 0 <= self.candidate_source_layer < layer_id
-            self.indexer = DeepseekV4Indexer(
+            self.indexer = self._indexer_cls(index_k_cache)(
                 vllm_config,
                 config=config,
                 hidden_size=self.hidden_size,
@@ -675,6 +685,34 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
         return self._o_proj(attn_out, positions)
+
+    def forward_kv(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> None:
+        """Write only the KV ``forward`` writes (SWA KV, compressed KV, index K),
+        skipping wq_b, the indexer's top-k and attention."""
+        attn_metadata = get_forward_context().attn_metadata
+        qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
+        _, _, kv = self._split_qkv_and_norm(qr_kv)
+        if isinstance(attn_metadata, dict):
+            # The KV half of _fused_qnorm_rope_kv_insert, bit for bit, without
+            # the unused query; same as dspark's _insert_context_kv.
+            cache = self.swa_cache_layer.kv_cache
+            torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+                kv,
+                cache,
+                cast(Any, attn_metadata[self.swa_cache_layer.prefix]).slot_mapping,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.swa_cache_layer.block_size,
+                self._flashinfer_fp8_kv_scale
+                if cache.dtype == torch.float8_e4m3fn
+                else None,
+                self.kv_mxfp8,
+            )
+        if self.compressor is not None:
+            latent = self.compressor(kv_score, positions)
+            self.compressor.insert_cache(latent, positions, self.rotary_emb)
+            if self.indexer is not None and self.indexer.owns_k:
+                self.indexer._produce_k(latent, positions, self.indexer_rotary_emb)
 
     def bind_gemm_rs(self) -> None:
         """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.
@@ -1152,6 +1190,10 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.compress_ratio = compress_ratio
         vllm_config = get_current_vllm_config()
         self.sparse_logits = vllm_config.attention_config.indexer_sparse_logits
+        # aiter's paged MXFP4 kernels write this cache and read it in place.
+        self.rocm_mxfp4 = current_platform.is_rocm() and dsa_indexer_uses_fp4(
+            vllm_config
+        )
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -1190,13 +1232,21 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             # it 512B-aligned; the main KV record read from the same blocks
             # needs its own TMA stride, so keep both.
             block_stride_alignment=(
-                math.lcm(512, page_alignment) if self.sparse_logits else None
+                math.lcm(512, page_alignment)
+                if self.sparse_logits and not self.rocm_mxfp4
+                else None
             ),
         )
 
     def forward(self): ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.rocm_mxfp4:
+            from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+                DeepseekV41RocmMxfp4IndexerBackend,
+            )
+
+            return DeepseekV41RocmMxfp4IndexerBackend
         if self.sparse_logits:
             return DeepseekV41SparseIndexerBackend
         return DeepseekV41IndexerBackend
@@ -1217,6 +1267,12 @@ class DeepseekV4Indexer(nn.Module):
     ``candidate_block_size`` compressed positions (``candidate_write``);
     later indexers mask their scores to those blocks before their own top-k.
     """
+
+    # The scoring layers; a platform subclass swaps in its own.
+    mqa_cls: ClassVar[type["SparseMQAIndexer | RocmSparseMQAIndexer"]] = (
+        SparseMQAIndexer
+    )
+    attn_cls: ClassVar[type[SparseAttnIndexer]] = SparseAttnIndexer
 
     def __init__(
         self,
@@ -1305,7 +1361,7 @@ class DeepseekV4Indexer(nn.Module):
             and candidate_block_buffer is not None
             and not candidate_write
         )
-        self.indexer_op: SparseAttnIndexer | SparseMQAIndexer
+        self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
         if use_sparse_logits:
             if not self.use_fp4_kv:
                 raise ValueError(
@@ -1314,7 +1370,7 @@ class DeepseekV4Indexer(nn.Module):
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
-            self.indexer_op = SparseMQAIndexer(
+            self.indexer_op = self.mqa_cls(
                 self.k_cache,
                 self.topk_tokens,
                 self.head_dim,
@@ -1324,7 +1380,7 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_block_size,
             )
         else:
-            self.indexer_op = SparseAttnIndexer(
+            self.indexer_op = self.attn_cls(
                 self.k_cache,
                 self.quant_block_size,
                 self.scale_fmt,
@@ -1343,7 +1399,7 @@ class DeepseekV4Indexer(nn.Module):
         # The fused Q kernel writes the per-head weights in the dtype the
         # scoring kernels take, so no cast runs per step.
         self.indexer_weights_dtype = (
-            SparseMQAIndexer.weights_dtype if use_sparse_logits else torch.float32
+            self.mqa_cls.weights_dtype if use_sparse_logits else torch.float32
         )
 
     def _produce_k(
