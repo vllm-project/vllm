@@ -473,6 +473,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         gqa_interleaved_layout=False,
         reduce_results: bool = True,
     ) -> None:
+        """Initialize gated delta attention and its tensor-parallel projections."""
         super().__init__(config, vllm_config, prefix)
 
         self.num_k_heads = config.linear_num_key_heads

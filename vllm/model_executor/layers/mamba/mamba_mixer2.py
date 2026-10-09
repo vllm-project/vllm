@@ -210,6 +210,7 @@ def mamba_v2_sharded_weight_loader(
 
     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         # - track boundary of (sharded) param, and loaded_weight, respectively
+        """Load projection slices, replicating groups across adjacent head shards."""
         boundary, loaded_boundary = 0, 0
 
         # - iterate over the shard specs
@@ -289,6 +290,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
+        """Initialize Mamba2 with group replication for tensor-parallel head shards."""
         super().__init__()
 
         # For TP, the sharding plan is as follows:
