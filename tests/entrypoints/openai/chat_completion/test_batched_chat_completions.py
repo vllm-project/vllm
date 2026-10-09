@@ -10,6 +10,7 @@ import pytest
 
 from tests.entrypoints.openai.chat_completion.test_serving_chat import (
     BASE_MODEL_PATHS,
+    CHAT_TEMPLATE,
     MockHFConfig,
     MockModelConfig,
     _build_renderer,
@@ -24,10 +25,13 @@ from vllm.entrypoints.openai.chat_completion.batch_serving import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
+    ChatCompletionRequest,
 )
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.reasoning import ReasoningParserManager
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -454,3 +458,101 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
     )
 
     assert prefixes == [[1], [2]]
+
+
+REASONING_PARSER = "kimi_k3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_batched_reasoning_wiring_matches_single_chat() -> None:
+    """`/v1/chat/completions/batch` must hand the engine the same reasoning
+    wiring as `/v1/chat/completions`.
+
+    Both `reasoning_ended` and `reasoning_parser_kwargs` are carried on the
+    request into `EngineCoreRequest`, where
+    `StructuredOutputManager._get_reasoner()` rebuilds the request-local
+    reasoning parser from the forwarded `chat_template_kwargs` -- "so the
+    structured-output gate observes the same template kwargs used by the
+    frontend". A divergence makes a template-kwarg-driven parser fall back to
+    its default (`thinking` on) for a request that disabled thinking, so
+    `is_reasoning_end()` keeps reporting False, the structured-output gate
+    never opens, and the grammar is silently never applied.
+
+    Both frontends run over one and the same model and renderer, so the only
+    thing that can differ between the two calls is the serving code itself.
+    """
+    mock_model_config = MockModelConfig()
+    shared_renderer = _build_renderer(mock_model_config)
+
+    def _build_serving(cls):
+        mock_engine = MagicMock(spec=AsyncLLM)
+        mock_engine.model_config = mock_model_config
+        mock_engine.errored = False
+        mock_engine.input_processor = MagicMock()
+        mock_engine.renderer = shared_renderer
+        mock_engine.generate.side_effect = lambda *args, **kwargs: _generator(0, "ok")
+
+        models = OpenAIServingModels(mock_engine, BASE_MODEL_PATHS)
+        online_renderer = OnlineRenderer(
+            model_config=mock_model_config,
+            renderer=mock_engine.renderer,
+            request_logger=None,
+            chat_template=CHAT_TEMPLATE,
+            chat_template_content_format="auto",
+            reasoning_parser=REASONING_PARSER,
+        )
+        return mock_engine, cls(
+            mock_engine,
+            models,
+            response_role="assistant",
+            online_renderer=online_renderer,
+            chat_template=CHAT_TEMPLATE,
+            chat_template_content_format="auto",
+            request_logger=None,
+            reasoning_parser=REASONING_PARSER,
+        )
+
+    conversation = [{"role": "user", "content": "What is the capital of France?"}]
+    chat_template_kwargs = {"enable_thinking": False}
+
+    single_engine, single_serving = _build_serving(OpenAIServingChat)
+    await single_serving.create_chat_completion(
+        ChatCompletionRequest(
+            model=MOCK_MODEL_NAME,
+            messages=conversation,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+    )
+    single_call = single_engine.generate.call_args_list[-1]
+
+    batch_engine, batch_serving = _build_serving(OpenAIServingChatBatch)
+    await batch_serving.create_batch_chat_completion(
+        BatchChatCompletionRequest(
+            model=MOCK_MODEL_NAME,
+            messages=[conversation],
+            chat_template_kwargs=chat_template_kwargs,
+        )
+    )
+    batch_call = batch_engine.generate.call_args_list[-1]
+
+    # Guard against a vacuous comparison: the reference path must be wired up.
+    assert single_call.kwargs["reasoning_ended"] is not None
+    assert single_call.kwargs["reasoning_parser_kwargs"] is not None
+
+    assert batch_call.kwargs["reasoning_ended"] == single_call.kwargs["reasoning_ended"]
+    assert (
+        batch_call.kwargs["reasoning_parser_kwargs"]
+        == single_call.kwargs["reasoning_parser_kwargs"]
+    )
+
+    # ...and the forwarded kwargs must actually turn thinking off for the
+    # engine-side parser, i.e. the structured-output gate opens right away.
+    engine_chat_template_kwargs = batch_call.kwargs["reasoning_parser_kwargs"][
+        "chat_template_kwargs"
+    ]
+    reasoner = ReasoningParserManager.get_reasoning_parser(REASONING_PARSER)(
+        tokenizer=batch_engine.renderer.tokenizer,
+        chat_template_kwargs=engine_chat_template_kwargs,
+    )
+    assert reasoner.is_reasoning_end([]) is True
