@@ -23,9 +23,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     EmbeddedRuntime,
     UMBPRuntimeConfig,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.embedded import (
-    _MoriSchedulerHandle,
-)
 
 if not hasattr(pytest.importorskip("mori.cpp"), "UMBPClient"):
     pytest.skip("MORI was built without UMBP", allow_module_level=True)
@@ -116,10 +113,18 @@ def test_mori_embedded_tp2_pp2_gpu_roundtrip(tmp_path):
     for process in processes:
         process.start()
     entries = sorted(ready.get(timeout=90) for _ in processes)
-    scheduler = _MoriSchedulerHandle(
+    scheduler = EmbeddedRuntime.from_config(
+        UMBPRuntimeConfig(
+            "embedded",
+            {
+                "capacity_bytes": 128 * 1024 * 1024,
+                "lookup_dir": str(tmp_path),
+            },
+        )
+    ).create_scheduler_handle(
         _NAMESPACE,
         _topology(0),
-        str(tmp_path),
+        KVLayoutDescriptor((), _topology(0)),
     )
     deadline = time.monotonic() + 10
     hits = [False] * 4
