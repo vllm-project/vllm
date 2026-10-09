@@ -928,3 +928,88 @@ def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
             attention[token].float(), weights @ keys, atol=0.05, rtol=0.05
         )
     _assert_projects_alike(z_unfused, z_fused)
+
+
+@pytest.mark.parametrize("capability", [80, 89, 90])
+@pytest.mark.parametrize(
+    "cache_dtype", [torch.bfloat16, torch.float8_e4m3fn, torch.uint8]
+)
+@pytest.mark.parametrize("cutedsl_available", [False, True])
+def test_full_row_compressor_routes_to_cutedsl(
+    monkeypatch, capability, cache_dtype, cutedsl_available
+):
+    """Full-row CUDA caches reach CuTeDSL independently of the SM routing gate."""
+    import sys
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v4 import compressor
+
+    calls = []
+    monkeypatch.setattr(
+        compressor,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda=lambda: True,
+            is_rocm=lambda: False,
+            is_xpu=lambda: False,
+            has_device_capability=lambda minimum: capability >= minimum,
+        ),
+    )
+    monkeypatch.setattr(compressor, "has_cutedsl", lambda: cutedsl_available)
+    monkeypatch.setattr(compressor, "_SAVE_PARTIAL_STATES_KERNEL", lambda **kw: None)
+    monkeypatch.setattr(
+        compressor,
+        "compress_norm_rope_store_triton",
+        lambda **kw: calls.append("triton"),
+    )
+    module_name = "vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl"
+    module = SimpleNamespace(
+        _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL=lambda **kw: calls.append("cutedsl")
+    )
+    monkeypatch.setitem(sys.modules, module_name, module if cutedsl_available else None)
+    metadata = SimpleNamespace(
+        token_to_req_indices=None,
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+        block_table=None,
+        block_size=1,
+    )
+    monkeypatch.setattr(
+        compressor,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"state": metadata, "key": metadata}),
+    )
+    layer = SimpleNamespace(kv_cache=torch.zeros((1, 1, 512), dtype=cache_dtype))
+    impl = SimpleNamespace(
+        coff=1,
+        head_dim=512,
+        state_cache=SimpleNamespace(prefix="state", kv_cache=torch.zeros(1, 1024)),
+        ape=None,
+        compress_ratio=4,
+        k_cache_prefix="key",
+        _static_forward_context={"key": layer},
+        _use_two_stage_fused_compressor=False,
+        rope_head_dim=64,
+        overlap=False,
+        use_fp4_cache=False,
+        norm=SimpleNamespace(weight=None, eps=1e-6),
+        _quant_block=128,
+        _token_stride=512,
+        _scale_dim=4,
+    )
+    args = (
+        impl,
+        torch.zeros(1, 1024),
+        torch.zeros(1, dtype=torch.int64),
+        SimpleNamespace(cos_sin_cache=None),
+    )
+    if cache_dtype != torch.uint8 and not cutedsl_available:
+        with pytest.raises(ModuleNotFoundError, match="sparse_attn_compress_cutedsl"):
+            compressor.DeepseekCompressor.forward(*args)
+    else:
+        compressor.DeepseekCompressor.forward(*args)
+        expected = (
+            "cutedsl"
+            if cutedsl_available and (cache_dtype != torch.uint8 or capability >= 90)
+            else "triton"
+        )
+        assert calls == [expected]
