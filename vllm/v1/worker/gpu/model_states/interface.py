@@ -164,6 +164,16 @@ class ModelState(ABC):
         across block boundaries. No-op by default."""
         return None
 
+    def save_decode_checkpoints(
+        self,
+        req_ids: list[str],
+        checkpoints: dict[str, tuple[int, tuple[int, ...]]],
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        return None
+
     def postprocess_state(
         self,
         idx_mapping: torch.Tensor,

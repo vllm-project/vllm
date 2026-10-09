@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
 
-from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -473,6 +472,26 @@ class KVCacheCoordinator(ABC):
         try:
             if keep:
                 boundary = self._select_decode_checkpoint(request, materialized_tokens)
+                if boundary is not None:
+                    for manager in self.single_type_managers:
+                        if (
+                            not isinstance(manager, MambaManager)
+                            and self.kv_cache_config.kv_cache_groups[
+                                manager.kv_cache_group_id
+                            ].kv_cache_spec.prefix_cacheable
+                            and manager.kv_cache_group_id not in self.eagle_group_ids
+                            and boundary % manager.block_size
+                        ):
+                            block = manager.req_to_blocks[request.request_id][
+                                boundary // manager.block_size
+                            ]
+                            manager.block_pool.cache_partial_block(
+                                request=request,
+                                block=block,
+                                num_tokens=boundary,
+                                kv_cache_group_id=manager.kv_cache_group_id,
+                                block_size=manager.block_size,
+                            )
             for manager in managers:
                 manager.finalize_decode_checkpoints(request, boundary)
         finally:

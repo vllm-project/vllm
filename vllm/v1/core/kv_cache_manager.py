@@ -147,6 +147,7 @@ class KVCacheManager:
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
         enable_mamba_decode_checkpoint: bool = False,
+        enable_fine_grained_decode_checkpoint: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -181,6 +182,21 @@ class KVCacheManager:
         )
         if enable_mamba_decode_checkpoint:
             self.coordinator.enable_decode_checkpoints()
+        self.decode_checkpoint_unit = 0
+        self.decode_checkpoint_managers: list[MambaManager] = []
+        if (
+            enable_mamba_decode_checkpoint
+            and enable_fine_grained_decode_checkpoint
+            and self.coordinator.enable_partial_hash_hits
+            and hash_block_size < scheduler_block_size
+        ):
+            self.decode_checkpoint_unit = hash_block_size
+            self.decode_checkpoint_managers = [
+                manager
+                for manager in self.coordinator.single_type_managers
+                if isinstance(manager, MambaManager)
+            ]
+        self._scheduled_decode_checkpoints: dict[str, tuple[int, tuple[int, ...]]] = {}
         # One predicate, read by both sides of the feature, so the scheduler
         # cannot end a chunk at a junction the manager would refuse -- a refused
         # junction costs a forward pass and displaces the block-boundary stop.
@@ -542,6 +558,17 @@ class KVCacheManager:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
+        checkpoint_unit = self.decode_checkpoint_unit
+        needs_decode_checkpoint = (
+            checkpoint_unit > 0
+            and not delay_cache_blocks
+            and total_computed_tokens >= prefill_end
+            and num_tokens_main_model // checkpoint_unit * checkpoint_unit
+            > max(
+                request.num_prompt_tokens,
+                total_computed_tokens - request.num_in_flight_tokens,
+            )
+        )
         num_tokens_need_slot = min(
             num_tokens_main_model + num_lookahead_tokens, self.max_model_len
         )
@@ -577,6 +604,8 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
+        if needs_decode_checkpoint:
+            required_blocks += len(self.decode_checkpoint_managers)
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
             return None
@@ -601,6 +630,14 @@ class KVCacheManager:
             num_tokens_main_model,
             num_encoder_tokens,
         )
+        if needs_decode_checkpoint:
+            self._scheduled_decode_checkpoints[request.request_id] = (
+                checkpoint_unit,
+                tuple(
+                    manager.allocate_decode_checkpoint(request.request_id)
+                    for manager in self.decode_checkpoint_managers
+                ),
+            )
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -629,9 +666,32 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
+        self._scheduled_decode_checkpoints.pop(request.request_id, None)
         self.coordinator.free(request.request_id)
 
-    def update_decode_checkpoint_candidates(self, request: Request) -> None:
+    def take_decode_checkpoints(
+        self, scheduled_req_ids: dict[str, int]
+    ) -> dict[str, tuple[int, tuple[int, ...]]] | None:
+        checkpoints = self._scheduled_decode_checkpoints
+        self._scheduled_decode_checkpoints = {}
+        return {
+            key: value for key, value in checkpoints.items() if key in scheduled_req_ids
+        } or None
+
+    def discard_decode_checkpoint(
+        self, request_id: str, checkpoint: tuple[int, tuple[int, ...]]
+    ) -> None:
+        for manager, block_id in zip(self.decode_checkpoint_managers, checkpoint[1]):
+            block = manager.pop_decode_checkpoint(request_id, block_id)
+            if block is not None:
+                self.block_pool.free_blocks((block,))
+
+    def update_decode_checkpoint_candidates(
+        self,
+        request: Request,
+        checkpoint: tuple[int, tuple[int, ...]] | None = None,
+        num_sampled: int = 1,
+    ) -> None:
         """Retain checkpoints only for tokens whose forward has completed."""
         if not self.coordinator.retain_decode_checkpoints:
             return
@@ -644,6 +704,19 @@ class KVCacheManager:
         self.coordinator.update_decode_checkpoint_candidates(
             request, materialized_tokens
         )
+        if checkpoint is not None:
+            unit, block_ids = checkpoint
+            boundary = processed_end // unit * unit
+            # Stop can clip the accepted run. Never hash a later GPU state as
+            # an earlier token prefix; keep the previous candidate instead.
+            copied = (
+                boundary >= processed_end - max(num_sampled, 1) + 1
+                and request.num_prompt_tokens < boundary <= materialized_tokens
+            )
+            for manager, block_id in zip(self.decode_checkpoint_managers, block_ids):
+                manager.complete_decode_checkpoint(
+                    request, block_id, boundary if copied else None
+                )
 
     def finalize_decode_checkpoints(self, request: Request, keep: bool) -> None:
         """Publish or discard the request's private decode checkpoints."""
@@ -689,6 +762,7 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
+        self._scheduled_decode_checkpoints.pop(request.request_id, None)
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def evict_blocks(self, block_ids: set[int]) -> None:

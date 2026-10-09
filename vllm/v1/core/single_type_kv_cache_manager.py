@@ -1523,6 +1523,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 str, list[DecodeCheckpointCandidate]
             ] = {}
             self.max_decode_checkpoints = 1
+            self._pending_decode_checkpoints: dict[str, dict[int, KVCacheBlock]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -2011,7 +2012,11 @@ class MambaManager(SingleTypeKVCacheManager):
         return self.kv_cache_group_id, source_block, boundary_tokens
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        pending = []
         if self.mamba_cache_mode == "align":
+            pending = list(
+                self._pending_decode_checkpoints.pop(request_id, {}).values()
+            )
             self._discard_decode_checkpoint_candidates(request_id)
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
@@ -2028,7 +2033,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 for entry in self._pending_boundary_state_offloads
                 if entry[0] != request_id
             ]
-        return super().pop_blocks_for_free(request_id)
+        return pending + super().pop_blocks_for_free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only
@@ -2141,6 +2146,42 @@ class MambaManager(SingleTypeKVCacheManager):
             for candidate in self._decode_checkpoint_candidates.get(request_id, [])
         ]
 
+    def allocate_decode_checkpoint(self, request_id: str) -> int:
+        block = self.block_pool.get_new_blocks(1)[0]
+        self._pending_decode_checkpoints.setdefault(request_id, {})[block.block_id] = (
+            block
+        )
+        return block.block_id
+
+    def pop_decode_checkpoint(
+        self, request_id: str, block_id: int
+    ) -> KVCacheBlock | None:
+        pending = self._pending_decode_checkpoints.get(request_id, {})
+        block = pending.pop(block_id, None)
+        if not pending:
+            self._pending_decode_checkpoints.pop(request_id, None)
+        return block
+
+    def complete_decode_checkpoint(
+        self, request: Request, block_id: int, boundary: int | None
+    ) -> None:
+        block = self.pop_decode_checkpoint(request.request_id, block_id)
+        if block is None:
+            return
+        candidates = self._decode_checkpoint_candidates.setdefault(
+            request.request_id, []
+        )
+        if boundary is None or any(c.num_tokens >= boundary for c in candidates):
+            self.block_pool.free_blocks((block,))
+            return
+        block_hash = make_block_hash_with_group_id(
+            request.block_hashes[boundary // self.block_pool.hash_block_size - 1],
+            self.kv_cache_group_id,
+        )
+        candidates.append(DecodeCheckpointCandidate(boundary, block, block_hash))
+        if len(candidates) > self.max_decode_checkpoints:
+            self.block_pool.free_blocks((candidates.pop(0).block,))
+
     def finalize_decode_checkpoints(
         self, request: Request, boundary: int | None
     ) -> None:
@@ -2151,6 +2192,15 @@ class MambaManager(SingleTypeKVCacheManager):
         try:
             for candidate in candidates:
                 if candidate.num_tokens == boundary:
+                    if boundary % self.block_size:
+                        self.block_pool.cache_partial_block(
+                            request=request,
+                            block=candidate.block,
+                            num_tokens=boundary,
+                            block_size=self.block_size,
+                            kv_cache_group_id=self.kv_cache_group_id,
+                        )
+                        continue
                     self.block_pool.cache_decode_checkpoint(
                         request=request,
                         block=candidate.block,

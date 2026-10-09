@@ -201,12 +201,14 @@ class CacheConfig:
     "align", EAGLE on the Mamba group, and a prefix match unit smaller than the
     Mamba block size."""
     enable_mamba_decode_checkpoint: bool = False
-    """Also publish the latest scheduler-aligned Mamba decode state to the local
+    """Also publish the latest reusable Mamba decode state to the local
     prefix cache when a request stops, so a follow-up turn that replays the
     generated message can resume from it. Off by default; requires
     `prefix_cache_retention_interval` 0 and `mamba_cache_mode` "align". With
     EAGLE/MTP, publish the deepest retained state whose draft KV lookahead
-    is finalized and reusable."""
+    is finalized and reusable. MRV2 also captures match-unit-aligned states
+    inside a scheduler block when fine-grained prefix hits are supported.
+    PP, KV connectors, ReplaySSM and RecoverSSM use scheduler alignment."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.

@@ -4976,6 +4976,7 @@ def _make_decode_checkpoint_manager(
     hash_block_size=None,
     num_prefill_lookahead=0,
     num_speculative_blocks=0,
+    fine_grained=False,
 ):
     hash_block_size = hash_block_size or block_size
     config = _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"])
@@ -4993,6 +4994,7 @@ def _make_decode_checkpoint_manager(
         use_eagle=use_eagle,
         num_prefill_lookahead=num_prefill_lookahead,
         enable_mamba_decode_checkpoint=True,
+        enable_fine_grained_decode_checkpoint=fine_grained,
     )
     return manager, block_size
 
@@ -5014,6 +5016,102 @@ def _materialize_checkpoint_test_request(manager, block_size, num_decode_blocks=
         request.append_output_token_ids(list(range(start, start + block_size)))
         compute(block_size)
     return request
+
+
+@pytest.mark.parametrize(
+    ("use_eagle", "end", "expected"), [(False, 13, 12), (True, 17, 12)]
+)
+def test_decode_checkpoint_reuses_match_unit_inside_scheduler_block(
+    use_eagle, end, expected
+):
+    """A copied partial state extends replay beyond the coarse decode checkpoint."""
+    manager, _ = _make_decode_checkpoint_manager(
+        use_eagle=use_eagle, block_size=8, hash_block_size=4, fine_grained=True
+    )
+    request = make_request("producer", list(range(4)), 4, sha256)
+    manager.allocate_slots(request, 4)
+    request.num_computed_tokens = 4
+    request.append_output_token_ids(4)
+    for computed in range(5, end + 1):
+        manager.new_step_starts()
+        assert manager.allocate_slots(request, 1) is not None
+        checkpoint = (
+            manager.take_decode_checkpoints({request.request_id: 1}) or {}
+        ).get(request.request_id)
+        request.num_computed_tokens = computed
+        request.append_output_token_ids(computed)
+        manager.update_decode_checkpoint_candidates(request, checkpoint)
+    assert manager.block_pool.get_cached_block(request.block_hashes[2], [1]) is None
+    manager.finalize_decode_checkpoints(request, keep=True)
+    manager.free(request)
+    replay = make_request("replay", list(request.all_token_ids) + [100, 101], 4, sha256)
+    _, hit, _ = manager.get_computed_blocks(replay)
+    assert hit == expected
+    assert manager.block_pool.get_num_free_blocks() == 99
+
+
+def test_decode_checkpoint_discards_snapshot_past_stop_in_accepted_run():
+    """Clipping accepted IDs must not publish the state at a later GPU boundary."""
+    manager, _ = _make_decode_checkpoint_manager(
+        block_size=8, hash_block_size=4, fine_grained=True
+    )
+    request = make_request("producer", list(range(4)), 4, sha256)
+    manager.allocate_slots(request, 4)
+    request.num_computed_tokens = 4
+    request.append_output_token_ids(4)
+    for computed in range(5, 10):
+        manager.new_step_starts()
+        manager.allocate_slots(request, 1)
+        checkpoint = (
+            manager.take_decode_checkpoints({request.request_id: 1}) or {}
+        ).get(request.request_id)
+        request.num_computed_tokens = computed
+        request.append_output_token_ids(computed)
+        manager.update_decode_checkpoint_candidates(request, checkpoint)
+    manager.new_step_starts()
+    manager.allocate_slots(request, 4)
+    checkpoint = (manager.take_decode_checkpoints({request.request_id: 4}) or {})[
+        request.request_id
+    ]
+    request.num_computed_tokens = 13
+    request.append_output_token_ids(10)  # stop clips the remaining accepted IDs
+    manager.update_decode_checkpoint_candidates(request, checkpoint, num_sampled=4)
+    assert manager.coordinator.single_type_managers[1].decode_checkpoint_boundaries(
+        request.request_id
+    ) == [8]
+    manager.finalize_decode_checkpoints(request, keep=True)
+    manager.free(request)
+    replay = make_request("replay", list(range(16)), 4, sha256)
+    _, hit, _ = manager.get_computed_blocks(replay)
+    assert hit == 8
+    assert manager.block_pool.get_num_free_blocks() == 99
+
+
+def test_in_flight_decode_snapshot_waits_for_deferred_free():
+    """Abort/preemption must fence private snapshot writes with ordinary KV writes."""
+    manager, _ = _make_decode_checkpoint_manager(
+        block_size=8, hash_block_size=4, fine_grained=True
+    )
+    request = make_request("producer", list(range(4)), 4, sha256)
+    manager.allocate_slots(request, 4)
+    request.num_computed_tokens = 4
+    request.append_output_token_ids(4)
+    for computed in range(5, 8):
+        manager.new_step_starts()
+        manager.allocate_slots(request, 1)
+        request.num_computed_tokens = computed
+        request.append_output_token_ids(computed)
+    manager.new_step_starts()
+    manager.allocate_slots(request, 1)
+    checkpoint = (manager.take_decode_checkpoints({request.request_id: 1}) or {})[
+        request.request_id
+    ]
+    private_id = checkpoint[1][0]
+    blocks = manager.pop_blocks_for_free(request)
+    assert private_id in [block.block_id for block in blocks]
+    assert manager.block_pool.blocks[private_id].ref_cnt == 1
+    manager.block_pool.free_blocks(blocks)
+    assert manager.block_pool.get_num_free_blocks() == 99
 
 
 @pytest.mark.parametrize("keep", [True, False])

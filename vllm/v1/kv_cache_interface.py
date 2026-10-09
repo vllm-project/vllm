@@ -1089,8 +1089,18 @@ class MambaSpec(KVCacheSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "align":
+            checkpoint_blocks = 0
+            if vllm_config.cache_config.enable_mamba_decode_checkpoint:
+                # Retained private states plus one destination per in-flight
+                # step, outside the position-indexed table.
+                checkpoint_blocks = (
+                    2 if vllm_config.num_speculative_tokens else 1
+                ) + vllm_config.max_concurrent_batches
             return self.page_size_bytes * (
-                2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
+                2
+                + self.num_speculative_blocks
+                + self.num_prefill_checkpoint_blocks
+                + checkpoint_blocks
             )
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
