@@ -13,6 +13,9 @@ engine -- where the `TrainerWeightTransferEngine` contract puts it -- rather tha
 in every caller.
 """
 
+from __future__ import annotations
+
+import math
 import socket
 from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -33,22 +36,22 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NParamMeta,
     M2NWireParam,
     Placements,
-    check_complete_plan_agreement,
     check_data_plane_agreement,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
-    check_transferable,
     create_m2n_communicator,
     expected_local_shape,
     import_m2n,
     prepare_m2n_local_runtime,
-    publish_destination_placements,
     resolve_layout,
     source_plan_digest,
     to_mesh,
     to_placements,
     validate_local_buffer,
-    validate_transfer_plan,
+)
+from vllm.distributed.weight_transfer.m2n_plan import (
+    M2NWireDestination,
+    agree_destination_plan,
 )
 from vllm.distributed.weight_transfer.m2n_source import M2NWeightSource
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -87,9 +90,8 @@ class M2NTrainerInitInfo(TrainerInitInfo):
     identically; defaults to a flat `(num_workers, 1)`, which is all a
     replicated destination needs.
 
-    Destination meshes remain common to every parameter; per-parameter
-    destination meshes are intentionally future work.
-    """
+    TODO: Carry a destination mesh/layout per parameter before supporting mixed
+    generator TP/DP layouts whose dense and expert weights need different meshes."""
     nccl_unique_id_b64: str | None = field(default=None, repr=False)
     """Optional UID for the NCCL data plane; TCP remains the metadata plane."""
     max_cta: int | None = None
@@ -179,10 +181,12 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._metas: list[M2NParamMeta] = []
         self._wire_params: list[M2NWireParam] = []
         self._source_digest = ""
+        self._destination_commit_token = ""
         self._dst_mesh: M2NMesh | None = None
         self._dst_placements: list[Placements | None] = []
         self._metadata_group: StatelessProcessGroup | None = None
         self._num_trainer_ranks = 0
+        self._destination_plan: list[M2NWireDestination] = []
 
     @classmethod
     def trainer_init(
@@ -190,7 +194,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         init_info: M2NTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
-        source: WeightSource | None = None,
+        source: WeightSource,  # type: ignore[override]
     ) -> Self:
         """Build the engine and rendezvous with the inference side.
 
@@ -199,10 +203,14 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         build local state and join the communicator. Every rank participates
         in every reshard and sends its local shard.
 
-        Build a local validation envelope, start the worker RPC without
-        waiting, join the metadata rendezvous, and require unanimous source,
-        data-plane, and runtime readiness before constructing NCCL.
+        The ordering here is not arbitrary -- see the comments inline. Build a
+        local validation envelope, start the worker RPC without waiting, join
+        the metadata rendezvous, and require unanimous source and destination
+        plan commits before constructing NCCL or the M2N handle.
         """
+        # Trainer-side weight transfer engine for this rank. `__init__` only
+        # holds the client and source; the communicator, meshes, and M2N handle
+        # are filled in below.
         engine = cls(
             client=client,
             source=cast(M2NWeightSource, source),
@@ -214,7 +222,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     def _initialize(
         self,
         init_info: M2NTrainerInitInfo,
-        source: WeightSource | None,
+        source: WeightSource,
     ) -> None:
         """Run source validation, metadata agreement, and NCCL rendezvous."""
         self._num_trainer_ranks = init_info.num_trainer_ranks
@@ -266,11 +274,23 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 local_error=local_source_error,
             )
 
-            # Retain the common destination mesh and the merged NCCL publication
-            # of per-parameter placements.
+            # The worker resolves its rank-local destinations, and every rank
+            # commits the same ordered plan before constructing NCCL.
             self._dst_mesh = M2NMesh(
                 init_info.destination_mesh_dims, init_info.num_trainer_ranks
             )
+            self._destination_plan, commit_token = agree_destination_plan(
+                metadata_group,
+                source_digest=plan_digest,
+                params=self._wire_params,
+                dst_mesh=self._dst_mesh,
+                local_plan=None,
+                local_error=None,
+            )
+            self._dst_placements = [
+                destination.placements for destination in self._destination_plan
+            ]
+            self._destination_commit_token = commit_token
             unique_id_bytes: bytes | None = None
             data_plane_error: str | None = None
             try:
@@ -295,32 +315,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             check_runtime_ready_agreement(metadata_group, runtime_error)
             assert nccl is not None and device is not None and handle is not None
             group = create_m2n_communicator(nccl, metadata_group, unique_id_bytes)
-            destination_placements = self._receive_destination_plan(
-                group,
-                init_info.num_trainer_ranks,
-                torch.device("cuda", device),
-            )
-
-            complete_plan_error: str | None = None
-            try:
-                assert self._dst_mesh is not None
-                validate_transfer_plan(
-                    self._metas, self._dst_mesh, destination_placements
-                )
-            except Exception as exc:
-                complete_plan_error = f"{type(exc).__name__}: {exc}"
-            assert self._dst_mesh is not None
-            check_complete_plan_agreement(
-                metadata_group,
-                plan_digest,
-                self._dst_mesh,
-                destination_placements,
-                complete_plan_error,
-            )
 
             if init_future is not None:
                 init_future.result()
-
             logger.info(
                 "nccl_m2n trainer ready: %d parameters, trainer ranks [0, %d), "
                 "inference ranks [%d, %d)",
@@ -333,12 +330,10 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         except BaseException:
             if group is not None:
                 try:
-                    # Transport cleanup only; reload validity belongs to the
-                    # model-update lifecycle, not this backend.
-                    group.abort()
+                    group.destroy()
                 except BaseException:
                     logger.exception(
-                        "failed to abort partially initialized nccl_m2n communicator"
+                        "failed to destroy partially initialized nccl_m2n communicator"
                     )
             if handle is not None:
                 try:
@@ -355,24 +350,92 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._metadata_group = metadata_group
         self._handle = handle
         self.group = group
-        self._dst_placements = destination_placements
 
-    def _receive_destination_plan(
-        self, group: Any, first_worker_rank: int, device: torch.device
-    ) -> list[Placements | None]:
-        """Receive the inference-side per-parameter placements."""
-        # The first inference worker publishes one placement per parameter.
-        # Every trainer rank receives the complete plan in this single,
-        # initialization-time broadcast.
-        placements = publish_destination_placements(
-            group,
-            device,
-            torch.cuda.current_stream(),
-            first_worker_rank,
-            None,
-            len(self._metas),
-        )
-        return placements
+    def _prepare_source_plan(
+        self, source: M2NWeightSource, num_trainer_ranks: int
+    ) -> None:
+        """Build and validate this rank's immutable source wire plan."""
+        self._metas = source.metadata()
+        names: set[str] = set()
+        for meta in self._metas:
+            if not isinstance(meta, M2NParamMeta):
+                raise TypeError(
+                    "nccl_m2n source metadata must contain M2NParamMeta "
+                    f"entries, got {type(meta).__name__}"
+                )
+            if meta.name in names:
+                raise ValueError(
+                    "nccl_m2n source metadata contains duplicate parameter "
+                    f"'{meta.name}'"
+                )
+            names.add(meta.name)
+            layout = meta.source_layout
+            if layout.mesh.start_rank != 0:
+                raise ValueError(
+                    f"parameter '{meta.name}' source mesh must start at rank 0, "
+                    f"got {layout.mesh.start_rank}"
+                )
+            if layout.mesh.size != num_trainer_ranks:
+                raise ValueError(
+                    f"parameter '{meta.name}' source mesh covers "
+                    f"{layout.mesh.size} ranks, but there are "
+                    f"{num_trainer_ranks} trainer ranks"
+                )
+        self._wire_params = [
+            M2NWireParam(
+                name=meta.name,
+                dtype_name=str(meta.dtype).split(".")[-1],
+                shape=meta.shape,
+                src_mesh_dims=meta.source_layout.mesh.dims,
+                src_placements=meta.source_layout.placements,
+                allow_full_fallback=meta.allow_full_fallback,
+            )
+            for meta in self._metas
+        ]
+        self._source_digest = source_plan_digest(self._wire_params)
+
+    def plan_summary(self) -> dict[str, Any]:
+        """Return the authenticated static plan as JSON-safe run metadata."""
+        if not self._destination_commit_token or not self._destination_plan:
+            raise RuntimeError("nccl_m2n transfer plan is not initialized")
+        assert self._dst_mesh is not None
+        mode_counts: dict[str, int] = {}
+        logical_bytes_by_mode: dict[str, int] = {}
+        receiver_bytes_by_mode: dict[str, int] = {}
+        for meta, destination in zip(self._metas, self._destination_plan, strict=True):
+            mode = destination.mode
+            element_size = torch.empty((), dtype=meta.dtype).element_size()
+            logical_bytes = math.prod(meta.shape) * element_size
+            receiver_bytes = (
+                math.prod(destination.local_shape) * element_size * self._dst_mesh.size
+            )
+            mode_counts[mode] = mode_counts.get(mode, 0) + 1
+            logical_bytes_by_mode[mode] = (
+                logical_bytes_by_mode.get(mode, 0) + logical_bytes
+            )
+            receiver_bytes_by_mode[mode] = (
+                receiver_bytes_by_mode.get(mode, 0) + receiver_bytes
+            )
+        logical_global_bytes = sum(logical_bytes_by_mode.values())
+        planned_receiver_payload_bytes = sum(receiver_bytes_by_mode.values())
+        return {
+            "wire_schema_version": M2N_WIRE_SCHEMA_VERSION,
+            "source_digest": self._source_digest,
+            "destination_commit_token": self._destination_commit_token,
+            "destination_mesh_dims": list(self._dst_mesh.dims),
+            "parameter_count": len(self._metas),
+            # Each complete logical parameter is counted once.
+            "logical_global_bytes": logical_global_bytes,
+            # Parameter counts, not byte counts.
+            "destination_mode_counts": mode_counts,
+            "logical_global_bytes_by_destination_mode": logical_bytes_by_mode,
+            # Aggregate destination tensor bytes implied by the agreed plan;
+            # this is not measured NCCL, InfiniBand, or protocol traffic.
+            "planned_receiver_payload_bytes": planned_receiver_payload_bytes,
+            "planned_receiver_payload_bytes_by_destination_mode": (
+                receiver_bytes_by_mode
+            ),
+        }
 
     def _worker_init_info(self, init_info: M2NTrainerInitInfo) -> dict[str, Any]:
         """Handshake payload: rendezvous, both meshes, and the transfer plan."""
@@ -390,96 +453,45 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         }
         return {key: value for key, value in payload.items() if value is not None}
 
-    def _prepare_source_plan(
-        self, source: M2NWeightSource, num_trainer_ranks: int
-    ) -> None:
-        """Build and validate this rank's immutable source plan."""
-        self._metas = source.metadata()
-        names: set[str] = set()
-        for meta in self._metas:
-            if not isinstance(meta, M2NParamMeta):
-                raise TypeError(
-                    "nccl_m2n source metadata must contain M2NParamMeta "
-                    f"entries, got {type(meta).__name__}"
-                )
-            if meta.name in names:
-                raise ValueError(
-                    "nccl_m2n source metadata contains duplicate parameter "
-                    f"'{meta.name}'"
-                )
-            names.add(meta.name)
-            check_transferable(meta.name, meta.dtype, meta.shape)
-            layout = meta.source_layout
-            if layout.mesh.start_rank != 0:
-                raise ValueError(
-                    f"parameter '{meta.name}' source mesh must start at rank 0, "
-                    f"got {layout.mesh.start_rank}"
-                )
-            if layout.mesh.size != num_trainer_ranks:
-                raise ValueError(
-                    f"parameter '{meta.name}' source mesh covers "
-                    f"{layout.mesh.size} ranks, but there are "
-                    f"{num_trainer_ranks} trainer ranks"
-                )
-            expected_local_shape(meta)
-        self._wire_params = [
-            M2NWireParam(
-                name=meta.name,
-                dtype_name=str(meta.dtype).split(".")[-1],
-                shape=meta.shape,
-                src_mesh_dims=meta.source_layout.mesh.dims,
-                src_placements=meta.source_layout.placements,
-            )
-            for meta in self._metas
-        ]
-        self._source_digest = source_plan_digest(self._wire_params)
-
     def send_weights(self) -> None:
         """Drive one update round: start, reshard concurrently, then finish."""
         if self._handle is None or self.group is None:
             raise RuntimeError("nccl_m2n trainer engine is not initialized")
 
-        if not self.is_sender:
-            try:
-                self._send()
-            except BaseException:
-                try:
-                    self._receive_round_outcome()
-                except BaseException:
-                    logger.exception(
-                        "failed to consume nccl_m2n round outcome after local failure"
-                    )
-                raise
-            self._receive_round_outcome()
-            return
-
         try:
-            self.client.start_weight_update()
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="m2n-weight-sync"
-            )
-            try:
-                update = executor.submit(
-                    self.client.update_weights,
-                    {"names": [m.name for m in self._metas]},
+            if self.is_sender:
+                self.client.start_weight_update()
+                executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="m2n-weight-sync"
                 )
-                # Surface an immediate worker-side rejection before trainers
-                # enter the collective sequence.
-                if update.done():
+                try:
+                    update = executor.submit(
+                        self.client.update_weights,
+                        {"names": [m.name for m in self._metas]},
+                    )
+                    # Surface an immediate worker-side rejection before trainers
+                    # enter the collective sequence.
+                    if update.done():
+                        update.result()
+                    self._send()
                     update.result()
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                self.client.finish_weight_update()
+            else:
                 self._send()
-                update.result()
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
-            self.client.finish_weight_update()
         except BaseException as exc:
-            try:
-                self._publish_round_outcome(exc)
-            except BaseException:
-                logger.exception("failed to publish nccl_m2n round failure")
+            if self.is_sender:
+                try:
+                    self._publish_round_outcome(exc)
+                except BaseException:
+                    logger.exception("failed to publish nccl_m2n round failure")
             raise
 
-        self._publish_round_outcome(None)
+        if self.is_sender:
+            self._publish_round_outcome(None)
+        else:
+            self._receive_round_outcome()
 
     def _publish_round_outcome(self, failure: BaseException | None) -> None:
         """Tell non-sender trainer ranks whether worker finalization passed."""
@@ -495,22 +507,12 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         }
         for rank in range(1, self._num_trainer_ranks):
             self._metadata_group.send_obj(envelope, rank)
-        # Keep rank zero's TCPStore alive until every trainer consumed its
-        # outcome. This also keeps the per-rank message counters aligned.
-        expected_ack = {"phase": "round_outcome_consumed"}
-        for rank in range(1, self._num_trainer_ranks):
-            ack = self._metadata_group.recv_obj(rank)
-            if ack != expected_ack:
-                raise RuntimeError(
-                    f"trainer rank {rank} sent an invalid round-outcome acknowledgement"
-                )
 
     def _receive_round_outcome(self) -> None:
         """Wait until trainer rank zero observed every worker's finish RPC."""
         if self._metadata_group is None:
             raise RuntimeError("nccl_m2n metadata group is unavailable")
         outcome = self._metadata_group.recv_obj(0)
-        self._metadata_group.send_obj({"phase": "round_outcome_consumed"}, 0)
         if not isinstance(outcome, Mapping) or set(outcome) != {"ok", "error"}:
             raise RuntimeError("trainer rank zero sent an invalid round outcome")
         ok = outcome["ok"]
@@ -603,6 +605,8 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         handle, self._handle = self._handle, None
         group, self.group = self.group, None
         self._metadata_group = None
+        self._destination_plan = []
+        self._destination_commit_token = ""
         self._dst_placements = []
         self._dst_mesh = None
         self._m2n = None
@@ -623,6 +627,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         if handle is not None:
             attempt(handle.destroy, "failed to destroy nccl_m2n handle")
         if group is not None:
-            attempt(group.abort, "failed to abort nccl_m2n communicator")
+            attempt(group.destroy, "failed to destroy nccl_m2n communicator")
         if first_error is not None:
             raise first_error

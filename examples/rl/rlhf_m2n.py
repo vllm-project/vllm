@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import os
 
-import nccl.core as nccl
 import pybase64 as base64
 import ray
 import torch
@@ -38,6 +37,7 @@ from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
+from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.weight_transfer import (
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
@@ -175,7 +175,10 @@ def main():
 
     # Trainer ranks [0, FSDP_WORLD_SIZE) and inference ranks after them share
     # one communicator, so the two meshes are contiguous rank intervals.
-    nccl_unique_id_b64 = base64.b64encode(nccl.get_unique_id().as_bytes).decode()
+    nccl = NCCLLibrary()
+    nccl_unique_id_b64 = base64.b64encode(
+        bytes(nccl.ncclGetUniqueId().internal)
+    ).decode()
     world_size = FSDP_WORLD_SIZE + num_workers
     metadata_address = get_ip()
     metadata_port = get_open_port()
