@@ -1,3 +1,6 @@
+# vllm/v1/attention/ops/triton_turboquant_decode.py
+
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton fused TurboQuant decode attention.
@@ -83,6 +86,7 @@ def _tq_decode_stage1(
     KEY_FP8: tl.constexpr,  # 1 if K is stored as FP8
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    SLIDING_WINDOW: tl.constexpr = -1,  # -1 = no window (full causal)
 ):
     bid = tl.program_id(0)  # batch index
     hid = tl.program_id(1)  # q_head index
@@ -92,7 +96,12 @@ def _tq_decode_stage1(
 
     # Sequence length for this batch
     seq_len = tl.load(Seq_lens_ptr + bid)
-
+    
+    if SLIDING_WINDOW > 0:
+        window_start = tl.maximum(0, seq_len - SLIDING_WINDOW)
+    else:
+        window_start = 0
+        
     # KV split range
     split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
     split_start = split_len * sid
@@ -135,8 +144,8 @@ def _tq_decode_stage1(
     # ================================================================
     for start_n in range(split_start, split_end, BLOCK_KV):
         kv_offs = start_n + kv_range
-        kv_mask = kv_offs < split_end
-
+        # kv_mask = kv_offs < split_end
+        kv_mask = (kv_offs < split_end) & (kv_offs >= window_start)
         page_idx = kv_offs // BLOCK_SIZE
         page_off = kv_offs % BLOCK_SIZE
         block_nums = tl.load(
@@ -496,6 +505,7 @@ def triton_turboquant_decode_attention(
     value_quant_bits: int,
     key_fp8: bool = False,
     norm_correction: bool = False,
+    sliding_window: int | None = None,
     PiT: torch.Tensor | None = None,  # [D, D] pre-computed Pi.T contiguous
     # Pre-allocated buffers (optional, avoids per-call allocation)
     mid_o_buf: torch.Tensor | None = None,
@@ -583,6 +593,7 @@ def triton_turboquant_decode_attention(
         KEY_FP8=1 if key_fp8 else 0,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
+        SLIDING_WINDOW=sliding_window if sliding_window is not None else -1,
         num_warps=1,
         num_stages=1,
     )
