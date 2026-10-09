@@ -328,13 +328,8 @@ def _check_unsupported(parsed) -> None:
                 _check_unsupported(branch)
 
         else:
-            # Any other node that nests a pattern holds it in tval, either as
-            # the value itself (atomic group) or as one of its members: repeats
-            # hold (min, max, subpattern) and groups hold
-            # (group, add_flags, del_flags, subpattern). Recursing on the
-            # nested patterns themselves means a feature cannot escape the
-            # check by being wrapped in a group or a quantifier.
-            for sub in tval if isinstance(tval, tuple) else (tval,):
+            nested = tval if isinstance(tval, tuple) else (tval,)
+            for sub in nested:
                 if isinstance(sub, _parser.SubPattern):
                     _check_unsupported(sub)
 

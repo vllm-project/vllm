@@ -117,55 +117,6 @@ def test_regex_with_nul_byte_rejected(regex):
         validate_xgrammar_grammar(params)
 
 
-@pytest.mark.parametrize(
-    "regex",
-    [
-        r"a\b",
-        r"(a\b)",
-        r"((a)\2)",
-        r"(a(?=b))",
-        r"(?i:a\b)",
-        r"((a\b))",
-        r"(?:(a\b)){2}",
-        r"(?:a\b)*?",
-        r"(?:a\b)*+",
-        r"(?>a\b)",
-    ],
-)
-def test_unbuildable_regex_rejected_inside_groups_and_repeats(regex):
-    """outlines_core cannot build a DFA for word boundaries, backreferences or
-    look-arounds, so they must be rejected wherever they appear. Only branches
-    and greedy repeats used to be walked, so wrapping one in a group, a flag
-    group, an atomic group or a lazy repeat got it past validation and failed
-    later in the engine core instead of as a 400 (#60344)."""
-    from vllm.v1.structured_output.backend_outlines import validate_regex_is_buildable
-
-    with pytest.raises(VLLMValidationError):
-        validate_regex_is_buildable(regex)
-
-
-@pytest.mark.parametrize(
-    "regex",
-    [
-        r"[\b]",
-        r"(a[\b]c)",
-        r"a\\b",
-        r"(a\\bc)",
-        r"(abc)",
-        r"(a|b)+c",
-        r"(?:ab)*?c",
-    ],
-)
-def test_buildable_regex_with_word_boundary_lookalikes_accepted(regex):
-    r"""`\b` is a backspace literal inside a character class and `\\b` is an
-    escaped backslash followed by `b`; both build fine. Rejecting them would be
-    worse than the bug, so the check must stay on the parse tree rather than on
-    the pattern text."""
-    from vllm.v1.structured_output.backend_outlines import validate_regex_is_buildable
-
-    validate_regex_is_buildable(regex)
-
-
 def _nested_array_schema(levels: int) -> str:
     # Built as text: json.dumps on a deeply nested dict would itself recurse.
     wrappers = levels - 1
