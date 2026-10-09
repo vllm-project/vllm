@@ -381,6 +381,18 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         return on_mi3xx()
 
 
+# Indexer writes per shared top-k buffer, in layer construction order.
+_INDEX_EPOCHS: dict[int, int] = {}
+
+
+def _index_epoch(buf: object, owns_indexer: bool) -> int:
+    """Number of indexer writes up to and including this layer."""
+    # id(): tensors are unhashable, and the buffer outlives every reader.
+    epoch = _INDEX_EPOCHS.get(id(buf), 0) + (1 if owns_indexer else 0)
+    _INDEX_EPOCHS[id(buf)] = epoch
+    return epoch
+
+
 @dataclass
 class ROCMAiterMLASparseMetadata(AttentionMetadata):
     num_reqs: int
@@ -402,6 +414,10 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 
     block_size: int = 1
     topk_tokens: int = 2048
+
+    # Source buffer and index_epoch of paged_kv_indices; -1 before any remap.
+    remapped_buf: object = None
+    remapped_epoch: int = -1
 
     # Fields read by the shared MLA forward. This impl has no dense-MHA prefill
     # path (supports_dense_mha_prefill=False), so it always runs the MQA path;
@@ -818,6 +834,10 @@ class ROCMAiterMLASparseImpl(
         self.init_topk_indices_buffer(indexer, topk_indices_buffer)
 
         vllm_config = get_current_vllm_config()
+        self.owns_indexer: bool = indexer is not None
+        self.index_epoch: int = _index_epoch(
+            self.topk_indices_buffer, self.owns_indexer
+        )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
@@ -1149,21 +1169,30 @@ class ROCMAiterMLASparseImpl(
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
-        # Get topk indices
-        assert self.topk_indices_buffer is not None
-        topk_indices = fit_kpool_indices_to_aiter(
-            self.topk_indices_buffer[:num_actual_toks], attn_metadata.topk_tokens
-        )
+        # Indexer layers may rewrite their buffer, so always remap. Non-indexer
+        # layers have their own KV cache group: remap once per indexer write.
+        if (
+            self.owns_indexer
+            or attn_metadata.remapped_epoch != self.index_epoch
+            or attn_metadata.remapped_buf is not self.topk_indices_buffer
+        ):
+            # Get topk indices
+            assert self.topk_indices_buffer is not None
+            topk_indices = fit_kpool_indices_to_aiter(
+                self.topk_indices_buffer[:num_actual_toks], attn_metadata.topk_tokens
+            )
 
-        triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
-            attn_metadata.block_table,
-            topk_indices,
-            attn_metadata.paged_kv_indptr,
-            attn_metadata.paged_kv_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
-        )
+            triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token,
+                attn_metadata.block_table,
+                topk_indices,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+            )
+            attn_metadata.remapped_buf = self.topk_indices_buffer
+            attn_metadata.remapped_epoch = self.index_epoch
 
         # write the latent and rope to kv cache
         if fp8_attention:
