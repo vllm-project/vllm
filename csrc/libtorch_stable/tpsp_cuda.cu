@@ -21,6 +21,13 @@ namespace {
 
 using bf16 = __nv_bfloat16;
 
+// One reduce-scatter inbox and one all-gather output region per rank.
+constexpr int kTpspDataRegions = 2;
+constexpr int kTpspInboxReady = 0;
+constexpr int kTpspGatherReady = 1;
+constexpr int kTpspGatherConsumed = 2;
+constexpr int kTpspFlagPhases = kTpspGatherConsumed + 1;
+
 struct alignas(16) TpspBf16Vec {
   bf16 data[8];
 };
@@ -381,7 +388,8 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
   int64_t slot_bytes = 0;
   int64_t flag_offset = 0;
   if (p2p) {
-    int64_t flag_bytes = 3 * tp_size * int64_t(sizeof(unsigned int));
+    int64_t flag_bytes =
+        kTpspFlagPhases * tp_size * int64_t(sizeof(unsigned int));
     STD_TORCH_CHECK(
         rank >= 0 && rank < tp_size && signal_one &&
             workspace_ptrs.size() == tp_size &&
@@ -391,13 +399,17 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
             local_workspace->device() == a.device() &&
             signal_one->device() == a.device() &&
             local_workspace->numel() >=
-                4 * tp_size * max_chunk * hidden + flag_bytes &&
-            (local_workspace->numel() - flag_bytes) % (2 * tp_size) == 0,
+                kTpspDataRegions * tp_size * max_chunk * hidden * sizeof(bf16) +
+                    flag_bytes &&
+            (local_workspace->numel() - flag_bytes) %
+                    (kTpspDataRegions * tp_size) ==
+                0,
         "Invalid TPSP P2P workspace");
     auto* local_base =
         reinterpret_cast<char*>(local_workspace->mutable_data_ptr());
-    slot_bytes = (local_workspace->numel() - flag_bytes) / (2 * tp_size);
-    flag_offset = 2 * tp_size * slot_bytes;
+    slot_bytes =
+        (local_workspace->numel() - flag_bytes) / (kTpspDataRegions * tp_size);
+    flag_offset = kTpspDataRegions * tp_size * slot_bytes;
     local_inbox = reinterpret_cast<bf16*>(local_base);
     local_gather = reinterpret_cast<bf16*>(local_base + tp_size * slot_bytes);
     local_flags = reinterpret_cast<unsigned int*>(local_base + flag_offset);
@@ -515,11 +527,13 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
             peer_base + rank * slot_bytes, partial_ptr + dest * shard_elems,
             shard_bytes, cudaMemcpyDeviceToDevice, comm_stream));
         STD_CUDA_CHECK(cudaMemcpyAsync(
-            peer_base + flag_offset + rank * sizeof(unsigned int), one,
-            sizeof(unsigned int), cudaMemcpyDeviceToDevice, comm_stream));
+            peer_base + flag_offset +
+                (kTpspInboxReady * tp_size + rank) * sizeof(unsigned int),
+            one, sizeof(unsigned int), cudaMemcpyDeviceToDevice, comm_stream));
       }
       wait_and_clear_tpsp_signals<<<(tp_size + 255) / 256, 256, 0,
-                                    comm_stream>>>(local_flags, rank, tp_size);
+                                    comm_stream>>>(
+          local_flags + kTpspInboxReady * tp_size, rank, tp_size);
       STD_CUDA_CHECK(cudaGetLastError());
     } else {
       STD_TORCH_CHECK(
@@ -589,12 +603,13 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
             normalized_chunk, shard_bytes, cudaMemcpyDeviceToDevice,
             comm_stream));
         STD_CUDA_CHECK(cudaMemcpyAsync(
-            peer_base + flag_offset + (tp_size + rank) * sizeof(unsigned int),
+            peer_base + flag_offset +
+                (kTpspGatherReady * tp_size + rank) * sizeof(unsigned int),
             one, sizeof(unsigned int), cudaMemcpyDeviceToDevice, comm_stream));
       }
       wait_and_clear_tpsp_signals<<<(tp_size + 255) / 256, 256, 0,
-                                    comm_stream>>>(local_flags + tp_size, rank,
-                                                   tp_size);
+                                    comm_stream>>>(
+          local_flags + kTpspGatherReady * tp_size, rank, tp_size);
       STD_CUDA_CHECK(cudaGetLastError());
       for (int source = 0; source < tp_size; ++source) {
         if (source == rank) {
@@ -612,12 +627,12 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
         auto* peer_base = reinterpret_cast<char*>(workspace_ptrs[dest]);
         STD_CUDA_CHECK(cudaMemcpyAsync(
             peer_base + flag_offset +
-                (2 * tp_size + rank) * sizeof(unsigned int),
+                (kTpspGatherConsumed * tp_size + rank) * sizeof(unsigned int),
             one, sizeof(unsigned int), cudaMemcpyDeviceToDevice, comm_stream));
       }
       wait_and_clear_tpsp_signals<<<(tp_size + 255) / 256, 256, 0,
-                                    comm_stream>>>(local_flags + 2 * tp_size,
-                                                   rank, tp_size);
+                                    comm_stream>>>(
+          local_flags + kTpspGatherConsumed * tp_size, rank, tp_size);
       STD_CUDA_CHECK(cudaGetLastError());
     } else {
       STD_TORCH_CHECK(

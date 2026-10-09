@@ -135,7 +135,8 @@ class DeviceCapability(NamedTuple):
 
 
 class TPSPBackend(ABC):
-    ops: Any
+    tpsp_chunk_granularity: int
+    tpsp_max_microchunk_tokens: int | None = None
 
     def __init__(self, group_name: str, device: torch.device) -> None:
         self.group_name = group_name
@@ -157,6 +158,8 @@ class TPSPBackend(ABC):
     def profile(
         self,
         *,
+        projection: torch.nn.Module,
+        norm: torch.nn.Module,
         tp_size: int,
         hidden_size: int,
         input_width: int,
@@ -180,6 +183,8 @@ class TPSPBackend(ABC):
 
         return profile_sp_config(
             self,
+            projection=projection,
+            norm=norm,
             tp_size=tp_size,
             hidden_size=hidden_size,
             input_width=input_width,

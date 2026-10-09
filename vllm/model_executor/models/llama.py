@@ -451,7 +451,14 @@ class LlamaModel(nn.Module, EagleModelMixin):
         **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if self.tpsp_requested and self.tpsp is None:
-            new_profile = profile_tpsp(self, self.max_tpsp_batched_tokens)
+            first_layer = self.layers[0]
+            new_profile = profile_tpsp(
+                first_layer.self_attn.o_proj,
+                first_layer.post_attention_layernorm,
+                first_layer.mlp.down_proj,
+                self.layers[1].input_layernorm,
+                self.max_tpsp_batched_tokens,
+            )
             if new_profile.enabled:
                 for layer in islice(self.layers, self.start_layer, self.end_layer):
                     layer.tpsp = new_profile
