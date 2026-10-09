@@ -441,13 +441,15 @@ def test_prefill_k_pe_is_rerotated_for_mha(monkeypatch: pytest.MonkeyPatch):
             }
         ),
     )
-    out_q, out_k = attn._prepare_mha_inputs(q_for_mha, k_pe[2:])
+    # Each slice is a new view, so the identity check needs the object passed in.
+    k_pe_pf = k_pe[2:]
+    out_q, out_k = attn._prepare_mha_inputs(q_for_mha, k_pe_pf)
     assert torch.count_nonzero(q) == 0
     assert torch.count_nonzero(out_q[..., :4]) == 0
     assert torch.equal(out_q[..., 4:], torch.ones_like(out_q[..., 4:]))
     assert torch.count_nonzero(k_pe[:2]) == 0
-    assert out_k is k_pe[2:]
-    assert torch.equal(k_pe[2:], torch.ones_like(k_pe[2:]))
+    assert out_k is k_pe_pf
+    assert torch.equal(k_pe_pf, torch.ones_like(k_pe_pf))
 
 
 def test_form_decode_q_matches_backend_query_dtype(monkeypatch: pytest.MonkeyPatch):
