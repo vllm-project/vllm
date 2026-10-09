@@ -2553,7 +2553,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         tail_page = (num_tokens - 1) // self.block_size
         if len(blocks) <= tail_page:
             blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
-        if blocks[tail_page].is_null:
+        if self.get_resident_page(request_id, tail_page) is None:
             blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
 
     def add_local_computed_blocks(
