@@ -99,19 +99,20 @@ def _fp32x1_to_fp8e4m3(arg0, HANDLE_NAN=False, _semantic=None):
 
 
 @tl.core.extern
-def _fp8e4m3x1_to_fp32x1(arg0, HANDLE_NAN=False, _semantic=None):
-    """Link the scalar FP8-to-FP32 bitcode conversion."""
-    u8 = tl.core.dtype("uint8")
-    u32 = tl.core.dtype("uint32")
+def _fp8e4m3x1_to_float(arg0, dtype, HANDLE_NAN=False, _semantic=None):
+    """Link direct scalar decoding to the requested floating-point dtype."""
+    dtype = tl.core._unwrap_if_constexpr(dtype)
+    name = {tl.float16: "fp16", tl.bfloat16: "bf16", tl.float32: "fp32"}[dtype]
+    bits = tl.core.dtype("uint32" if dtype == tl.float32 else "uint16")
     return tl.core.extern_elementwise(
         "fp8e4nv",
         _HELPER_PATH_STR,
         [arg0],
         {
-            (u8,): (
-                "fp8e4m3x1_to_fp32x1"
+            (tl.core.dtype("uint8"),): (
+                f"fp8e4m3x1_to_{name}x1"
                 + ("_nan" if tl.core._unwrap_if_constexpr(HANDLE_NAN) else ""),
-                u32,
+                bits,
             )
         },
         is_pure=True,
@@ -339,6 +340,4 @@ def convert_from_fp8e4m3(
             else:
                 return tl.map_elementwise(_decode_bf16_pack4, x, pack=4)[0]
     else:
-        return (
-            _fp8e4m3x1_to_fp32x1(x, HANDLE_NAN).to(tl.float32, bitcast=True).to(dtype)
-        )
+        return _fp8e4m3x1_to_float(x, dtype, HANDLE_NAN).to(dtype, bitcast=True)
