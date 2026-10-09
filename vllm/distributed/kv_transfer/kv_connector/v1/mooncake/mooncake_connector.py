@@ -26,6 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
     get_current_attn_backends,
+    tensor_byte_span_end,
+    uses_dense_virtual_transfer_pages,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -1970,6 +1972,10 @@ class MooncakeConnectorWorker:
             )
         return ret_value
 
+    def _physical_page_size(self, layer_spec: KVCacheSpec) -> int:
+        """Bytes per kernel block of an attention layer's page."""
+        return layer_spec.page_size_bytes // self._physical_blocks_per_logical_kv_block
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
@@ -1994,6 +2000,22 @@ class MooncakeConnectorWorker:
         num_blocks = (
             self.kv_cache_config.num_blocks * self._physical_blocks_per_logical_kv_block
         )
+        # As in NIXL, a compressed cache that packs several kernel blocks per
+        # tensor row (GLM-5.3-Flash's kpool indexer) is registered page by page,
+        # and a kpool tail inside its allocation moves with it.
+        dense_page_layers = {
+            layer_name
+            for layer_name, cache in kv_caches.items()
+            if (spec := self._layer_specs.get(layer_name)) is not None
+            and uses_dense_virtual_transfer_pages(
+                spec, cache, self._physical_page_size(spec), num_blocks
+            )
+        }
+        dense_page_owners = {
+            kv_caches[name].data_ptr(): kv_caches[name] for name in dense_page_layers
+        }
+        dense_page_regions: dict[int, int] = {}
+        covered_tail_groups: dict[int, set[int]] = {}
 
         for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
@@ -2014,6 +2036,37 @@ class MooncakeConnectorWorker:
                 seen_storage_ptrs.add(storage_addr)
                 kv_data_ptrs.append(storage_addr)
                 kv_data_lens.append(storage.nbytes())
+
+            if isinstance(layer_spec, KpoolTailSpec):
+                owner = dense_page_owners.get(cache.data_ptr())
+                if owner is not None:
+                    if not (
+                        owner.untyped_storage().data_ptr() == storage_addr
+                        and tensor_byte_span_end(cache)
+                        <= owner.data_ptr() + owner.nbytes
+                    ):
+                        raise AssertionError(
+                            "Kpool tail cache is not fully covered by its "
+                            f"compressed indexer region: layer={layer_name}, "
+                            f"tail_shape={tuple(cache.shape)}, "
+                            f"owner_shape={tuple(owner.shape)}"
+                        )
+                    covered_tail_groups.setdefault(cache.data_ptr(), set()).add(
+                        group_index
+                    )
+                    continue
+            if layer_name in dense_page_layers:
+                page = self._physical_page_size(layer_spec)
+                dense_page_regions[cache.data_ptr()] = len(region_base_addresses)
+                region_base_addresses.append(cache.data_ptr())
+                self.block_len_per_layer.append(page)
+                self.kv_block_len_per_layer.append(page)
+                self.registered_layer_names.append(layer_name)
+                self.registered_layer_indices.append(layer_index)
+                self.registered_group_indices.append(group_index)
+                self.region_shared_groups.append((group_index,))
+                self.region_row_offsets.append(-1)
+                continue
 
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
@@ -2149,6 +2202,16 @@ class MooncakeConnectorWorker:
                 self.region_shared_groups.append((group_index,))
                 # Not a view into a shared packed row, so do not promote it.
                 self.region_row_offsets.append(-1)
+
+        # The tail group's blocks are read through the indexer region it shares.
+        for owner_ptr, tail_groups in covered_tail_groups.items():
+            region_idx = dense_page_regions[owner_ptr]
+            shared = tuple(
+                dict.fromkeys((*self.region_shared_groups[region_idx], *tail_groups))
+            )
+            self.region_shared_groups[region_idx] = shared
+            if len(shared) > 1:
+                self.registered_group_indices[region_idx] = _SHARED_REGION_GROUP_ID
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
