@@ -23,7 +23,19 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics."""
+    """Container for transfer performance metrics.
+
+    All timing and throughput metrics are aggregated across all TP ranks
+    before summary stats are computed. Each rank records per-transfer
+    telemetry via ``record_transfer()``, stats from all ranks are
+    concatenated via ``aggregate()`` (``list.extend()``), and ``reduce()``
+    computes averages/percentiles over the combined pool:
+    - ``Num successful transfers``: total count across all ranks
+    - ``Avg MB per transfer``: average over individual rank-level transfers
+    - ``Throughput (MB/s)``: ``total_MB_all_ranks / total_time_all_ranks``
+      (average per-rank throughput, not aggregate system throughput)
+    - ``P90``: percentile over combined distribution of all ranks
+    """
 
     def __post_init__(self):
         if not self.data:
