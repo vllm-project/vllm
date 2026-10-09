@@ -73,6 +73,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
+from vllm.v1.attention.backends.flashinfer_causal import (
+    causal_group_indices,
+    symmetric_window_mask,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     get_flashinfer_layout_string,
@@ -629,10 +633,19 @@ class FlashInferBackend(AttentionBackend):
 
 
 @dataclass
+class FICausalPrefillGroup:
+    """A planned partition of requests sharing a causal attention mode."""
+
+    wrapper: BatchPrefillWithPagedKVCacheWrapper
+    token_indices: torch.Tensor
+
+
+@dataclass
 class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
+    causal_groups: list[FICausalPrefillGroup] | None = None
 
 
 @dataclass
@@ -1280,7 +1293,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 raise NotImplementedError(
                     "FlashInfer non-causal prefill is not supported with DCP yet."
                 )
-            if self.is_kvcache_nvfp4:
+            if self.nvfp4_trtllm:
                 raise NotImplementedError(
                     "FlashInfer non-causal attention is not supported with "
                     "NVFP4 KV cache."
@@ -1346,6 +1359,59 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
+
+    def _plan_causal_groups(
+        self,
+        causal_cpu: torch.Tensor,
+        qo_indptr_cpu: torch.Tensor,
+        kv_indptr_cpu: torch.Tensor,
+        kv_last_page_len_cpu: torch.Tensor,
+        kv_indices: torch.Tensor,
+        kv_lens_cpu: torch.Tensor,
+        o_dtype: torch.dtype,
+    ) -> list[FICausalPrefillGroup]:
+        """Plan separate causal and bidirectional native prefill wrappers."""
+        groups = []
+        qo_lens = qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]
+        page_counts = kv_indptr_cpu[1:] - kv_indptr_cpu[:-1]
+        for mode, requests, tokens, pages in causal_group_indices(
+            causal_cpu, qo_indptr_cpu, kv_indptr_cpu
+        ):
+            wrapper = self._get_prefill_wrapper(causal=mode)
+            group_qo_indptr = torch.zeros(requests.numel() + 1, dtype=torch.int32)
+            group_kv_indptr = torch.zeros_like(group_qo_indptr)
+            torch.cumsum(qo_lens[requests], dim=0, out=group_qo_indptr[1:])
+            torch.cumsum(page_counts[requests], dim=0, out=group_kv_indptr[1:])
+            mask = None
+            window_left = self.window_left
+            if not mode and window_left >= 0:
+                mask = symmetric_window_mask(
+                    qo_lens[requests], kv_lens_cpu[requests], window_left, self.device
+                )
+                window_left = -1
+            wrapper.plan(
+                qo_indptr=group_qo_indptr,
+                paged_kv_indptr=group_kv_indptr,
+                paged_kv_indices=kv_indices[pages.to(self.device)],
+                paged_kv_last_page_len=kv_last_page_len_cpu[requests],
+                seq_lens=kv_lens_cpu[requests],
+                num_qo_heads=self.num_qo_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim_qk=self.head_dim,
+                page_size=self.page_size,
+                causal=mode,
+                custom_mask=mask,
+                sm_scale=self.sm_scale,
+                window_left=window_left,
+                logits_soft_cap=self.logits_soft_cap,
+                q_data_type=self.q_data_type_prefill,
+                kv_data_type=self.kv_cache_dtype,
+                o_data_type=o_dtype,
+                fixed_split_size=self.prefill_fixed_split_size,
+                disable_split_kv=self.disable_split_kv,
+            )
+            groups.append(FICausalPrefillGroup(wrapper, tokens.to(self.device)))
+        return groups
 
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
         if use_cudagraph:
@@ -1447,7 +1513,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
-        route_decode = causal or self.use_xqa
+        causal_flags = causal if isinstance(causal, torch.Tensor) else None
+        if causal_flags is not None:
+            if (
+                self.nvfp4_trtllm
+                or self.use_dcp
+                or self.has_sinks
+                or self.reorder_batch_threshold > 1
+                or common_prefix_len > 0
+                or self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                raise NotImplementedError(
+                    "Mixed causal FlashInfer attention requires native FA2 prefill "
+                    "without DCP, sinks, speculative reordering, cascade or full "
+                    "CUDA graphs. Use --cudagraph-mode PIECEWISE."
+                )
+            # All requests, including single-token requests, run through prefill;
+            # decode wrappers plan one causal mode for the entire batch.
+            causal = False
+        route_decode = causal_flags is None and (causal or self.use_xqa)
         if route_decode:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(
@@ -1755,7 +1839,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_seq_len=max_seq_len,
                 )
             else:
-                prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
+                prefill_wrapper = self._get_prefill_wrapper(
+                    causal=True if causal_flags is not None else attn_metadata.causal
+                )
+                causal_groups = None
                 # Slicing CPU buffers that are only needed for FI native prefills
                 paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
                     prefill_start:num_reqs
@@ -1787,7 +1874,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 if PIN_MEMORY:
                     kv_lens_prefill_cpu = kv_lens_prefill_cpu.pin_memory()
-                if self.use_dcp:
+                if causal_flags is not None:
+                    assert paged_kv_indices is not None
+                    with gpu_sync_allowed():
+                        causal_cpu = causal_flags[:num_reqs].cpu()
+                    causal_groups = self._plan_causal_groups(
+                        causal_cpu,
+                        qo_indptr_prefill_cpu,
+                        paged_kv_indptr_prefill_cpu,
+                        paged_kv_last_page_len_prefill_cpu,
+                        paged_kv_indices,
+                        kv_lens_prefill_cpu,
+                        self.model_config.dtype,
+                    )
+                    prefill_wrapper = causal_groups[0].wrapper
+                elif self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     prefill_wrapper.plan(
                         qo_indptr_cpu=qo_indptr_prefill_cpu,
@@ -1840,7 +1941,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     )
-                attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
+                attn_metadata.prefill = FIPrefill(
+                    wrapper=prefill_wrapper, causal_groups=causal_groups
+                )
 
         ## DECODE PATHWAY
         if num_decodes > 0:
@@ -2398,12 +2501,15 @@ class FlashInferImpl(AttentionImpl):
                     assert isinstance(
                         prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
                     )
-                    assert prefill_wrapper._window_left == self.window_left
+                    causal_groups = attn_metadata.prefill.causal_groups
+                    if causal_groups is None:
+                        assert prefill_wrapper._window_left == self.window_left
                     assert prefill_wrapper._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._sm_scale == self.scale
-                    assert prefill_wrapper._causal == attn_metadata.causal
+                    if causal_groups is None:
+                        assert prefill_wrapper._causal == attn_metadata.causal
 
                     if self.is_kvcache_nvfp4:
                         kv_cache_for_fi = nvfp4_kv_data
@@ -2424,7 +2530,23 @@ class FlashInferImpl(AttentionImpl):
                     else:
                         out_prefill = output[num_decode_tokens:]
 
-                    if isinstance(
+                    if causal_groups is not None:
+                        for group in causal_groups:
+                            group_query = prefill_query[group.token_indices]
+                            group_output = torch.empty_like(group_query)
+                            group.wrapper.run(
+                                group_query,
+                                kv_cache_for_fi,
+                                q_scale=1.0 if self.nvfp4_fa2 else layer._q_scale_float,
+                                k_scale=layer._k_scale_float,
+                                v_scale=layer._v_scale_float,
+                                out=group_output,
+                                kv_cache_sf=kv_cache_sf,
+                            )
+                            out_prefill.index_copy_(
+                                0, group.token_indices, group_output
+                            )
+                    elif isinstance(
                         prefill_wrapper, BatchAttentionWithAttentionSinkWrapper
                     ):
                         assert self.sinks is not None

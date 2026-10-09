@@ -345,11 +345,26 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
         attention_config = vllm_config.attention_config
         if attention_config.backend == AttentionBackendEnum.FLASHINFER:
-            raise ValueError(
-                "FlashInfer does not support DiffusionGemma's mixed "
-                "causal/bidirectional attention. Use --attention-backend "
-                "FLASH_ATTN or TRITON_ATTN instead."
-            )
+            from vllm.config.compilation import CUDAGraphMode
+            from vllm.platforms import current_platform
+
+            cache_config = vllm_config.cache_config
+            if not (
+                cache_config is not None
+                and cache_config.cache_dtype == "nvfp4"
+                and current_platform.is_device_capability_family(120)
+            ):
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer requires NVFP4 KV cache on "
+                    "CC 12.x. Use FLASH_ATTN or TRITON_ATTN otherwise."
+                )
+            compilation_config = vllm_config.compilation_config
+            if (
+                compilation_config.cudagraph_mode is None
+                or compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                # Per-request grouping and wrapper plans vary on every step.
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
         if attention_config.backend is None and not attention_config.use_non_causal:
             # Only the sm_100 default backend order reads this flag (it puts
             # FlashInfer first for causal models). Elsewhere Gemma4Config above
