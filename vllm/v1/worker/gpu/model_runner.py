@@ -1361,7 +1361,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
         idx_mapping = async_tensor_h2d(
-            idx_mapping_np, device=self.device, dtype=torch.int32
+            idx_mapping_np, device=self.device, dtype=torch.int64
         )
         num_reqs = len(req_ids)
 

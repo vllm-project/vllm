@@ -402,7 +402,7 @@ def _prepare_prefill_inputs_kernel(
     target_input_ids_ptr,  # [src_tokens] int32
     target_positions_ptr,  # [src_tokens] int64
     last_sampled_ptr,  # [max_num_reqs] int32
-    idx_mapping_ptr,  # [num_reqs] int32
+    idx_mapping_ptr,  # [num_reqs] int64
     out_input_ids_ptr,  # [src_tokens + num_reqs] int32
     out_positions_ptr,  # [src_tokens + num_reqs] int64
     last_token_indices_ptr,  # [max_num_reqs] int64
