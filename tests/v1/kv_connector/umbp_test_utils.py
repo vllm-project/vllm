@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 
 
@@ -178,6 +179,7 @@ class _MemoryWorkerHandle(UMBPWorkerHandle):
         if job.status in (
             TransferJobStatus.COMPLETED,
             TransferJobStatus.FAILED,
+            TransferJobStatus.CANCELLED,
         ):
             return job
         return None
@@ -186,6 +188,14 @@ class _MemoryWorkerHandle(UMBPWorkerHandle):
         if job.status.value != "completed":
             raise RuntimeError("cannot publish an incomplete embedded job")
         self._store.publish(id(job))
+
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        if job.status.value not in ("completed", "failed"):
+            job.cancel("preempted")
+        return job
+
+    def take_evicted_keys(self) -> Sequence[str]:
+        return ()
 
     def close(self) -> None:
         return
@@ -241,7 +251,29 @@ def _kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
+def _hybrid_kv_cache_config() -> KVCacheConfig:
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+    )
+
+
+def _vllm_config(
+    extra: dict, prefix_match_unit: int | None = None, **parallel_overrides
+) -> SimpleNamespace:
     parallel = {
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
@@ -256,6 +288,7 @@ def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
         cache_config=SimpleNamespace(
             block_size=16,
             enable_prefix_caching=True,
+            prefix_match_unit=prefix_match_unit,
         ),
         model_config=SimpleNamespace(
             model="test-model",
@@ -269,6 +302,69 @@ def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
         num_prefill_lookahead_tokens=0,
         parallel_config=SimpleNamespace(**parallel),
     )
+
+
+def make_request(request_id: str = "req", **overrides) -> SimpleNamespace:
+    """Build the common scheduler-side request shape used by UMBP tests."""
+    num_tokens = overrides.pop("num_tokens", 32)
+    num_prompt_tokens = overrides.pop("num_prompt_tokens", num_tokens)
+    values = {
+        "request_id": request_id,
+        "req_id": request_id,
+        "num_tokens": num_tokens,
+        "num_prompt_tokens": num_prompt_tokens,
+        "num_computed_tokens": 0,
+        "num_in_flight_tokens": 0,
+        "block_hashes": [b"a", b"b"],
+        "block_ids": ([1, 2],),
+        "prompt_token_ids": list(range(num_prompt_tokens)),
+        "all_token_ids": list(range(num_tokens)),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def make_scheduler_output(
+    *,
+    new_reqs=(),
+    cached_reqs=None,
+    scheduled_tokens=None,
+    finished=(),
+    preempted=(),
+    block_state=None,
+) -> SimpleNamespace:
+    """Build a scheduler output with empty defaults for unrelated fields."""
+    return SimpleNamespace(
+        finished_req_ids=set(finished),
+        preempted_req_ids=set(preempted),
+        scheduled_new_reqs=list(new_reqs),
+        scheduled_cached_reqs=(
+            SimpleNamespace(req_ids=[]) if cached_reqs is None else cached_reqs
+        ),
+        num_scheduled_tokens=dict(scheduled_tokens or {}),
+        kv_connector_block_state=block_state,
+    )
+
+
+def make_kv_caches(*, fill: bool = False) -> dict[str, torch.Tensor]:
+    """Build the standard two-layer CPU KV cache used by connector tests."""
+    caches = {
+        name: torch.empty_strided(
+            (8, 2, 16, 8),
+            (512, 256, 8, 1),
+            dtype=torch.float16,
+        )
+        for name in ("layer1", "layer2")
+    }
+    for index, cache in enumerate(caches.values()):
+        if fill:
+            cache.copy_(
+                torch.arange(cache.numel(), dtype=torch.float16).reshape(cache.shape)
+                + index
+            )
+        else:
+            cache.zero_()
+    return caches
 
 
 class _SchedulerHandle:
@@ -315,6 +411,7 @@ class _WorkerHandle:
         if job.status in (
             TransferJobStatus.COMPLETED,
             TransferJobStatus.FAILED,
+            TransferJobStatus.CANCELLED,
         ):
             return job
         return None
@@ -378,8 +475,19 @@ class _WaitRecordingDelayedLoadHandle(_DelayedLoadWorkerHandle):
         return job
 
 
-class _DelayedStoreWorkerHandle(_WorkerHandle):
+class _CancellableWorkerHandle(_WorkerHandle):
     def __init__(self):
+        self.cancelled = []
+
+    def cancel(self, job):
+        self.cancelled.append(job)
+        job.cancel("preempted")
+        return job
+
+
+class _DelayedStoreWorkerHandle(_CancellableWorkerHandle):
+    def __init__(self):
+        super().__init__()
         self.jobs = []
         self.waited = []
         self.publications = []
