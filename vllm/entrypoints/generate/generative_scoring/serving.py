@@ -12,12 +12,13 @@ import asyncio
 import math
 import time
 from collections.abc import Mapping
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import Request
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
@@ -59,6 +60,7 @@ class GenerativeScoringRequest(OpenAIBaseModel):
             the full vocab for those ids (False).
         item_first: If True, prepend items to query. Otherwise append items to query.
         add_special_tokens: Whether to add special tokens when tokenizing.
+        cache_salt: Optional salt for prefix caching.
 
     """
 
@@ -91,6 +93,17 @@ class GenerativeScoringRequest(OpenAIBaseModel):
         default=True,
         description="Whether to add special tokens when tokenizing.",
     )
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
     priority: int = Field(
         default=0,
         ge=-(2**63),
@@ -103,6 +116,13 @@ class GenerativeScoringRequest(OpenAIBaseModel):
         default_factory=random_uuid,
         description="The request_id related to this request.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            validate_cache_salt(data.get("cache_salt"))
+        return data
 
 
 class GenerativeScoringItemResult(OpenAIBaseModel):
@@ -395,7 +415,9 @@ class ServingGenerativeScoring(BaseServing):
             if len(prompt_token_ids) > max_prompt_len:
                 prompt_token_ids = prompt_token_ids[:max_prompt_len]
 
-            engine_inputs.append(tokens_input(prompt_token_ids))
+            engine_inputs.append(
+                tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
+            )
             prompt_token_counts.append(len(prompt_token_ids))
 
         return engine_inputs, prompt_token_counts

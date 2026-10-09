@@ -14,7 +14,6 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -31,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backends,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
-    kv_postprocess_layout_on_receive,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -935,6 +933,9 @@ class NixlBaseConnectorWorker:
         # page it overlays, so its regions cannot be recovered from spec type.
         self._scratch_region_indices = list[int]()
         self._ple_region_index: int | None = None
+        # Page length of the PLE short-conv state; its region may be shared with
+        # pages of a different (smaller) size, so it cannot use the region's.
+        self._ple_block_len: int | None = None
 
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
@@ -1464,6 +1465,7 @@ class NixlBaseConnectorWorker:
         seen_base_addresses: list[int] = []
         self._ssm_region_indices = []
         self._scratch_region_indices = []
+        self._ple_block_len = None
         self._ple_region_index = None
 
         packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
@@ -1751,6 +1753,7 @@ class NixlBaseConnectorWorker:
                         assert self._is_csa_linear
                         assert self._ple_region_index in (None, region_index)
                         self._ple_region_index = region_index
+                        self._ple_block_len = block_len
                     elif region_index not in self._ssm_region_indices:
                         self._ssm_region_indices.append(region_index)
                 elif (
@@ -1885,6 +1888,7 @@ class NixlBaseConnectorWorker:
             else self.host_buffer_kv_cache_layout,
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
+            ple_block_len=self._ple_block_len,
             attn_backend_name=self.backend_name,
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
@@ -1905,6 +1909,19 @@ class NixlBaseConnectorWorker:
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
+
+    def _ple_page_len(self) -> int:
+        """Transfer length of one PLE state page.
+
+        The PLE page shares its region with the first page of other cache
+        groups (block-outer layout), whose block_len may be smaller; the
+        descriptors must cover the whole PLE page or part of the conv state
+        never reaches the decode side."""
+        assert self._ple_region_index is not None
+        assert self._ple_block_len is not None, (
+            "PLE region registered without its page length"
+        )
+        return self._ple_block_len
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
@@ -1960,7 +1977,7 @@ class NixlBaseConnectorWorker:
             parts.append(self._stack_descs(blk_addrs + conv_size, ssm_size, device_id))
 
         if (region_index := self._ple_region_index) is not None:
-            block_len = self.block_len_per_layer[region_index] * physical_per_logical
+            block_len = self._ple_page_len() * physical_per_logical
             block_stride = (
                 self.block_stride_per_layer[region_index] * physical_per_logical
             )
@@ -2019,11 +2036,12 @@ class NixlBaseConnectorWorker:
 
         if (region_index := self._ple_region_index) is not None:
             local_block_len = (
-                self.block_len_per_layer[region_index]
-                * self._physical_blocks_per_logical_kv_block
+                self._ple_page_len() * self._physical_blocks_per_logical_kv_block
             )
+            # Same NIXL_CONNECTOR_VERSION on both sides, so the field is set.
+            assert nixl_agent_meta.ple_block_len is not None
             remote_block_len = (
-                nixl_agent_meta.block_lens[region_index] * remote_physical_per_logical
+                nixl_agent_meta.ple_block_len * remote_physical_per_logical
             )
             if local_block_len != remote_block_len:
                 raise ValueError(
@@ -2576,6 +2594,7 @@ class NixlBaseConnectorWorker:
             if (
                 self.kv_transfer_config.enable_permute_local_kv
                 and nixl_agent_meta.kv_cache_layout == "LBHNC"
+                and kv_cache_layout == "LBNHC"
             ):
                 logger.info(
                     "Remote is LBHNC and local is LBNHC, enabled additional permute "
@@ -2587,9 +2606,11 @@ class NixlBaseConnectorWorker:
                 self.enable_permute_local_kv = True
             else:
                 raise RuntimeError(
-                    "Heterogeneous TP expects same kv_cache_layout. "
-                    "Or enable experimental feature to use HND to NHD support by "
-                    "setting 'enable_permute_local_kv'=True in --kv-transfer-config."
+                    "Heterogeneous TP expects same kv_cache_layout (local "
+                    f"{kv_cache_layout}, remote {nixl_agent_meta.kv_cache_layout}). "
+                    "Or enable experimental feature to receive LBHNC into a local "
+                    "LBNHC cache by setting 'enable_permute_local_kv'=True "
+                    "in --kv-transfer-config."
                 )
         # if remote_agent used attn is not same as local,
         # hint heterogenuous attn post process
@@ -2775,26 +2796,10 @@ class NixlBaseConnectorWorker:
                     "d2h",
                 )
 
-    @cached_property
-    def _attention_kv_caches(self) -> list[torch.Tensor]:
-        """Device KV caches of attention layers (mamba states excluded),
-        as consumed by the receive post-process."""
-        assert self.device_kv_caches, (
-            "_attention_kv_caches accessed before register_kv_caches"
-        )
-        mamba_layers = {
-            name
-            for g, group in enumerate(self.kv_cache_config.transfer_groups)
-            if _is_ssm_spec(self._group_spec_types[g])
-            for name in group.layer_names
-        }
-        kv_caches = self.device_kv_caches
-        return [cache for name, cache in kv_caches.items() if name not in mamba_layers]
-
     def post_process_device_kv_on_receive(
         self,
         block_size_ratio: int,
-        block_ids_list: list[tuple[list[int], int]],
+        block_ids_list: list[tuple[int, list[int], int]],
         convert: bool = True,
     ):
         """Post process device kv cache after receiving from remote.
@@ -2843,9 +2848,11 @@ class NixlBaseConnectorWorker:
                 block_size_ratio,
             )
 
-        attn_caches = self._attention_kv_caches
-        device = attn_caches[0].device
-        for block_ids, covered_sub_blocks in block_ids_list:
+        for group, block_ids, covered_sub_blocks in block_ids_list:
+            attn_caches = [
+                self.device_kv_caches[name]
+                for name in self.kv_cache_config.transfer_groups[group].layer_names
+            ]
             # Blocks the transfer didn't write: the token tail of the last
             # partially covered block, then everything beyond it.
             covered_blocks, sub_blocks_in_last = divmod(
@@ -2855,17 +2862,16 @@ class NixlBaseConnectorWorker:
             has_stale = first_stale < len(block_ids)
             indices = None
             if convert or has_stale:
-                indices = async_tensor_h2d(block_ids, device, torch.long)
+                indices = async_tensor_h2d(block_ids, attn_caches[0].device, torch.long)
 
             if convert:
                 for cache in attn_caches:
-                    if self.enable_permute_local_kv and block_size_ratio > 1:
+                    if self.enable_permute_local_kv:
                         kv_postprocess_blksize_and_layout_on_receive(
                             cache, indices, block_size_ratio
                         )
-                    elif self.enable_permute_local_kv:
-                        kv_postprocess_layout_on_receive(cache, indices)
-                    else:
+                    elif KVCacheLayout[self.kv_cache_layout].is_block_contiguous:
+                        # Token-major blocks get the sub-blocks in token order.
                         kv_postprocess_blksize_on_receive(
                             cache, indices, block_size_ratio
                         )
@@ -2873,10 +2879,10 @@ class NixlBaseConnectorWorker:
             if sub_blocks_in_last:
                 last_block_id = block_ids[covered_blocks]
                 for cache in attn_caches:
-                    # Both post-processed layouts leave tokens on dim 1.
-                    sub_block_tokens = cache.shape[1] // block_size_ratio
+                    # Attention caches are [B, H, N, C]: tokens on dim 2.
+                    sub_block_tokens = cache.shape[2] // block_size_ratio
                     zero_from = sub_blocks_in_last * sub_block_tokens
-                    cache[last_block_id, zero_from:].zero_()
+                    cache[last_block_id, :, zero_from:].zero_()
             if has_stale:
                 assert indices is not None
                 stale_ids = indices[first_stale:]
@@ -3048,7 +3054,7 @@ class NixlBaseConnectorWorker:
                         len(meta.remote.block_ids[g]),
                     )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
-                        (local_group, covered_sub_blocks)
+                        (g, local_group, covered_sub_blocks)
                     )
             # post processing for heterogeneous attention
             if self.enable_heterogeneous_attn_post_process:

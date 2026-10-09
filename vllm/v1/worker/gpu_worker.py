@@ -821,10 +821,15 @@ class Worker(WorkerBase):
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
 
-        # Adopt the engine core's layout; workers spawned after resolution
-        # (e.g. elastic EP scale-up) only see it through the config.
+        # Adopt the engine core's layout and prefix-cache granularity; workers
+        # spawned after resolution (e.g. elastic EP scale-up) only see them
+        # through the config.
         if kv_cache_config.kv_cache_layout is not None:
             record_kv_cache_layout(self.cache_config, kv_cache_config.kv_cache_layout)
+        self.cache_config.hash_block_size = kv_cache_config.hash_block_size
+        self.cache_config.cache_hit_alignment_tokens = (
+            kv_cache_config.cache_hit_alignment_tokens
+        )
 
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
