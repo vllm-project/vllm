@@ -12,8 +12,13 @@ from typing import Any, ParamSpec, TypeVar
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.cache_policy import CompileCachePolicy
-from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
+from vllm.compilation.counter import compilation_counter
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
@@ -45,6 +50,17 @@ def _compilation_context() -> Generator[None, None, None]:
         torch._dynamo.config.accumulated_cache_size_limit = original_accumulated_cache
 
 
+def compile_model_with_stock_torch(
+    model: torch.nn.Module, vllm_config: VllmConfig
+) -> None:
+    from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+    _apply_constrain_to_fx_strides_patch()
+    backend = vllm_config.compilation_config.init_backend(vllm_config)
+    compilation_counter.stock_torch_compile_count += 1
+    model.compile(fullgraph=True, backend=backend)
+
+
 class TorchCompileWithNoGuardsWrapper:
     """A wrapper class for torch.compile, it ensures that all guards are dropped
     when CompilationMode is not CompilationMode.STOCK_TORCH_COMPILE.
@@ -69,6 +85,8 @@ class TorchCompileWithNoGuardsWrapper:
             return ctx.result
         return callable_fn(*args, **kwargs)
 
+    _allow_aot_compile: bool = True
+
     def __init__(
         self,
         compile_prefix: str = "",
@@ -80,7 +98,6 @@ class TorchCompileWithNoGuardsWrapper:
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
-        self.cache_policy = CompileCachePolicy.resolve(vllm_config)
         mode = vllm_config.compilation_config.mode
         self.layerwise_nvtx_tracing_enabled = (
             vllm_config.observability_config.enable_layerwise_nvtx_tracing
@@ -92,7 +109,7 @@ class TorchCompileWithNoGuardsWrapper:
             vllm_config,
             prefix=compile_prefix,
             is_encoder=is_encoder,
-            cache_policy=self.cache_policy,
+            use_aot_compile=self._allow_aot_compile,
         )
         options = {}
 
@@ -139,7 +156,7 @@ class TorchCompileWithNoGuardsWrapper:
         _apply_constrain_to_fx_strides_patch()
 
         aot_context = nullcontext()
-        if self.cache_policy.use_model_aot:
+        if self._allow_aot_compile and envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):
                 aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
             else:

@@ -3,7 +3,7 @@
 import contextlib
 import copy
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import ExitStack
 from typing import Any, Literal
 from unittest.mock import patch
@@ -13,7 +13,6 @@ import torch._inductor.compile_fx
 import torch.fx as fx
 
 import vllm.envs as envs
-from vllm.compilation.cache_policy import CompileCachePolicy
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
@@ -28,13 +27,14 @@ _last_inductor_triton_cache_dir: str | None = None
 
 
 def initialize_inductor_cache(base_cache_dir: str) -> None:
-    """Keep lower graph caches persistent even without vLLM artifacts."""
     global _last_inductor_triton_cache_dir
+    # Keep artifacts together unless the caller supplies a Triton cache.
     inductor_cache = os.path.join(base_cache_dir, "inductor_cache")
     os.makedirs(inductor_cache, exist_ok=True)
-    # torch's cache_dir() may have already populated this with its tmp default.
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
     triton_cache = os.environ.get("TRITON_CACHE_DIR")
+    # A directory assigned by an earlier adaptor is still a model-local
+    # default, rather than a caller override for subsequent models.
     if triton_cache is None or triton_cache == _last_inductor_triton_cache_dir:
         triton_cache = os.path.join(base_cache_dir, "triton_cache")
         _last_inductor_triton_cache_dir = triton_cache
@@ -167,22 +167,18 @@ class AlwaysHitShapeEnv:
         return ""
 
 
-def _get_vllm_functorch_config(
-    use_mega_artifact: bool | None = None,
-) -> dict[str, Any]:
+def _get_vllm_functorch_config(use_aot_compile: bool = True) -> dict[str, Any]:
     """Return the functorch config overrides that vLLM applies at compile time.
 
     Used by both set_functorch_config() and get_inductor_factors() to ensure
     the compile-time config and cache key are always consistent."""
     cfg: dict[str, Any] = {}
-    if use_mega_artifact is None:
-        use_mega_artifact = envs.VLLM_USE_MEGA_AOT_ARTIFACT
-    if not use_mega_artifact:
+    if not (use_aot_compile and envs.VLLM_USE_MEGA_AOT_ARTIFACT):
         cfg["bundled_autograd_cache"] = False
     return cfg
 
 
-def get_inductor_factors(use_mega_artifact: bool | None = None) -> list[Any]:
+def get_inductor_factors(use_aot_compile: bool = True) -> list[Any]:
     factors: list[Any] = []
     # summarize system state
     from torch._inductor.codecache import CacheBase
@@ -200,7 +196,7 @@ def get_inductor_factors(use_mega_artifact: bool | None = None) -> list[Any]:
     from torch._inductor import config as inductor_config
 
     factors.append(inductor_config.save_config_portable())
-    with functorch_config.patch(_get_vllm_functorch_config(use_mega_artifact)):
+    with functorch_config.patch(_get_vllm_functorch_config(use_aot_compile)):
         factors.append(functorch_config.save_config_portable())
     return factors
 
@@ -275,17 +271,15 @@ class InductorStandaloneAdaptor(CompilerInterface):
     name = "inductor_standalone"
 
     def __init__(
-        self,
-        save_format: Literal["binary", "unpacked"],
-        cache_policy: CompileCachePolicy | None = None,
+        self, save_format: Literal["binary", "unpacked"], *, use_aot_compile: bool
     ) -> None:
         if not is_torch_equal_or_newer("2.10.0"):
             _patch_standalone_compile_atomic_save()
         self.save_format = save_format
-        self.cache_policy = cache_policy or CompileCachePolicy.resolve()
+        self.use_aot_compile = use_aot_compile
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors(self.cache_policy.use_mega_artifact)
+        factors = get_inductor_factors(self.use_aot_compile)
         hash_str: str = safe_hash(
             str(factors).encode(), usedforsecurity=False
         ).hexdigest()[:10]
@@ -295,6 +289,10 @@ class InductorStandaloneAdaptor(CompilerInterface):
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
         self.cache_dir = cache_dir
+        if not self.use_aot_compile and not disable_cache:
+            initialize_inductor_cache(
+                cache_dir[: -len(prefix)] if prefix else cache_dir
+            )
 
     def compile(
         self,
@@ -310,8 +308,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if compiler_config is not None:
             current_config.update(compiler_config)
         set_inductor_config(current_config, compile_range)
-        if self.cache_policy.use_vllm_artifact_cache:
-            set_functorch_config()
 
         if compile_range.is_single_size():
             dynamic_shapes = "from_example_inputs"
@@ -322,7 +318,11 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         supports_aot = is_torch_equal_or_newer("2.10.0")
 
-        if not supports_aot and self.cache_policy.use_mega_artifact:
+        if (
+            not supports_aot
+            and self.use_aot_compile
+            and envs.VLLM_USE_MEGA_AOT_ARTIFACT
+        ):
             logger.error(
                 "CRITICAL: VLLM_USE_MEGA_AOT_ARTIFACT "
                 "is enabled but PyTorch version does not support 'aot' "
@@ -340,7 +340,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if is_torch_equal_or_newer("2.13.0.dev"):
             compile_kwargs["donate_graph_module"] = True  # type: ignore[assignment]
 
-        use_aot: bool = supports_aot and self.cache_policy.use_mega_artifact
+        use_aot: bool = (
+            supports_aot and self.use_aot_compile and envs.VLLM_USE_MEGA_AOT_ARTIFACT
+        )
         # only add 'aot' parameter if both supported and enabled...
         # this will set bundled_autograd_cache
         # https://github.com/pytorch/pytorch/blob/9bbc5b2905c260adf41bc866a732f9c121a2828a/torch/_inductor/standalone_compile.py#L359 # noqa
@@ -392,15 +394,10 @@ class InductorStandaloneAdaptor(CompilerInterface):
         else:
             fake_mode_ctx = contextlib.nullcontext()
 
-        hf_config = (
-            torch._functorch.config.patch(bundled_autograd_cache=False)
-            if not self.cache_policy.use_vllm_artifact_cache
-            else contextlib.nullcontext()
-        )
-        with pregrad_ctx, fake_mode_ctx, hf_config:
+        with pregrad_ctx, fake_mode_ctx, set_functorch_config(self.use_aot_compile):
             compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
-        if not self.cache_policy.use_vllm_artifact_cache:
+        if not self.use_aot_compile:
             return compiled_graph, None
 
         if use_aot:
@@ -452,7 +449,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
-        path = handle[1]
+        path = os.path.join(self.cache_dir, handle[0])
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
             path=path, format=self.save_format
         )
@@ -479,11 +476,11 @@ class InductorAdaptor(CompilerInterface):
 
     name = "inductor"
 
-    def __init__(self, cache_policy: CompileCachePolicy | None = None) -> None:
-        self.cache_policy = cache_policy or CompileCachePolicy.resolve()
+    def __init__(self, *, use_aot_compile: bool) -> None:
+        self.use_aot_compile = use_aot_compile
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors(self.cache_policy.use_mega_artifact)
+        factors = get_inductor_factors(self.use_aot_compile)
         hash_str: str = safe_hash(
             str(factors).encode(), usedforsecurity=False
         ).hexdigest()[:10]
@@ -495,7 +492,7 @@ class InductorAdaptor(CompilerInterface):
         self.cache_dir = cache_dir
         self.prefix = prefix
         self.base_cache_dir = cache_dir[: -len(prefix)] if prefix else cache_dir
-        if disable_cache or not self.cache_policy.use_vllm_artifact_cache:
+        if disable_cache:
             return
         initialize_inductor_cache(self.base_cache_dir)
 
@@ -520,8 +517,6 @@ class InductorAdaptor(CompilerInterface):
         current_config["fx_graph_remote_cache"] = False
 
         set_inductor_config(current_config, compile_range)
-        if self.cache_policy.use_vllm_artifact_cache:
-            set_functorch_config()
 
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
@@ -580,10 +575,7 @@ class InductorAdaptor(CompilerInterface):
             return AlwaysHitShapeEnv()
 
         with ExitStack() as stack:
-            if not self.cache_policy.use_vllm_artifact_cache:
-                stack.enter_context(
-                    torch._functorch.config.patch(bundled_autograd_cache=False)
-                )
+            stack.enter_context(set_functorch_config(self.use_aot_compile))
             # for hijacking the hash of the compiled graph
             stack.enter_context(
                 patch(
@@ -784,9 +776,17 @@ def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
         )
 
 
-def set_functorch_config() -> None:
-    for k, v in _get_vllm_functorch_config().items():
-        setattr(torch._functorch.config, k, v)
+@contextlib.contextmanager
+def set_functorch_config(use_aot_compile: bool) -> Generator[None, None, None]:
+    overrides = _get_vllm_functorch_config(use_aot_compile)
+    if use_aot_compile:
+        # Preserve the existing native configuration lifetime.
+        for key, value in overrides.items():
+            setattr(torch._functorch.config, key, value)
+        yield
+    else:
+        with torch._functorch.config.patch(overrides):
+            yield
 
 
 def trigger_inductor_lazy_init(device: torch.device | None = None) -> None:

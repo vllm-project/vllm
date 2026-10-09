@@ -3,16 +3,15 @@
 """Utilities for selecting and loading models."""
 
 import inspect
+import time
 import warnings
 from contextlib import contextmanager, nullcontext
-from typing import Any
+from typing import Any, assert_never
 
 import torch
 from torch import nn
-from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.compilation.cache_policy import CompileCachePolicy, use_compile_cache_policy
 from vllm.config import (
     LoadConfig,
     ModelConfig,
@@ -88,15 +87,11 @@ def initialize_model(
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
 
-    cache_policy = CompileCachePolicy.resolve(vllm_config, model_config=model_config)
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
-        with (
-            set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix),
-            use_compile_cache_policy(vllm_config, cache_policy),
-        ):
+        with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
             record_metadata_for_reloading(model)
             return model
@@ -128,10 +123,7 @@ def initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
-    with (
-        set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix),
-        use_compile_cache_policy(vllm_config, cache_policy),
-    ):
+    with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
         record_metadata_for_reloading(model)
 
@@ -149,6 +141,11 @@ def process_weights_after_loading(
     """
     # Reclaim memory when an explicit lm_head has been
     # loaded, but it is identical to the input embeddings.
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+
     maybe_retie_word_embeddings(model, model_config)
 
     for name, module in model.named_modules():
@@ -174,7 +171,12 @@ def process_weights_after_loading(
                 if quant_method.requires_device_loading
                 else nullcontext()
             )
-            with loading_context:
+            timing_context = (
+                online_quantization_timing_context(module, quant_method)
+                if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+                else nullcontext()
+            )
+            with loading_context, timing_context:
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
@@ -251,6 +253,43 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
                 ).copy_(p.data)
                 p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
                 p._vllm_is_uva_offloaded = True
+
+
+@contextmanager
+def online_quantization_timing_context(
+    layer: nn.Module, quant_method: QuantizeMethodBase
+):
+    """Accumulate online quantization processing time for ``quant_method``."""
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+
+    assert isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+    quant_config = layer.quant_config
+    assert quant_config is not None
+    online_quantization_config = (
+        quant_config
+        if isinstance(quant_config, OnlineQuantizationConfig)
+        else quant_config.online_quantization_config
+    )
+    # reload/layerwise.py's _layerwise_process calls this for experts_int8,
+    # whose online MoE method has no OnlineQuantizationConfig.
+    if online_quantization_config is None:
+        yield
+        return
+    assert isinstance(online_quantization_config, OnlineQuantizationConfig)
+
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        online_quantization_config.online_quantization_time += (
+            time.perf_counter() - start_time
+        )
 
 
 _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
