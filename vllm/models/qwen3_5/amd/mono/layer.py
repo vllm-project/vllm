@@ -20,15 +20,18 @@ One launch a layer and rank, ``BLOCKS`` x ``THREADS``, S <= 8 decode rows:
              descending order, softmax-renormalized -> ROUTE
     ug       (|U| x 16, every CTA): the union U of the step's picks; an
              expert's 16 gate + 16 up rows (fp4 -> bf16 by their e8m0 scales)
-             against the bf16 x rows; silu(g) u -> bf16 -> INTER a pick
+             against the x rows through MXFP4; silu(g) u (fp32) -> INTER a pick
     down     (512 x 16 hidden rows, every CTA): w2 of every expert of U
-             against its picks' INTER, times the route weight, summed in top-k
+             against its picks' INTER through MXFP4, times the route weight,
+             summed in top-k
              order; + the shared down rows of silu(g) u (SGU) times SGATE ->
              bf16 partial -> every rank's FINAL
     final    (CTAs 0 .. 63, 128 columns): FINAL in rank order -> bf16 ``out``
 
-The routed experts read bf16 activations, as the stock decode path does (AITER's
-one-stage ``fmoe_bf16_pertokenMXfp4_g1u1_flat`` below 32 rows); their weights are
+The routed experts quantize their activations as the stock decode path does
+(AITER's one-stage ``fmoe_bf16_pertokenMXfp4_g1u1_flat`` below 32 rows takes bf16
+in, but runs x and silu(g) u through MXFP4, 1 x 32 blocks, RCEIL scales); the
+quantized values are exact in bf16, so the MFMAs stay bf16. Their weights are
 ``AITER_MXFP4_MXFP4``'s shuffled ones (``layout``). Peer regions are
 double-buffered by the step epoch's parity.
 """
@@ -41,6 +44,7 @@ import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T, as_ir_value
 
 from vllm.models.kimi_k3.amd.mono.common.debug import region_ids
@@ -48,10 +52,12 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     CM_DEV,
     CM_NT,
     ballot,
+    bf16_pair,
     bf16_round,
     bf_hi,
     bf_lo,
     block_excl_scan,
+    div_rn,
     hw_exp2,
     hw_rsq,
     lanes_below,
@@ -64,6 +70,7 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     traced,
     uniform,
     wave_sum,
+    xred,
 )
 from vllm.models.kimi_k3.amd.mono.common.plan import (
     BLOCKS,
@@ -184,7 +191,7 @@ def scratch_layout(key: K2Build) -> dict:
         "sgu": s * SI,  # 2 SI bf16 a token, two a pair
         "sgate": s,
         "route": s * 2 * TOPK,
-        "inter": s * TOPK * RI // 2,
+        "inter": s * TOPK * RI,
     }
     lay = pair_layout(pairs.items())
     end = max(o + n for o, n in lay.values())
@@ -224,6 +231,30 @@ def silu_mul(g, u):
 def pow2(code):
     """The fp32 power of two an e8m0 code stands for."""
     return (code << 23).bitcast(fx.Float32)
+
+
+def mx_scale(amax):
+    """A 1 x 32 block's MXFP4 e8m0 code from its abs max: ceil_pow2(amax / 6)
+    (RCEIL, AITER's activation quant), clamped to codes 1 .. 253."""
+    d = div_rn(amax, fx.Float32(6.0), fx.Float32(1.0 / 6.0))
+    bits = d.bitcast(fx.Int32)
+    e = (bits >> 23) & 0xFF
+    e = e + ((bits & 0x7FFFFF) != 0).select(fx.Int32(1), fx.Int32(0))
+    return fx.min(fx.max(e, fx.Int32(1)), fx.Int32(253))
+
+
+def mx_qdq(v, code):
+    """An fp32 through e2m1 at scale ``code`` (nearest even, saturating at 6)
+    and back: a power of two times an e2m1 value, exact in bf16."""
+    a = fx.min(fx.Float32(fmath.absf(v * pow2(fx.Int32(254) - code))), fx.Float32(6.0))
+    q = (a < fx.Float32(2.0)).select(
+        fx.Float32(fmath.roundeven(a * fx.Float32(2.0))) * fx.Float32(0.5),
+        (a < fx.Float32(4.0)).select(
+            fx.Float32(fmath.roundeven(a)),
+            fx.Float32(fmath.roundeven(a * fx.Float32(0.5))) * fx.Float32(2.0),
+        ),
+    )
+    return (v < fx.Float32(0.0)).select(-q, q) * pow2(code)
 
 
 def fp4x8_bf16(word, scale):
@@ -306,9 +337,10 @@ def run_oproj(c, oops):
 # ---------------------------------------------------------------- norm
 @traced
 def stage_norm(c, j):
-    """Columns 128 j ..: the AR sum (rank order, fp32 -> bf16) + residual ->
-    ``res_out``; every task's sum of squares -> rstd -> bf16(v rstd (1 + w)) ->
-    the x rows, XRDY j."""
+    """Columns 128 j ..: the AR sum (rank order, fp32 -> bf16) + residual (fp32;
+    bf16 -> ``res_out``); every task's sum of squares -> rstd -> bf16(v rstd
+    (1 + w)) -> the x rows, XRDY j. The norm reads the unrounded sum, as
+    ``fused_add_rms_norm`` does."""
     s, tid, lane, red = c["S"], c["tid"], c["lane"], c["red"]
     a = c["args"]
     mine = tid < s * 64
@@ -326,8 +358,8 @@ def stage_norm(c, j):
             rsrc(a["residual"]), (t * HIDDEN + col) // 2, vec_width=1, dtype=T.i32
         )
     )
-    z0 = bf16_round(bf16_round(lo) + bf_lo(rw))
-    z1 = bf16_round(bf16_round(hi) + bf_hi(rw))
+    z0 = bf16_round(lo) + bf_lo(rw)
+    z1 = bf16_round(hi) + bf_hi(rw)
     zw = (
         fx.Vector.from_elements([z0, z1], fx.Float32)
         .to(fx.BFloat16)
@@ -379,6 +411,32 @@ def wait_x(c, klen, k0):
         ldk=HIDDEN,
         k0=k0,
     )
+
+
+@traced
+def quant_x(c):
+    """The x rows in LDS through MXFP4 in place, a thread a 1 x 32 block (RCEIL
+    scale): the routed experts' activations, as the stock decode kernel takes
+    them. The router and the shared expert read x unquantized, before this."""
+    s, tid, xl = c["S"], c["tid"], c["xl"]
+    xrow = HIDDEN + gemv.LDS_PAD
+    nb = s * HIDDEN // 32
+    for i in range_constexpr((nb + THREADS - 1) // THREADS):
+        b = tid + THREADS * i
+        if b < nb:
+            base = ((b // (HIDDEN // 32)) * xrow + 32 * (b % (HIDDEN // 32))) // 2
+            ws = [fx.ptr_load(xl + (base + j)) for j in range_constexpr(16)]
+            vs = []
+            for j in range_constexpr(16):
+                vs += [bf_lo(ws[j]), bf_hi(ws[j])]
+            amax = fx.Float32(0.0)
+            for j in range_constexpr(32):
+                amax = fx.max(amax, fx.Float32(fmath.absf(vs[j])))
+            e = mx_scale(amax)
+            for j in range_constexpr(16):
+                w = bf16_pair(mx_qdq(vs[2 * j], e), mx_qdq(vs[2 * j + 1], e))
+                fx.ptr_store(w.bitcast(fx.Int32), xl + (base + j))
+    gpu.barrier()
 
 
 # ---------------------------------------------------------------- router / sgu
@@ -646,8 +704,8 @@ def ug_loads(c, task):
 @traced
 def stage_ug(c, task, ops):
     """Slot task / 16, columns 16 (task % 16) ..: the gate and up rows against
-    the bf16 x rows in LDS (``ops``: ``ug_loads``); silu(g) u -> bf16 -> INTER
-    of each picking token."""
+    the quantized x rows in LDS (``ops``: ``ug_loads``); silu(g) u -> fp32 ->
+    INTER of each picking token."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     rt = c["rt"]
     slot = task // UG_GROUPS
@@ -675,37 +733,43 @@ def stage_ug(c, task, ops):
         gw = (0, 2, 4, 6)
         uw = (1, 3, 5, 7)
         v = [
-            bf16_round(
-                silu_mul(
-                    row_sum(red, 2 * cp + d, tt, waves=gw),
-                    row_sum(red, 2 * cp + d, tt, waves=uw),
-                )
-            )
+            silu_mul(
+                row_sum(red, 2 * cp + d, tt, waves=gw),
+                row_sum(red, 2 * cp + d, tt, waves=uw),
+            ).bitcast(fx.Int32)
             for d in range(2)
         ]
         if k >= 0:
             pick = tt * TOPK + k
-            c["put_bf"](c["inter"], pick * RI + g * UG_COLS + 2 * cp, v)
+            c["put_words"](c["inter"], pick * RI + g * UG_COLS + 2 * cp, v)
     gpu.barrier()
 
 
 # ---------------------------------------------------------------- down
 @traced
 def load_inter(c):
-    """Every pick's INTER -> LDS (bf16 rows of RI, padded); one poll batch."""
+    """Every pick's INTER (fp32) through MXFP4 by 32 columns (RCEIL scale, the
+    block's 16 column pairs on 16 lanes of a row), as the stock decode kernel
+    quantizes its intermediate -> LDS (bf16 rows of RI, padded); one poll batch."""
     s, tid = c["S"], c["tid"]
     n = s * TOPK * RI // 2
     per = (n + THREADS - 1) // THREADS
     irow = RI + gemv.LDS_PAD
     got = c["poll"](
-        [(c["inter"], fx.min(tid + THREADS * i, n - 1), 1) for i in range(per)]
+        [(c["inter"], 2 * fx.min(tid + THREADS * i, n - 1), 2) for i in range(per)]
     )
     for i in range_constexpr(per):
         p = fx.min(tid + THREADS * i, n - 1)
         pick = p // (RI // 2)
         cp = p % (RI // 2)
+        h0, h1 = f32_of(got[i][0]), f32_of(got[i][1])
+        amax = fx.max(fx.Float32(fmath.absf(h0)), fx.Float32(fmath.absf(h1)))
+        for off in range_constexpr(4):
+            amax = xred(amax, 1 << off, fx.max)
+        e = mx_scale(amax)
+        w = bf16_pair(mx_qdq(h0, e), mx_qdq(h1, e)).bitcast(fx.Int32)
         if tid + THREADS * i < n:
-            fx.ptr_store(got[i][0], c["il"] + (pick * irow + 2 * cp) // 2)
+            fx.ptr_store(w, c["il"] + (pick * irow + 2 * cp) // 2)
     gpu.barrier()
 
 
@@ -976,6 +1040,7 @@ def build(key: K2Build):
             "eps": key.eps,
             "put": mb.put,
             "put_bf": mb.put_bf,
+            "put_words": mb.put_words,
             "poll": mb.poll,
             "red": lds.red.ptr,
             "peer": peer,
@@ -1040,6 +1105,7 @@ def build(key: K2Build):
         if const_expr(key.stop > 4):
             nu = load_route(c)
             wait_x(c, HIDDEN, 0)
+            quant_x(c)
             total = nu * UG_GROUPS
             last = total - 1
             # reversed placement: the round's leftover tasks go to the high

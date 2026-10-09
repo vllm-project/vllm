@@ -256,6 +256,7 @@ class MonoDecode:
     def forward(self, input_ids, positions) -> torch.Tensor:
         model = self.model
         s = input_ids.size(0)
+        logger.info_once("Qwen3.8 mono decode: first mono step (%d rows)", s)
         self.epoch.add_(1)
         md = get_forward_context().attn_metadata
         assert isinstance(md, dict)
