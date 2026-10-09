@@ -501,7 +501,9 @@ mod tests {
             num_descriptors: vec![2, 4],
             num_failed_transfers: vec![],
             num_failed_notifications: vec![],
+            num_failed_handshakes: vec![],
             num_kv_expired_reqs: vec![1],
+            num_notifications_after_expiry: vec![],
         }
     }
 
