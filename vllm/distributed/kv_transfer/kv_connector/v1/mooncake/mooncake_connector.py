@@ -2438,9 +2438,30 @@ class MooncakeConnectorWorker:
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
+        max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+            async with httpx.AsyncClient(
+                timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+            ) as client:
+                retry_delay = 0.1
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        response = await client.get(url)
+                        break
+                    except httpx.RequestError as e:
+                        if attempt == max_attempts:
+                            raise
+                        logger.warning(
+                            "Bootstrap query to %s failed on attempt %d/%d "
+                            "(%s: %s); retrying in %.1f seconds",
+                            remote_bootstrap_addr,
+                            attempt,
+                            max_attempts,
+                            type(e).__name__,
+                            e,
+                            retry_delay,
+                        )
+                        await asyncio.sleep(retry_delay)
                 response.raise_for_status()
                 data: dict = response.json()
                 for _, dp_entry in data.items():
@@ -2455,8 +2476,9 @@ class MooncakeConnectorWorker:
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
         except Exception as e:
             logger.error(
-                "Failed to connect to bootstrap server %s: %s",
+                "Failed to connect to bootstrap server %s (%s): %s",
                 remote_bootstrap_addr,
+                type(e).__name__,
                 e,
             )
 
