@@ -397,10 +397,14 @@ def get_hermes_structural_tag(
             stop_after_first=True,
         )
     else:
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=_hermes_tool_tags(tools),
-            separator="",
-            at_least_one=True,
+        # Hermes chat templates render a newline between parallel tool calls;
+        # some fine-tuned templates write them back to back.
+        tags = _hermes_tool_tags(tools)
+        suffix_tag = OrFormat(
+            elements=[
+                TagsWithSeparatorFormat(tags=tags, separator=sep, at_least_one=True)
+                for sep in ("\n", "")
+            ]
         )
 
     return StructuralTag(format=suffix_tag)
