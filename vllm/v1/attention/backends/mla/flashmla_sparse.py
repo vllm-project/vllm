@@ -117,7 +117,7 @@ token's KV cache is 352 Bytes, structured as:
     elements, stored permuted (an 8x4 -> 4x8 transpose: the scale for element
     block `s` lives at byte `8 * (s & 3) + (s >> 2)`) so that the 8 scales one
     FlashMLA dequant thread needs are contiguous. See the layout comment in
-    `csrc/libtorch_stable/cache_kernels.cu`.
+    `csrc/cache_kernels.cu`.
 
 """
 

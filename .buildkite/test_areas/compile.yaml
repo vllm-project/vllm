@@ -40,7 +40,7 @@ steps:
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   source_file_dependencies:
-  - csrc/libtorch_stable/quantization/fp4/
+  - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/layers/fusion/
   - vllm/model_executor/layers/layernorm.py
@@ -96,7 +96,7 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
-    - csrc/libtorch_stable/quantization/
+    - csrc/quantization/
     - vllm/model_executor/
     - vllm/v1/attention/
     - vllm/compilation/
@@ -117,7 +117,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - csrc/libtorch_stable/quantization/
+      - csrc/quantization/
       - vllm/model_executor/
       - vllm/v1/attention/
       - vllm/compilation/
@@ -136,7 +136,7 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
-    - csrc/libtorch_stable/quantization/
+    - csrc/quantization/
     - vllm/compilation/
     # can affect pattern matching
     - vllm/model_executor/layers/layernorm.py
@@ -158,7 +158,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - csrc/libtorch_stable/quantization/
+      - csrc/quantization/
       - vllm/compilation/
       - vllm/model_executor/layers/layernorm.py
       - vllm/model_executor/layers/activation.py
@@ -195,7 +195,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - .buildkite/test_areas/compile.yaml
-      - csrc/libtorch_stable/quantization/
+      - csrc/quantization/
       - vllm/compilation/
       - vllm/model_executor/
       - vllm/v1/attention/
@@ -213,7 +213,7 @@ steps:
   device: h100
   num_devices: 2
   source_file_dependencies:
-    - csrc/libtorch_stable/quantization/
+    - csrc/quantization/
     - vllm/model_executor/
     - vllm/v1/attention/
     - vllm/compilation/
@@ -232,7 +232,7 @@ steps:
       - image-build-amd
       working_dir: /vllm-workspace/
       source_file_dependencies:
-      - csrc/libtorch_stable/quantization/
+      - csrc/quantization/
       - vllm/compilation/
       - vllm/distributed/
       - vllm/model_executor/
@@ -271,7 +271,7 @@ steps:
   device: h100
   num_devices: 2
   source_file_dependencies:
-    - csrc/libtorch_stable/quantization/
+    - csrc/quantization/
     - vllm/compilation/
     # can affect pattern matching
     - vllm/model_executor/layers/layernorm.py
@@ -303,7 +303,7 @@ steps:
       - tests/compile/fusions_e2e/
       - tests/utils.py
       - tests/conftest.py
-      - csrc/libtorch_stable/quantization/
+      - csrc/quantization/
       commands:
       # Existing MI300 jobs own BF16; TP2 Quick owns the excluded Llama cell.
       - amd-smi
@@ -316,7 +316,7 @@ steps:
   device: b200-k8s
   num_devices: 2
   source_file_dependencies:
-    - csrc/libtorch_stable/quantization/
+    - csrc/quantization/
     - vllm/model_executor/
     - vllm/v1/attention/
     - vllm/compilation/
@@ -347,7 +347,7 @@ steps:
       - tests/compile/fusions_e2e/
       - tests/utils.py
       - tests/conftest.py
-      - csrc/libtorch_stable/quantization/
+      - csrc/quantization/
       commands:
       # Dummy-weight rewrite coverage; trained FP8 AR/RMS equivalence is unresolved.
       # TODO: FP4 output-quant and trained MXFP4 AR/RMS fusion remain unsupported.
@@ -369,7 +369,7 @@ steps:
   - tests/compile/fusions_e2e/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
-  - csrc/libtorch_stable/quantization/
+  - csrc/quantization/
   - vllm/v1/attention/
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
@@ -390,7 +390,7 @@ steps:
   - tests/compile/fusions_e2e/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
-  - csrc/libtorch_stable/quantization/
+  - csrc/quantization/
   - vllm/v1/attention/
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1

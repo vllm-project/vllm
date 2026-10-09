@@ -704,7 +704,7 @@ class HiSparseRuntime:
                 "HiSparse requires its compiled _C_cache_ops CUDA kernels "
                 "(host-resident decode has no Python fallback). Rebuild vLLM "
                 "from source so "
-                "csrc/libtorch_stable/hisparse_kernels.cu is included."
+                "csrc/hisparse_kernels.cu is included."
             )
         self.max_num_reqs = max_num_reqs
         self.row_width = row_width
