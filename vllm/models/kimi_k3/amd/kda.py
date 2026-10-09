@@ -13,6 +13,10 @@ from vllm.config import VllmConfig
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -37,6 +41,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
@@ -300,13 +305,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         qkv = qkv.permute(1, 0, 2, 3).contiguous().unsqueeze(1)
         return qkv.unbind(0)
 
+    def get_input_quant_key(self) -> QuantKey | None:
+        return get_input_quant_key(self.in_proj_qkvgfab)
+
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        num_tokens = hidden_states.size(0)
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+        num_tokens = projected_qkvgfab.shape[0]
 
         split_sizes = [
             3 * self.local_projection_size,
@@ -326,8 +334,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         core_attn_out = torch.empty(
             (1, num_tokens, self.local_num_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+            dtype=projected_qkvgfab.dtype,
+            device=projected_qkvgfab.device,
         )
 
         self._forward(

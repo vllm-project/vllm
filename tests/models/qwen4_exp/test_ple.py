@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -44,6 +45,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
@@ -585,6 +587,16 @@ def test_ple_embedding_respects_inc_layer_config() -> None:
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix)
 
 
+def test_ple_embedding_is_unquantized_under_quark() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = QuarkConfig({"exclude": [], "global_quant_config": {}})
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
 def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
     quant_config = ModelOptNvFp4Config(exclude_modules=[prefix])
@@ -1091,7 +1103,7 @@ def test_fused_ngram_ids_correctness(
     contexts: list[list[int]],
     first_token_id: int,
 ) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple import ple_ngram_ids
+    from vllm.models.qwen4_exp.common.ops.ple import ple_ngram_ids
 
     device = torch.device("cuda")
     query_start_loc = torch.tensor(
@@ -1846,15 +1858,20 @@ def _make_conv_metadata(
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "layer_cls", [Qwen4ExpPLELayer, Qwen4ExpPLELayerAMD], ids=["nvidia", "amd"]
+)
 def test_fused_conv_correctness(
     case: _ConvBatchCase,
     state_layout: str,
+    layer_cls: type[nn.Module],
 ) -> None:
     device = torch.device("cuda")
     metadata, num_real_tokens = _make_conv_metadata(case, device)
     if case.state_index_stride > 1:
         assert metadata.state_indices_tensor.stride(0) == case.state_index_stride
-    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    # layer_cls is type[nn.Module], so layer_cls.__new__ is type.__new__.
+    module = object.__new__(layer_cls)
     nn.Module.__init__(module)
     module.conv_state_len = (case.kernel_size - 1) * case.dilation
     module.short_conv_dilation = case.dilation
@@ -1927,7 +1944,7 @@ def test_fused_conv_correctness(
 def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
     import math
 
-    from vllm.models.qwen4_exp.nvidia.ops.ple import ple_gate
+    from vllm.models.qwen4_exp.common.ops.ple import ple_gate
 
     device = torch.device("cuda")
     hc, h = 4, 2560
@@ -2027,7 +2044,6 @@ def _build_amd_ngram_embedding(
             embedding_dim=config.ple_embed_dim,
             ple_dense_layer_id=0,
             max_total_tokens=4,
-            max_num_reqs=2,
             prefix="test.ple_embedding",
             layer_name="test.ple",
             quant_config=(
@@ -2213,3 +2229,47 @@ def test_amd_pinned_embedding_output_written_under_cudagraph_capture(
 
         expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
         torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="only the ROCm backend runs the n-gram embedding under torch.compile",
+)
+@pytest.mark.parametrize(
+    ("query_lens", "contexts"),
+    [([3, 1], [[5, 6], [0, 7]]), ([1, 0, 2], [[1, 2], [3, 4], [0, 0]])],
+    ids=["two-requests", "empty-request"],
+)
+def test_amd_ngram_embedding_matches_reference_under_compile(
+    monkeypatch: pytest.MonkeyPatch,
+    query_lens: list[int],
+    contexts: list[list[int]],
+) -> None:
+    """The AMD n-gram ID op must run under Dynamo with a symbolic request count."""
+    module, loaded_weight = _build_amd_ngram_embedding(
+        monkeypatch, device="cuda:0", cpu_offload=False, fp8_checkpoint=False
+    )
+    device = torch.device("cuda:0")
+    query_start_loc = torch.tensor(
+        [0, *accumulate(query_lens)], dtype=torch.int32, device=device
+    )
+    input_ids = torch.tensor(
+        [9, 0, 11, 12][: sum(query_lens)], dtype=torch.int32, device=device
+    )
+    ngram_context = torch.tensor(contexts, dtype=torch.int32, device=device)
+
+    compiled = torch.compile(module, fullgraph=True, dynamic=True)
+    output = compiled(input_ids, query_start_loc, ngram_context)
+
+    ngram_ids = _reference_ngram_ids(
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        module.layer_multipliers,
+        module.ngram_heads_vocab_sizes,
+        module.ngram_heads_offsets,
+        module.eos_token_id,
+        module.heads_per_ngram,
+    )
+    expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)

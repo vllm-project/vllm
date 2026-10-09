@@ -58,13 +58,17 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.int8_utils import block_dequant
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    LoaderFunction,
+    composed_weight_loader,
+    default_weight_loader,
+)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -78,6 +82,23 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _scaled_weight_loader(scale: float) -> LoaderFunction:
+    return composed_weight_loader(default_weight_loader, lambda x: x * scale)
+
+
+def scale_mla_lora_norms_on_load(self_attn: nn.Module, config) -> None:
+    """Fold LongCat's MLA LoRA scaling into the q/kv_a_layernorm weight loaders."""
+    for norm, rank, enabled in (
+        (self_attn.q_a_layernorm, config.q_lora_rank, config.mla_scale_q_lora),
+        (self_attn.kv_a_layernorm, config.kv_lora_rank, config.mla_scale_kv_lora),
+    ):
+        if enabled:
+            scale = (config.hidden_size / rank) ** 0.5
+            set_weight_attrs(
+                norm.weight, {"weight_loader": _scaled_weight_loader(scale)}
+            )
 
 
 class FlashMLP(nn.Module):
@@ -265,6 +286,8 @@ class FlashDecoderLayer(nn.Module):
                 for i in range(2)
             ]
         )
+        for self_attn in self.self_attn:
+            scale_mla_lora_norms_on_load(self_attn, config)
         self.input_layernorm = nn.ModuleList(
             [RMSNorm(config.hidden_size, eps=config.rms_norm_eps) for i in range(2)]
         )
@@ -450,6 +473,9 @@ class FlashModel(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            # The MTP layers are loaded by LongCatFlashMTP.
+            if name.startswith("mtp."):
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -460,9 +486,6 @@ class FlashModel(nn.Module):
                 if (
                     name.endswith(".bias") or name.endswith("_bias")
                 ) and name not in params_dict:
-                    continue
-                # Skip mtp
-                if ".mtp." in name:
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -478,9 +501,6 @@ class FlashModel(nn.Module):
                         continue
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
-                    # Skip mtp
-                    if ".mtp." in name_mapped:
-                        continue
                     if (
                         name_mapped.endswith(".bias") or name_mapped.endswith("_bias")
                     ) and name not in params_dict:
@@ -515,9 +535,6 @@ class FlashModel(nn.Module):
                     # Skip loading kv_scale from ckpts towards new design.
                     if name.endswith(".kv_scale") and name not in params_dict:
                         continue
-                    # Skip mtp
-                    if ".mtp." in name:
-                        continue
                     if name is None:
                         continue
                     if is_pp_missing_parameter(name, self):
@@ -528,54 +545,6 @@ class FlashModel(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-        for layer_id in range(self.config.num_layers):
-            for i in range(2):
-                if isinstance(self.layers[layer_id], PPMissingLayer):
-                    continue
-                self_attn = self.layers[layer_id].self_attn[i]
-                if (
-                    self.quant_config is not None
-                    and hasattr(self.quant_config, "weight_block_size")
-                    and self_attn.kv_b_proj.weight.dtype
-                    in (
-                        torch.float8_e4m3fn,
-                        torch.float8_e4m3fnuz,
-                    )
-                ):
-                    weight_block_size = self.quant_config.weight_block_size
-                    if weight_block_size is not None:
-                        assert hasattr(self_attn.kv_b_proj, "weight_scale_inv")
-                        dtype = torch.get_default_dtype()
-                        w = block_dequant(
-                            self_attn.kv_b_proj.weight,
-                            self_attn.kv_b_proj.weight_scale_inv,
-                            weight_block_size,
-                        ).to(dtype)
-                else:
-                    w = self_attn.kv_b_proj.weight
-
-                w_kc, w_vc = w.unflatten(
-                    0, (-1, self_attn.qk_nope_head_dim + self_attn.v_head_dim)
-                ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
-                self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
-                self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
-                # Guard against compounding on incremental load_weights calls:
-                # the in-place ``*=`` would otherwise re-apply the MLA LoRA
-                # scaling to the layernorm weights on each pass.
-                if self.config.mla_scale_q_lora and not getattr(
-                    self_attn, "_mla_q_lora_scaled", False
-                ):
-                    self_attn.q_a_layernorm.weight.data *= (
-                        self.config.hidden_size / self.config.q_lora_rank
-                    ) ** 0.5
-                    self_attn._mla_q_lora_scaled = True
-                if self.config.mla_scale_kv_lora and not getattr(
-                    self_attn, "_mla_kv_lora_scaled", False
-                ):
-                    self_attn.kv_a_layernorm.weight.data *= (
-                        self.config.hidden_size / self.config.kv_lora_rank
-                    ) ** 0.5
-                    self_attn._mla_kv_lora_scaled = True
         return loaded_params
 
 
