@@ -1079,6 +1079,7 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
         ),
         logger_manager=Mock(),
         _record_sleep_snapshot=Mock(),
+        _run_output_handler=Mock(),
     )
 
     async def call_release():

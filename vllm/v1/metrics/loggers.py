@@ -76,9 +76,11 @@ class StatLoggerBase(ABC):
         pass
 
     def record_sleep_snapshot(self, state: EngineSleepState, engine_idx: int):  # noqa
+        """Receive engine state events in place of the legacy callback."""
         pass
 
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
+        """Legacy callback, no longer dispatched for engine-originated state events."""
         pass
 
 

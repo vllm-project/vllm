@@ -39,6 +39,11 @@ unknown resources, and `engine_fully_awake` remains zero. A new sleep request
 while only some resources are awake is rejected until that partial transition
 has a defined executor contract.
 
+After a partial wake, restore the remaining resources before requesting sleep
+again. A rejected sleep does not change resource states or dispatch a memory
+RPC. EngineCore pauses scheduling before asking the executor to sleep; this
+failure leaves scheduling paused, preserving the existing pause-first contract.
+
 `wake_up(None)` restores all sleeping resources. An empty tag list or a list
 containing an invalid tag is a no-op, including for the scheduler. The
 `scheduling` tag explicitly requests scheduler resume without waking memory;
@@ -82,3 +87,14 @@ The legacy stat-logger `record_sleep_state` method remains available for custom
 logger compatibility. Engine-originated snapshots use the optional
 `record_sleep_snapshot` callback instead; custom loggers can implement that
 callback to observe per-engine resource state.
+Custom loggers that rely on engine sleep-state events must implement
+`record_sleep_snapshot(state, engine_idx)`. Implementing only
+`record_sleep_state` no longer receives engine-originated state events. The old
+callback remains available for explicit callers and legacy gauge initialization;
+there is no dual dispatch or mapping of resource snapshots to legacy levels.
+The ordinary `record` interface is unchanged.
+
+Frontend consumption of telemetry-only snapshots leaves renderer MM cache stats
+buffered for the next normal scheduler update. AsyncLLM starts its existing
+output handler on the first asynchronous sleep, wake, pause, resume or KV release,
+even when constructed before an event loop and no generation is requested.

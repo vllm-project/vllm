@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from contextlib import suppress
 from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -9,13 +11,21 @@ import msgspec
 import pytest
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
+from vllm.renderers.base import BaseRenderer
 from vllm.v1.core.sched.interface import PauseState
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.core_client import AsyncMPClient
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import PrometheusStatLogger, StatLoggerManager
-from vllm.v1.metrics.stats import EngineSleepState, SchedulerStats
+from vllm.v1.metrics.loggers import (
+    PrometheusStatLogger,
+    StatLoggerBase,
+    StatLoggerManager,
+)
+from vllm.v1.metrics.stats import EngineSleepState, MultiModalCacheStats, SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -73,6 +83,25 @@ def test_partial_wake_then_sleep_is_rejected():
         "weights": "resident",
         "kv_cache": "released",
     }
+
+
+def test_engine_partial_wake_sleep_rejection_preserves_resources_and_pause():
+    engine = make_engine()
+    engine.pause_scheduler = Mock(
+        side_effect=lambda **kwargs: engine.scheduler.set_pause_state(
+            PauseState.PAUSED_ALL
+        )
+    )
+    engine.model_executor.sleep(1)
+    engine.wake_up(["weights"])
+    before = engine.get_sleep_state()
+    with pytest.raises(RuntimeError, match="partially awake"):
+        engine.sleep(1)
+    assert engine.get_sleep_state() == before
+    assert engine.model_executor.collective_rpc.call_count == 2
+    assert engine.wake_up(["kv_cache"]) is True
+    engine.sleep(1)
+    assert engine.is_scheduler_paused()
 
 
 def test_failed_sleep_then_wake_keeps_scheduler_paused_and_metric_zero():
@@ -411,6 +440,21 @@ def test_identical_sleep_snapshots_are_not_recorded_twice():
     assert logger.record_sleep_snapshot.call_count == 2
 
 
+def test_engine_snapshots_do_not_dispatch_legacy_logger_callback():
+    legacy = SimpleNamespace(record_sleep_state=Mock())
+    legacy.record_sleep_snapshot = (
+        lambda state, idx: StatLoggerBase.record_sleep_snapshot(legacy, state, idx)
+    )
+    modern = Mock()
+    manager = object.__new__(StatLoggerManager)
+    manager.stat_loggers = [legacy, modern]
+    state = EngineSleepState(True, "offloaded", "released")
+    manager.record_sleep_snapshot(state, 0)
+    legacy.record_sleep_state.assert_not_called()
+    modern.record_sleep_state.assert_not_called()
+    modern.record_sleep_snapshot.assert_called_once_with(state, 0)
+
+
 def test_new_series_absent_until_first_snapshot():
     registry = CollectorRegistry()
     logger = object.__new__(PrometheusStatLogger)
@@ -461,3 +505,216 @@ def test_scheduler_snapshot_msgpack_backward_compatibility():
     )
     assert decoded.sleep_state == state
     assert decoded.sleep_state_only
+
+
+def make_buffered_frontend(use_async):
+    logger, registry = make_logger()
+    normal = Mock()
+    manager = object.__new__(StatLoggerManager)
+    manager.stat_loggers = [
+        SimpleNamespace(
+            record=normal.record, record_sleep_snapshot=logger.record_sleep_snapshot
+        )
+    ]
+    recorded = asyncio.Event()
+
+    def record(**kwargs):
+        StatLoggerManager.record(manager, **kwargs)
+        recorded.set()
+
+    manager.record = Mock(side_effect=record)
+    manager.log_engine_initialized = Mock()
+    stats = MultiModalCacheStats()
+    stats.record(num_queries=5, num_hits=3)
+    renderer = SimpleNamespace(
+        _mm_cache_stats=stats,
+        mm_processor_cache=None,
+        clear_mm_cache_async=AsyncMock(),
+        shutdown=Mock(),
+        tokenizer=None,
+    )
+    renderer.stat_mm_cache = Mock(wraps=lambda: BaseRenderer.stat_mm_cache(renderer))
+    queue: asyncio.Queue[EngineCoreOutputs] = asyncio.Queue()
+    core = Mock(engine_ranks_managed=[0], get_output_async=queue.get)
+    processor = object.__new__(OutputProcessor)
+    processor.lora_states = Mock()
+    processor.process_outputs = Mock(
+        return_value=SimpleNamespace(request_outputs=[], reqs_to_abort=[])
+    )
+    processor.propagate_error = Mock()
+    if use_async:
+        config = Mock()
+        config.observability_config.otlp_traces_endpoint = None
+        config.profiler_config.should_profile_frontend = False
+        with (
+            patch("vllm.v1.engine.async_llm.configure_logging_if_needed"),
+            patch("vllm.v1.engine.async_llm.maybe_register_config_serialize_by_value"),
+            patch(
+                "vllm.v1.engine.async_llm.load_stat_logger_plugin_factories",
+                return_value=[],
+            ),
+            patch(
+                "vllm.v1.engine.async_llm.renderer_from_config", return_value=renderer
+            ),
+            patch("vllm.v1.engine.async_llm.InputProcessor"),
+            patch("vllm.v1.engine.async_llm.OutputProcessor", return_value=processor),
+            patch(
+                "vllm.v1.engine.async_llm.EngineCoreClient.make_async_mp_client",
+                return_value=core,
+            ),
+            patch("vllm.v1.engine.async_llm.StatLoggerManager", return_value=manager),
+        ):
+            engine = AsyncLLM(config, Mock(), log_stats=True)
+        assert engine.output_handler is None
+        engine.shutdown = Mock()
+    else:
+        engine = object.__new__(LLMEngine)
+        engine.renderer = renderer
+        engine.engine_core = core
+        engine.output_processor = processor
+        engine.logger_manager = manager
+        engine.log_stats = True
+        engine.should_execute_dummy_batch = False
+        engine.do_log_stats_with_interval = Mock()
+    return SimpleNamespace(
+        engine=engine,
+        renderer=renderer,
+        stats=stats,
+        normal=normal,
+        registry=registry,
+        queue=queue,
+        recorded=recorded,
+        use_async=use_async,
+    )
+
+
+@pytest.fixture
+def buffered_frontend(request):
+    return make_buffered_frontend(request.param)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("buffered_frontend", [False, True], indirect=True)
+async def test_state_only_preserves_mm_stats_for_next_normal_output(buffered_frontend):
+    f = buffered_frontend
+    snapshot = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(
+            sleep_state=EngineSleepState(True), sleep_state_only=True
+        )
+    )
+    normal = EngineCoreOutputs(
+        outputs=[EngineCoreOutput(request_id="request", new_token_ids=[1])],
+        scheduler_stats=SchedulerStats(num_running_reqs=7, kv_cache_usage=0.25),
+    )
+    if f.use_async:
+        f.engine._run_output_handler()
+    else:
+        f.engine.engine_core.get_output.side_effect = [snapshot, normal]
+    try:
+        for output in (snapshot, normal):
+            f.recorded.clear()
+            if f.use_async:
+                f.queue.put_nowait(output)
+                await asyncio.wait_for(f.recorded.wait(), timeout=5)
+            else:
+                f.engine.step()
+            if output is snapshot:
+                f.renderer.stat_mm_cache.assert_not_called()
+                assert f.renderer._mm_cache_stats is f.stats
+                assert (f.stats.requests, f.stats.queries, f.stats.hits) == (1, 5, 3)
+                f.normal.record.assert_not_called()
+                f.engine.output_processor.lora_states.update_scheduler_stats.assert_not_called()
+                assert (
+                    f.registry.get_sample_value(
+                        "vllm:engine_fully_awake", {"engine": "0"}
+                    )
+                    == 0
+                )
+        f.renderer.stat_mm_cache.assert_called_once_with()
+        f.normal.record.assert_called_once()
+        assert f.normal.record.call_args.kwargs["mm_cache_stats"] is f.stats
+        assert f.normal.record.call_args.args[0] is normal.scheduler_stats
+        assert f.normal.record.call_args.args[1] is not None
+        assert f.renderer._mm_cache_stats.queries == 0
+        f.engine.output_processor.lora_states.update_scheduler_stats.assert_called_once_with(
+            normal.scheduler_stats
+        )
+    finally:
+        if f.use_async:
+            f.engine.output_handler.cancel()
+            with suppress(asyncio.CancelledError):
+                await f.engine.output_handler
+
+
+@pytest.fixture
+def idle_async_frontend():
+    with pytest.raises(RuntimeError, match="no running event loop"):
+        asyncio.get_running_loop()
+    return make_buffered_frontend(True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "pause_generation",
+        "resume_generation",
+        "sleep",
+        "wake_up",
+        "release_kv_cache_memory",
+    ],
+)
+async def test_first_control_operation_starts_idle_output_handler(
+    idle_async_frontend, operation
+):
+    f = idle_async_frontend
+    engine = f.engine
+    assert engine.output_handler is None
+    methods = {
+        "pause_generation": "pause_scheduler_async",
+        "resume_generation": "resume_scheduler_async",
+        "sleep": "sleep_async",
+        "wake_up": "wake_up_async",
+        "release_kv_cache_memory": "release_kv_cache_memory_async",
+    }
+
+    async def control(name):
+        state = EngineSleepState(
+            name not in ("resume_generation", "wake_up"),
+            "offloaded" if name == "sleep" else "resident",
+            "released" if name in ("sleep", "release_kv_cache_memory") else "resident",
+        )
+
+        def publish(*args, **kwargs):
+            f.queue.put_nowait(
+                EngineCoreOutputs(
+                    scheduler_stats=SchedulerStats(
+                        sleep_state=state, sleep_state_only=True
+                    )
+                )
+            )
+            return state.fully_awake
+
+        setattr(engine.engine_core, methods[name], AsyncMock(side_effect=publish))
+        f.recorded.clear()
+        await getattr(engine, name)()
+        await asyncio.wait_for(f.recorded.wait(), timeout=5)
+        assert f.registry.get_sample_value(
+            "vllm:engine_fully_awake", {"engine": "0"}
+        ) == int(state.fully_awake)
+
+    try:
+        await control(operation)
+        handler = engine.output_handler
+        assert handler is not None
+        for name in methods:
+            await control(name)
+            assert engine.output_handler is handler
+        f.normal.record.assert_not_called()
+        f.renderer.stat_mm_cache.assert_not_called()
+        engine.output_processor.propagate_error.assert_not_called()
+    finally:
+        if engine.output_handler is not None:
+            engine.output_handler.cancel()
+            with suppress(asyncio.CancelledError):
+                await engine.output_handler

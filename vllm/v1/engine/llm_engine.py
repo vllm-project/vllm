@@ -358,7 +358,11 @@ class LLMEngine:
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
-                    mm_cache_stats=self.renderer.stat_mm_cache(),
+                    mm_cache_stats=(
+                        None
+                        if outputs.scheduler_stats.sleep_state_only
+                        else self.renderer.stat_mm_cache()
+                    ),
                 )
                 if outputs.outputs:
                     self.do_log_stats_with_interval()
