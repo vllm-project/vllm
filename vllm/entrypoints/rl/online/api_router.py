@@ -46,7 +46,8 @@ async def pause_generation(
             - ``"keep"``: Freeze requests in queue; they resume on /resume.
         wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
-            draining. Ignored when mode="keep".
+            draining. Applies to every mode, including ``"keep"``; set to
+            ``False`` to preserve cache for faster resume.
 
     """
     engine = engine_client(raw_request)

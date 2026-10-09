@@ -2663,6 +2663,124 @@ def test_pause_new_ignores_streaming_session_waiting_for_input():
     assert scheduler.get_num_unfinished_requests() == 0
 
 
+def _park_streaming_session(scheduler, stop_token=7, req_id="s"):
+    """Drive one resumable request to a parked WAITING_FOR_STREAMING_REQ."""
+    (session,) = create_requests(
+        num_requests=1,
+        num_tokens=4,
+        stop_token_ids=[stop_token],
+        req_ids=[req_id],
+    )
+    session.resumable = True
+    scheduler.add_request(session)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[req_id],
+            req_id_to_index={req_id: 0},
+            sampled_token_ids=[[stop_token]],
+        ),
+    )
+    return session
+
+
+def test_reset_prefix_cache_reclaims_parked_streaming_session():
+    """A keep-pause clear_cache reset must reclaim a parked session's blocks
+    instead of failing, and the session must stay parked and intact."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    session = _park_streaming_session(scheduler)
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert session in scheduler.kv_holding_waiting
+    assert scheduler.kv_cache_manager.get_block_ids("s")[0]
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    # Blockless now, so it leaves the kv-holding queue, but it is still a
+    # parked session waiting for the next chunk.
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert scheduler.num_waiting_for_streaming_input == 1
+    assert session in scheduler.waiting
+    assert session not in scheduler.kv_holding_waiting
+    assert session.num_computed_tokens == 0
+    assert not scheduler.kv_cache_manager.get_block_ids("s")[0]
+    # The blocks are gone; the trajectory is not.
+    assert len(session.all_token_ids) == 5
+
+
+def test_reset_prefix_cache_still_fails_on_remote_kvs_holder():
+    """A request still waiting on a remote KV load holds connector-owned
+    blocks; reclaiming it stays unsupported and the reset keeps failing."""
+    block_size = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=2 * block_size, is_async=True),
+        block_size=block_size,
+    )
+    (loading,) = create_requests(
+        num_requests=1,
+        num_tokens=3 * block_size,
+        max_tokens=2,
+        block_size=block_size,
+        req_ids=["loading"],
+    )
+    scheduler.add_request(loading)
+    output = scheduler.schedule()
+    assert loading.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(output, _runner_output([]))
+
+    with pytest.raises(RuntimeError, match="Failed to reset KV cache"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+
+
+def test_reset_prefix_cache_reclaims_resumed_streaming_session():
+    """A resumed streaming session waiting for compute still holds its prior
+    blocks; the reset reclaims it like a preemption and it recomputes from
+    scratch."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    session = _park_streaming_session(scheduler)
+
+    (chunk,) = create_requests(num_requests=1, num_tokens=2, req_ids=["s"])
+    chunk.resumable = True
+    scheduler.add_request(chunk)
+    assert session.status == RequestStatus.WAITING
+    assert session in scheduler.kv_holding_waiting
+    assert scheduler.kv_cache_manager.get_block_ids("s")[0]
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert session.status == RequestStatus.PREEMPTED
+    assert session.num_computed_tokens == 0
+    assert session in scheduler.waiting
+    assert not scheduler.kv_cache_manager.get_block_ids("s")[0]
+
+    # The prefix cache was cleared, so resuming recomputes the full prompt.
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {"s": session.num_tokens}
+
+
+def test_resume_after_reset_preserves_parked_session_history():
+    """Resuming a reset-reclaimed session folds the prior turn into the
+    prompt and recomputes it; without the fold guard the same resume would
+    delete the whole trajectory because num_computed_tokens is 0."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    session = _park_streaming_session(scheduler)
+    prior_tokens = list(session.all_token_ids)
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    (chunk,) = create_requests(num_requests=1, num_tokens=2, req_ids=["s"])
+    chunk.resumable = True
+    scheduler.add_request(chunk)
+
+    assert session.status == RequestStatus.WAITING
+    assert scheduler.num_waiting_for_streaming_input == 0
+    assert list(session.all_token_ids) == prior_tokens + list(chunk.prompt_token_ids)
+    assert session.num_prompt_tokens == len(prior_tokens) + len(chunk.prompt_token_ids)
+
+    # Full recompute: the cleared cache has nothing to hit.
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {"s": session.num_tokens}
+
+
 @pytest.mark.parametrize(
     ("load_modes", "expected_has_sync_loads"),
     [
