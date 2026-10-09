@@ -878,9 +878,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
+        # XQA reads an NVFP4 cache only on SM12x; SM90 decodes it with fa2.
         can_use_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
             self.num_qo_heads, self.num_kv_heads, is_prefill=False
-        )
+        ) and (not self.nvfp4_fa2 or current_platform.is_device_capability_family(120))
         # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
         # get_supported_kernel_block_sizes).
         assert self.page_size <= 64 or (
@@ -1072,7 +1073,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=spec.num_kv_heads,
                 is_prefill=False,
-            ) or (is_xqa_arch and not _is_xqa_head_dim_supported(spec.head_size)):
+            ) or (
+                is_xqa_arch
+                and (
+                    (
+                        spec.kv_quant_mode.is_nvfp4
+                        and not current_platform.is_device_capability_family(120)
+                    )
+                    or not _is_xqa_head_dim_supported(spec.head_size)
+                )
+            ):
                 has_uniform_batch_support = False
                 break
 
