@@ -40,6 +40,7 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.ops.fp8e4nv import (
     FP8E4NV_EXTERN_LIBS,
     convert_from_fp8e4m3,
+    convert_to_fp8e4m3,
 )
 
 
@@ -74,6 +75,7 @@ def quantize_and_insert_k_kernel(
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
     use_fnuz: tl.constexpr = False,
+    fp8_software_conv: tl.constexpr = False,
 ):
     """Quantize K tensor and insert into paged K cache.
 
@@ -85,7 +87,9 @@ def quantize_and_insert_k_kernel(
     One program per token.
 
     ``use_fnuz=True`` selects FNUZ (``tl.float8e4b8``); default OCP
-    (``tl.float8e4nv``) matches every production caller.
+    (``tl.float8e4nv``) matches every production caller. Pre-SM89 CUDA uses
+    software conversion, preserving finite subnormals and signed zeros, with
+    NaN propagation disabled.
     """
     pid = tl.program_id(0)
 
@@ -150,11 +154,12 @@ def quantize_and_insert_k_kernel(
             x_clamped = tl.clamp(x_scaled, -fp8_max, fp8_max)
 
             # Convert to fp8 (FNUZ on gfx942, OCP elsewhere), then bitcast to uint8.
-            if use_fnuz:
-                x_fp8 = x_clamped.to(tl.float8e4b8)
+            if fp8_software_conv:
+                x_uint8 = convert_to_fp8e4m3(x_clamped)
+            elif use_fnuz:
+                x_uint8 = x_clamped.to(tl.float8e4b8).to(tl.uint8, bitcast=True)
             else:
-                x_fp8 = x_clamped.to(tl.float8e4nv)
-            x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
+                x_uint8 = x_clamped.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
 
             # Store as uint8 (1 byte each)
             tl.store(token_fp8_ptr + offsets, x_uint8, mask=mask)
@@ -223,6 +228,9 @@ def quantize_and_insert_k_cache(
         FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
     TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
 
+    fp8_software_conv = (
+        current_platform.is_cuda() and not current_platform.has_device_capability(89)
+    )
     grid = (num_tokens,)
 
     quantize_and_insert_k_kernel[grid](
@@ -241,6 +249,8 @@ def quantize_and_insert_k_cache(
         fp8_max=FP8_MAX,
         n_quant_blocks=8,
         use_fnuz=use_fnuz,
+        fp8_software_conv=fp8_software_conv,
+        **({"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}),
     )
 
 
