@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm entry point for the fused Kimi-K3 KDA chunk kernel.
 
-The kernel in ``csrc/libtorch_stable/kimi_k3/fused_kda_chunk_kernel_rocm.cu``
+The kernel in ``csrc/kimi_k3/fused_kda_chunk_kernel_rocm.cu``
 replaces the chunk-state recurrence and the output GEMM of the Triton chunk
 path with a single launch that keeps the per-chunk state in registers, so the
 ``[chunks, H, V, K]`` state tensor and the recomputed values never reach HBM.

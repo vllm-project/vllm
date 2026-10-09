@@ -825,9 +825,7 @@ steps:
   - examples/features/data_parallel/data_parallel_offline.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
-  - csrc/custom_quickreduce.cu
-  - csrc/ops.h
-  - csrc/torch_bindings.cpp
+  - csrc/rocm/quickreduce/
   - vllm/model_executor/layers/
   - vllm/entrypoints/llm.py
   - vllm/config/parallel.py
@@ -1510,7 +1508,7 @@ steps:
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - csrc/rocm/
   - tests/kernels/moe
@@ -1556,6 +1554,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/attention/
+  - csrc/core/vec_dtypes/
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
@@ -1581,10 +1580,10 @@ steps:
   - vllm/platforms/rocm.py
   - tests/kernels/core/test_minimax_reduce_rms.py
   - tests/utils.py
-  - csrc/libtorch_stable/minimax_reduce_rms_kernel.cu
-  - csrc/libtorch_stable/minimax_reduce_rms_kernel.h
-  - csrc/libtorch_stable/ops.h
-  - csrc/libtorch_stable/torch_bindings.cpp
+  - csrc/minimax_reduce_rms_kernel.cu
+  - csrc/minimax_reduce_rms_kernel.h
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
   - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   optional: true
   commands:
@@ -1606,9 +1605,9 @@ steps:
   - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
   - vllm/models/kimi_k3/amd/
   - CMakeLists.txt
-  - csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu
-  - csrc/libtorch_stable/ops.h
-  - csrc/libtorch_stable/torch_bindings.cpp
+  - csrc/kimi_k3/fused_kda_decode_kernel_rocm.cu
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
   - tests/models/kimi_k3/test_amd_attn_res.py
   - tests/models/kimi_k3/test_amd_kda_decode.py
   - tests/models/kimi_k3/test_kda.py
@@ -1629,7 +1628,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/models/kimi_k3/
-  - csrc/libtorch_stable/kimi_k3/
+  - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - vllm/platforms/rocm.py
   commands:
@@ -3457,9 +3456,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/custom_quickreduce.cu
-  - csrc/ops.h
-  - csrc/torch_bindings.cpp
+  - csrc/rocm/quickreduce/
   - vllm/distributed/
   - vllm/model_executor/layers/
   - vllm/entrypoints/llm.py
@@ -3978,7 +3975,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/libtorch_stable/gdn/
+  - csrc/gdn/
   - tests/evals/qwen4_exp/
   - vllm/model_executor/layers/mamba/
   - vllm/models/qwen4_exp/
@@ -4549,10 +4546,10 @@ steps:
   - vllm/platforms/rocm.py
   - tests/kernels/core/test_minimax_reduce_rms.py
   - tests/utils.py
-  - csrc/libtorch_stable/minimax_reduce_rms_kernel.cu
-  - csrc/libtorch_stable/minimax_reduce_rms_kernel.h
-  - csrc/libtorch_stable/ops.h
-  - csrc/libtorch_stable/torch_bindings.cpp
+  - csrc/minimax_reduce_rms_kernel.cu
+  - csrc/minimax_reduce_rms_kernel.h
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
   - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   optional: true
   commands:
@@ -4567,7 +4564,7 @@ steps:
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py
@@ -4619,7 +4616,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - vllm/platforms/rocm.py
@@ -4635,6 +4632,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/attention/
+  - csrc/core/vec_dtypes/
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
@@ -4654,7 +4652,7 @@ steps:
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - csrc/rocm/
   - tests/kernels/moe
@@ -4704,7 +4702,7 @@ steps:
   - vllm/utils/torch_utils.py
   - vllm/platforms/
   - vllm/_aiter_ops.py
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - vllm/distributed/device_communicators/
   - vllm/config
   commands:
