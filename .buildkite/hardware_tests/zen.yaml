@@ -1,0 +1,85 @@
+group: Zen CPU
+depends_on: []
+steps:
+- label: Zen-CPU-Kernel Tests
+  key: zen-cpu-kernel-tests
+  # Reuse the shared CPU image (built by image-build-cpu) as the base for the zen
+  # image, so this waits for that build. run-zen-cpu-test.sh pulls it instead of
+  # recompiling vLLM on the scarce zen5 hardware (with a from-source fallback).
+  depends_on:
+  - zen-cpu-image-build
+  allow_dependency_failure: true
+  soft_fail: true
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - .buildkite/hardware_tests/cpu.yaml
+  - .buildkite/image_build/image_build_zen_cpu.sh
+  - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
+  - docker/Dockerfile.zen
+  - docker/Dockerfile.cpu
+  - requirements/cpu.txt
+  - requirements/build/cpu.txt
+  - requirements/test/cpu.txt
+  - cmake/cpu_extension.cmake
+  - vllm/model_executor/layers/utils.py
+  - vllm/model_executor/kernels/linear/zentorch_utils.py
+  - vllm/model_executor/kernels/linear/scaled_mm/zentorch.py
+  - vllm/model_executor/kernels/linear/mixed_precision/zentorch.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/__init__.py
+  - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+  - tests/test_zen_cpu_platform_detection.py
+  - tests/kernels/moe/test_zen_cpu_fused_moe.py
+  - tests/kernels/moe/test_zen_cpu_int8_moe.py
+  - vllm/v1/attention/backends/zentorch_sdpa.py
+  - tests/test_zentorch_version_pin.py
+  - vllm/v1/attention/backends/mla/prefill/zen_cpu_sdpa.py
+  - vllm/model_executor/layers/fused_moe/experts/zentorch_moe.py
+  - tests/kernels/quantization/test_zen_da8w4.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 20m "
+      pytest -x -v -s tests/model_executor/test_cpu_unquantized_gemm_dispatch.py"
+
+- label: Zen-CPU-Platform-Detection Tests
+  key: zen-cpu-platform-detection-tests
+  # Same reuse model as the kernel test: run-zen-cpu-test.sh pulls the shared
+  # image-build-cpu image and layers the zen image on top (from-source fallback).
+  depends_on:
+  - zen-cpu-image-build
+  allow_dependency_failure: true
+  soft_fail: true
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - .buildkite/hardware_tests/cpu.yaml
+  - .buildkite/image_build/image_build_zen_cpu.sh
+  - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
+  - docker/Dockerfile.zen
+  - docker/Dockerfile.cpu
+  - requirements/cpu.txt
+  - requirements/build/cpu.txt
+  - requirements/test/cpu.txt
+  - cmake/cpu_extension.cmake
+  - vllm/model_executor/layers/utils.py
+  - vllm/model_executor/kernels/linear/zentorch_utils.py
+  - vllm/model_executor/kernels/linear/scaled_mm/zentorch.py
+  - vllm/model_executor/kernels/linear/mixed_precision/zentorch.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/__init__.py
+  - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+  - tests/test_zen_cpu_platform_detection.py
+  - tests/kernels/moe/test_zen_cpu_fused_moe.py
+  - tests/kernels/moe/test_zen_cpu_int8_moe.py
+  - vllm/v1/attention/backends/zentorch_sdpa.py
+  - tests/test_zentorch_version_pin.py
+  - vllm/v1/attention/backends/mla/prefill/zen_cpu_sdpa.py
+  - vllm/model_executor/layers/fused_moe/experts/zentorch_moe.py
+  - tests/kernels/quantization/test_zen_da8w4.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 20m "
+      pytest -x -v -s tests/test_zen_cpu_platform_detection.py"

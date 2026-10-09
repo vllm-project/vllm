@@ -247,6 +247,7 @@ steps:
   source_file_dependencies:
     - .buildkite/hardware_tests/cpu.yaml
     - .buildkite/image_build/image_build_zen_cpu.sh
+    - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
     - docker/Dockerfile.zen
     - docker/Dockerfile.cpu
     - requirements/cpu.txt
