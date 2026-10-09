@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which rows the PP sampled-token broadcast must carry."""
+"""PP broadcast requirements and deferred state updates."""
 
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
 
 from vllm.v1.worker.gpu import pp_utils
 
@@ -32,7 +33,8 @@ def _batch(
     )
 
 
-def test_excludes_non_final_prefill_chunks():
+@pytest.mark.parametrize("need_aux_output", [False, True])
+def test_excludes_non_final_prefill_chunks(need_aux_output):
     """Unchanged behaviour: a chunk that does not finish its prefill is skipped."""
     # Row 0 is a middle prefill chunk and produces no sample; row 1 finishes its
     # prefill this step and therefore does.
@@ -42,21 +44,29 @@ def test_excludes_non_final_prefill_chunks():
         num_scheduled=[448, 4],
     )
 
-    mask = pp_utils.compute_need_sampled_mask(batch)
+    need_broadcast, mask = pp_utils.compute_pp_output_requirements(
+        batch, need_aux_output
+    )
 
-    assert mask is not None
+    assert need_broadcast
     assert mask.tolist() == [False, True]
 
 
-def test_none_when_no_row_samples():
-    """Unchanged behaviour: an all-prefill batch needs no broadcast at all."""
+@pytest.mark.parametrize("need_aux_output", [False, True])
+def test_skips_broadcast_when_no_row_samples(need_aux_output):
+    """Unfinished prefill chunks need neither a broadcast nor deferred updates."""
     batch = _batch(
         num_computed=[0, 512],
         prefill_len=[4096, 4096],
         num_scheduled=[448, 448],
     )
 
-    assert pp_utils.compute_need_sampled_mask(batch) is None
+    need_broadcast, mask = pp_utils.compute_pp_output_requirements(
+        batch, need_aux_output
+    )
+
+    assert not need_broadcast
+    assert mask.tolist() == [False, False]
 
 
 def test_keeps_decoding_request_past_its_length_cap():
@@ -77,9 +87,9 @@ def test_keeps_decoding_request_past_its_length_cap():
         num_scheduled=[8],
     )
 
-    mask = pp_utils.compute_need_sampled_mask(batch)
+    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
 
-    assert mask is not None
+    assert need_broadcast
     assert mask.tolist() == [True]
 
 
@@ -91,19 +101,15 @@ def test_decode_row_ahead_of_a_prefill_chunk():
         num_scheduled=[1, 448],
     )
 
-    mask = pp_utils.compute_need_sampled_mask(batch)
+    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
 
-    assert mask is not None
+    assert need_broadcast
     assert mask.tolist() == [True, False]
 
 
-def test_excludes_final_prefill_chunk_reaching_its_length_cap():
-    """A max_tokens=1 final chunk hands its token off and leaves the engine.
-
-    Disaggregated prefill submits max_tokens=1, so the request finishes with
-    the final chunk's single sample and no follow-up step on this engine
-    reads the broadcast payload.
-    """
+@pytest.mark.parametrize("need_aux_output", [False, True])
+def test_final_prefill_broadcast_needed_only_for_aux_output(need_aux_output):
+    """Terminal prefill needs a broadcast for R3 but no deferred state update."""
     batch = _batch(
         num_computed=[1000],
         prefill_len=[1004],
@@ -112,7 +118,12 @@ def test_excludes_final_prefill_chunk_reaching_its_length_cap():
         max_seq_len=[1005],
     )
 
-    assert pp_utils.compute_need_sampled_mask(batch) is None
+    need_broadcast, mask = pp_utils.compute_pp_output_requirements(
+        batch, need_aux_output
+    )
+
+    assert need_broadcast == need_aux_output
+    assert mask.tolist() == [False]
 
 
 def test_keeps_final_prefill_chunk_with_generation_budget_left():
@@ -125,9 +136,9 @@ def test_keeps_final_prefill_chunk_with_generation_budget_left():
         max_seq_len=[1004 + 256],
     )
 
-    mask = pp_utils.compute_need_sampled_mask(batch)
+    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
 
-    assert mask is not None
+    assert need_broadcast
     assert mask.tolist() == [True]
 
 
@@ -146,14 +157,15 @@ def test_length_cap_overrun_decode_row_is_kept():
         max_seq_len=[12176],
     )
 
-    mask = pp_utils.compute_need_sampled_mask(batch)
+    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
 
-    assert mask is not None
+    assert need_broadcast
     assert mask.tolist() == [True]
 
 
-def test_finishing_prefill_row_does_not_drop_a_sibling_row():
-    """Only finishing rows are excluded; a decoding sibling keeps its row."""
+@pytest.mark.parametrize("need_aux_output", [False, True])
+def test_finishing_prefill_row_does_not_drop_a_sibling_row(need_aux_output):
+    """Only the decoding sibling needs a deferred update, even with R3 enabled."""
     batch = _batch(
         num_computed=[1000, 10],
         prefill_len=[1004, 8],
@@ -162,7 +174,9 @@ def test_finishing_prefill_row_does_not_drop_a_sibling_row():
         max_seq_len=[1005, 1024],
     )
 
-    mask = pp_utils.compute_need_sampled_mask(batch)
+    need_broadcast, mask = pp_utils.compute_pp_output_requirements(
+        batch, need_aux_output
+    )
 
-    assert mask is not None
+    assert need_broadcast
     assert mask.tolist() == [False, True]

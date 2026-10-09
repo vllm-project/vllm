@@ -335,6 +335,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
+                need_aux_output=(
+                    vllm_config.aux_output_config.enable_return_routed_experts
+                ),
             )
 
         # Samplers and decode_query_len created in load_model() after
@@ -1320,7 +1323,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         has_prefill = bool(is_prefilling_np.any())
         max_seq_len_np = None
         if self.use_pp and has_prefill:
-            # consumed by the PP `compute_need_sampled_mask` for batches with prefill.
+            # Used to exclude terminal prefill rows from PP state updates.
             max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
         num_draft_tokens_np = None

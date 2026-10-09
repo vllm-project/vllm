@@ -35,21 +35,23 @@ class PendingRecv:
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
 
 
-def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
-    """Return a bool array of shape `[input_batch.num_reqs]` marking requests
-    with outputs that might be needed in a subsequent (decode) step.
-    Returns None if no sampled outputs are needed in the requests' next step."""
+def compute_pp_output_requirements(
+    input_batch: InputBatch, need_aux_output: bool = False
+) -> tuple[bool, np.ndarray]:
+    """Return whether to broadcast and which rows need deferred state updates."""
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
     # Exclude non-final prefill chunks (they don't produce a sample).
     need_sampled_mask = old_computed + input_batch.num_scheduled_tokens >= prefill_len
+    need_broadcast = need_aux_output and bool(need_sampled_mask.any())
     if input_batch.max_seq_len_np is not None:
         # Also exclude final prefill chunks whose single sampled token reaches
         # the request's length cap.
         finished_prefill = prefill_len + 1 >= input_batch.max_seq_len_np
         finished_prefill &= input_batch.is_prefilling_np
         need_sampled_mask &= ~finished_prefill
-    return need_sampled_mask if need_sampled_mask.any() else None
+    need_broadcast = need_broadcast or bool(need_sampled_mask.any())
+    return need_broadcast, need_sampled_mask
 
 
 class PPHandler:
@@ -63,12 +65,17 @@ class PPHandler:
     """
 
     def __init__(
-        self, max_num_reqs: int, num_speculative_steps: int, device: torch.device
+        self,
+        max_num_reqs: int,
+        num_speculative_steps: int,
+        device: torch.device,
+        need_aux_output: bool = False,
     ):
         self.is_last_rank = get_pp_group().is_last_rank
         self.last_rank = get_pp_group().last_rank
         self.max_sample_len = num_speculative_steps + 1
         self.num_speculative_steps = num_speculative_steps
+        self.need_aux_output = need_aux_output
         self.device = device
         self.main_stream = torch.cuda.current_stream(device)
         self.broadcast_stream = torch.cuda.Stream(device)
@@ -174,7 +181,10 @@ class PPHandler:
     ) -> None:
         """Broadcast draft proposals so non-last ranks can embed real token ids."""
         assert self.is_last_rank
-        if compute_need_sampled_mask(input_batch) is None:
+        need_broadcast, _ = compute_pp_output_requirements(
+            input_batch, self.need_aux_output
+        )
+        if not need_broadcast:
             return
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
@@ -187,10 +197,12 @@ class PPHandler:
             )
 
     def receive(self, input_batch: InputBatch) -> PendingRecv | None:
-        """Returns this step's pending receive, or None if no request is sampled."""
+        """Return this step's pending receive, or None if no broadcast is needed."""
         assert not self.is_last_rank
-        need_sampled_mask = compute_need_sampled_mask(input_batch)
-        if need_sampled_mask is None:
+        need_broadcast, need_sampled_mask = compute_pp_output_requirements(
+            input_batch, self.need_aux_output
+        )
+        if not need_broadcast:
             # Leave this step's reserved slot as None.
             return None
 
@@ -252,8 +264,10 @@ class PPHandler:
         input_batch: InputBatch,
     ) -> None:
         assert self.is_last_rank
-        if compute_need_sampled_mask(input_batch) is None:
-            # No request needs sampled outputs for a subsequent decode step.
+        need_broadcast, _ = compute_pp_output_requirements(
+            input_batch, self.need_aux_output
+        )
+        if not need_broadcast:
             return
 
         assert sampled_token_ids.dtype == torch.int64
