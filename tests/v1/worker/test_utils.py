@@ -1173,6 +1173,7 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
             is_index_group_leader=is_leader,
             row_width=8,
             kv_dtype=torch.float32,
+            stages_prefill=False,
             index_group=index_group,
             device="cpu",
         )

@@ -38,6 +38,7 @@ from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLACommonImpl,
+    SparseMLACommonMetadataBuilder,
     SparseMLAPrefillMetadata,
     _is_masked_mha_available,
     _masked_mha_workspace_fits,
@@ -110,6 +111,7 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.worker.workspace import current_workspace_manager
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -2883,14 +2885,16 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
 
 
 @requires_hisparse_ops
+@pytest.mark.parametrize("split_prefills", [False, True], ids=["one_plan", "two_plans"])
 def test_hisparse_mixed_batch_bf16_row_split(
-    default_vllm_config, dist_init, workspace_init
+    default_vllm_config, dist_init, workspace_init, split_prefills
 ):
     """Host-resident mixed batch on the bf16 path is row-split.
 
-    Two long-context speculative-decode requests + one short local-prefill
-    chunk: every decode step must be served from the bounded hot buffer before
-    it is reused, while only the prefill rows' blocks are staged host->GPU.
+    Two long-context speculative-decode requests + short local-prefill chunks:
+    every decode step must be served from the bounded hot buffer before it is
+    reused, while only the prefill rows' blocks are staged host->GPU. With
+    two_plans the prefills exceed the staging capacity and stage one at a time.
     """
     ok, reason = flashmla.is_flashmla_sparse_supported()
     if not ok:
@@ -2910,7 +2914,11 @@ def test_hisparse_mixed_batch_bf16_row_split(
     block_size = 64
 
     # Long decode contexts + a short prefill chunk (router shortcut shape).
-    batch_spec = BatchSpec(seq_lens=[2048, 2048, 192], query_lens=[2, 2, 64])
+    prefill_seq_lens = [192, 256] if split_prefills else [192]
+    batch_spec = BatchSpec(
+        seq_lens=[2048, 2048, *prefill_seq_lens],
+        query_lens=[2, 2, *([64] * len(prefill_seq_lens))],
+    )
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
     total_tokens = batch_spec.compute_num_tokens()
@@ -3001,6 +3009,10 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
     builder_cls = FlashMLASparseBackend.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    if split_prefills:
+        builder.hisparse_staging_block_capacity = cdiv(
+            max(prefill_seq_lens), block_size
+        )
     metadata = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
     )
@@ -3100,9 +3112,9 @@ def test_hisparse_mixed_batch_bf16_row_split(
     staging_calls = []
     original_gather = cache_handle.runtime.gather_prefill_cache
 
-    def spy_gather(self, kv, plan, resident_cache=None):
-        staged = original_gather(kv, plan, resident_cache)
-        staging_calls.append((plan, staged.shape))
+    def spy_gather(self, kv, plan, staging, resident_cache=None):
+        staged = original_gather(kv, plan, staging, resident_cache)
+        staging_calls.append((plan, staged))
         return staged
 
     cache_handle.runtime.gather_prefill_cache = MethodType(
@@ -3116,13 +3128,49 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
     # Only the prefill rows' blocks were staged: the decode rows' 2048-token
     # contexts (32 blocks each) must stay off the staging gather.
-    assert len(staging_calls) == 1
-    plan, staged_shape = staging_calls[0]
-    assert plan is metadata.prefill.host_staging_plan
-    prefill_blocks = cdiv(batch_spec.seq_lens[-1], block_size)
-    assert staged_shape[0] <= prefill_blocks + 1  # +1: block-0 tail padding
+    plans = metadata.prefill.host_staging_plans
+    assert len(plans) == (len(prefill_seq_lens) if split_prefills else 1)
+    assert [plan for plan, _ in staging_calls] == plans
+    # Staging uses the shared workspace, after the impl's own buffers.
+    *_, reserved = current_workspace_manager().get_simultaneous(
+        *impl.workspace_specs, cache_handle.runtime.prefill_staging_spec
+    )
+    for plan, staged in staging_calls:
+        plan_seq_lens = prefill_seq_lens
+        if split_prefills:
+            plan_seq_lens = [prefill_seq_lens[plan.request_start]]
+        plan_blocks = sum(cdiv(seq_len, block_size) for seq_len in plan_seq_lens)
+        assert staged.shape[0] <= plan_blocks + 1  # +1: block-0 tail padding
+        assert staged.data_ptr() == reserved.data_ptr()
 
     torch.testing.assert_close(backend_output, reference, rtol=0.01, atol=0.01)
+
+
+def test_hisparse_staging_plans_fit_reserved_capacity():
+    """Prefills whose staged history together exceeds the reserved buffer get
+    separate plans, so no plan stages more than the buffer holds."""
+    block_size, capacity = 4, 3
+    builder = SimpleNamespace(
+        kv_cache_spec=SimpleNamespace(block_size=block_size),
+        hisparse_staging_block_capacity=capacity,
+    )
+    # One decode, then prefills of 2, 1 and 3 blocks.
+    seq_lens = torch.tensor([5, 8, 4, 12], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        seq_lens=seq_lens,
+        query_start_loc_cpu=torch.tensor([0, 1, 3, 4, 8], dtype=torch.int32),
+    )
+    block_table = torch.arange(12, dtype=torch.int32).view(3, 4)
+
+    plans = SparseMLACommonMetadataBuilder._build_hisparse_staging_plans(
+        builder, metadata, block_table, 1, seq_lens[1:]
+    )
+
+    assert [plan.request_start for plan in plans] == [0, 2]
+    assert [plan.block_table.shape[0] for plan in plans] == [2, 1]
+    assert [plan.tokens for plan in plans] == [slice(0, 3), slice(3, 7)]
+    for plan in plans:
+        assert plan.row_ids.shape[1] <= (capacity + 1) * block_size
 
 
 def test_hisparse_prefill_staging_remap():
@@ -3154,6 +3202,8 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
         seq_lens=torch.tensor([5, 8], dtype=torch.int32),
         block_size=4,
         staging_block_capacity=4,
+        request_start=0,
+        tokens=slice(0, 0),
     )
 
     assert (plan.block_table[:, 2] == 0).all()
@@ -3173,7 +3223,12 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32)
     plan = build_hisparse_prefill_staging_plan(
-        block_table, seq_lens, block_size, staging_block_capacity=4
+        block_table,
+        seq_lens,
+        block_size,
+        staging_block_capacity=4,
+        request_start=0,
+        tokens=slice(0, 0),
     )
     # Two resident pages per host block; 0 entries are null (not resident).
     resident_table = torch.tensor(
@@ -3226,7 +3281,12 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32, device=device)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32, device=device)
     plan = build_hisparse_prefill_staging_plan(
-        block_table, seq_lens, block_size, staging_block_capacity=4
+        block_table,
+        seq_lens,
+        block_size,
+        staging_block_capacity=4,
+        request_start=0,
+        tokens=slice(0, 0),
     )
     resident_table = torch.tensor(
         [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]],
@@ -3252,8 +3312,13 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         .to(device)
     )
 
+    staging = torch.empty(
+        plan.row_ids.shape[1] * row_width * host_cache.element_size(),
+        dtype=torch.uint8,
+        device=device,
+    )
     staged = HiSparseRuntime.gather_prefill_cache(
-        None, host_cache, plan, resident_cache=resident_cache
+        None, host_cache, plan, staging, resident_cache=resident_cache
     )
 
     staged_flat = staged.view(-1, row_width).cpu()
@@ -4012,51 +4077,67 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert not lse.isnan().any()
 
 
-def test_hisparse_prefill_reuses_builder_staging_plan():
-    """Every layer must reuse the batch plan instead of synchronizing to dedupe."""
+def test_hisparse_staged_prefills_rebase_to_plan(monkeypatch):
+    """A plan that starts past the batch's decodes and earlier prefills stages
+    its own resident rows and converts only its own query tokens' top-k, against
+    its own block table with plan-relative request ids."""
+    # One decode (1 token), then prefills of 2 and 3 tokens; the plan covers
+    # only the second prefill.
     plan = SimpleNamespace(
-        block_table=torch.tensor([[0]], dtype=torch.int32),
+        block_table=torch.tensor([[7]], dtype=torch.int32),
         ensure_gpu_sources=MagicMock(),
+        request_start=1,
+        tokens=slice(2, 5),
     )
     staged = torch.empty((1, 1, 8))
+    staging = torch.empty(0, dtype=torch.uint8)
     calls = []
 
-    def gather(kv_cache, staging_plan, resident_cache=None):
-        calls.append((kv_cache, staging_plan, resident_cache))
+    def gather(kv_cache, staging_plan, staging_buffer, resident_cache=None):
+        calls.append((kv_cache, staging_plan, staging_buffer, resident_cache))
         return staged
 
+    conversions = []
+
+    def convert(req_ids, block_table, topk, **kwargs):
+        conversions.append((req_ids, block_table, topk))
+        return topk, torch.ones(topk.shape[0], dtype=torch.int32)
+
+    monkeypatch.setattr(
+        index_group_module, "triton_convert_req_index_to_global_index", convert
+    )
     resident_cache = torch.empty((1, 1, 8))
-    resident_block_table = torch.tensor([[1]], dtype=torch.int32)
     cache = SimpleNamespace(
-        runtime=SimpleNamespace(
-            gather_prefill_cache=gather,
-        ),
+        runtime=SimpleNamespace(gather_prefill_cache=gather),
         view=SimpleNamespace(cache=resident_cache, block_size=1),
-        block_table=resident_block_table,
+        block_table=torch.tensor([[10], [11], [12]], dtype=torch.int32),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
     source = torch.empty((1, 1, 8))
     metadata = SimpleNamespace(
-        num_decodes=0,
-        num_decode_tokens=0,
-        seq_lens=torch.tensor([1], dtype=torch.int32),
-        prefill=SimpleNamespace(host_staging_plan=plan),
-        req_id_per_token=torch.tensor([0], dtype=torch.int32),
+        num_decodes=1,
+        num_decode_tokens=1,
+        block_size=1,
+        req_id_per_token=torch.tensor([0, 1, 1, 2, 2, 2], dtype=torch.int32),
+        prefill=SimpleNamespace(host_staging_plans=[plan]),
+    )
+    topk_indices = torch.arange(6, dtype=torch.int32).view(6, 1)
+
+    ((tokens, result, _, _),) = list(
+        index_group.staged_prefills(0, source, metadata, topk_indices, staging=staging)
     )
 
-    result, block_table, request_ids = index_group.stage_prefill_rows(
-        0, source, metadata
-    )
-
+    assert tokens == slice(3, 6)
     assert result is staged
+    ((req_ids, block_table, topk),) = conversions
+    assert req_ids.tolist() == [0, 0, 0]
     assert block_table is plan.block_table
-    torch.testing.assert_close(request_ids, metadata.req_id_per_token)
-    plan.ensure_gpu_sources.assert_called_once()
-    args = plan.ensure_gpu_sources.call_args.args
-    torch.testing.assert_close(args[0], resident_block_table)
-    assert args[1] == 1
-    assert calls == [(source, plan, resident_cache)]
+    assert topk.flatten().tolist() == [3, 4, 5]
+    resident_rows, resident_block_size = plan.ensure_gpu_sources.call_args.args
+    assert resident_rows.tolist() == [[12]]
+    assert resident_block_size == 1
+    assert calls == [(source, plan, staging, resident_cache)]
 
 
 def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
@@ -4089,7 +4170,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         ensure_gpu_sources=MagicMock(),
     )
     metadata = SimpleNamespace(
-        prefill=SimpleNamespace(host_staging_plan=plan),
+        prefill=SimpleNamespace(host_staging_plans=[plan]),
         num_decodes=0,
     )
 

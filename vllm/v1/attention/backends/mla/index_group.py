@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +15,7 @@ from vllm.forward_context import in_piecewise_cudagraph
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.hisparse.runtime import (
@@ -22,6 +24,7 @@ from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     create_hisparse_cache_handle,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
 
 
 def _create_side_stream(device: torch.device) -> torch.Stream:
@@ -203,6 +206,8 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             row_width=row_width,
             kv_dtype=kv_dtype,
             index_group=self,
+            # fp8_ds_mla prefills stage into FlashMLA's own prefill workspace.
+            stages_prefill=kv_cache_dtype != "fp8_ds_mla",
         )
         assert cache is not None
         self.caches.append(cache)
@@ -212,6 +217,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
 
     def cache(self, layer_index: int) -> HiSparseCacheHandle:
         return self.caches[layer_index]
+
+    def prefill_staging_spec(
+        self, layer_index: int
+    ) -> tuple[tuple[int, ...], torch.dtype]:
+        return self.cache(layer_index).runtime.prefill_staging_spec
 
     def physical_kv_cache(self, layer_index: int) -> torch.Tensor:
         cache = self.cache(layer_index)
@@ -259,37 +269,73 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             num_valid_rows=attn_metadata.query_start_loc[-1:],
         )
 
-    def stage_prefill_rows(
-        self, layer_index: int, kv_cache: torch.Tensor, attn_metadata: Any
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def staged_prefills(
+        self,
+        layer_index: int,
+        kv_cache: torch.Tensor,
+        attn_metadata: Any,
+        topk_indices: torch.Tensor,
+        *,
+        staging: torch.Tensor | None = None,
+        flat_rows: bool = False,
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Stage each prefill group in turn, yielding its batch query-token slice,
+        the staged cache (flattened to rows if ``flat_rows``), the group's top-k
+        converted to staged rows, and its valid counts. Every group reuses
+        ``staging`` (default: the shared workspace), so consume each item before
+        advancing."""
         cache = self.cache(layer_index)
-        prefill = attn_metadata.prefill
-        staging_plan = prefill.host_staging_plan if prefill is not None else None
-        assert staging_plan is not None
-        resident_cache = None
-        if cache.view is not None and cache.block_table is not None:
-            staging_plan.ensure_gpu_sources(
-                cache.block_table[attn_metadata.num_decodes :],
-                cache.view.block_size,
+        if staging is None:
+            (staging,) = current_workspace_manager().get_simultaneous(
+                cache.runtime.prefill_staging_spec
             )
-            resident_cache = cache.view.cache
-        staged_cache = cache.runtime.gather_prefill_cache(
-            kv_cache,
-            staging_plan,
-            resident_cache=resident_cache,
-        )
-        req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
-        if attn_metadata.num_decodes > 0:
-            req_ids = req_ids - attn_metadata.num_decodes
-        return staged_cache, staging_plan.block_table, req_ids
+        prefill = attn_metadata.prefill
+        assert prefill is not None and prefill.host_staging_plans is not None
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        for plan in prefill.host_staging_plans:
+            first_request = attn_metadata.num_decodes + plan.request_start
+            resident_cache = None
+            if cache.view is not None and cache.block_table is not None:
+                plan.ensure_gpu_sources(
+                    cache.block_table[
+                        first_request : first_request + plan.block_table.shape[0]
+                    ],
+                    cache.view.block_size,
+                )
+                resident_cache = cache.view.cache
+            staged_cache = cache.runtime.gather_prefill_cache(
+                kv_cache, plan, staging, resident_cache=resident_cache
+            )
+            tokens = slice(
+                num_decode_tokens + plan.tokens.start,
+                num_decode_tokens + plan.tokens.stop,
+            )
+            req_ids = attn_metadata.req_id_per_token[tokens]
+            if first_request > 0:
+                req_ids = req_ids - first_request
+            block_stride_rows = None
+            if flat_rows:
+                staged_cache, block_stride_rows = flat_kv_row_view(
+                    staged_cache, attn_metadata.block_size
+                )
+            physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+                req_ids,
+                plan.block_table,
+                topk_indices[tokens],
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
+            yield tokens, staged_cache, physical_topk, valid_counts
 
     def _prefill_gather_plan(
         self, layer_index: int, attn_metadata: Any
     ) -> HiSparsePrefillStagingPlan:
         cache = self.cache(layer_index)
         prefill = attn_metadata.prefill
-        plan = prefill.host_staging_plan if prefill is not None else None
-        assert plan is not None
+        assert prefill is not None and prefill.host_staging_plans is not None
+        (plan,) = prefill.host_staging_plans
         assert cache.view is not None and cache.block_table is not None
         plan.ensure_gpu_sources(
             cache.block_table[attn_metadata.num_decodes :],

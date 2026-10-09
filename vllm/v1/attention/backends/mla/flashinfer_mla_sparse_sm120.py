@@ -153,34 +153,30 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                             return_valid_counts=False,
                         ),
                     )
-                    prefill_cache = index_group.physical_kv_cache(
-                        self.index_group_index
-                    )
-                else:
-                    prefill_cache, block_table, req_ids = (
-                        index_group.stage_prefill_rows(
-                            self.index_group_index,
-                            kv_c_and_k_pe_cache,
-                            attn_metadata,
+                    outputs.append(
+                        self._run_mqa_kernel(
+                            q,
+                            index_group.physical_kv_cache(self.index_group_index),
+                            topk_indices_physical,
                         )
                     )
-                    topk_indices_physical = cast(
-                        torch.Tensor,
-                        triton_convert_req_index_to_global_index(
-                            req_ids,
-                            block_table,
-                            topk_indices[num_decode_tokens:],
-                            BLOCK_SIZE=attn_metadata.block_size,
-                            NUM_TOPK_TOKENS=topk_indices.shape[1],
-                        ),
-                    )
-                outputs.append(
-                    self._run_mqa_kernel(
-                        q[num_decode_tokens:],
+                else:
+                    for (
+                        tokens,
                         prefill_cache,
                         topk_indices_physical,
-                    )
-                )
+                        _,
+                    ) in index_group.staged_prefills(
+                        self.index_group_index,
+                        kv_c_and_k_pe_cache,
+                        attn_metadata,
+                        topk_indices,
+                    ):
+                        outputs.append(
+                            self._run_mqa_kernel(
+                                q[tokens], prefill_cache, topk_indices_physical
+                            )
+                        )
             output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
             return output, None
 
