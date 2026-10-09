@@ -123,6 +123,7 @@ steps:
 
 - label: ":nvidia: (L4) PyTorch Compilation Passes"
   key: pytorch-compilation-passes-unit-tests
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 45
