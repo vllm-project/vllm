@@ -6,6 +6,9 @@ import contextlib
 import json
 import os
 import random
+import shutil
+import socket
+import subprocess
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -372,36 +375,14 @@ def _format(turns: list[Turn]) -> str:
     return "\n".join(rows)
 
 
-@pytest.mark.parametrize(
-    "deployment_name,prompt_len",
-    [
-        # Blocks=6144, PMU=128. P=7040 is PMU-aligned but not block-aligned:
-        # ensure lookup reads the cached attention proof at 7040 despite
-        # the final hit limit of 7039, then applies EAGLE's 128-token drop.
-        pytest.param("plain", 7040, id="eagle-proof-scan"),
-        # Blocks=6144, PMU=128. P=7296 is an exact PMU multiple:
-        # ensure the Mamba checkpoint is 7168, not 7040 from applying both
-        # the P - 1 cap and EAGLE's 128-token drop.
-        pytest.param("plain", 7296, id="eagle-double-cap"),
-        # Blocks=6144, PMU=128. P=7449 needs Mamba state at 7296 and attention
-        # proof at 7424, both beyond the normal Mooncake save boundary of 6144:
-        # ensure they remain reusable after GPU cache reset.
-        pytest.param("mooncake", 7449, id="mooncake-tail-proof"),
-    ],
-)
-def test_dspark_exact_resend_reuses_prompt_checkpoint(
-    deployment_name: str, prompt_len: int
+def _check_resend_reuses_prompt_checkpoint(
+    deployment: Deployment, prompt_len: int
 ) -> None:
     """Resends reuse the Mamba checkpoint and its companion EAGLE attention proof."""
     mode = Mode(128, True)
     salt = str(uuid4())
     rng = random.Random(0)
     prompt = [rng.randint(1000, 150000) for _ in range(prompt_len)]
-    deployment = DEPLOYMENTS["plain"]
-    if deployment_name == "mooncake":
-        if not os.getenv("MOONCAKE_CONFIG_PATH"):
-            pytest.skip("Mooncake Store requires MOONCAKE_CONFIG_PATH and a master")
-        deployment = Deployment(Instance(kv_config=MOONCAKE), offload=True)
     with _serve(deployment, mode) as servers:
         url = servers[0].url_root
         cold = _complete(url, prompt, salt, max_tokens=1)
@@ -420,6 +401,84 @@ def test_dspark_exact_resend_reuses_prompt_checkpoint(
         outputs_1_lst=[_tokens_text_logprobs(resend)],
         name_0="recompute",
         name_1="resend",
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt_len",
+    [
+        # Blocks=6144, PMU=128. P=7040 is PMU-aligned but not block-aligned:
+        # ensure lookup reads the cached attention proof at 7040 despite
+        # the final hit limit of 7039, then applies EAGLE's 128-token drop.
+        pytest.param(7040, id="eagle-proof-scan"),
+        # Blocks=6144, PMU=128. P=7296 is an exact PMU multiple:
+        # ensure the Mamba checkpoint is 7168, not 7040 from applying both
+        # the P - 1 cap and EAGLE's 128-token drop.
+        pytest.param(7296, id="eagle-double-cap"),
+    ],
+)
+def test_dspark_exact_resend_reuses_prompt_checkpoint(prompt_len: int) -> None:
+    _check_resend_reuses_prompt_checkpoint(DEPLOYMENTS["plain"], prompt_len)
+
+
+@pytest.fixture
+def mooncake_store(tmp_path, monkeypatch) -> Iterator[None]:
+    """Run a Mooncake master and point the servers' store config at it."""
+    if shutil.which("mooncake_master") is None:
+        pytest.skip("mooncake_master is not installed")
+    port = get_open_port()
+    log_path = tmp_path / "mooncake_master.log"
+    with open(log_path, "w") as log:
+        master = subprocess.Popen(
+            [
+                "mooncake_master",
+                f"--port={port}",
+                f"--metrics_port={get_open_port()}",
+                "--enable_metric_reporting=false",
+                "--default_kv_lease_ttl=60000",
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    try:
+        deadline = time.monotonic() + 60
+        while True:
+            assert master.poll() is None, log_path.read_text()
+            with (
+                contextlib.suppress(OSError),
+                socket.create_connection(("127.0.0.1", port)),
+            ):
+                break
+            assert time.monotonic() < deadline, "Mooncake master did not start"
+            time.sleep(0.1)
+        config_path = tmp_path / "mooncake.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "metadata_server": "P2PHANDSHAKE",
+                    "master_server_address": f"127.0.0.1:{port}",
+                    "protocol": "rdma",
+                    "device_name": os.getenv("MOONCAKE_DEVICE_NAME", "mlx5_12"),
+                    "global_segment_size": "4GB",
+                    "local_buffer_size": "1GB",
+                }
+            )
+        )
+        monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+        monkeypatch.setenv("MC_MAX_MR_SIZE", str(4 << 30))
+        yield
+    finally:
+        master.kill()
+        master.wait()
+
+
+@pytest.mark.usefixtures("mooncake_store")
+def test_mooncake_resend_reuses_prompt_checkpoint() -> None:
+    """Blocks=6144, PMU=128. P=7449 needs Mamba state at 7296 and attention proof
+    at 7424, both beyond the normal Mooncake save boundary of 6144: ensure they
+    remain reusable from the store after a GPU cache reset."""
+    _check_resend_reuses_prompt_checkpoint(
+        Deployment(Instance(kv_config=MOONCAKE), offload=True), 7449
     )
 
 

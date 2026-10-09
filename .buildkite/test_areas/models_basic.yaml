@@ -174,43 +174,7 @@ steps:
   - .buildkite/scripts/install-kv-connectors.sh
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - |
-    set -e
-    export MC_MAX_MR_SIZE=4294967296
-    export MOONCAKE_CONFIG_PATH=$$(mktemp /vllm-workspace/mooncake-prefix-cache.XXXXXX.json)
-    MOONCAKE_PORTS=$$(uv run --no-project python - <<'PY'
-    import json
-    import os
-    import socket
-    from pathlib import Path
-
-    with socket.socket() as rpc, socket.socket() as metrics:
-        rpc.bind(("127.0.0.1", 0))
-        metrics.bind(("127.0.0.1", 0))
-        port = rpc.getsockname()[1]
-        metrics_port = metrics.getsockname()[1]
-    config = {
-        "metadata_server": "P2PHANDSHAKE",
-        "master_server_address": f"127.0.0.1:{port}",
-        "protocol": "rdma",
-        "device_name": os.getenv("MOONCAKE_DEVICE_NAME", "mlx5_12"),
-        "global_segment_size": "4GB",
-        "local_buffer_size": "1GB",
-    }
-    Path(os.environ["MOONCAKE_CONFIG_PATH"]).write_text(json.dumps(config))
-    print(port, metrics_port)
-    PY
-    )
-    read -r MOONCAKE_MASTER_PORT MOONCAKE_METRICS_PORT <<EOF
-    $$MOONCAKE_PORTS
-    EOF
-    mooncake_master --port="$$MOONCAKE_MASTER_PORT" \
-      --metrics_port="$$MOONCAKE_METRICS_PORT" --enable_metric_reporting=false \
-      --default_kv_lease_ttl=60000 \
-      > "$${MOONCAKE_CONFIG_PATH}.master.log" 2>&1 &
-    MOONCAKE_MASTER_PID=$$!
-    trap 'kill "$$MOONCAKE_MASTER_PID" 2>/dev/null || true; wait "$$MOONCAKE_MASTER_PID" 2>/dev/null || true' EXIT
-    pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: ":nvidia: (H200) GLM5Next"
