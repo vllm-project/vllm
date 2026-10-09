@@ -23,7 +23,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.harmony import HarmonyParser
 from vllm.parser.parser_manager import ParserManager
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
@@ -1139,7 +1140,7 @@ class TestAdjustRequest:
     @classmethod
     def _assert_structured_outputs_admission(
         cls,
-        adjusted_request: ChatCompletionRequest | ResponsesRequest,
+        adjusted_request: ChatCompletionRequest | ResponsesRequest | SamplingParams,
         expected_admission: Sequence[str],
         xgrammar_backend: XgrammarBackend,
         stop_token_ids: set[int],
@@ -1335,3 +1336,60 @@ class TestAdjustRequest:
             xgrammar_backend,
             gpt_oss_stop_token_ids,
         )
+
+    @pytest.mark.parametrize(
+        ("structured_outputs", "expected_admission"),
+        [
+            (
+                StructuredOutputsParams(json=OUTPUT_SCHEMA),
+                ["FINAL_JSON_SCHEMA"],
+            ),
+            (
+                StructuredOutputsParams(json_object=True),
+                ["FINAL_JSON_SCHEMA", "FINAL_JSON_OBJECT"],
+            ),
+            (StructuredOutputsParams(regex=r"regex"), ["FINAL_REGEX"]),
+            (
+                StructuredOutputsParams(choice=["choice1", "choice2"]),
+                ["FINAL_CHOICE"],
+            ),
+            (
+                StructuredOutputsParams(grammar='root ::= "grammar"'),
+                ["FINAL_GRAMMAR"],
+            ),
+        ],
+        ids=["json", "json_object", "regex", "choice", "grammar"],
+    )
+    def test_engine_input_scoped_to_final_channel(
+        self,
+        xgrammar_backend,
+        gpt_oss_stop_token_ids,
+        structured_outputs,
+        expected_admission,
+    ):
+        """Requests that bypass the OpenAI server (e.g. `LLM.generate`, or
+        frontends calling the engine directly) must still allow reasoning
+        before the constrained final channel (#60664)."""
+        params = SamplingParams(structured_outputs=structured_outputs)
+        scoped = InputProcessor._scope_structured_outputs_to_harmony(params)
+
+        assert params.structured_outputs is structured_outputs
+        self._assert_structured_outputs_admission(
+            scoped, expected_admission, xgrammar_backend, gpt_oss_stop_token_ids
+        )
+
+    def test_engine_input_keeps_structural_tag(self):
+        params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(
+                structural_tag=json.dumps(
+                    {
+                        "type": "structural_tag",
+                        "format": {
+                            "type": "json_schema",
+                            "json_schema": self.OUTPUT_SCHEMA,
+                        },
+                    }
+                )
+            )
+        )
+        assert InputProcessor._scope_structured_outputs_to_harmony(params) is params
