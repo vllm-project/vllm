@@ -129,3 +129,74 @@ def test_flash_attention_geometry_comes_from_the_group():
     assert builder.num_heads_q == 16
     assert builder.num_heads_kv == 2
     assert builder.headdim == 64
+
+
+def test_mixed_fa3_sliding_fa4_full_graph_split_policy(monkeypatch):
+    """FA4 full layers must not inherit FA3's fixed graph split count."""
+    from vllm.v1.attention.backends import flash_attn
+
+    config = MagicMock()
+    config.attention_config.flash_attn_max_num_splits_for_cuda_graph = 32
+    config.model_config.rswa_window = None
+    config.model_config.is_mm_prefix_lm = False
+    config.parallel_config.cp_kv_cache_interleave_size = 1
+    config.compilation_config.cudagraph_mode.has_full_cudagraphs.return_value = True
+    config.compilation_config.max_cudagraph_capture_size = 256
+    config.kernel_config.enable_jit_warmup = False
+    config.scheduler_config.max_num_seqs = 64
+    monkeypatch.setattr(
+        flash_attn,
+        "get_flash_attn_version",
+        lambda *, head_size, **kwargs: 3 if head_size == 256 else 4,
+    )
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    monkeypatch.setattr(flash_attn, "get_num_attention_heads_from_layers", lambda *a: 8)
+    monkeypatch.setattr(flash_attn, "get_dcp_world_size_and_rank", lambda *a: (1, 0))
+    schedule = MagicMock(
+        side_effect=AssertionError("Mixed windows must disable FA3 AOT")
+    )
+    monkeypatch.setattr(flash_attn, "get_scheduler_metadata", schedule)
+    layers = {}
+    builders = {}
+    for name, head_size, window in (
+        ("sliding", 256, (1023, 0)),
+        ("full", 512, (-1, -1)),
+    ):
+        impl = object.__new__(flash_attn.FlashAttentionImpl)
+        impl.sliding_window = window
+        layers[name] = SimpleNamespace(
+            impl=SimpleNamespace(get_impl_variants=lambda impl=impl: [impl])
+        )
+        spec = SimpleNamespace(
+            head_size=head_size,
+            num_kv_heads=1,
+            dtype=torch.float8_e4m3fn,
+            block_size=64,
+            dcp_sharded=False,
+        )
+        builders[name] = flash_attn.FlashAttentionMetadataBuilder(
+            spec, [name], config, torch.device("cpu")
+        )
+    monkeypatch.setattr(flash_attn, "get_layers_from_vllm_config", lambda *a: layers)
+    assert builders["sliding"].aot_schedule
+    assert not builders["full"].aot_schedule
+    assert builders["sliding"].max_num_splits == 32
+    assert builders["full"].max_num_splits == 0
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_actual_tokens=1,
+        max_query_len=1,
+        max_seq_len=128,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([128], dtype=torch.int32),
+        block_table_tensor=torch.tensor([[0, 1]], dtype=torch.int32),
+        slot_mapping=torch.tensor([127], dtype=torch.int64),
+        causal=True,
+        mm_req_doc_ranges=None,
+        rswa_prefix_lens=None,
+    )
+    for name, expected_splits in (("sliding", 32), ("full", 0)):
+        metadata = builders[name].build(0, common)
+        assert metadata.max_num_splits == expected_splits
+        assert metadata.scheduler_metadata is None
+    schedule.assert_not_called()
