@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Object-free rendering of ``/inference/v1/generate`` sample logprobs.
 
-:func:`render_tokens_logprobs` reads the engine rows of an
-:class:`~vllm.logprobs.ArrayLogprobs` and produces exactly the JSON that
+:func:`render_tokens_logprobs` reads the engine rows of a
+:class:`~vllm.logprobs.FlatLogprobs` and produces exactly the JSON that
 ``ServingTokens._create_tokens_logprobs`` + ``model_dump`` + Starlette's
 ``JSONResponse.render`` produce for the same rows, without a Python object
 per entry. :func:`render_json_with_fragments` splices such pre-rendered values
@@ -19,7 +19,7 @@ from typing import Any
 import msgspec
 import numpy as np
 
-from vllm.logprobs import ArrayLogprobs
+from vllm.logprobs import FlatLogprobs
 
 # Rows rendered per batch; bounds the per-entry lists and index arrays.
 _RENDER_BLOCK_ROWS = 1024
@@ -152,7 +152,7 @@ _MSGSPEC_FLOATS_MATCH_REPR = _msgspec_floats_match_repr()
 
 def render_tokens_logprobs(
     sampled_token_ids: Sequence[int],
-    container: ArrayLogprobs,
+    container: FlatLogprobs,
     num_output_top_logprobs: int,
 ) -> list[bytes] | None:
     """Render the ``GenerateLogProbs`` JSON of one choice, as parts whose
@@ -169,9 +169,10 @@ def render_tokens_logprobs(
     not in slot 0, repeated top-k ids, fewer entries than requested, a value
     JSON cannot represent): the caller then uses the per-entry path.
     """
-    if not container.is_regular:
+    engine_rows = container.rows()
+    if engine_rows is None:
         return None
-    token_ids, logprobs, engine_ranks = container.arrays()
+    token_ids, logprobs, engine_ranks = engine_rows
     n = len(sampled_token_ids)
     if n != len(token_ids):
         return None

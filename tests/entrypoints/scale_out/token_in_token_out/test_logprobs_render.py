@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Non-streaming tokens-mode generate responses rendered from sample logprobs
-kept as engine rows (ArrayLogprobs): byte-identical to the per-entry
-pydantic path, which every other case still uses."""
+kept as FlatLogprobs engine rows: byte-identical to the per-entry pydantic
+path, which every other case still uses."""
 
 import asyncio
 import json
@@ -51,11 +51,11 @@ def _rows(n, slots, seed=0, vocab=50_000):
     return ids.astype(np.int32), lps, rng.integers(0, 100, n)
 
 
-def _stored(k, *steps, array):
+def _stored(k, *steps, flat):
     """The rows of ``steps`` as the LogprobsProcessor stores them."""
     processor = LogprobsProcessor(
         tokenizer=None,
-        logprobs=create_sample_logprobs(False, array_logprobs=array),
+        logprobs=create_sample_logprobs(flat),
         prompt_logprobs=None,
         cumulative_logprob=0.0,
         num_logprobs=k,
@@ -98,13 +98,11 @@ def _body(serving, k, outputs, finish_reason="length"):
 
 
 def _outcome(serving, k, choices, finish_reason="length"):
-    """Bodies of the per-entry and the array storage of ``choices``, or the
-    error each raises."""
+    """Bodies of the list and the flat storage of ``choices``, or the error
+    each raises."""
     results = []
-    for array in (False, True):
-        outputs = [
-            (tokens, _stored(k, *steps, array=array)) for tokens, steps in choices
-        ]
+    for flat in (False, True):
+        outputs = [(tokens, _stored(k, *steps, flat=flat)) for tokens, steps in choices]
         try:
             results.append(_body(serving, k, outputs, finish_reason)[0])
         except ValueError as e:
@@ -118,8 +116,8 @@ def test_rendered_bytes_equal_the_per_entry_path(k, n):
     serving = _build_serving_tokens(_mock_engine())
     rows = _rows(n, k + 1, seed=k * 7 + n)
     token_ids = rows[0][:, 0].tolist()
-    legacy, _ = _body(serving, k, [(token_ids, _stored(k, rows, array=False))])
-    fast, rendered = _body(serving, k, [(token_ids, _stored(k, rows, array=True))])
+    legacy, _ = _body(serving, k, [(token_ids, _stored(k, rows, flat=False))])
+    fast, rendered = _body(serving, k, [(token_ids, _stored(k, rows, flat=True))])
     assert rendered and fast == legacy
 
 
@@ -173,7 +171,7 @@ def _cases():
 
 @pytest.mark.parametrize("name,k,choices", _cases(), ids=[c[0] for c in _cases()])
 def test_special_and_irregular_rows_match_the_per_entry_path(name, k, choices):
-    """The same bytes, or the same error, as the per-entry storage."""
+    """The same bytes, or the same error, as the list storage."""
     serving = _build_serving_tokens(_mock_engine())
     legacy, fast = _outcome(serving, k, choices)
     assert fast == legacy
@@ -239,23 +237,27 @@ def test_rendered_response_headers_match_json_response():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "stream,output_mode,logprobs,expected",
+    "stream,output_mode,logprobs,prompt_logprobs,expected",
     [
-        (False, "tokens", 3, True),
-        (False, "tokens", 0, True),
-        (True, "tokens", 3, False),
-        (False, "text", 3, False),
-        (False, "tokens", -1, False),
-        (False, "tokens", None, False),
+        (False, "tokens", 3, None, True),
+        (False, "tokens", 0, None, True),
+        (False, "tokens", 3, 2, False),
+        (True, "tokens", 3, None, False),
+        (False, "text", 3, None, False),
+        (False, "tokens", -1, None, False),
+        (False, "tokens", None, None, False),
     ],
 )
-async def test_array_storage_selection(stream, output_mode, logprobs, expected):
-    """Only non-streaming tokens-mode requests with top-k sample logprobs."""
+async def test_flat_storage_selection(
+    stream, output_mode, logprobs, prompt_logprobs, expected
+):
+    """Only non-streaming tokens-mode requests with top-k sample logprobs and
+    no prompt logprobs, which the response returns as lists."""
     engine = _mock_engine()
     seen = []
 
     async def generate(engine_input, params, *args, **kwargs):
-        seen.append(params._array_logprobs)
+        seen.append((params.flat_logprobs, not params._detokenize_logprobs))
         yield _make_request_output(
             "r",
             [10],
@@ -269,7 +271,9 @@ async def test_array_storage_selection(stream, output_mode, logprobs, expected):
     serving = _build_serving_tokens(engine)
     request = GenerateRequest(
         token_ids=[1, 2, 3],
-        sampling_params=SamplingParams(max_tokens=1, logprobs=logprobs),
+        sampling_params=SamplingParams(
+            max_tokens=1, logprobs=logprobs, prompt_logprobs=prompt_logprobs
+        ),
         model=MODEL_NAME,
         stream=stream,
         output_mode=output_mode,
@@ -277,14 +281,14 @@ async def test_array_storage_selection(stream, output_mode, logprobs, expected):
     out = await serving.serve_tokens(request)
     if stream:
         [chunk async for chunk in out]
-    assert seen == [expected]
+    assert seen == [(expected, expected)]
 
 
-def test_clients_cannot_select_array_storage():
+def test_clients_cannot_skip_logprobs_detokenize():
     request = GenerateRequest.model_validate(
-        {"token_ids": [1], "sampling_params": {"_array_logprobs": True}}
+        {"token_ids": [1], "sampling_params": {"_detokenize_logprobs": False}}
     )
-    assert request.sampling_params._array_logprobs is False
+    assert request.sampling_params._detokenize_logprobs is True
 
 
 def _full_request(n=40):
@@ -299,7 +303,7 @@ async def _serve_full(serving, rows):
     """serve_tokens_full_generator for one choice of ``rows`` (k=3)."""
 
     async def results():
-        yield _final([(rows[0][:, 0].tolist(), _stored(3, rows, array=True))])
+        yield _final([(rows[0][:, 0].tolist(), _stored(3, rows, flat=True))])
 
     return await serving.serve_tokens_full_generator(
         _full_request(len(rows[2])), results(), "r", MODEL_NAME, MagicMock()
