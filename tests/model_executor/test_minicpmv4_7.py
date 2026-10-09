@@ -325,6 +325,25 @@ def test_canvas_mrope_interleaved_image_and_video():
     assert delta == -6
 
 
+def test_canvas_span_is_shared_by_image_and_video():
+    """A video frame and a same-geometry image must place identical offsets.
+
+    Both paths go through `_assign_canvas_span`; this pins that they cannot
+    drift apart now that the duplicated geometry is gone.
+    """
+    thumb = [_IM_START] + [_IMAGE_PAD] * 4 + [_IM_END]
+
+    img_pos, _ = _canvas_positions([_TEXT, *thumb, _TEXT], [[8, 8]])
+    vid_pos, _ = _canvas_positions([_TEXT, *thumb, *thumb, _TEXT], [[8, 8], [8, 8]])
+
+    def offsets(pos, start):
+        # The <im_start> halo is one below the canvas base.
+        base = pos[1][start] + 1
+        return [[c[start + k] - base for k in range(3)] for c in pos]
+
+    assert offsets(img_pos, 0) == offsets(vid_pos, 0)
+
+
 def test_canvas_mrope_delta_leaves_room_for_the_first_decoded_token():
     # First decoded token must land on max_prefill_position + 1, matching
     # transformers and the other native M-RoPE models.

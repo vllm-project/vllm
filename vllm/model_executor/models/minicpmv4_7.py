@@ -7,7 +7,7 @@ Same vision/LLM stack as MiniCPM-V 4.6, plus canvas 3D M-RoPE.
 
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 
@@ -338,6 +338,183 @@ def _compute_canvas_single(
     )[:, 0, :]
 
 
+def _target_hw(target_sizes: torch.Tensor, index: int) -> tuple[int, int]:
+    """Patch-grid height/width recorded for one image or slice."""
+    return int(target_sizes[index, 0]), int(target_sizes[index, 1])
+
+
+class _CanvasLayout(NamedTuple):
+    """Grid of one canvas measured in LLM tokens.
+
+    A canvas is a thumbnail plus the slices cut from it, tiled row-major.
+    """
+
+    thumb_h: int
+    thumb_w: int
+    """Thumbnail grid."""
+    slice_h: int
+    slice_w: int
+    """Per-slice grid. Zero when the canvas has no slices."""
+    cols: int
+    """Slices sharing a canvas row. Zero when the canvas has no slices."""
+    height: int
+    width: int
+    """Assembled canvas."""
+
+
+def _canvas_layout(
+    thumbnail: tuple[int, int, int],
+    slices: list[tuple[int, int, int]],
+    target_sizes: torch.Tensor,
+) -> _CanvasLayout:
+    """Measure the canvas for one ``(thumbnail, slices)`` group.
+
+    ``thumbnail`` and each slice are ``(start, end, target_index)`` token spans.
+    """
+    t_bs, t_be, t_gi = thumbnail
+    thumb_h, thumb_w = compute_llm_grid(t_be - t_bs, *_target_hw(target_sizes, t_gi))
+    if not slices:
+        return _CanvasLayout(
+            thumb_h, thumb_w, 0, 0, 0, max(thumb_h, 1), max(thumb_w, 1)
+        )
+
+    cols = len(slices)
+    for k in range(len(slices) - 1):
+        if slices[k + 1][0] - slices[k][1] > 2:
+            cols = k + 1
+            break
+    rows = len(slices) // cols if cols > 0 else 1
+    if rows * cols != len(slices):
+        rows, cols = 1, len(slices)
+
+    s0_bs, s0_be, s0_gi = slices[0]
+    slice_h, slice_w = compute_llm_grid(s0_be - s0_bs, *_target_hw(target_sizes, s0_gi))
+    return _CanvasLayout(
+        thumb_h, thumb_w, slice_h, slice_w, cols, rows * slice_h, cols * slice_w
+    )
+
+
+def _assign_canvas_span(
+    pos3d: torch.Tensor,
+    *,
+    thumbnail: tuple[int, int, int],
+    span_end: int,
+    slices: list[tuple[int, int, int]],
+    base: int,
+    target_sizes: torch.Tensor,
+) -> int:
+    """Place one canvas at ``base``, writing its 3-D positions into ``pos3d``.
+
+    Shared by the video-frame and single-image paths; they differ only in how
+    the per-canvas base advances, not in the geometry placed here.
+
+    Mutates ``pos3d`` in place, as the packed canvas computation has always
+    done. Returns the distance to the next canvas base, so each caller keeps
+    only its own base advancement.
+    """
+    t_bs, t_be, _ = thumbnail
+    device = pos3d.device
+    span_start = t_bs - 1  # the <im_start> token
+    n_thumb = t_be - t_bs
+    layout = _canvas_layout(thumbnail, slices, target_sizes)
+    cols, canvas_H, canvas_W = layout.cols, layout.height, layout.width
+
+    # base coat
+    pos3d[0, 0, span_start:span_end] = base
+    pos3d[1, 0, span_start:span_end] = base
+    pos3d[2, 0, span_start:span_end] = base
+
+    # <im_start> -> halo
+    halo_lo = max(base - 1, 0)
+    pos3d[1, 0, span_start] = halo_lo
+    pos3d[2, 0, span_start] = halo_lo
+
+    # <im_end> -> halo (right after thumbnail)
+    if t_be < span_end:
+        pos3d[1, 0, t_be] = base + canvas_H
+        pos3d[2, 0, t_be] = base + canvas_W
+
+    # thumbnail visual tokens
+    llm_th, llm_tw = layout.thumb_h, layout.thumb_w
+    if llm_th > 0 and llm_tw > 0 and llm_th * llm_tw == n_thumb:
+        if slices and canvas_H > 0 and canvas_W > 0:
+            h_c = torch.linspace(0, canvas_H - 1, llm_th, device=device).round().long()
+            w_c = torch.linspace(0, canvas_W - 1, llm_tw, device=device).round().long()
+        else:
+            h_c = torch.arange(llm_th, device=device)
+            w_c = torch.arange(llm_tw, device=device)
+        h_idx = h_c.view(-1, 1).expand(-1, llm_tw).reshape(-1)
+        w_idx = w_c.view(1, -1).expand(llm_th, -1).reshape(-1)
+        pos3d[0, 0, t_bs:t_be] = base
+        pos3d[1, 0, t_bs:t_be] = h_idx + base
+        pos3d[2, 0, t_bs:t_be] = w_idx + base
+    else:
+        fallback = torch.arange(n_thumb, device=device, dtype=torch.long) + base
+        for d in range(3):
+            pos3d[d, 0, t_bs:t_be] = fallback
+
+    # slice visual tokens + slice specials
+    for k, (s_bs, s_be, s_gi) in enumerate(slices):
+        n_s = s_be - s_bs
+        sh_k, sw_k = compute_llm_grid(n_s, *_target_hw(target_sizes, s_gi))
+        h_off = (k // cols) * layout.slice_h
+        w_off = (k % cols) * layout.slice_w
+
+        slice_start_pos = s_bs - 1
+        if slice_start_pos >= span_start:
+            pos3d[1, 0, slice_start_pos] = base + h_off
+            pos3d[2, 0, slice_start_pos] = base + w_off
+
+        slice_end_pos = s_be
+        if sh_k > 0 and sw_k > 0:
+            end_h = h_off + sh_k - 1
+            end_w = w_off + sw_k - 1
+        else:
+            end_h = h_off
+            end_w = w_off
+        if slice_end_pos < span_end:
+            pos3d[1, 0, slice_end_pos] = base + end_h
+            pos3d[2, 0, slice_end_pos] = base + end_w
+
+        if sh_k > 0 and sw_k > 0 and sh_k * sw_k == n_s:
+            h_idx = (
+                torch.arange(sh_k, device=device)
+                .view(-1, 1)
+                .expand(-1, sw_k)
+                .reshape(-1)
+            )
+            w_idx = (
+                torch.arange(sw_k, device=device)
+                .view(1, -1)
+                .expand(sh_k, -1)
+                .reshape(-1)
+            )
+            pos3d[0, 0, s_bs:s_be] = base
+            pos3d[1, 0, s_bs:s_be] = h_idx + h_off + base
+            pos3d[2, 0, s_bs:s_be] = w_idx + w_off + base
+        else:
+            fallback = torch.arange(n_s, device=device, dtype=torch.long) + base
+            for d in range(3):
+                pos3d[d, 0, s_bs:s_be] = fallback
+
+    # \n between slice rows -> W = right edge + 1.
+    # H stays within the ended row (does NOT cross to next row): the \n sits at
+    # the right-outside of the row that just ended, at H = that row's last row
+    # and W = one column past the rightmost slice.
+    for k in range(len(slices) - 1):
+        gap_s = slices[k][1]
+        gap_e = slices[k + 1][0]
+        if gap_e - gap_s <= 2:
+            continue
+        boundary_h = ((k // cols) + 1) * layout.slice_h - 1
+        right_edge_w = cols * layout.slice_w
+        for nl_pos in range(gap_s + 1, gap_e - 1):
+            pos3d[1, 0, nl_pos] = base + boundary_h
+            pos3d[2, 0, nl_pos] = base + right_edge_w
+
+    return max(canvas_H, canvas_W) + 1
+
+
 def _compute_canvas_packed(
     position_ids_2d,
     cu_seqlens,
@@ -489,8 +666,8 @@ def _compute_canvas_packed(
 
                 # process each frame with its own per-frame base
                 frame_cursor = group_start
-                for fi, vf in enumerate(frames):
-                    t_bs, t_be, t_gi = vf["thumbnail"]
+                for vf in frames:
+                    t_bs = vf["thumbnail"][0]
                     vf_slices = vf["slices"]
                     im_start_pos = t_bs - 1
 
@@ -507,158 +684,15 @@ def _compute_canvas_packed(
 
                     # --- per-frame base ---
                     base_f = pos
-                    halo_lo_f = max(base_f - 1, 0)
-
-                    # per-frame canvas dimensions
-                    n_thumb = t_be - t_bs
-                    llm_th, llm_tw = compute_llm_grid(
-                        n_thumb,
-                        target_sizes[t_gi, 0].item(),
-                        target_sizes[t_gi, 1].item(),
-                    )
-
-                    if vf_slices:
-                        f_cols = len(vf_slices)
-                        for kk in range(len(vf_slices) - 1):
-                            if vf_slices[kk + 1][0] - vf_slices[kk][1] > 2:
-                                f_cols = kk + 1
-                                break
-                        f_rows = len(vf_slices) // f_cols if f_cols > 0 else 1
-                        if f_rows * f_cols != len(vf_slices):
-                            f_rows, f_cols = 1, len(vf_slices)
-                        s0_bs, s0_be, s0_gi = vf_slices[0]
-                        llm_sh, llm_sw = compute_llm_grid(
-                            s0_be - s0_bs,
-                            target_sizes[s0_gi, 0].item(),
-                            target_sizes[s0_gi, 1].item(),
-                        )
-                        canvas_H = f_rows * llm_sh
-                        canvas_W = f_cols * llm_sw
-                    else:
-                        llm_sh, llm_sw = 0, 0
-                        f_rows, f_cols = 0, 0
-                        canvas_H = max(llm_th, 1)
-                        canvas_W = max(llm_tw, 1)
-
-                    # find per-frame end (after structural tokens)
                     frame_end = _group_end_pos(vf, group_end)
-
-                    # base coat for this frame's span
-                    pos3d[0, 0, im_start_pos:frame_end] = base_f
-                    pos3d[1, 0, im_start_pos:frame_end] = base_f
-                    pos3d[2, 0, im_start_pos:frame_end] = base_f
-
-                    # <im_start> -> halo
-                    pos3d[1, 0, im_start_pos] = halo_lo_f
-                    pos3d[2, 0, im_start_pos] = halo_lo_f
-
-                    # <im_end> -> halo (right after thumbnail)
-                    im_end_pos = t_be
-                    if im_end_pos < frame_end:
-                        pos3d[1, 0, im_end_pos] = base_f + canvas_H
-                        pos3d[2, 0, im_end_pos] = base_f + canvas_W
-
-                    # thumbnail visual tokens
-                    if llm_th > 0 and llm_tw > 0 and llm_th * llm_tw == n_thumb:
-                        if vf_slices and canvas_H > 0 and canvas_W > 0:
-                            h_c = (
-                                torch.linspace(0, canvas_H - 1, llm_th, device=device)
-                                .round()
-                                .long()
-                            )
-                            w_c = (
-                                torch.linspace(0, canvas_W - 1, llm_tw, device=device)
-                                .round()
-                                .long()
-                            )
-                        else:
-                            h_c = torch.arange(llm_th, device=device)
-                            w_c = torch.arange(llm_tw, device=device)
-                        h_idx = h_c.view(-1, 1).expand(-1, llm_tw).reshape(-1)
-                        w_idx = w_c.view(1, -1).expand(llm_th, -1).reshape(-1)
-                        pos3d[0, 0, t_bs:t_be] = base_f
-                        pos3d[1, 0, t_bs:t_be] = h_idx + base_f
-                        pos3d[2, 0, t_bs:t_be] = w_idx + base_f
-                    else:
-                        fallback = (
-                            torch.arange(n_thumb, device=device, dtype=torch.long)
-                            + base_f
-                        )
-                        for d in range(3):
-                            pos3d[d, 0, t_bs:t_be] = fallback
-
-                    # slice visual tokens + slice specials (same as image path)
-                    for k, (s_bs, s_be, s_gi) in enumerate(vf_slices):
-                        n_s = s_be - s_bs
-                        sh_k, sw_k = compute_llm_grid(
-                            n_s,
-                            target_sizes[s_gi, 0].item(),
-                            target_sizes[s_gi, 1].item(),
-                        )
-                        gr = k // f_cols
-                        gc = k % f_cols
-                        h_off = gr * llm_sh
-                        w_off = gc * llm_sw
-
-                        slice_start_pos = s_bs - 1
-                        if slice_start_pos >= im_start_pos:
-                            pos3d[1, 0, slice_start_pos] = base_f + h_off
-                            pos3d[2, 0, slice_start_pos] = base_f + w_off
-
-                        slice_end_pos = s_be
-                        if sh_k > 0 and sw_k > 0:
-                            end_h = h_off + sh_k - 1
-                            end_w = w_off + sw_k - 1
-                        else:
-                            end_h = h_off
-                            end_w = w_off
-                        if slice_end_pos < frame_end:
-                            pos3d[1, 0, slice_end_pos] = base_f + end_h
-                            pos3d[2, 0, slice_end_pos] = base_f + end_w
-
-                        if sh_k > 0 and sw_k > 0 and sh_k * sw_k == n_s:
-                            h_idx = (
-                                torch.arange(sh_k, device=device)
-                                .view(-1, 1)
-                                .expand(-1, sw_k)
-                                .reshape(-1)
-                            )
-                            w_idx = (
-                                torch.arange(sw_k, device=device)
-                                .view(1, -1)
-                                .expand(sh_k, -1)
-                                .reshape(-1)
-                            )
-                            pos3d[0, 0, s_bs:s_be] = base_f
-                            pos3d[1, 0, s_bs:s_be] = h_idx + h_off + base_f
-                            pos3d[2, 0, s_bs:s_be] = w_idx + w_off + base_f
-                        else:
-                            fallback = (
-                                torch.arange(n_s, device=device, dtype=torch.long)
-                                + base_f
-                            )
-                            for d in range(3):
-                                pos3d[d, 0, s_bs:s_be] = fallback
-
-                    # \n between slice rows -> W = right edge + 1
-                    # H stays within the ended row (does NOT cross to next row).
-                    # Geometry: \n sits at the right-outside of the row that just ended,
-                    # at H = the last row of that row's slices, W = canvas_W (one column
-                    # past the rightmost slice).
-                    if vf_slices:
-                        for k in range(len(vf_slices) - 1):
-                            gap_s = vf_slices[k][1]
-                            gap_e = vf_slices[k + 1][0]
-                            if gap_e - gap_s <= 2:
-                                continue
-                            row_ended = k // f_cols
-                            boundary_h = (row_ended + 1) * llm_sh - 1
-                            right_edge_w = f_cols * llm_sw
-                            for nl_p in range(gap_s + 1, gap_e - 1):
-                                pos3d[1, 0, nl_p] = base_f + boundary_h
-                                pos3d[2, 0, nl_p] = base_f + right_edge_w
-
-                    pos = base_f + max(canvas_H, canvas_W) + 1
+                    pos = base_f + _assign_canvas_span(
+                        pos3d,
+                        thumbnail=vf["thumbnail"],
+                        span_end=frame_end,
+                        slices=vf_slices,
+                        base=base_f,
+                        target_sizes=target_sizes,
+                    )
                     frame_cursor = frame_end
 
                 # trailing tokens after last frame (if any)
@@ -675,10 +709,9 @@ def _compute_canvas_packed(
 
             else:
                 # === Single image group (thumbnail + optional slices) ===
-                t_bs, t_be, t_gi = group["thumbnail"]
                 slices = group["slices"]
 
-                group_start = t_bs - 1
+                group_start = group["thumbnail"][0] - 1
                 group_end = _group_end_pos(group, s_end)
 
                 # text before group
@@ -692,158 +725,14 @@ def _compute_canvas_packed(
                     pos += text_len
 
                 base = pos
-                halo_lo = max(base - 1, 0)
-
-                # compute canvas dimensions
-                n_thumb = t_be - t_bs
-                llm_th, llm_tw = compute_llm_grid(
-                    n_thumb, target_sizes[t_gi, 0].item(), target_sizes[t_gi, 1].item()
+                pos = base + _assign_canvas_span(
+                    pos3d,
+                    thumbnail=group["thumbnail"],
+                    span_end=group_end,
+                    slices=slices,
+                    base=base,
+                    target_sizes=target_sizes,
                 )
-
-                if slices:
-                    cols = len(slices)
-                    for k in range(len(slices) - 1):
-                        gap = slices[k + 1][0] - slices[k][1]
-                        if gap > 2:
-                            cols = k + 1
-                            break
-                    rows = len(slices) // cols if cols > 0 else 1
-                    if rows * cols != len(slices):
-                        rows, cols = 1, len(slices)
-
-                    s0_bs, s0_be, s0_gi = slices[0]
-                    llm_sh, llm_sw = compute_llm_grid(
-                        s0_be - s0_bs,
-                        target_sizes[s0_gi, 0].item(),
-                        target_sizes[s0_gi, 1].item(),
-                    )
-
-                    canvas_H = rows * llm_sh
-                    canvas_W = cols * llm_sw
-                else:
-                    llm_sh, llm_sw = 0, 0
-                    canvas_H = max(llm_th, 1)
-                    canvas_W = max(llm_tw, 1)
-
-                # base coat
-                pos3d[0, 0, group_start:group_end] = base
-                pos3d[1, 0, group_start:group_end] = base
-                pos3d[2, 0, group_start:group_end] = base
-
-                # <im_start> -> halo
-                pos3d[1, 0, group_start] = halo_lo
-                pos3d[2, 0, group_start] = halo_lo
-
-                # <im_end> -> halo
-                im_end_pos = t_be
-                if im_end_pos < group_end:
-                    pos3d[1, 0, im_end_pos] = base + canvas_H
-                    pos3d[2, 0, im_end_pos] = base + canvas_W
-
-                # thumbnail visual tokens
-                if llm_th > 0 and llm_tw > 0 and llm_th * llm_tw == n_thumb:
-                    if slices and canvas_H > 0 and canvas_W > 0:
-                        h_c = (
-                            torch.linspace(0, canvas_H - 1, llm_th, device=device)
-                            .round()
-                            .long()
-                        )
-                        w_c = (
-                            torch.linspace(0, canvas_W - 1, llm_tw, device=device)
-                            .round()
-                            .long()
-                        )
-                    else:
-                        h_c = torch.arange(llm_th, device=device)
-                        w_c = torch.arange(llm_tw, device=device)
-
-                    h_idx = h_c.view(-1, 1).expand(-1, llm_tw).reshape(-1)
-                    w_idx = w_c.view(1, -1).expand(llm_th, -1).reshape(-1)
-
-                    pos3d[0, 0, t_bs:t_be] = base
-                    pos3d[1, 0, t_bs:t_be] = h_idx + base
-                    pos3d[2, 0, t_bs:t_be] = w_idx + base
-                else:
-                    fallback = (
-                        torch.arange(n_thumb, device=device, dtype=torch.long) + base
-                    )
-                    for d in range(3):
-                        pos3d[d, 0, t_bs:t_be] = fallback
-
-                # slice visual tokens + slice specials
-                for k, (s_bs, s_be, s_gi) in enumerate(slices):
-                    n_s = s_be - s_bs
-                    sh_k, sw_k = compute_llm_grid(
-                        n_s, target_sizes[s_gi, 0].item(), target_sizes[s_gi, 1].item()
-                    )
-
-                    gr = k // cols
-                    gc = k % cols
-                    h_off = gr * llm_sh
-                    w_off = gc * llm_sw
-
-                    # <slice_start_k>
-                    slice_start_pos = s_bs - 1
-                    if slice_start_pos >= group_start:
-                        pos3d[1, 0, slice_start_pos] = base + h_off
-                        pos3d[2, 0, slice_start_pos] = base + w_off
-
-                    # <slice_end_k>
-                    slice_end_pos = s_be
-                    if sh_k > 0 and sw_k > 0:
-                        end_h = h_off + sh_k - 1
-                        end_w = w_off + sw_k - 1
-                    else:
-                        end_h = h_off
-                        end_w = w_off
-                    if slice_end_pos < group_end:
-                        pos3d[1, 0, slice_end_pos] = base + end_h
-                        pos3d[2, 0, slice_end_pos] = base + end_w
-
-                    # visual tokens
-                    if sh_k > 0 and sw_k > 0 and sh_k * sw_k == n_s:
-                        h_idx = (
-                            torch.arange(sh_k, device=device)
-                            .view(-1, 1)
-                            .expand(-1, sw_k)
-                            .reshape(-1)
-                        )
-                        w_idx = (
-                            torch.arange(sw_k, device=device)
-                            .view(1, -1)
-                            .expand(sh_k, -1)
-                            .reshape(-1)
-                        )
-
-                        pos3d[0, 0, s_bs:s_be] = base
-                        pos3d[1, 0, s_bs:s_be] = h_idx + h_off + base
-                        pos3d[2, 0, s_bs:s_be] = w_idx + w_off + base
-                    else:
-                        fallback = (
-                            torch.arange(n_s, device=device, dtype=torch.long) + base
-                        )
-                        for d in range(3):
-                            pos3d[d, 0, s_bs:s_be] = fallback
-
-                # \n between slice rows -> W = right edge + 1
-                # H stays within the ended row (does NOT cross to next row).
-                # Geometry: \n sits at the right-outside of the row that just ended,
-                # at H = the last row of that row's slices, W = canvas_W (one column
-                # past the rightmost slice).
-                if slices:
-                    for k in range(len(slices) - 1):
-                        gap_s = slices[k][1]
-                        gap_e = slices[k + 1][0]
-                        if gap_e - gap_s <= 2:
-                            continue
-                        row_ended = k // cols
-                        boundary_h = (row_ended + 1) * llm_sh - 1
-                        right_edge_w = cols * llm_sw
-                        for nl_pos in range(gap_s + 1, gap_e - 1):
-                            pos3d[1, 0, nl_pos] = base + boundary_h
-                            pos3d[2, 0, nl_pos] = base + right_edge_w
-
-                pos = base + max(canvas_H, canvas_W) + 1
                 cursor = group_end
 
         # remaining text
