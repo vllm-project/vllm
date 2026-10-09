@@ -2594,6 +2594,7 @@ class NixlBaseConnectorWorker:
             if (
                 self.kv_transfer_config.enable_permute_local_kv
                 and nixl_agent_meta.kv_cache_layout == "LBHNC"
+                and kv_cache_layout == "LBNHC"
             ):
                 logger.info(
                     "Remote is LBHNC and local is LBNHC, enabled additional permute "
@@ -2605,9 +2606,11 @@ class NixlBaseConnectorWorker:
                 self.enable_permute_local_kv = True
             else:
                 raise RuntimeError(
-                    "Heterogeneous TP expects same kv_cache_layout. "
-                    "Or enable experimental feature to use HND to NHD support by "
-                    "setting 'enable_permute_local_kv'=True in --kv-transfer-config."
+                    "Heterogeneous TP expects same kv_cache_layout (local "
+                    f"{kv_cache_layout}, remote {nixl_agent_meta.kv_cache_layout}). "
+                    "Or enable experimental feature to receive LBHNC into a local "
+                    "LBNHC cache by setting 'enable_permute_local_kv'=True "
+                    "in --kv-transfer-config."
                 )
         # if remote_agent used attn is not same as local,
         # hint heterogenuous attn post process
