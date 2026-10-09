@@ -533,9 +533,18 @@ class DefaultModelLoader(BaseModelLoader):
                 # which can be missing in checkpoints
                 if has_online_quant or has_postprocess_quant:
                     for param_name, param in module.named_parameters():
-                        # A serialized quantized checkpoint must still carry
-                        # everything but KV-cache quantization parameters,
-                        # empty placeholders and config-built parameters.
+                        # On a quantized model, every parameter has to come from
+                        # the checkpoint except those a checkpoint cannot carry:
+                        # - online quantization (uses_meta_device) quantizes the
+                        #   weights while loading, so its parameters do not map
+                        #   to checkpoint tensors;
+                        # - KV-cache quantization parameters (BaseKVCacheMethod)
+                        #   fall back to defaults when a checkpoint has none;
+                        # - empty placeholders hold no data, e.g. the qzeros
+                        #   moe_wna16 registers for symmetric GPTQ;
+                        # - _CONFIG_BUILT_PARAMS come from the quantization config.
+                        # Unquantized models, where this check runs by default,
+                        # keep the module-wide exemption.
                         if (
                             quantized
                             and not has_online_quant
