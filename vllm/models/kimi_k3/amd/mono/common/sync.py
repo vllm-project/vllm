@@ -16,7 +16,6 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
-from vllm.models.kimi_k3.amd.mono.common.layout import DIAG_WORDS
 from vllm.models.kimi_k3.amd.mono.common.ops import (
     CM_DEV,
     CM_SYS,
@@ -25,7 +24,7 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     rsrc,
     traced,
 )
-from vllm.models.kimi_k3.amd.mono.common.trace import Space, note
+from vllm.models.kimi_k3.amd.mono.common.plan import DIAG_WORDS, Space, note
 
 POLL_MAX = 12  # mailbox specs polled per batch (bounds live registers)
 

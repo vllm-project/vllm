@@ -29,24 +29,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
-from vllm.models.kimi_k3.amd.mono.common.abi import KernelAbi
-from vllm.models.kimi_k3.amd.mono.common.build_key import key_tuple
-from vllm.models.kimi_k3.amd.mono.common.execution import BLOCKS, THREADS, WAVES
-from vllm.models.kimi_k3.amd.mono.common.layout import pair_layout
-from vllm.models.kimi_k3.amd.mono.common.ops import (
-    CM_NT,
-    bf16_round,
-    ld_i32,
-    mfma_bf16,
-    row_sum,
-    rsrc,
-    traced,
-    uniform,
-)
-from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases, sum_partials
-from vllm.models.kimi_k3.amd.mono.common.stamps import stamp, stamp_begin, stamp_flush
-from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, shift, sreg
-from vllm.models.kimi_k3.amd.mono.kda_pre import (
+from vllm.models.kimi_k3.amd.mono.attention.kda import (
     _SOURCES,
     COLS,
     HIDDEN,
@@ -59,6 +42,27 @@ from vllm.models.kimi_k3.amd.mono.kda_pre import (
     stage_slice,
     step_tag,
 )
+from vllm.models.kimi_k3.amd.mono.common.debug import stamp, stamp_begin, stamp_flush
+from vllm.models.kimi_k3.amd.mono.common.ops import (
+    CM_NT,
+    bf16_round,
+    ld_i32,
+    mfma_bf16,
+    row_sum,
+    rsrc,
+    traced,
+    uniform,
+)
+from vllm.models.kimi_k3.amd.mono.common.plan import (
+    BLOCKS,
+    THREADS,
+    WAVES,
+    KernelAbi,
+    key_tuple,
+    pair_layout,
+)
+from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases, sum_partials
+from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, shift, sreg
 
 TP = 8
 OROWS = HIDDEN  # o_proj rows (full hidden, a rank's K slice)

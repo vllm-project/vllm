@@ -43,16 +43,13 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, T, as_ir_value
 
-from vllm.models.kimi_k3.amd.mono import gemv
-from vllm.models.kimi_k3.amd.mono.common.abi import KernelAbi
-from vllm.models.kimi_k3.amd.mono.common.build_key import key_tuple
-from vllm.models.kimi_k3.amd.mono.common.debug import region_ids
-from vllm.models.kimi_k3.amd.mono.common.execution import (
-    BLOCKS,
-    THREADS,
-    WAVES,
+from vllm.models.kimi_k3.amd.mono.attention.kda import _SOURCES, step_tag
+from vllm.models.kimi_k3.amd.mono.common.debug import (
+    region_ids,
+    stamp,
+    stamp_begin,
+    stamp_flush,
 )
-from vllm.models.kimi_k3.amd.mono.common.layout import pair_layout
 from vllm.models.kimi_k3.amd.mono.common.mx import (
     FP4,
     UNIT_SCALE,
@@ -81,10 +78,17 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     uniform,
     wave_sum,
 )
+from vllm.models.kimi_k3.amd.mono.common.plan import (
+    BLOCKS,
+    THREADS,
+    WAVES,
+    KernelAbi,
+    key_tuple,
+    pair_layout,
+)
 from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases, sum_partials
-from vllm.models.kimi_k3.amd.mono.common.stamps import stamp, stamp_begin, stamp_flush
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, publish, shift, sreg
-from vllm.models.kimi_k3.amd.mono.kda_pre import _SOURCES, step_tag
+from vllm.models.kimi_k3.amd.mono.stages import gemv as gemv
 
 REGIONS = (
     "sgu",
