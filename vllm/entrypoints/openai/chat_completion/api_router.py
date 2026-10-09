@@ -43,9 +43,11 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
     "/v1/chat/completions",
     response_model=ChatCompletionResponse,
     dependencies=[Depends(validate_json_request)],
+    # Register the streaming model alongside response_model's non-streaming model.
+    # FastAPI also assigns it to application/json; openapi_extra restores the
+    # non-streaming JSON schema after generation.
     responses={
         HTTPStatus.OK.value: {
-            # Register the chunk model as well as response_model's unary model.
             "model": ChatCompletionStreamResponse,
             "description": (
                 "JSON response when stream=false. With stream=true, the schema "
@@ -65,7 +67,6 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
         HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
     },
-    # FastAPI applies responses[200].model to JSON too; restore the unary ref last.
     openapi_extra={
         "responses": {
             "200": {

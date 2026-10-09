@@ -37,9 +37,11 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
     "/v1/completions",
     response_model=CompletionResponse,
     dependencies=[Depends(validate_json_request)],
+    # Register the streaming model alongside response_model's non-streaming model.
+    # FastAPI also assigns it to application/json; openapi_extra restores the
+    # non-streaming JSON schema after generation.
     responses={
         HTTPStatus.OK.value: {
-            # Register the chunk model as well as response_model's unary model.
             "model": CompletionStreamResponse,
             "description": (
                 "JSON response when stream=false. With stream=true, the schema "
@@ -56,7 +58,6 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
-    # FastAPI applies responses[200].model to JSON too; restore the unary ref last.
     openapi_extra={
         "responses": {
             "200": {
