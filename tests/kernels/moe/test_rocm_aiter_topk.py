@@ -279,6 +279,58 @@ def test_rocm_aiter_topk_gating_matches_softmax_reference(
     torch.testing.assert_close(topk_weights, expected_weights, atol=2e-2, rtol=2e-2)
 
 
+def test_rocm_aiter_topk_gating_shared_expert_suffix():
+    """Fused shared expert: softmax top-k on the prefix, sigmoid appended.
+
+    Matches the Qwen3.8 FSE launch: 512 routed experts, top-10, one shared
+    column, weights wide enough for the suffix, and the shared id prefilled.
+    """
+    torch.manual_seed(0)
+    num_tokens, num_experts, topk, num_shared = 4, 512, 10, 1
+    routed = torch.randn((num_tokens, num_experts), dtype=torch.bfloat16, device="cuda")
+    shared = torch.randn((num_tokens, num_shared), dtype=torch.bfloat16, device="cuda")
+    shared[0, 0] = 40
+    gating_output = torch.cat([routed, shared], dim=-1).contiguous()
+    width = topk + num_shared
+    shared_ids = torch.arange(
+        num_experts, num_experts + num_shared, device="cuda", dtype=torch.int32
+    )
+    topk_ids = torch.full((num_tokens, width), -1, dtype=torch.int32, device="cuda")
+    topk_ids[:, topk:] = shared_ids
+    topk_weights = torch.empty((num_tokens, width), dtype=torch.float32, device="cuda")
+    token_expert_indices = torch.empty(
+        (num_tokens, topk), dtype=torch.int32, device="cuda"
+    )
+
+    torch.ops.vllm.rocm_aiter_topk_gating(
+        topk_weights,
+        topk_ids[:, :topk],
+        token_expert_indices,
+        gating_output,
+        True,
+        num_shared,
+        "sigmoid",
+    )
+
+    scores = torch.softmax(routed.float(), dim=-1)
+    cutoff = torch.topk(scores, k=topk, dim=-1).values[:, -1:]
+    routed_ids = topk_ids[:, :topk]
+    assert ((routed_ids >= 0) & (routed_ids < num_experts)).all()
+    sorted_ids = torch.sort(routed_ids, dim=-1).values
+    assert (sorted_ids[:, 1:] != sorted_ids[:, :-1]).all()
+    selected = torch.gather(scores, 1, routed_ids.long())
+    assert (selected >= cutoff).all()
+    expected = selected / selected.sum(dim=-1, keepdim=True)
+    torch.testing.assert_close(topk_weights[:, :topk], expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(
+        topk_weights[:, topk:],
+        torch.sigmoid(shared.float()),
+        atol=2e-2,
+        rtol=2e-2,
+    )
+    assert torch.equal(topk_ids[:, topk:], shared_ids.expand_as(topk_ids[:, topk:]))
+
+
 def test_rocm_aiter_topk_gating_torch_compile_compatibility():
     token, expert, topk, renormalize = 4, 512, 10, True
     gating_output = torch.randn((token, expert), dtype=torch.bfloat16, device="cuda")

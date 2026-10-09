@@ -518,6 +518,31 @@ def _rocm_aiter_topk_softmax_impl(
     )
 
 
+def _topk_gating_shared_suffix_supported(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    num_shared_experts: int,
+    shared_expert_scoring_func: str,
+) -> bool:
+    """Whether this launch can sigmoid shared experts inside topk_gating.
+
+    The routed prefix is still softmax top-k. Shared columns are appended
+    after it and do not compete for a slot. AITER accepts 1, 2, 4 or 8 of
+    them, scored with sigmoid, and requires the weight and index tensors to
+    share a row stride wide enough for those columns. Shared ids stay as the
+    caller prefilled them.
+    """
+    if num_shared_experts == 0:
+        return not shared_expert_scoring_func
+    if shared_expert_scoring_func != "sigmoid":
+        return False
+    if num_shared_experts not in (1, 2, 4, 8):
+        return False
+    if topk_weights.stride(0) != topk_indices.stride(0):
+        return False
+    return topk_weights.shape[-1] >= topk_indices.shape[-1] + num_shared_experts
+
+
 def _rocm_aiter_topk_gating_impl(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -527,16 +552,19 @@ def _rocm_aiter_topk_gating_impl(
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
 ) -> None:
-    # Fused shared-expert scoring and non-contiguous gating rows are only
-    # handled by the legacy topk_softmax launcher.
+    # Non-contiguous rows, an unsupported shared-expert suffix, and large
+    # prefills stay on the legacy launcher. At E=512/k=10, topk_gating wins
+    # through T=4096 but its one-row generic prefill path regresses at 8K+
+    # tokens.
     if (
-        num_shared_experts
-        or shared_expert_scoring_func
-        or (not gating_output.is_contiguous())
-        # At E=512/k=10, topk_gating wins through T=4096 but its current
-        # one-row generic prefill path regresses at 8K+ tokens. Preserve the
-        # legacy throughput path for those large prefills.
+        not gating_output.is_contiguous()
         or gating_output.shape[0] > 4096
+        or not _topk_gating_shared_suffix_supported(
+            topk_weights,
+            topk_indices,
+            num_shared_experts,
+            shared_expert_scoring_func,
+        )
     ):
         _rocm_aiter_topk_softmax_impl(
             topk_weights,
@@ -551,9 +579,9 @@ def _rocm_aiter_topk_gating_impl(
 
     from aiter.ops.topk import topk_gating
 
-    # Newer AITER builds renormalize the selected softmax mass inside this
-    # launch, preserving vLLM's `renormalize=True` semantics without a second
-    # pointwise kernel.
+    # AITER renormalizes the selected softmax mass inside this launch,
+    # preserving vLLM's `renormalize=True` semantics without a second
+    # pointwise kernel, and sigmoids the trailing shared-expert columns.
     topk_gating(
         topk_weights,
         topk_indices,
@@ -562,6 +590,7 @@ def _rocm_aiter_topk_gating_impl(
         need_renorm=renormalize,
         routed_scaling_factor=1.0,
         score_func="softmax",
+        num_shared_experts=num_shared_experts,
     )
 
 
