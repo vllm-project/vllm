@@ -79,6 +79,9 @@ def _partial_tail_non_mamba_puts(
     16, blocks of 4 tokens, and a checkpoint at 44, the full-attention blocks
     are 8-10, keyed at 36, 40 and 44.
 
+    A Mamba state handed off at any other position, i.e. a shared-prefix
+    junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
+
     ``block_sizes`` are the per-group block sizes, indexed like
     ``req_meta.block_ids``.
     """
@@ -101,9 +104,11 @@ def _partial_tail_non_mamba_puts(
     boundary = get_mamba_prefill_checkpoint_position(
         prompt_tokens, hash_block_size, coord.use_eagle
     )
-    assert all(position == boundary for position in mamba_tails), (
-        "Mamba tail offloads must match the prompt checkpoint boundary"
-    )
+    # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
+    # attention KV, EAGLE proof included, ends on an attention block end no later
+    # than this checkpoint's proof, so the normal and prompt-tail saves store it.
+    if not req_meta.publish_partial_tail and boundary not in mamba_tails:
+        return []
     num_hashes = len(req_meta.block_hashes)
     if boundary == 0 or boundary // hash_block_size > num_hashes:
         return []

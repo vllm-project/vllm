@@ -1331,6 +1331,60 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
     ]
 
 
+@pytest.mark.parametrize(
+    "completed, mamba_tails, publish, expected",
+    [
+        # The chunk ending at the junction (40) hands off its Mamba state. Its
+        # attention KV comes from the normal saves, so nothing is added here.
+        (40, [40], False, []),
+        # The prompt-completing save: blocks from the LCM floor 64 up to the
+        # checkpoint 68 plus the EAGLE proof unit, whether or not the junction
+        # hand-off is in the same save.
+        (75, [68], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+        (75, [40, 68], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+    ],
+)
+def test_shared_prefix_junction_handoff_adds_no_attention_tail(
+    completed, mamba_tails, publish, expected
+):
+    """``--enable-mamba-shared-prefix-checkpoint`` also hands off a sub-block
+    Mamba state at the shared-prefix junction, below the prompt checkpoint."""
+    groups = [
+        KVCacheGroupSpec(
+            ["attention"],
+            FullAttentionSpec(
+                block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+            is_eagle_group=True,
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=16,
+                shapes=((1,),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
+    ]
+    coord = MooncakeStoreCoordinator(
+        groups, 16, 4, use_eagle=True, enable_partial_hash_hits=True
+    )
+    # 75-token prompt: checkpoint 72 - 4 = 68.
+    req_meta = ReqMeta(
+        req_id="req-0",
+        token_len_chunk=0,
+        block_ids=(list(range(1, 20)), [50, 51, 52, 53, 54]),
+        block_hashes=[bytes([i]) for i in range(18)],
+        num_prompt_tokens=75,
+        completed_token_len=completed,
+        boundary_puts=[BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
+        publish_partial_tail=publish,
+    )
+
+    assert _partial_tail_non_mamba_puts(coord, req_meta, [4, 16]) == expected
+
+
 def test_decode_boundary_state_offload_dropped_unclaimed():
     # A hand-off past the prefill end can never complete a joint hybrid hit
     # (every other group stops saving there), so it is neither transferred nor

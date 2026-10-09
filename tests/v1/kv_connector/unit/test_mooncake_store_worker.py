@@ -1009,7 +1009,9 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
 
 
 @pytest.mark.parametrize("use_eagle", [False, True])
-def test_partial_tail_offload_rejects_wrong_prompt_boundary(use_eagle):
+def test_partial_tail_ignores_handoff_off_prompt_boundary(use_eagle):
+    """A Mamba hand-off away from the prompt checkpoint (a shared-prefix
+    junction) gets no attention tail; only its own Mamba put remains."""
     store = MagicMock()
     thread = _make_partial_tail_send_thread(store)
     thread.coord.use_eagle = use_eagle
@@ -1018,10 +1020,7 @@ def test_partial_tail_offload_rejects_wrong_prompt_boundary(use_eagle):
     req.num_prompt_tokens = 17 if use_eagle else 13
     req.boundary_puts = [(1, 7, 8)]
 
-    with pytest.raises(AssertionError, match="Mamba tail.*prompt checkpoint"):
-        thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
-    store.batch_is_exist.assert_not_called()
-    store.batch_put_from_multi_buffers.assert_not_called()
+    assert _resolve_partial_tail(thread, req).boundary_puts == [(1, 7, 8)]
 
 
 def test_eagle_attention_proof_published_after_checkpoint_handoff():
@@ -1471,6 +1470,57 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
     mamba_puts = [db_mamba.key_for(BlockHash(hs[10]))] if tp_rank == 0 else []
     assert keys == [db_full.key_for(BlockHash(hs[10])), *mamba_puts]
     assert addrs == [[0x1000 + 3 * 256], *([[0x2000 + 7 * 256]] * len(mamba_puts))]
+
+
+def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
+    """A junction hand-off (``--enable-mamba-shared-prefix-checkpoint``) below
+    the prompt checkpoint stores its Mamba state under the junction hash and
+    no attention tail."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    coord = SimpleNamespace(
+        enable_partial_hash_hits=True,
+        hash_block_size=4,
+        lcm_block_size=16,
+        mamba_group_ids={1},
+        use_eagle=True,
+        eagle_proof_margin_by_group={0: 4},
+    )
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0), block_size=4, hash_block_size=4
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+        hash_block_size=4,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([256])
+    thread = _make_store_sending_thread(
+        store, coord=coord, token_databases=[db_full, db_mamba]
+    )
+
+    hs = [bytes([i + 1]) * 4 for i in range(18)]
+    # 75-token prompt (checkpoint 68), chunk cut at the junction 40.
+    req = ReqMeta(
+        req_id="req-b",
+        token_len_chunk=0,
+        block_ids=(list(range(1, 11)), [20, 21, 22]),
+        block_hashes=hs,
+        can_save=True,
+        boundary_puts=[(1, 7, 40)],
+        num_prompt_tokens=75,
+        completed_token_len=40,
+    )
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
+    assert req.boundary_puts == [(1, 7, 40)]
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [db_mamba.key_for(BlockHash(hs[9]))]
+    assert addrs == [[0x2000 + 7 * 256]]
 
 
 def test_snapshot_offload_skips_null_handoff_block():
