@@ -101,7 +101,6 @@ def check_hidden_state_handoff_supported(vllm_config: VllmConfig) -> None:
             parallel_config.decode_context_parallel_size > 1
             or parallel_config.prefill_context_parallel_size > 1
         ),
-        "batch-sharded sampling": parallel_config.enable_batch_sharded_sampling,
         "pooling models": vllm_config.model_config.runner_type == "pooling",
     }
     if names := [name for name, on in unsupported.items() if on]:
