@@ -1145,37 +1145,23 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # Exclude MultiModalMixin itself
         bases = [b for b in bases if b is not MultiModalMixin]
 
-        name = self._get_text_model_name()
-        text_model = None if name is None else getattr(self.model, name)
-
         class LanguageModel(*bases):  # type: ignore[misc]
             def __init__(self, multimodal_model):
                 # Don't call super().__init__() to avoid re-initialization
                 self.__dict__.update(multimodal_model.__dict__)
 
-            model = text_model
+            model = getattr_iter(self.model, ("language_model", "text_model"), None)
 
         return LanguageModel(self)
 
-    def _get_text_model_name(self) -> str | None:
-        """The child holding the text model, which is not always named after it."""
-        for name in ("language_model", "text_model"):
-            if getattr(self.model, name, None) is not None:
-                return name
-        decoder = self.model.get_decoder()
-        for name, module in self.model.named_children():
-            if module is decoder:
-                return name
-        return None
-
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models"""
-        name = self._get_text_model_name()
-        if name is None:
-            raise ValueError(
-                "Could not locate the language model submodule for LoRA support"
-            )
-        return MultiModelKeys.from_string_field(language_model=f"model.{name}")
+        for name in ("language_model", "text_model"):
+            if getattr(self.model, name, None) is not None:
+                return MultiModelKeys.from_string_field(language_model=f"model.{name}")
+        raise ValueError(
+            "Could not locate the language model submodule for LoRA support"
+        )
 
     def _split_embeddings(
         self, embeddings: torch.Tensor, split_sizes: list[int]
