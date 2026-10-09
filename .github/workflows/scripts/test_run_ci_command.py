@@ -32,10 +32,12 @@ from run_ci_command import (
     has_trusted_approval,
     is_active_build,
     is_build_for_pr,
+    is_ci_command_attempt,
     notify_authorized,
     parse_command,
     parse_trusted_users,
     pipeline_for_command,
+    reply_unrecognized_command,
     resolve_workflow_run_pr,
     run,
     select_latest_build,
@@ -340,13 +342,45 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIsNone(parse_command("/ci run please"))
         self.assertIsNone(parse_command("/ci run all please"))
         self.assertIsNone(parse_command("/ci cancel please"))
-        self.assertIsNone(parse_command(" /ci run"))
         self.assertIsNone(parse_command("/amd-ci run please"))
-        self.assertIsNone(parse_command("/amd-ci retry "))
         self.assertIsNone(parse_command("/AMD-CI run"))
         self.assertIsNone(parse_command("/amdci run"))
         self.assertIsNone(parse_command("/ci run --allow-stale all"))
         self.assertIsNone(parse_command("/amd-ci run --allow-stale please"))
+
+    def test_surrounding_whitespace_is_ignored(self) -> None:
+        self.assertEqual(parse_command("/ci run\r\n"), COMMAND_RUN_CI)
+        self.assertEqual(parse_command(" /ci run "), COMMAND_RUN_CI)
+        self.assertEqual(parse_command("/amd-ci retry\n"), COMMAND_RETRY_AMD_FAILED)
+
+    def test_ci_command_attempts_are_detected(self) -> None:
+        for body in ("/ci", "/ci rn", "/CI run", "/amd-ci run please", " /ci\nrun"):
+            with self.subTest(body=body):
+                self.assertTrue(is_ci_command_attempt(body))
+        for body in ("", "LGTM", "/cifoo", "/amdci run", "please /ci run"):
+            with self.subTest(body=body):
+                self.assertFalse(is_ci_command_attempt(body))
+
+    def test_unrecognized_command_gets_feedback(self) -> None:
+        github = FakeGitHub()
+
+        reply_unrecognized_command(make_event("/ci rn", actor="author"), github)
+
+        self.assertEqual(github.reactions, ["-1"])
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn(
+            "@author, that is not a recognized CI command", github.comments[0]
+        )
+        self.assertIn(f"`{COMMAND_RUN_CI}`", github.comments[0])
+        self.assertIn("<!-- vllm-ci-command:99 -->", github.comments[0])
+
+    def test_unrecognized_command_feedback_is_not_repeated(self) -> None:
+        github = FakeGitHub(comments=["❌ earlier\n\n<!-- vllm-ci-command:99 -->"])
+
+        reply_unrecognized_command(make_event("/ci rn"), github)
+
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.reactions, [])
 
     def test_commands_select_only_their_configured_pipeline(self) -> None:
         cases = (
