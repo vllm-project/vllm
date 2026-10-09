@@ -536,6 +536,13 @@ class TestThinkingModeConfig:
             ({"reasoning_effort": "high"}, "REASONING"),
             ({"thinking": False}, "CONTENT"),
             ({"enable_thinking": False}, "CONTENT"),
+            ({"thinking": True, "enable_thinking": False}, "CONTENT"),
+            ({"thinking": False, "enable_thinking": True}, "REASONING"),
+            ({"thinking": False, "enable_thinking": None}, "CONTENT"),
+            ({"thinking": True, "enable_thinking": None}, "REASONING"),
+            ({"thinking": None}, "REASONING"),
+            ({"enable_thinking": None}, "REASONING"),
+            ({"thinking": None, "enable_thinking": None}, "REASONING"),
             (
                 {"enable_thinking": True, "reasoning_effort": "none"},
                 "CONTENT",
