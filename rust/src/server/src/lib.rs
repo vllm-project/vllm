@@ -131,7 +131,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone())
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_always_constrain_output(config.always_constrain_output);
 
     let state = Arc::new(
         AppState::new(served_model_names, chat)

@@ -238,6 +238,9 @@ pub struct Config {
     pub reasoning_parser: ParserSelection,
     /// Server-side floor for tool-call structural tags.
     pub tool_strict_level: ToolStrictLevel,
+    /// Constrain the output of requests without a tool or structured-output
+    /// constraint.
+    pub always_constrain_output: bool,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
