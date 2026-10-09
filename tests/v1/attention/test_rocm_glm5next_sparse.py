@@ -258,16 +258,21 @@ def test_sparse_prefill_query_row_offset_does_not_overflow_int32():
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_sparse_prefill_fp8_nope_matches_bf16_reference():
-    """NoPE FP8 KV must dequantize in Triton, not reach 576-wide AITER asm."""
+@pytest.mark.parametrize("num_splits", [None, 4])
+def test_sparse_fp8_nope_matches_bf16_reference(num_splits):
+    """NoPE FP8 KV must dequantize in Triton, not reach 576-wide AITER asm.
+
+    ``num_splits=None`` covers the ragged kernel, otherwise split-K decode.
+    """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_bf16_triton,
         _rocm_sparse_attn_prefill_ragged_triton,
     )
 
     torch.manual_seed(0)
     device = "cuda"
     num_queries, num_heads, head_dim = 4, 16, 512
-    num_kv = 32
+    num_kv, topk = 256, 64
     kv_scale = 1.5
     q = torch.randn(
         num_queries, num_heads, head_dim, dtype=torch.bfloat16, device=device
@@ -275,11 +280,15 @@ def test_sparse_prefill_fp8_nope_matches_bf16_reference():
     kv_source = torch.randn(num_kv, head_dim, dtype=torch.float32, device=device)
     kv_fp8 = (kv_source / kv_scale).to(current_platform.fp8_dtype())
     kv_bf16 = (kv_fp8.float() * kv_scale).to(torch.bfloat16)
-    indices = torch.arange(num_queries * 8, device=device, dtype=torch.int32) % num_kv
-    indptr = torch.arange(0, num_queries * 8 + 1, 8, device=device, dtype=torch.int32)
+    indices = torch.randint(
+        0, num_kv, (num_queries * topk,), device=device, dtype=torch.int32
+    )
+    indptr = torch.arange(
+        0, num_queries * topk + 1, topk, device=device, dtype=torch.int32
+    )
 
     def run(kv, scale):
-        return _rocm_sparse_attn_prefill_ragged_triton(
+        common = dict(
             q=q,
             kv=kv,
             indices=indices,
@@ -289,6 +298,11 @@ def test_sparse_prefill_fp8_nope_matches_bf16_reference():
             nope_head_dim=head_dim,
             rope_head_dim=0,
             kv_scale=scale,
+        )
+        if num_splits is None:
+            return _rocm_sparse_attn_prefill_ragged_triton(**common)
+        return _rocm_sparse_attn_decode_ragged_bf16_triton(
+            **common, num_splits=num_splits
         )
 
     out_fp8 = run(kv_fp8, kv_scale)

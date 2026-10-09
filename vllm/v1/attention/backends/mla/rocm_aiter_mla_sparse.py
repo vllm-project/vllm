@@ -915,6 +915,11 @@ class ROCMAiterMLASparseImpl(
                     q.shape[1],
                 ).reshape(-1)
             kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
+            kv_scale = (
+                float(layer._k_scale_float)
+                if self.kv_cache_dtype.startswith("fp8")
+                else 1.0
+            )
             decode_num_splits = (
                 rocm_sparse_decode_bf16_num_splits(
                     num_tokens,
@@ -937,6 +942,7 @@ class ROCMAiterMLASparseImpl(
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
                     num_splits=decode_num_splits,
+                    kv_scale=kv_scale,
                 )
             else:
                 rocm_sparse_attn_prefill(
@@ -952,7 +958,7 @@ class ROCMAiterMLASparseImpl(
                     output=output,
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
-                    kv_scale=float(layer._k_scale_float),
+                    kv_scale=kv_scale,
                 )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
@@ -1141,10 +1147,11 @@ class ROCMAiterMLASparseImpl(
         # MQA 576/512 approach for both prefill and decode
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        head_size = sum(t.shape[-1] for t in q) if isinstance(q, tuple) else q.shape[-1]
         # The AITER sparse MLA opt-in takes precedence and reads FP8 Q.
         use_triton_sparse = not self.use_aiter_sparse_mla and _use_rocm_sparse_triton(
             kv_cache_dtype=self.kv_cache_dtype,
-            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
+            head_size=head_size,
             kv_lora_rank=self.kv_lora_rank,
             num_prefills=attn_metadata.num_prefills,
             num_decodes=attn_metadata.num_decodes,
