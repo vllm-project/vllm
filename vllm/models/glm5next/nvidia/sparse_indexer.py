@@ -7,7 +7,12 @@ import torch
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config_or_none
-from vllm.distributed import get_dcp_group
+from vllm.distributed import (
+    get_dcp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -577,7 +582,133 @@ def sparse_attn_indexer_kpool(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        from vllm.utils.deep_gemm import fp8_fp4_paged_mqa_logits
+        from vllm.utils.deep_gemm import (
+            fp8_fp4_paged_mqa_logits,
+            get_paged_mqa_logits_metadata,
+        )
+
+        # Opt-in TP row-shard: rank r scores requests r::tp_size and the
+        # expanded pool ids are all-gathered. KV/tail writes stay replicated.
+        # Verify batches (num_requests <= 32) keep the replicated path.
+        num_requests = attn_metadata_narrowed.num_decodes
+        tp_size = (
+            get_tensor_model_parallel_world_size()
+            if envs.VLLM_GLM_KPOOL_DECODE_INDEXER_ROW_SHARD
+            else 1
+        )
+        if (
+            tp_size > 1
+            and dcp_world_size == 1
+            and index_kpool > 1
+            and positions is not None
+            and decode_metadata.decode_is_uniform
+            and not decode_metadata.requires_padding
+            and num_padded_tokens
+            == num_requests * decode_metadata.write_max_decode_len
+            and num_requests >= tp_size
+            and attn_metadata_narrowed.max_seq_len > 2 * topk_tokens
+            and (
+                decode_metadata.write_max_decode_len == 1
+                or num_requests > 32
+            )
+        ):
+            tp_rank = get_tensor_model_parallel_rank()
+            device = q_quant.device
+            rows_per_req = num_padded_tokens // num_requests
+            req_ids = torch.arange(
+                tp_rank, num_requests, tp_size, device=device, dtype=torch.int64
+            )
+            flat_rows = (
+                req_ids[:, None] * rows_per_req
+                + torch.arange(rows_per_req, device=device, dtype=torch.int64)
+            ).reshape(-1)
+            # Native layouts group a request's rows on dim 0; flat/varlen
+            # keep one row per token.
+            row_index = req_ids if batch_size == num_requests else flat_rows
+            q_local = padded_q_quant_cast.index_select(0, row_index)
+            scale_local = (
+                padded_q_scale.index_select(0, row_index)
+                if padded_q_scale is not None
+                else None
+            )
+            weights_local = padded_weights[:num_padded_tokens].index_select(
+                0, flat_rows
+            )
+            lens_local = seq_lens.index_select(0, row_index)
+            block_table_local = decode_metadata.block_table.index_select(
+                0, row_index
+            )
+            indices = decode_metadata.indices
+            indices_local = (
+                indices.index_select(0, flat_rows) if indices is not None else None
+            )
+            # Local-rows schedule; num_sms comes from the full-batch shape.
+            num_sms = decode_metadata.schedule_metadata.shape[0] - 1
+            if next_n == 4 and current_platform.is_device_capability_family(90):
+                num_sms *= 2
+            schedule_local = get_paged_mqa_logits_metadata(
+                lens_local,
+                kv_cache.shape[1],
+                num_sms,
+                indices=indices_local,
+            )
+            logits = fp8_fp4_paged_mqa_logits(
+                (q_local, scale_local),
+                kv_cache,
+                weights_local,
+                lens_local,
+                block_table_local,
+                schedule_local,
+                max_model_len=max_pool_len,
+                clean_logits=False,
+                indices=indices_local,
+            )
+            select_k = topk_tokens // index_kpool
+            pool_topk = torch.empty(
+                (flat_rows.shape[0], select_k),
+                dtype=torch.int32,
+                device=logits.device,
+            )
+            get_indexer_topk(topk_backend)(
+                logits,
+                lens_local,
+                next_n,
+                pool_topk,
+                select_k,
+                attn_metadata_narrowed.max_seq_len,
+            )
+            # No padding: row length is positions + 1, gathered per row.
+            dec_seq = positions.index_select(0, flat_rows).to(torch.int32) + 1
+            out_local = kpool_ops.expand_pools_and_append_tail(
+                pool_topk.to(torch.int64), dec_seq, index_kpool
+            )
+
+            sizes = [
+                len(range(r, num_requests, tp_size)) * rows_per_req
+                for r in range(tp_size)
+            ]
+            gathered = get_tp_group().all_gatherv(out_local, dim=0, sizes=sizes)
+            # Undo round-robin: row (b, t) lands at
+            # starts[b % tp_size] + (b // tp_size) * rows_per_req + t.
+            ranks = torch.arange(tp_size, device=device, dtype=torch.int64)
+            block_starts = torch.zeros(tp_size + 1, device=device, dtype=torch.int64)
+            torch.cumsum(
+                (num_requests - ranks + tp_size - 1) // tp_size * rows_per_req,
+                dim=0,
+                out=block_starts[1:],
+            )
+            rows = torch.arange(num_padded_tokens, device=device, dtype=torch.int64)
+            req = rows // rows_per_req
+            perm = (
+                block_starts.index_select(0, req % tp_size)
+                + req // tp_size * rows_per_req
+                + rows
+                - req * rows_per_req
+            )
+            topk_indices_buffer[:num_padded_tokens, : out_local.shape[-1]] = (
+                gathered.index_select(0, perm)
+            )
+            return topk_indices_buffer
 
         logits = fp8_fp4_paged_mqa_logits(
             (padded_q_quant_cast, padded_q_scale),
