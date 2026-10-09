@@ -4,7 +4,7 @@
 
 When the resolved KDA decode backend is ``flashinfer`` and the installed
 FlashInfer ``fused_kda_decode`` accepts ``backend`` and ``state_indices_mode``
-(FlashInfer >= 0.7.1rc5), the layer passes ``backend="auto"`` and
+(FlashInfer >= 0.7.1rc1), the layer passes ``backend="auto"`` and
 ``state_indices_mode="unique_or_null"`` so FlashInfer selects the kernel itself;
 otherwise (the pinned 0.7.0.post1) the call is unchanged.
 """

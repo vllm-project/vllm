@@ -504,7 +504,7 @@ def _fused_kda_decode_accepts_backend(fn: Callable[..., Any]) -> bool:
 @functools.cache
 def flashinfer_fused_kda_decode_selects_backend() -> bool:
     """Return whether FlashInfer's ``fused_kda_decode`` accepts ``backend=`` and
-    ``state_indices_mode=`` (FlashInfer >= 0.7.1rc5; the pinned 0.7.0.post1 does
+    ``state_indices_mode=`` (FlashInfer >= 0.7.1rc1; the pinned 0.7.0.post1 does
     not), so the caller can let FlashInfer select the decode kernel itself."""
     if not has_flashinfer_fused_kda_decode():
         return False

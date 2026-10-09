@@ -252,7 +252,7 @@ def _flashinfer_kda_decode_kwargs(backend: str) -> dict[str, str]:
 
     When ``backend`` is ``"flashinfer"`` and the installed FlashInfer
     ``fused_kda_decode`` accepts ``backend`` / ``state_indices_mode``
-    (FlashInfer >= 0.7.1rc5), pass ``backend="auto"`` and the host-known
+    (FlashInfer >= 0.7.1rc1), pass ``backend="auto"`` and the host-known
     state-indices mode so FlashInfer selects the kernel itself. Otherwise (the
     pinned 0.7.0.post1, or another decode backend) the call is unchanged.
     """
