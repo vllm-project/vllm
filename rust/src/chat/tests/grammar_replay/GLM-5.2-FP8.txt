@@ -17,12 +17,12 @@ sequence
   tag `` text `</think>`
   tag `<tool_call>get_weather` glm_xml({ location: string }) `</tool_call>`
 
-# none_answer (from_token_zero)
+# none_schema (from_token_zero)
 sequence
   tag `` text `</think>`
   json({ answer: string })
 
-# auto_answer, auto_answer_calls (from_token_zero)
+# auto_schema_content, auto_schema_calls (from_token_zero)
 sequence
   tag `` text `</think>`
   or

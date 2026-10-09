@@ -45,7 +45,7 @@ sequence
         json({ location: string })
     `<|tool_calls_section_end|>`
 
-# auto_answer_calls (from_token_zero)
+# auto_schema_calls (from_token_zero)
 sequence
   tag `` text `</think>`
   or

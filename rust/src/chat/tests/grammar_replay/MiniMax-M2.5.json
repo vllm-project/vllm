@@ -357,7 +357,7 @@
         "coverage": "from_token_zero"
       },
       "generations": {
-        "none_answer": {
+        "none_schema": {
           "completion": "Need call the weather and add tools.\n</think>\n\n{\"answer\":\"sunny\"}",
           "generation_token_ids": [42478, 1728, 275, 12562, 306, 1187, 6629, 320, 200051, 367, 16673, 33591, 15368, 78697, 7582, 22089, 200020]
         }
@@ -494,11 +494,11 @@
         "coverage": "from_token_zero"
       },
       "generations": {
-        "auto_answer": {
+        "auto_schema_content": {
           "completion": "Need call the weather and add tools.\n</think>\n\n{\"answer\":\"sunny\"}",
           "generation_token_ids": [42478, 1728, 275, 12562, 306, 1187, 6629, 320, 200051, 367, 16673, 33591, 15368, 78697, 7582, 22089, 200020]
         },
-        "auto_answer_calls": {
+        "auto_schema_calls": {
           "completion": "Need call the weather and add tools.\n</think>\n\n\n<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">Shanghai</parameter>\n</invoke>\n<invoke name=\"add\">\n<parameter name=\"y\">1.0</parameter>\n<parameter name=\"x\">2</parameter>\n<parameter name=\"items\">[\"left\", \"right\"]</parameter>\n</invoke>\n</minimax:tool_call>",
           "generation_token_ids": [42478, 1728, 275, 12562, 306, 1187, 6629, 320, 200051, 4368, 200052, 10, 60, 88638, 1925, 1139, 848, 95, 51872, 6143, 60, 24662, 1925, 1139, 28415, 3361, 165806, 1579, 24662, 1100, 1579, 88638, 1100, 60, 88638, 1925, 1139, 2132, 6143, 60, 24662, 1925, 1139, 121, 3361, 49, 46, 48, 1579, 24662, 1100, 60, 24662, 1925, 1139, 120, 3361, 50, 1579, 24662, 1100, 60, 24662, 1925, 1139, 12405, 3361, 7795, 2038, 1164, 494, 1581, 8760, 1579, 24662, 1100, 1579, 88638, 1100, 200053, 200020]
         }

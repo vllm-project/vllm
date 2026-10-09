@@ -17,12 +17,12 @@ sequence
   optional tag `<think>` text `</think>`
   tag `<tool_call><function=get_weather>` qwen_xml({ location: string }) `</function></tool_call>`
 
-# none_answer (from_token_zero)
+# none_schema (from_token_zero)
 sequence
   optional tag `<think>` text `</think>`
   json({ answer: string })
 
-# auto_answer, auto_answer_calls (from_token_zero)
+# auto_schema_content, auto_schema_calls (from_token_zero)
 sequence
   optional tag `<think>` text `</think>`
   or

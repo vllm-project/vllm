@@ -59,12 +59,13 @@ struct RoundtripCase {
     json_fmt: JsonFmt,
     /// Whether the template renders tool-call argument object keys in sorted order.
     sort_json_keys: bool,
-    /// Answer-constraint variants of the tool-call fixture this case runs. The
-    /// variants without calls need a template that renders a final turn
-    /// without tool calls back to its completion (some templates drop its
-    /// reasoning or its stop suffix); the variant with calls needs a tool
-    /// grammar, which holds the calls next to the answer.
-    answer_variants: &'static [FixtureVariant],
+    /// Which tool-call fixture variants with a JSON schema this case runs;
+    /// every case runs the variants without one. The variants answered with
+    /// content need a template that renders a final turn without tool calls
+    /// back to its completion (some templates drop its reasoning or its stop
+    /// suffix); the variant answered with calls needs a tool grammar, which
+    /// holds the calls next to the schema.
+    with_schema: &'static [ToolCallMixVariant],
 }
 
 #[derive(Clone, Copy)]
@@ -133,11 +134,11 @@ impl ThinkingBehavior {
     }
 }
 
-/// Variant of the tool-call fixture: the tool choice, and whether the request
-/// constrains the answer with a JSON schema.
+/// Variant of the tool-call fixture: the request's tool choice and optional
+/// JSON schema, and the completion that answers it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum FixtureVariant {
+enum ToolCallMixVariant {
     /// `auto`, with content before the tool calls.
     Auto,
     /// `required`, with tool calls only: builder grammars admit no content
@@ -145,37 +146,42 @@ enum FixtureVariant {
     Required,
     /// Named `get_weather`, with a single call to it and no content.
     Named,
-    /// `none` with an answer constraint, answered with the constrained answer.
-    NoneAnswer,
-    /// `auto` with an answer constraint, answered with the constrained answer.
-    AutoAnswer,
-    /// `auto` with an answer constraint, answered with tool calls only:
-    /// builder grammars hold either the answer or the calls.
-    AutoAnswerCalls,
+
+    /// `none` with a JSON schema, answered with schema-valid content.
+    NoneSchema,
+    /// `auto` with a JSON schema, answered with schema-valid content.
+    AutoSchemaContent,
+    /// `auto` with a JSON schema, answered with tool calls only: builder
+    /// grammars hold either schema-valid content or the calls.
+    AutoSchemaCalls,
 }
 
-/// The constrained answer of the answer variants, and its schema.
-const ANSWER: &str = r#"{"answer":"sunny"}"#;
+/// The schema-valid content of the schema variants answered with content.
+const SCHEMA_CONTENT: &str = r#"{"answer":"sunny"}"#;
 
-impl FixtureVariant {
-    const TOOL_CHOICES: [Self; 3] = [Self::Auto, Self::Required, Self::Named];
-    const ANSWERS: &[Self] = &[Self::NoneAnswer, Self::AutoAnswer, Self::AutoAnswerCalls];
+impl ToolCallMixVariant {
+    const WITHOUT_SCHEMA: &[Self] = &[Self::Auto, Self::Required, Self::Named];
+    const WITH_SCHEMA: &[Self] = &[
+        Self::NoneSchema,
+        Self::AutoSchemaContent,
+        Self::AutoSchemaCalls,
+    ];
 
     fn tool_choice(self) -> ChatToolChoice {
         match self {
-            Self::Auto | Self::AutoAnswer | Self::AutoAnswerCalls => ChatToolChoice::Auto,
+            Self::Auto | Self::AutoSchemaContent | Self::AutoSchemaCalls => ChatToolChoice::Auto,
             Self::Required => ChatToolChoice::Required,
             Self::Named => ChatToolChoice::Function {
                 name: "get_weather".to_string(),
             },
-            Self::NoneAnswer => ChatToolChoice::None,
+            Self::NoneSchema => ChatToolChoice::None,
         }
     }
 
-    fn answer_constraint(self) -> Option<StructuredOutputsParams> {
+    fn structured_outputs(self) -> Option<StructuredOutputsParams> {
         matches!(
             self,
-            Self::NoneAnswer | Self::AutoAnswer | Self::AutoAnswerCalls
+            Self::NoneSchema | Self::AutoSchemaContent | Self::AutoSchemaCalls
         )
         .then(|| {
             StructuredOutputsParams::json(serde_json::json!({
@@ -190,9 +196,9 @@ impl FixtureVariant {
     fn expected(self) -> (Option<&'static str>, usize) {
         match self {
             Self::Auto => (Some("I will call the tools."), 2),
-            Self::Required | Self::AutoAnswerCalls => (None, 2),
+            Self::Required | Self::AutoSchemaCalls => (None, 2),
             Self::Named => (None, 1),
-            Self::NoneAnswer | Self::AutoAnswer => (Some(ANSWER), 0),
+            Self::NoneSchema | Self::AutoSchemaContent => (Some(SCHEMA_CONTENT), 0),
         }
     }
 }
@@ -208,7 +214,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -222,7 +228,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -236,7 +242,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -250,7 +256,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -264,7 +270,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -278,7 +284,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -292,7 +298,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -306,7 +312,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -320,9 +326,12 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            // The GLM-4.5 tool parser builds no tool grammar, so an answer
-            // constraint excludes the calls.
-            answer_variants: &[FixtureVariant::NoneAnswer, FixtureVariant::AutoAnswer],
+            // The GLM-4.5 tool parser builds no tool grammar, so the schema
+            // excludes the calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
         }
     }
 
@@ -336,7 +345,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -350,7 +359,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -364,7 +373,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
-            answer_variants: &[FixtureVariant::AutoAnswerCalls],
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 
@@ -388,7 +397,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
             sort_json_keys: false,
-            answer_variants: &[FixtureVariant::AutoAnswerCalls],
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 
@@ -406,7 +415,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -424,7 +433,7 @@ impl RoundtripCase {
             },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: &[FixtureVariant::AutoAnswerCalls],
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 
@@ -438,7 +447,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -452,7 +461,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -466,7 +475,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -480,7 +489,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            answer_variants: &[FixtureVariant::AutoAnswerCalls],
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 
@@ -494,7 +503,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
-            answer_variants: FixtureVariant::ANSWERS,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 }
@@ -612,7 +621,7 @@ async fn run_roundtrip_tool_call_mix(
     backends: &vllm_chat::LoadedModelBackends,
 ) -> Result<()> {
     let mut results = Vec::new();
-    for &variant in FixtureVariant::TOOL_CHOICES.iter().chain(case.answer_variants) {
+    for &variant in ToolCallMixVariant::WITHOUT_SCHEMA.iter().chain(case.with_schema) {
         let result = run_roundtrip_tool_call_mix_inner(case, backends, variant)
             .await
             .with_context(|| format!("variant {}", serde_json::to_value(variant).unwrap()))?;
@@ -624,7 +633,7 @@ async fn run_roundtrip_tool_call_mix(
 async fn run_roundtrip_tool_call_mix_inner(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
-    variant: FixtureVariant,
+    variant: ToolCallMixVariant,
 ) -> Result<RoundtripResult> {
     let mut request = roundtrip_request(
         "roundtrip-reasoning-tools",
@@ -637,7 +646,7 @@ async fn run_roundtrip_tool_call_mix_inner(
         Some(true), // always enable thinking in this fixture
         case.thinking_behavior,
     );
-    request.sampling_params.structured_outputs = variant.answer_constraint();
+    request.sampling_params.structured_outputs = variant.structured_outputs();
     let expected_reasoning = "Need call the weather and add tools.";
     let (expected_text, tool_call_count) = variant.expected();
 
@@ -1196,7 +1205,7 @@ struct GrammarReplayCase {
     /// first generated token.
     grammar: BuiltOutputGrammar,
     /// Generations keyed by the fixture variants whose requests build this grammar.
-    generations: BTreeMap<FixtureVariant, GrammarReplayGeneration>,
+    generations: BTreeMap<ToolCallMixVariant, GrammarReplayGeneration>,
 }
 
 /// One rendered completion replayed against its output grammar.
@@ -1231,7 +1240,7 @@ fn grammar_replay_dir() -> PathBuf {
 fn check_grammar_replay_file(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
-    results: Vec<(FixtureVariant, RoundtripResult)>,
+    results: Vec<(ToolCallMixVariant, RoundtripResult)>,
 ) -> Result<()> {
     let model_name = case.model_id.rsplit_once('/').map_or(case.model_id, |(_, name)| name);
     let path = grammar_replay_dir().join(format!("{model_name}.json"));

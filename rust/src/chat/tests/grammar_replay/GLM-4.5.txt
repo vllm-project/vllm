@@ -1,4 +1,4 @@
-# none_answer, auto_answer (from_token_zero)
+# none_schema, auto_schema_content (from_token_zero)
 sequence
   optional
     sequence

@@ -111,7 +111,7 @@ sequence
           `\n`
     `\n</tool_calls:opensource>`
 
-# auto_answer_calls (from_token_zero)
+# auto_schema_calls (from_token_zero)
 sequence
   tag `` text `</think:opensource>`
   or

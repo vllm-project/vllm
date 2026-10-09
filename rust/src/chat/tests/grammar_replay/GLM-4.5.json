@@ -54,11 +54,11 @@
         "coverage": "from_token_zero"
       },
       "generations": {
-        "none_answer": {
+        "none_schema": {
           "completion": "\n<think>Need call the weather and add tools.</think>\n{\"answer\":\"sunny\"}",
           "generation_token_ids": [198, 151350, 23591, 1618, 279, 9101, 323, 912, 7375, 13, 151351, 198, 4913, 9214, 3252, 82, 27208, 9204, 151329]
         },
-        "auto_answer": {
+        "auto_schema_content": {
           "completion": "\n<think>Need call the weather and add tools.</think>\n{\"answer\":\"sunny\"}",
           "generation_token_ids": [198, 151350, 23591, 1618, 279, 9101, 323, 912, 7375, 13, 151351, 198, 4913, 9214, 3252, 82, 27208, 9204, 151329]
         }

@@ -321,7 +321,7 @@
         "coverage": "from_token_zero"
       },
       "generations": {
-        "none_answer": {
+        "none_schema": {
           "completion": "Need call the weather and add tools.</think>{\"answer\":\"sunny\"}",
           "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128822, 24313, 19995, 16562, 69958, 2928, 62773, 1]
         }
@@ -449,11 +449,11 @@
         "coverage": "from_token_zero"
       },
       "generations": {
-        "auto_answer": {
+        "auto_schema_content": {
           "completion": "Need call the weather and add tools.</think>{\"answer\":\"sunny\"}",
           "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128822, 24313, 19995, 16562, 69958, 2928, 62773, 1]
         },
-        "auto_answer_calls": {
+        "auto_schema_calls": {
           "completion": "Need call the weather and add tools.</think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n<｜DSML｜ parameter name=\"location\" string=\"true\">Shanghai</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"add\">\n<｜DSML｜ parameter name=\"y\" string=\"false\">1.0</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"x\" string=\"false\">2</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"items\" string=\"false\">[\"left\", \"right\"]</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
           "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128822, 271, 30, 128825, 10699, 1018, 30, 128825, 34756, 2329, 1281, 1133, 65, 50219, 3816, 30, 128825, 10767, 2329, 1281, 33182, 4, 3418, 1281, 11476, 3320, 119606, 28011, 1718, 128825, 10767, 1018, 1718, 128825, 34756, 1018, 30, 128825, 34756, 2329, 1281, 3327, 3816, 30, 128825, 10767, 2329, 1281, 91, 4, 3418, 1281, 19836, 3320, 19, 16, 18, 1718, 128825, 10767, 1018, 30, 128825, 10767, 2329, 1281, 90, 4, 3418, 1281, 19836, 3320, 20, 1718, 128825, 10767, 1018, 30, 128825, 10767, 2329, 1281, 17173, 4, 3418, 1281, 19836, 3320, 10931, 4589, 1760, 582, 2459, 13747, 1718, 128825, 10767, 1018, 1718, 128825, 34756, 1018, 1718, 128825, 10699, 32, 1]
         }

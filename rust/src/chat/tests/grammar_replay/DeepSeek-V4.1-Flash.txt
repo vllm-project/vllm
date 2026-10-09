@@ -25,12 +25,12 @@ sequence
     tag `<｜DSML｜ invoke name="get_weather">\n` deepseek_v4_1_xml({ location: string }) `</｜DSML｜ invoke>\n`
     `</｜DSML｜ calls>`
 
-# none_answer (from_token_zero)
+# none_schema (from_token_zero)
 sequence
   tag `` text `</think>`
   json({ answer: string })
 
-# auto_answer, auto_answer_calls (from_token_zero)
+# auto_schema_content, auto_schema_calls (from_token_zero)
 sequence
   tag `` text `</think>`
   or

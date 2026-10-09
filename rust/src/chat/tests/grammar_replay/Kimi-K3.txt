@@ -87,13 +87,13 @@ sequence
               tag `<|open|>json type="object"<|sep|>` json({ location: string }) `<|close|>json<|sep|>`
   optional `<|close|>message<|sep|>`
 
-# none_answer (from_token_zero)
+# none_schema (from_token_zero)
 sequence
   tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
   tag `<|open|>response<|sep|>` json({ answer: string }) `<|close|>response<|sep|>`
   optional `<|close|>message<|sep|>`
 
-# auto_answer, auto_answer_calls (from_token_zero)
+# auto_schema_content, auto_schema_calls (from_token_zero)
 sequence
   tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
   or

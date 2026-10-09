@@ -26,7 +26,7 @@ sequence
       `\n\n`
   tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ location: string }) `}\n</tool_call>`
 
-# none_answer (from_token_zero)
+# none_schema (from_token_zero)
 sequence
   optional
     sequence
@@ -34,7 +34,7 @@ sequence
       `\n\n`
   json({ answer: string })
 
-# auto_answer, auto_answer_calls (from_token_zero)
+# auto_schema_content, auto_schema_calls (from_token_zero)
 sequence
   optional
     sequence

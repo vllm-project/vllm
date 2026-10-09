@@ -31,14 +31,14 @@ sequence
     tag `<invoke name="get_weather">\n` minimax_xml({ location: string }) `</invoke>\n`
     `</minimax:tool_call>`
 
-# none_answer (from_token_zero)
+# none_schema (from_token_zero)
 sequence
   sequence
     tag `` text `</think>`
     `\n\n`
   json({ answer: string })
 
-# auto_answer, auto_answer_calls (from_token_zero)
+# auto_schema_content, auto_schema_calls (from_token_zero)
 sequence
   sequence
     tag `` text `</think>`
