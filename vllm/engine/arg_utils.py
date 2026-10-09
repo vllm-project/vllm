@@ -600,6 +600,7 @@ class EngineArgs:
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
+    cpu_offload_stage_min_tokens: int = UVAOffloadConfig.cpu_offload_stage_min_tokens
     offload_group_size: int = PrefetchOffloadConfig.offload_group_size
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
@@ -1454,6 +1455,13 @@ class EngineArgs:
         offload_group.add_argument("--cpu-offload-gb", **uva_kwargs["cpu_offload_gb"])
         offload_group.add_argument(
             "--cpu-offload-params", **uva_kwargs["cpu_offload_params"]
+        )
+        offload_group.add_argument(
+            "--cpu-offload-stage-min-tokens",
+            **{
+                **uva_kwargs["cpu_offload_stage_min_tokens"],
+                "type": human_readable_int_or_auto,
+            },
         )
         offload_group.add_argument(
             "--offload-group-size",
@@ -2833,6 +2841,7 @@ class EngineArgs:
             uva=UVAOffloadConfig(
                 cpu_offload_gb=self.cpu_offload_gb,
                 cpu_offload_params=self.cpu_offload_params,
+                cpu_offload_stage_min_tokens=self.cpu_offload_stage_min_tokens,
             ),
             prefetch=PrefetchOffloadConfig(
                 offload_group_size=self.offload_group_size,

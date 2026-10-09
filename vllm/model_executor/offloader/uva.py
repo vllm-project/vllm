@@ -12,12 +12,60 @@ from torch.func import functional_call
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+
+class UVAExpertStager:
+    """Copies UVA-offloaded expert weights into a device buffer for steps of
+    at least `min_tokens` tokens (0 disables), see
+    `UVAOffloadConfig.cpu_offload_stage_min_tokens`.
+
+    One buffer per (slot, shape, stride, dtype, device) is shared by all
+    layers. The copy and the kernel reading the buffer are issued on the same
+    stream, so layer l+1's copy waits for layer l's kernel. Under DBO both
+    micro-batches use one compute stream, so the caller must not yield between
+    staging and the experts kernel.
+    """
+
+    def __init__(self, min_tokens: int):
+        self.min_tokens = min_tokens
+        self._buffers: dict[tuple, torch.Tensor] = {}
+
+    def maybe_stage(
+        self, weight: torch.Tensor, num_tokens: int, slot: str
+    ) -> torch.Tensor:
+        if (
+            self.min_tokens == 0
+            or num_tokens < self.min_tokens
+            or not getattr(weight, "_vllm_is_uva_offloaded", False)
+            # A captured copy would replay at every size the graph serves.
+            or torch.accelerator.current_stream().is_capturing()
+        ):
+            return weight
+        key = (slot, tuple(weight.shape), weight.stride(), weight.dtype, weight.device)
+        buf = self._buffers.get(key)
+        if buf is None:
+            # First allocated by the profiling run, so the KV cache accounts
+            # for it.
+            buf = torch.empty_strided(
+                weight.shape, weight.stride(), dtype=weight.dtype, device=weight.device
+            )
+            self._buffers[key] = buf
+            logger.info(
+                "Allocated a %s GiB buffer to stage UVA-offloaded %s %s (%s).",
+                format_gib(buf.numel() * buf.element_size()),
+                slot,
+                tuple(weight.shape),
+                weight.dtype,
+            )
+        buf.copy_(weight, non_blocking=True)
+        return buf
 
 
 class UVAOffloader(BaseOffloader):
@@ -34,6 +82,9 @@ class UVAOffloader(BaseOffloader):
         cpu_offload_max_bytes: Maximum bytes to offload to CPU.
         cpu_offload_params: Set of parameter name segments to selectively
             offload. If empty, all parameters are eligible up to the byte limit.
+        stage_min_tokens: Resolved `cpu_offload_stage_min_tokens`; steps with
+            at least this many tokens read fused-MoE expert weights from a
+            device copy. 0 (or an unresolved "auto") disables it.
 
     """
 
@@ -43,6 +94,7 @@ class UVAOffloader(BaseOffloader):
         self,
         cpu_offload_max_bytes: int,
         cpu_offload_params: set[str] | None = None,
+        stage_min_tokens: int = 0,
     ):
         self.cpu_offload_max_bytes = cpu_offload_max_bytes
         self.cpu_offload_bytes = 0
@@ -52,6 +104,21 @@ class UVAOffloader(BaseOffloader):
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
+        # CUDA only: ROCm kernels read per-tensor dispatch attributes (e.g.
+        # `is_shuffled`) that a staging buffer does not carry.
+        stage = self.uva_offloading and current_platform.is_cuda()
+        self.expert_stager = UVAExpertStager(max(stage_min_tokens, 0) if stage else 0)
+        if self.expert_stager.min_tokens > 0:
+            logger.info(
+                "Staging UVA-offloaded MoE expert weights in VRAM for steps of at "
+                "least %d tokens.",
+                self.expert_stager.min_tokens,
+            )
+
+    def maybe_stage(
+        self, weight: torch.Tensor, num_tokens: int, slot: str
+    ) -> torch.Tensor:
+        return self.expert_stager.maybe_stage(weight, num_tokens, slot)
 
     def wrap_modules(
         self,
