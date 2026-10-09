@@ -80,6 +80,11 @@ def _truncate_message_text_content(
     max_tokens: int,
 ) -> ConversationMessage:
     content = message["content"]
+    if isinstance(content, str):
+        return ConversationMessage(
+            role=message["role"],
+            content=truncate_text_to_tokens(content, tokenizer, max_tokens),
+        )
     if not isinstance(content, list):
         raise ValueError("Structured scoring messages must contain content parts.")
 
@@ -678,7 +683,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         sentence_transformers_config = self.sentence_transformers_config
         if (
             sentence_transformers_config is not None
-            and sentence_transformers_config.uses_message_format
+            and sentence_transformers_config.message_format is not None
             and max_length is not None
             and prompt_length >= max_length
             and all(
@@ -793,12 +798,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tokenizer = self.tokenizer
 
         sentence_transformers_config = self.sentence_transformers_config
-        uses_message_format = (
-            sentence_transformers_config is not None
-            and sentence_transformers_config.uses_message_format
+        message_format = (
+            sentence_transformers_config.message_format
+            if sentence_transformers_config is not None
+            else None
         )
         chat_template_kwargs = dict(chat_template_kwargs or {})
-        if uses_message_format:
+        if message_format is not None:
             chat_template_kwargs.pop("restore_suffix", None)
 
         system_prompt = None
@@ -823,14 +829,23 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 system_prompt = prompts[prompt_name]
             if system_prompt is not None and not isinstance(system_prompt, str):
                 raise ValueError("The CrossEncoder prompt must be a string.")
-            if system_prompt and not uses_message_format:
-                raise ValueError(
-                    "LogitScore prompts require structured message inputs."
-                )
+            if system_prompt and message_format is None:
+                raise ValueError("LogitScore prompts require message inputs.")
 
         prompt_1 = prompt_2 = ""
         messages: list[ConversationMessage] | None = None
-        if uses_message_format:
+        if message_format is not None:
+            # ST only unwraps a single text part into a flat string; joining
+            # multiple parts would change the saved template's input semantics.
+            if message_format == "flat" and any(
+                not isinstance(data, str)
+                and (len(data) != 1 or data[0]["type"] != "text")
+                for data in (data_1, data_2)
+            ):
+                raise ValueError(
+                    "Flat Sentence Transformers message inputs require strings "
+                    "or a single text content part."
+                )
             messages, mm_data, mm_uuids = parse_chat_messages(
                 cast(
                     list[ChatCompletionMessageParam],
@@ -840,7 +855,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     ],
                 ),
                 model_config,
-                content_format="openai",
+                content_format="string" if message_format == "flat" else "openai",
             )
             if max_tokens_per_query > 0:
                 messages[0] = _truncate_message_text_content(
@@ -855,7 +870,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     0,
                     ConversationMessage(
                         role="system",
-                        content=cast(Any, [{"type": "text", "text": system_prompt}]),
+                        content=cast(
+                            Any,
+                            system_prompt
+                            if message_format == "flat"
+                            else [{"type": "text", "text": system_prompt}],
+                        ),
                     ),
                 )
         else:
@@ -915,10 +935,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
-        # Most CrossEncoders use tokenizer pair encoding. Structured modular
-        # CrossEncoders are the narrow exception: Sentence Transformers
+        # Most CrossEncoders use tokenizer pair encoding. Modular CrossEncoders
+        # declaring message inputs are the exception: Sentence Transformers
         # converts pairs to query/document messages before tokenization.
-        if chat_template is None and not uses_message_format:
+        if chat_template is None and message_format is None:
             full_prompt, prompt_inputs = default_tokenizer_encode()
         else:
             try:
@@ -936,7 +956,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                         f"conflict with fixed scorer arguments: {_unexpected}"
                     )
 
-                if uses_message_format:
+                if message_format is not None:
                     assert messages is not None
                 else:
                     messages = [
@@ -959,14 +979,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     ),
                 )
                 template_encode_kwargs = encode_kwargs
-                if uses_message_format:
+                if message_format is not None:
                     template_encode_kwargs = {
                         **encode_kwargs,
                         "add_special_tokens": False,
                     }
                 prompt_inputs = tokenizer(full_prompt, **template_encode_kwargs)
             except ChatTemplateResolutionError as exc:
-                if uses_message_format:
+                if message_format is not None:
                     raise ValueError(
                         "Unable to apply the saved Sentence Transformers "
                         "CrossEncoder chat template."

@@ -3,6 +3,7 @@
 """Integration tests for modular Sentence Transformers CrossEncoders."""
 
 from pathlib import Path
+from typing import Literal
 
 import pytest
 import torch
@@ -14,7 +15,7 @@ from vllm.entrypoints.pooling.scoring.typing import ScoreInput, ScoreMultiModalP
 def _create_modular_bert_cross_encoder(
     path: Path,
     *,
-    structured: bool = False,
+    message_format: Literal["flat", "structured"] | None = None,
     pooling_mode: str = "mean",
 ) -> tuple[str, list[tuple[str, str]], list[float]]:
     from sentence_transformers import CrossEncoder
@@ -70,11 +71,16 @@ def _create_modular_bert_cross_encoder(
         do_lower_case=False,
         model_max_length=16,
     )
-    if structured:
+    if message_format is not None:
+        content_template = (
+            "{{ message['content'] }}"
+            if message_format == "flat"
+            else "{% for item in message['content'] %}{{ item['text'] }}{% endfor %}"
+        )
         tokenizer.chat_template = (
             "{% for message in messages %}{{ message['role'] }}:"
-            "{% for item in message['content'] %}{{ item['text'] }}{% endfor %};"
-            "{% endfor %}[SEP]"
+            + content_template
+            + ";{% endfor %}[SEP]"
         )
     tokenizer.save_pretrained(base_path)
 
@@ -87,10 +93,10 @@ def _create_modular_bert_cross_encoder(
             "message": {
                 "method": "forward",
                 "method_output_name": "last_hidden_state",
-                "format": "structured",
+                "format": message_format,
             },
         }
-        if structured
+        if message_format is not None
         else None,
     )
     pooling = Pooling(
@@ -156,16 +162,19 @@ def test_modular_bert_cross_encoder_score_parity(vllm_runner, tmp_path: Path) ->
             )
 
 
-@pytest.mark.parametrize("pooling_mode", ["cls", "mean", "lasttoken"])
-def test_structured_cross_encoder_export_preserves_truncated_scores(
-    vllm_runner, tmp_path: Path, pooling_mode: str
+@pytest.mark.parametrize(
+    "pooling_mode,message_format",
+    [("cls", "structured"), ("mean", "flat"), ("lasttoken", "structured")],
+)
+def test_message_cross_encoder_export_preserves_truncated_scores(
+    vllm_runner, tmp_path: Path, pooling_mode: str, message_format: str
 ) -> None:
-    """Saved structured exports retain the template tail used by the trained head."""
+    """Saved message exports retain the template tail used by the trained head."""
     pytest.importorskip("sentence_transformers", minversion="5.7.0")
     from sentence_transformers import CrossEncoder
 
     model_path, pairs, reference_scores = _create_modular_bert_cross_encoder(
-        tmp_path, structured=True, pooling_mode=pooling_mode
+        tmp_path, message_format=message_format, pooling_mode=pooling_mode
     )
     reference = CrossEncoder(model_path, device="cpu", trust_remote_code=False)
     features = reference.preprocess(pairs)
@@ -197,6 +206,7 @@ def _create_qwen_cross_encoder(
     *,
     multimodal: bool = False,
     dense: bool = False,
+    message_format: Literal["flat", "structured"] = "structured",
 ) -> tuple[
     str,
     list[tuple[ScoreInput, ScoreInput]],
@@ -242,6 +252,14 @@ def _create_qwen_cross_encoder(
     }
     tokenizer_backend = Tokenizer(WordLevel(vocab, unk_token="[UNK]"))
     tokenizer_backend.pre_tokenizer = Whitespace()
+    content_template = (
+        "{{ message['content'] }}"
+        if message_format == "flat"
+        else "{% for item in message['content'] %}"
+        "{% if item['type'] == 'image' %}"
+        "<|vision_start|><|image_pad|><|vision_end|>"
+        "{% else %}{{ item['text'] }}{% endif %}{% endfor %}"
+    )
     tokenizer = TokenizersBackend(
         tokenizer_object=tokenizer_backend,
         pad_token="[PAD]",
@@ -252,11 +270,8 @@ def _create_qwen_cross_encoder(
         additional_special_tokens=vision_tokens,
         chat_template=(
             "{% for message in messages %}{{ message['role'] }}:"
-            "{% for item in message['content'] %}"
-            "{% if item['type'] == 'image' %}"
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "{% else %}{{ item['text'] }}{% endif %}{% endfor %};"
-            "{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}"
+            + content_template
+            + ";{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}"
         ),
     )
     text_kwargs = dict(
@@ -348,7 +363,7 @@ def _create_qwen_cross_encoder(
             "message": {
                 "method": "forward",
                 "method_output_name": output_name,
-                "format": "structured",
+                "format": message_format,
             },
         },
         processing_kwargs={}
@@ -414,14 +429,14 @@ def _create_qwen_cross_encoder(
 
 
 @pytest.mark.parametrize(
-    "false_id,tied,multimodal",
+    "false_id,tied,multimodal,message_format",
     [
-        (None, False, False),
-        (5, False, False),
-        (None, True, False),
-        (5, True, False),
-        (5, False, True),
-        (5, True, True),
+        (None, False, False, "flat"),
+        (5, False, False, "flat"),
+        (None, True, False, "structured"),
+        (5, True, False, "structured"),
+        (5, False, True, "structured"),
+        (5, True, True, "structured"),
     ],
 )
 def test_logit_score_matches_sentence_transformers_export(
@@ -431,12 +446,15 @@ def test_logit_score_matches_sentence_transformers_export(
     false_id: int | None,
     tied: bool,
     multimodal: bool,
+    message_format: str,
 ) -> None:
     """Score real exports through both logit modes, including tied LM heads."""
     pytest.importorskip("sentence_transformers", minversion="5.7.0")
     # Compare checkpoint semantics without Triton's default TF32 attention rounding.
     monkeypatch.setenv("TRITON_F32_DEFAULT", "ieee")
-    export = _create_qwen_cross_encoder(tmp_path, false_id, tied, multimodal=multimodal)
+    export = _create_qwen_cross_encoder(
+        tmp_path, false_id, tied, multimodal=multimodal, message_format=message_format
+    )
     _check_export_scores(vllm_runner, export, multimodal=multimodal)
 
 

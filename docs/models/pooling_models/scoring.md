@@ -146,16 +146,17 @@ the saved CrossEncoder activation. This requires unquantized merged weights,
 TP=PP=1, and a bias-free linear LM head without logit scaling or soft-capping;
 runtime LoRA adapters are not supported.
 
-LogitScore structured inputs support saved default and named system prompts, plus
+LogitScore message inputs support saved default and named system prompts, plus
 boolean `add_generation_prompt` and `enable_thinking` settings under
 `processing_kwargs.chat_template`. Request chat-template kwargs override saved
 settings: `prompt` overrides `prompt_name`, and `prompt=""` disables the default.
 For example, select a saved prompt with
 `PoolingParams(extra_kwargs={"chat_template_kwargs": {"prompt_name": "match"}})`.
 
-Ordinary text pairs use tokenizer pair encoding. Exports declaring structured
-message inputs use their saved chat template with `query` and `document` roles;
-multimodal pairs additionally require a compatible multimodal backbone. Text and
+Ordinary text pairs use tokenizer pair encoding. Exports declaring `flat` or
+`structured` message inputs use their saved chat template with `query` and
+`document` roles. Flat inputs accept strings or a single text content part;
+multimodal pairs require structured messages and a compatible backbone. Text and
 image pairs are tested; arbitrary any-to-any models, audio, and video are not.
 The saved tokenizer length limit is used by default. Explicit tokenization options
 can override automatic truncation.

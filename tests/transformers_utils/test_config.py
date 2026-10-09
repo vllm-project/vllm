@@ -423,7 +423,7 @@ def test_current_sentence_transformers_cross_encoder_config(tmp_path):
         activation_function=dense_config["activation_function"],
         folder="2_Dense",
     )
-    assert not cross_encoder_config.uses_message_format
+    assert cross_encoder_config.message_format is None
     assert try_get_dense_modules(str(tmp_path), revision=None) == [
         {**dense_config, "folder": "2_Dense"}
     ]
@@ -732,7 +732,7 @@ def test_manual_token_classifier_uses_existing_hf_scoring_path(
         ({}, False, "classify"),
     ],
 )
-def test_flat_logit_score_stays_strict_without_complete_classifier_contract(
+def test_logit_score_validates_message_format_without_complete_classifier_contract(
     tmp_path, overrides, saved_classifier, convert
 ):
     _write_logit_score_cross_encoder(tmp_path)
@@ -741,13 +741,13 @@ def test_flat_logit_score_stays_strict_without_complete_classifier_contract(
     transformer_config["modality_config"]["message"] = {
         "method": "forward",
         "method_output_name": "logits",
-        "format": "flat",
+        "format": "unsupported",
     }
     path.write_text(json.dumps(transformer_config))
     if saved_classifier:
         update_json(tmp_path / "config.json", classifier_from_token=["no", "yes"])
 
-    with pytest.raises(ValueError, match="only structured"):
+    with pytest.raises(ValueError, match="flat or structured"):
         ModelConfig(
             str(tmp_path), dtype="float32", hf_overrides=overrides, convert=convert
         )
@@ -890,14 +890,21 @@ def test_cross_encoder_requires_saved_activations(
         get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
 
 
-def test_cross_encoder_message_modality_requires_saved_template(tmp_path):
-    _write_sentence_transformers_cross_encoder(tmp_path)
+@pytest.mark.parametrize("message_format", ["flat", "structured"])
+@pytest.mark.parametrize("logit_score", [False, True])
+def test_cross_encoder_message_modality_requires_saved_template(
+    tmp_path, message_format, logit_score
+):
+    if logit_score:
+        _write_logit_score_cross_encoder(tmp_path)
+    else:
+        _write_sentence_transformers_cross_encoder(tmp_path)
     transformer_config_path = tmp_path / "sentence_bert_config.json"
     transformer_config = json.loads(transformer_config_path.read_text(encoding="utf-8"))
     transformer_config["modality_config"]["message"] = {
         "method": "forward",
-        "method_output_name": "last_hidden_state",
-        "format": "structured",
+        "method_output_name": "logits" if logit_score else "last_hidden_state",
+        "format": message_format,
     }
     transformer_config_path.write_text(json.dumps(transformer_config), encoding="utf-8")
 
@@ -911,4 +918,4 @@ def test_cross_encoder_message_modality_requires_saved_template(tmp_path):
         str(tmp_path), revision=None
     )
     assert config is not None
-    assert config.uses_message_format
+    assert config.message_format == message_format

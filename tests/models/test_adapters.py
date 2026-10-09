@@ -442,7 +442,7 @@ def test_logit_score_rejects_unvalidated_loading_modes(tp, pp, quantized, lora):
             sentence_transformers_config=SentenceTransformersCrossEncoderConfig(
                 activation_fn="torch.nn.Sigmoid",
                 seq_pooling_type="LAST",
-                uses_message_format=False,
+                message_format=None,
                 logit_score_token_ids=(7,),
             ),
         ),

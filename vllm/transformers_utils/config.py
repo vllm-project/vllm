@@ -968,7 +968,7 @@ class SentenceTransformersCrossEncoderConfig:
 
     activation_fn: str
     seq_pooling_type: Literal["CLS", "MEAN", "LAST"]
-    uses_message_format: bool
+    message_format: Literal["flat", "structured"] | None
     dense_config: SentenceTransformersDenseConfig | None = None
     logit_score_token_ids: tuple[int, ...] | None = None
     prompts: dict[str, str] = field(default_factory=dict)
@@ -1468,7 +1468,7 @@ def get_sentence_transformers_cross_encoder_config(
             "CrossEncoder checkpoints."
         )
 
-    uses_message_format = False
+    message_format: Literal["flat", "structured"] | None = None
     method_output_name = "logits" if is_logit_score else "last_hidden_state"
     modality_config = transformer_config.get("modality_config")
     if modality_config is not None:
@@ -1484,12 +1484,11 @@ def get_sentence_transformers_cross_encoder_config(
                     f"got unsupported settings for {modality!r}."
                 )
         if message_config := modality_config.get("message"):
-            if message_config.get("format") != "structured":
+            message_format = message_config.get("format")
+            if message_format not in ("flat", "structured"):
                 raise ValueError(
-                    "vLLM supports only structured Sentence Transformers "
-                    "message inputs."
+                    "Sentence Transformers message format must be flat or structured."
                 )
-            uses_message_format = True
 
     prompts: dict[str, str] = {}
     default_prompt_name = None
@@ -1508,10 +1507,10 @@ def get_sentence_transformers_cross_encoder_config(
             raise ValueError(
                 "default_prompt_name must name a saved CrossEncoder prompt."
             )
-        if not uses_message_format and (prompts or chat_template_kwargs):
-            raise ValueError("LogitScore prompts require structured message inputs.")
+        if message_format is None and (prompts or chat_template_kwargs):
+            raise ValueError("LogitScore prompts require message inputs.")
 
-    if uses_message_format:
+    if message_format is not None:
         has_template_file = file_or_path_exists(
             model=model,
             config_name="chat_template.jinja",
@@ -1526,7 +1525,7 @@ def get_sentence_transformers_cross_encoder_config(
         )
         if not has_template_file and not has_inline_template:
             raise ValueError(
-                "Structured Sentence Transformers CrossEncoder inputs require "
+                "Sentence Transformers CrossEncoder message inputs require "
                 "a saved chat template."
             )
 
@@ -1551,7 +1550,7 @@ def get_sentence_transformers_cross_encoder_config(
         return SentenceTransformersCrossEncoderConfig(
             activation_fn=activation_fn,
             seq_pooling_type="LAST",
-            uses_message_format=uses_message_format,
+            message_format=message_format,
             logit_score_token_ids=(true_id,)
             if false_id is None
             else (false_id, true_id),
@@ -1639,7 +1638,7 @@ def get_sentence_transformers_cross_encoder_config(
             activation_function=dense_activation,
             folder=dense_folder,
         ),
-        uses_message_format=uses_message_format,
+        message_format=message_format,
     )
 
 

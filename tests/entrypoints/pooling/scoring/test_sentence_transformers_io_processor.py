@@ -28,6 +28,10 @@ _CHAT_TEMPLATE = (
     "{% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}"
     "{% endfor %};{% endfor %}"
 )
+_FLAT_CHAT_TEMPLATE = (
+    "{% for message in messages %}{{ message['role'] }}:"
+    "{{ message['content'] }};{% endfor %}"
+)
 
 
 class _MultiModalParser:
@@ -38,6 +42,9 @@ class _MultiModalParser:
     def parse_image(self, image_url, uuid=None):
         self.tracker.images.append(image_url)
         self.tracker.image_uuids.append(uuid)
+
+    def mm_placeholder_storage(self):
+        return {}
 
 
 class _MultiModalTracker:
@@ -86,6 +93,7 @@ def processor(monkeypatch, tokenizer):
         enable_prompt_embeds=False,
         max_model_len=16,
         encoder_config={},
+        multimodal_config=None,
         model=tokenizer.name_or_path,
         tokenizer=tokenizer.name_or_path,
         revision=None,
@@ -98,7 +106,7 @@ def processor(monkeypatch, tokenizer):
     processor.model = None
     processor.use_sep_token = True
     processor.sentence_transformers_config = SimpleNamespace(
-        uses_message_format=True,
+        message_format="structured",
         logit_score_token_ids=None,
     )
     processor.renderer = SimpleNamespace(
@@ -113,7 +121,7 @@ def processor(monkeypatch, tokenizer):
 @pytest.fixture
 def logit_processor(processor):
     processor.sentence_transformers_config = SimpleNamespace(
-        uses_message_format=True,
+        message_format="structured",
         logit_score_token_ids=(7,),
         chat_template_kwargs={"add_generation_prompt": True},
         prompts={"default": "default instruction", "other": "other instruction"},
@@ -123,7 +131,7 @@ def logit_processor(processor):
 
 
 @pytest.fixture
-def st_transformer(tmp_path, tokenizer):
+def st_transformer(tmp_path, tokenizer, processor, request):
     pytest.importorskip("sentence_transformers", minversion="5.7.0")
     from sentence_transformers.sentence_transformer.modules import Transformer
 
@@ -138,7 +146,10 @@ def st_transformer(tmp_path, tokenizer):
         )
     ).save_pretrained(tmp_path)
     tokenizer.model_max_length = 16
-    tokenizer.chat_template = _CHAT_TEMPLATE + "[SEP]"
+    message_format = getattr(request, "param", "structured")
+    processor.sentence_transformers_config.message_format = message_format
+    template = _FLAT_CHAT_TEMPLATE if message_format == "flat" else _CHAT_TEMPLATE
+    tokenizer.chat_template = template + "[SEP]"
     tokenizer.save_pretrained(tmp_path)
     return Transformer(
         str(tmp_path),
@@ -146,7 +157,7 @@ def st_transformer(tmp_path, tokenizer):
             "message": {
                 "method": "forward",
                 "method_output_name": "last_hidden_state",
-                "format": "structured",
+                "format": message_format,
             },
         },
         module_output_name="token_embeddings",
@@ -170,6 +181,7 @@ def _render_pair(processor, pair, tokenization_kwargs=None, chat_template_kwargs
     return processor.render(next(factory()))
 
 
+@pytest.mark.parametrize("message_format", ["flat", "structured"])
 @pytest.mark.parametrize(
     "kwargs,expected_prompt,expected_generation",
     [
@@ -187,10 +199,13 @@ def test_logit_score_preserves_saved_and_request_prompt_semantics(
     kwargs,
     expected_prompt,
     expected_generation,
+    message_format,
 ):
     processor = logit_processor
+    processor.sentence_transformers_config.message_format = message_format
     original_kwargs = dict(kwargs)
-    template = _CHAT_TEMPLATE + "{% if add_generation_prompt %}assistant:{% endif %}"
+    template = _FLAT_CHAT_TEMPLATE if message_format == "flat" else _CHAT_TEMPLATE
+    template += "{% if add_generation_prompt %}assistant:{% endif %}"
     full_prompt, engine_prompt = processor.get_score_prompt(
         "query",
         "document",
@@ -198,15 +213,18 @@ def test_logit_score_preserves_saved_and_request_prompt_semantics(
         chat_template=template,
         chat_template_kwargs=kwargs,
     )
-    messages = [
-        {"role": "query", "content": [{"type": "text", "text": "query"}]},
-        {"role": "document", "content": [{"type": "text", "text": "document"}]},
-    ]
+    contents = [("query", "query"), ("document", "document")]
     if expected_prompt:
-        messages.insert(
-            0,
-            {"role": "system", "content": [{"type": "text", "text": expected_prompt}]},
-        )
+        contents.insert(0, ("system", expected_prompt))
+    messages = [
+        {
+            "role": role,
+            "content": content
+            if message_format == "flat"
+            else [{"type": "text", "text": content}],
+        }
+        for role, content in contents
+    ]
     expected = tokenizer.apply_chat_template(
         messages,
         chat_template=template,
@@ -236,6 +254,45 @@ def test_logit_score_rejects_invalid_request_prompt(logit_processor, kwargs, err
         logit_processor.get_score_prompt(
             "query", "document", {}, chat_template_kwargs=kwargs
         )
+
+
+@pytest.mark.parametrize(
+    "document,expected",
+    [
+        ("", ""),
+        ("document extra", "document"),
+        ([{"type": "text", "text": "document extra"}], "document"),
+    ],
+)
+def test_flat_message_text_limits(processor, tokenizer, document, expected):
+    processor.sentence_transformers_config.message_format = "flat"
+    full_prompt, engine_prompt = processor.get_score_prompt(
+        "query extra",
+        document,
+        {"add_special_tokens": True},
+        chat_template=_FLAT_CHAT_TEMPLATE,
+        max_tokens_per_query=1,
+        max_tokens_per_doc=1,
+    )
+    assert full_prompt == f"query:query;document:{expected};"
+    assert (
+        engine_prompt["prompt_token_ids"]
+        == tokenizer(full_prompt, add_special_tokens=False)["input_ids"]
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [],
+        [{"type": "image_url", "image_url": {"url": "image.png"}}],
+        [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}],
+    ],
+)
+def test_flat_message_rejects_non_text_or_multiple_parts(processor, content):
+    processor.sentence_transformers_config.message_format = "flat"
+    with pytest.raises(ValueError, match="strings or a single text content part"):
+        processor.get_score_prompt("query", content, {})
 
 
 @pytest.mark.parametrize(
@@ -375,9 +432,10 @@ def test_explicit_template_preserves_special_token_setting(processor, tokenizer)
     assert engine_prompt["prompt_token_ids"] == expected["input_ids"]
 
 
+@pytest.mark.parametrize("st_transformer", ["flat", "structured"], indirect=True)
 @pytest.mark.parametrize("document_tokens", [3, 4, 5])
 @pytest.mark.parametrize("truncation_side", ["left", "right"])
-def test_structured_truncation_matches_sentence_transformers(
+def test_message_truncation_matches_sentence_transformers(
     processor, st_transformer, document_tokens, truncation_side
 ):
     """Both LAST and MEAN readouts must see the same boundary-length inputs."""
@@ -399,6 +457,7 @@ def test_structured_truncation_matches_sentence_transformers(
     )
 
 
+@pytest.mark.parametrize("st_transformer", ["flat", "structured"], indirect=True)
 @pytest.mark.parametrize(
     "chat_template_kwargs", [None, {"add_generation_prompt": False}]
 )
@@ -406,8 +465,8 @@ def test_logit_score_truncation_preserves_saved_template_settings(
     processor, st_transformer, chat_template_kwargs
 ):
     """Truncated LogitScore inputs retain the saved generation and system suffix."""
-    template = (
-        _CHAT_TEMPLATE + "{% if messages[0]['role'] == 'system' %}[SEP]{% endif %}"
+    template = processor.tokenizer.chat_template.removesuffix("[SEP]") + (
+        "{% if messages[0]['role'] == 'system' %}[SEP]{% endif %}"
         "{% if add_generation_prompt %}assistant:{% endif %}"
     )
     processor.tokenizer.chat_template = template
@@ -416,7 +475,7 @@ def test_logit_score_truncation_preserves_saved_template_settings(
         "chat_template": {"add_generation_prompt": True}
     }
     processor.sentence_transformers_config = SimpleNamespace(
-        uses_message_format=True,
+        message_format=processor.sentence_transformers_config.message_format,
         logit_score_token_ids=(7,),
         chat_template_kwargs={"add_generation_prompt": True},
         prompts={"match": "match"},
@@ -549,6 +608,7 @@ def test_explicit_offline_truncation_opt_out(
     assert len(result["prompts"]["prompt_token_ids"]) == 16
 
 
+@pytest.mark.parametrize("st_transformer", ["flat", "structured"], indirect=True)
 @pytest.mark.parametrize("explicit_opt_out", [False, True])
 def test_online_default_preserves_explicit_truncation_opt_out(
     processor, st_transformer, explicit_opt_out
