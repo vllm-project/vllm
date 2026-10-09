@@ -17,6 +17,7 @@ from vllm.transformers_utils.config import (
     ConfigFormat,
     get_safetensors_params_metadata,
 )
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
@@ -85,7 +86,7 @@ class ModelArchConfigConvertorBase:
     def get_head_size(self) -> int:
         if self.is_deepseek_mla():
             # special case for deepseek_v4
-            if hasattr(self.hf_text_config, "compress_ratios"):
+            if get_compress_ratios(self.hf_text_config):
                 return self.hf_text_config.head_dim
             qk_rope_head_dim = self._get_qk_rope_head_dim()
             if not envs.VLLM_MLA_DISABLE:
@@ -337,7 +338,7 @@ class ModelArchConfigConvertorBase:
             "hy_v4_mtp",
         ):
             # check is deepseek_v4 model
-            if hasattr(self.hf_text_config, "compress_ratios"):
+            if get_compress_ratios(self.hf_text_config):
                 return getattr(self.hf_text_config, "head_dim", None) is not None
             else:
                 return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
@@ -705,6 +706,16 @@ class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class Step3p5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+    def get_per_layer_hf_configs(
+        self,
+    ) -> list[tuple[PreTrainedConfig, PreTrainedConfig]] | None:
+        if (per_layer := super().get_per_layer_hf_configs()) is None:
+            return None
+        # Each MTP layer matches the first main layer of the same type
+        layer_types = self.hf_text_config.layer_types
+        mtp_layer_types = self.hf_text_config.mtp_layer_types or []
+        return [per_layer[layer_types.index(t)] for t in mtp_layer_types]
 
 
 class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):

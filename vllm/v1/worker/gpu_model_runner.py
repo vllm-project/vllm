@@ -2373,7 +2373,7 @@ class GPUModelRunner(
             # TODO(Isotr0py): Refactor mm_prefix_lm implementation
             # for better readability and maintainability.
             _span_pad_modulus = getattr(
-                hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
+                self.model, "mm_prefix_span_leading_pad_modulus", 0
             )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []

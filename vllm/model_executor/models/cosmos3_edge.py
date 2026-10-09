@@ -1,11 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Literal
 
 import torch
 import torch.nn as nn
-from transformers import NemotronHConfig, ProcessorMixin
+from transformers import (
+    Cosmos3EdgeConfig,
+    Cosmos3EdgeImageProcessor,
+    Cosmos3EdgeTextConfig,
+    Cosmos3EdgeVideoProcessor,
+    NemotronHConfig,
+    ProcessorMixin,
+)
+from transformers.models.cosmos3_edge.image_processing_cosmos3_edge import (
+    smart_resize,
+)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -19,6 +30,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -99,6 +111,23 @@ class Cosmos3EdgeVisionEncoder(Siglip2VisionTransformer):
         )[0]
 
 
+def _merge_windows_to_raster(
+    pixel_values: torch.Tensor,
+    grid_thw: torch.Tensor,
+    merge_size: int,
+) -> torch.Tensor:
+    """Reorder the processor's merge-window-major patches to raster order."""
+    chunks = []
+    for chunk, (t, h, w) in zip(
+        pixel_values.split(grid_thw.prod(-1).tolist()), grid_thw.tolist()
+    ):
+        chunk = chunk.view(
+            t, h // merge_size, w // merge_size, merge_size, merge_size, -1
+        )
+        chunks.append(chunk.permute(0, 1, 3, 2, 4, 5).reshape(t * h * w, -1))
+    return torch.cat(chunks)
+
+
 def patch_merging_by_param(
     image_embeds: torch.Tensor,
     grid_thw: torch.Tensor,
@@ -152,7 +181,6 @@ def patch_merging_by_param(
 class Cosmos3EdgePatchMerger(nn.Module):
     """Projector: LayerNorm -> Linear -> GELU -> Linear.
 
-    Reads config from projector_config (not vision_config).
     input_hidden_size * spatial_merge_size² -> merger_intermediate_size
     -> out_hidden_size
     """
@@ -213,14 +241,14 @@ class Cosmos3EdgeVisionModel(nn.Module):
 
     def __init__(
         self,
-        vision_config,
-        projector_config,
+        config: Cosmos3EdgeConfig,
         quant_config=None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.spatial_merge_size = projector_config.spatial_merge_size
-        self.out_hidden_size = projector_config.out_hidden_size
+        vision_config = config.vision_config
+        self.spatial_merge_size = vision_config.spatial_merge_size
+        self.out_hidden_size = config.text_config.hidden_size
 
         self.encoder = Cosmos3EdgeVisionEncoder(
             vision_config,
@@ -228,13 +256,10 @@ class Cosmos3EdgeVisionModel(nn.Module):
             prefix=maybe_prefix(prefix, "encoder"),
         )
         self.projector = Cosmos3EdgePatchMerger(
-            input_hidden_size=projector_config.input_hidden_size,
-            out_hidden_size=projector_config.out_hidden_size,
-            merger_intermediate_size=projector_config.merger_intermediate_size,
+            input_hidden_size=vision_config.hidden_size,
+            out_hidden_size=self.out_hidden_size,
+            merger_intermediate_size=config.projector_hidden_size,
             spatial_merge_size=self.spatial_merge_size,
-            use_postshuffle_norm=getattr(
-                projector_config, "use_postshuffle_norm", False
-            ),
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "projector"),
         )
@@ -249,6 +274,9 @@ class Cosmos3EdgeVisionModel(nn.Module):
         grid_thw: torch.Tensor | list[list[int]],
     ) -> torch.Tensor:
         grid_thw = torch.as_tensor(grid_thw, dtype=torch.int64, device="cpu")
+        pixel_values = _merge_windows_to_raster(
+            pixel_values, grid_thw, self.spatial_merge_size
+        )
         image_embeds = self.encoder.encode(pixel_values.type(self.dtype), grid_thw)
         image_embeds = patch_merging_by_param(
             image_embeds,
@@ -265,10 +293,52 @@ class Cosmos3EdgeVisionModel(nn.Module):
 
 class Cosmos3EdgeProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config()
+        return self.ctx.get_hf_config(Cosmos3EdgeConfig)
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         return self.ctx.get_hf_processor(**kwargs)
+
+    def _get_vision_info(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        num_frames: int = 2,
+        do_resize: bool = True,
+        image_processor: Cosmos3EdgeImageProcessor | Cosmos3EdgeVideoProcessor,
+        mm_kwargs: Mapping[str, object],
+        modality: Literal["image", "video"] | None = None,
+    ) -> tuple[ImageSize, int]:
+        # Images and videos share one resize rule with no temporal patching
+        if modality is None:
+            is_video = isinstance(image_processor, Cosmos3EdgeVideoProcessor)
+            modality = "video" if is_video else "image"
+        vision_config = self.get_hf_config().vision_config
+        patch_size = vision_config.patch_size
+        merge_size = vision_config.spatial_merge_size
+
+        merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs(mm_kwargs)
+        scope = "videos_kwargs" if modality == "video" else "images_kwargs"
+        size = self._get_vision_size(
+            merged_mm_kwargs.get(scope, {}),
+            default_size=image_processor.size,
+        )
+
+        if do_resize:
+            image_height, image_width = smart_resize(
+                num_frames=num_frames,
+                height=image_height,
+                width=image_width,
+                temporal_factor=1,
+                factor=patch_size * merge_size,
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
+            )
+
+        grid_h = image_height // patch_size
+        grid_w = image_width // patch_size
+        num_vision_tokens = max(num_frames, 1) * grid_h * grid_w // merge_size**2
+        return ImageSize(width=image_width, height=image_height), num_vision_tokens
 
 
 class Cosmos3EdgeMultiModalProcessor(Qwen3VLMultiModalProcessor):
@@ -375,14 +445,32 @@ class Cosmos3EdgeTextModel(NemotronHModel):
     load_weights = None  # type: ignore[assignment]
 
 
+def _to_nemotron_h_config(text_config: Cosmos3EdgeTextConfig) -> NemotronHConfig:
+    """Express the dense text model as Nemotron-H attention and MLP layers."""
+    config_dict = text_config.to_dict()
+    for key in ("model_type", "num_hidden_layers", "transformers_version"):
+        config_dict.pop(key, None)
+    rope_parameters = config_dict.pop("rope_parameters")
+    config = NemotronHConfig(
+        layers_block_type=["full_attention", "mlp"] * text_config.num_hidden_layers,
+        mlp_hidden_act=config_dict.pop("hidden_act"),
+        layer_norm_epsilon=config_dict.pop("rms_norm_eps"),
+        **config_dict,
+    )
+    # Set after init because Nemotron-H's RoPE validation rejects mRoPE keys
+    config.rope_parameters = {**rope_parameters, "mrope_interleaved": True}
+    return config
+
+
 class Cosmos3EdgeForCausalLM(nn.Module):
     """Minimal CausalLM wrapper for the Cosmos3 Edge dense text model."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        hf_config = vllm_config.model_config.hf_config
-        text_config = getattr(hf_config, "text_config", hf_config)
-        vllm_config = vllm_config.with_hf_config(text_config)
+        text_config = _to_nemotron_h_config(vllm_config.model_config.hf_config)
+        vllm_config = vllm_config.with_hf_config(
+            text_config, architectures=["NemotronHForCausalLM"]
+        )
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -564,17 +652,14 @@ class Cosmos3EdgeForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Cosmos3EdgeVisionModel(
-                vision_config=config.vision_config,
-                projector_config=config.projector_config,
+                config,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
         with self._mark_language_model(vllm_config):
             self.language_model = Cosmos3EdgeForCausalLM(
-                vllm_config=vllm_config.with_hf_config(
-                    config.text_config, architectures=["NemotronHForCausalLM"]
-                ),
+                vllm_config=vllm_config.with_hf_config(config.text_config),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 

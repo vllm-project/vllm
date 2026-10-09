@@ -240,9 +240,7 @@ class MiniMaxM3IndexerAiterMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         hf_config = vllm_config.model_config.hf_config
         text_config = getattr(hf_config, "text_config", hf_config)
-        self.sparse_block_size = int(
-            text_config.sparse_attention_config["sparse_block_size"]
-        )
+        self.sparse_block_size = int(text_config.index_block_size)
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # Companions to the base's num_valid_pages_buffer, for the two vectors
         # only the emitted table needs.

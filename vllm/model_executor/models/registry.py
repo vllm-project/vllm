@@ -271,6 +271,8 @@ _LATE_INTERACTION_MODELS = {
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
+    # Inferred by Transformers for ModernVBERT checkpoints without `architectures`
+    "ModernVBertModel": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
     "ColQwen3_5": ("colqwen3_5", "ColQwen3_5Model"),

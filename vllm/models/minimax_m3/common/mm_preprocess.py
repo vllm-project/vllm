@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import numpy.typing as npt
 import torch
-from transformers import BatchFeature
+from transformers import BatchFeature, MiniMaxM3VLConfig
 from transformers.video_utils import VideoMetadata
 
 from vllm.config.multimodal import (
@@ -38,7 +38,6 @@ from vllm.multimodal.video import (
     VideoSourceMetadata,
     VideoTargetMetadata,
 )
-from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
 from vllm.transformers_utils.processors.minimax_m3 import (
     MIN_SHORT_SIDE_PIXEL,
     MiniMaxM3VLImageProcessor,
@@ -66,8 +65,8 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     VISION_START_TOKEN = "]<]start of image[>["
     VISION_END_TOKEN = "]<]end of image[>["
 
-    def get_hf_config(self) -> MiniMaxM3Config:
-        return self.ctx.get_hf_config(MiniMaxM3Config)
+    def get_hf_config(self) -> MiniMaxM3VLConfig:
+        return self.ctx.get_hf_config(MiniMaxM3VLConfig)
 
     def get_hf_processor(self, **kwargs: object) -> MiniMaxVLProcessor:
         # The released checkpoint only ships the processor as remote code

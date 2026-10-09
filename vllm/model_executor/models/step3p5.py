@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -46,11 +47,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-if typing.TYPE_CHECKING:
-    from vllm.transformers_utils.configs.step3p5 import Step3p5Config
-else:
-    from transformers import PreTrainedConfig as Step3p5Config
-
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
     AutoWeightsLoader,
@@ -67,10 +63,70 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _get_layer_type(config: PreTrainedConfig, layer_idx: int) -> str:
+    # Upstream configs move the trailing MTP layers to `mtp_layer_types`
+    mtp_layer_types = getattr(config, "mtp_layer_types", None) or []
+    return [*config.layer_types, *mtp_layer_types][layer_idx]
+
+
+def _get_num_attention_heads(
+    config: PreTrainedConfig, layer_idx: int, layer_type: str
+) -> int:
+    if layer_type == "sliding_attention":
+        if num_heads := getattr(config, "num_sliding_attention_heads", None):
+            return num_heads
+        # Remote code configs
+        other_setting = getattr(config, "attention_other_setting", None) or {}
+        if other_setting.get("attention_type") == layer_type:
+            return other_setting["num_attention_heads"]
+    if getattr(config, "is_heterogeneous", False):
+        return config.per_layer_config[layer_idx].num_attention_heads
+    return config.num_attention_heads
+
+
+def _get_rope_parameters(
+    config: PreTrainedConfig, layer_idx: int, layer_type: str
+) -> dict[str, Any]:
+    rope_parameters = getattr(config, "rope_parameters", None) or {}
+    if isinstance(rope_parameters.get(layer_type), dict):
+        rope_parameters = dict(rope_parameters[layer_type])
+        rope_parameters.setdefault("partial_rotary_factor", 1.0)
+        return rope_parameters
+    # Remote code configs keep per-layer lists
+    rope_scaling = getattr(config, "rope_scaling", None)
+    yarn_only_types = getattr(config, "yarn_only_types", None)
+    if yarn_only_types and layer_type not in yarn_only_types:
+        rope_scaling = None
+    rope_parameters = dict(rope_scaling or {})
+    rope_parameters.setdefault("rope_type", "default")
+    rope_theta = config.rope_theta
+    if isinstance(rope_theta, list):
+        rope_theta = rope_theta[layer_idx]
+    rope_parameters["rope_theta"] = rope_theta
+    partial_rotary_factors = getattr(config, "partial_rotary_factors", None)
+    rope_parameters["partial_rotary_factor"] = (
+        partial_rotary_factors[layer_idx] if partial_rotary_factors else 1.0
+    )
+    return rope_parameters
+
+
+def _is_moe_layer(config: PreTrainedConfig, layer_idx: int) -> bool:
+    if (mlp_layer_types := getattr(config, "mlp_layer_types", None)) is not None:
+        mtp_mlp_layer_types = getattr(config, "mtp_mlp_layer_types", None) or []
+        mlp_layer_types = [*mlp_layer_types, *mtp_mlp_layer_types]
+        return layer_idx < len(mlp_layer_types) and (
+            mlp_layer_types[layer_idx] == "sparse"
+        )
+    # Remote code configs
+    if (moe_layers_enum := getattr(config, "moe_layers_enum", None)) is not None:
+        return layer_idx in {int(i) for i in moe_layers_enum.strip().split(",")}
+    return 0 < layer_idx < config.num_hidden_layers
+
+
 class Step3p5MLP(nn.Module):
     def __init__(
         self,
-        config: Step3p5Config,
+        config: PreTrainedConfig,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
@@ -104,12 +160,10 @@ class Step3p5MLP(nn.Module):
         self.hidden_size = hidden_size
         self.limit = None
         layer_idx = extract_layer_index(prefix)
-        if (
-            config.swiglu_limits_shared
-            and config.swiglu_limits_shared[layer_idx] is not None
-            and config.swiglu_limits_shared[layer_idx] != 0
-        ):
-            self.limit = config.swiglu_limits_shared[layer_idx]
+        swiglu_limits_shared = config.swiglu_limits_shared or []
+        # Upstream configs drop the entries for the trailing MTP layers
+        if layer_idx < len(swiglu_limits_shared) and swiglu_limits_shared[layer_idx]:
+            self.limit = swiglu_limits_shared[layer_idx]
             self.act_fn = SwigluStepAndMul(limit=self.limit)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -129,47 +183,28 @@ class Step3p5Attention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
-        rope_theta: float | list[float] | None = 10000,
+        rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: dict[str, Any] | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         # Step3p5 specific args
         sliding_window: int | None = None,
         use_head_wise_attn_gate: bool = False,
-        layer_types: list[str] | None = None,
-        use_rope_layers: list[bool] | None = None,
-        yarn_only_types: list[str] | None = None,
-        swa_num_attention_heads: int | None = None,
-        partial_rotary_factor: float = 1.0,
+        use_rope: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.total_num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
         self.layer_idx = extract_layer_index(prefix)
-        if layer_types:
-            enable_sliding_window = layer_types[self.layer_idx] == "sliding_attention"
-        else:
-            enable_sliding_window = self.layer_idx % 2 == 0
-        if yarn_only_types:
-            assert layer_types is not None
-            if layer_types[self.layer_idx] not in yarn_only_types:
-                rope_scaling = None
-
-        if sliding_window is not None and enable_sliding_window:
-            if swa_num_attention_heads is not None:
-                num_heads = swa_num_attention_heads
-                self.total_num_heads = swa_num_attention_heads
-        else:
-            sliding_window = None
-
-        if isinstance(rope_theta, list):
-            rope_theta = rope_theta[self.layer_idx]
+        rope_parameters = dict(rope_parameters or {})
+        rope_parameters.setdefault("rope_type", "default")
+        rope_parameters.setdefault("rope_theta", 10000)
+        rope_parameters.setdefault("partial_rotary_factor", 1.0)
 
         self.rank = get_tensor_model_parallel_rank()
-        self.partial_rotary_factor = partial_rotary_factor
+        self.partial_rotary_factor = rope_parameters["partial_rotary_factor"]
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
@@ -186,7 +221,7 @@ class Step3p5Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
+        self.rope_theta = rope_parameters["rope_theta"]
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -203,16 +238,6 @@ class Step3p5Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-
-        if rope_scaling is not None and not isinstance(rope_scaling, dict):
-            raise ValueError("rope_scaling must be a dict for Step3p5Attention.")
-
-        rope_parameters: dict[str, Any] = (
-            dict(rope_scaling) if rope_scaling is not None else {}
-        )
-        rope_parameters.setdefault("rope_type", "default")
-        rope_parameters["rope_theta"] = self.rope_theta
-        rope_parameters["partial_rotary_factor"] = partial_rotary_factor
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
@@ -232,9 +257,7 @@ class Step3p5Attention(nn.Module):
                 prefix=f"{prefix}.g_proj",
             )
 
-        self.use_rope = True
-        if use_rope_layers:
-            self.use_rope = use_rope_layers[self.layer_idx]
+        self.use_rope = use_rope
 
         self.attn = Attention(
             self.num_heads,
@@ -296,7 +319,6 @@ class FusedMoEBlock(nn.Module):
 
         self.ep_size = get_ep_group().device_group.size()
         config = vllm_config.model_config.hf_config
-        assert isinstance(config, Step3p5Config)
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
@@ -402,7 +424,6 @@ class Step3p5DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        assert isinstance(config, Step3p5Config)
         self.hidden_size = config.hidden_size
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
@@ -410,54 +431,30 @@ class Step3p5DecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
         if cache_config is not None:
             cache_config.sliding_window = None
-        if config.att_impl_type == "GQA":
-            num_attention_heads = None
-            num_attention_groups = None
-            head_dim = None
-            attention_other_setting = config.attention_other_setting
-            layer_types = config.layer_types
-            if (
-                attention_other_setting
-                and layer_types
-                and layer_types[layer_idx] == attention_other_setting["attention_type"]
-            ):
-                num_attention_heads = attention_other_setting["num_attention_heads"]
-                num_attention_groups = attention_other_setting["num_attention_groups"]
-                head_dim = attention_other_setting["head_dim"]
-            partial_rotary_factors = getattr(config, "partial_rotary_factors", [])
-            assert config.max_position_embeddings is not None
-            self.self_attn = Step3p5Attention(
-                hidden_size=self.hidden_size,
-                num_heads=num_attention_heads
-                if num_attention_heads
-                else config.num_attention_heads,
-                max_position=config.max_position_embeddings,
-                num_kv_heads=num_attention_groups
-                if num_attention_groups
-                else config.num_attention_groups,
-                rope_theta=config.rope_theta,
-                rms_norm_eps=config.rms_norm_eps,
-                qkv_bias=getattr(config, "attention_bias", False),
-                head_dim=head_dim if head_dim else getattr(config, "head_dim", None),
-                cache_config=cache_config,
-                quant_config=quant_config,
-                rope_scaling=getattr(config, "rope_scaling", None),
-                sliding_window=getattr(config, "sliding_window", None),
-                use_head_wise_attn_gate=getattr(
-                    config, "use_head_wise_attn_gate", False
-                ),
-                layer_types=getattr(config, "layer_types", []),
-                use_rope_layers=getattr(config, "use_rope_layers", []),
-                yarn_only_types=getattr(config, "yarn_only_types", []),
-                partial_rotary_factor=partial_rotary_factors[layer_idx]
-                if partial_rotary_factors
-                else 1.0,
-                prefix=f"{prefix}.self_attn",
-            )
-        else:
-            raise ValueError(
-                f"Unsupported attention implementation: {config.att_impl_type}"
-            )
+        att_impl_type = getattr(config, "att_impl_type", "GQA")
+        if att_impl_type != "GQA":
+            raise ValueError(f"Unsupported attention implementation: {att_impl_type}")
+        layer_type = _get_layer_type(config, layer_idx)
+        use_rope_layers = getattr(config, "use_rope_layers", None)
+        assert config.max_position_embeddings is not None
+        self.self_attn = Step3p5Attention(
+            hidden_size=self.hidden_size,
+            num_heads=_get_num_attention_heads(config, layer_idx, layer_type),
+            max_position=config.max_position_embeddings,
+            num_kv_heads=config.num_attention_groups,
+            rope_parameters=_get_rope_parameters(config, layer_idx, layer_type),
+            rms_norm_eps=config.rms_norm_eps,
+            qkv_bias=getattr(config, "attention_bias", False),
+            head_dim=getattr(config, "head_dim", None),
+            cache_config=cache_config,
+            quant_config=quant_config,
+            sliding_window=getattr(config, "sliding_window", None)
+            if layer_type == "sliding_attention"
+            else None,
+            use_head_wise_attn_gate=getattr(config, "use_head_wise_attn_gate", False),
+            use_rope=use_rope_layers[layer_idx] if use_rope_layers else True,
+            prefix=f"{prefix}.self_attn",
+        )
         self.use_moe = False
         self.tp_group = get_tp_group()
         self.use_fused_all_reduce = (
@@ -469,12 +466,7 @@ class Step3p5DecoderLayer(nn.Module):
         else:
             logger.warning_once("Disable custom fused all reduce...")
 
-        moe_layers_enum = getattr(config, "moe_layers_enum", None)
-        if moe_layers_enum is not None:
-            moe_layers_idx = [int(i) for i in moe_layers_enum.strip().split(",")]
-        else:
-            moe_layers_idx = [i for i in range(1, config.num_hidden_layers)]
-        if layer_idx in moe_layers_idx:
+        if _is_moe_layer(config, layer_idx):
             self.moe = FusedMoEBlock(
                 vllm_config,
                 prefix=f"{prefix}.moe",
@@ -532,7 +524,6 @@ class Step3p5Model(nn.Module):
 
         self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
-        assert isinstance(config, Step3p5Config)
         self.vocab_size = config.vocab_size
         self.config = config
 

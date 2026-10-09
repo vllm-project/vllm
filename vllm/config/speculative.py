@@ -1062,6 +1062,15 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
             )
+        if hf_config.model_type == "muse_glimmer_assistant":
+            # Non-causal DFlash drafter sharing Muse Glimmer's vocabulary
+            hf_config.update(
+                {
+                    "dflash_config": {"causal": False}
+                    | (getattr(hf_config, "dflash_config", None) or {}),
+                    "vocab_size": getattr(hf_config, "vocab_size", 202048),
+                }
+            )
 
         return hf_config
 

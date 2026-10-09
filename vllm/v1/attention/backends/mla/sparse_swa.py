@@ -18,6 +18,10 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import (
+    get_compress_ratios,
+    get_mm_prefix_clamp_sliding_window,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (
@@ -477,7 +481,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # models keep max_image_tokens == 0 everywhere.
         self.max_image_tokens = (
             getattr(hf_config, "vision_max_n_token", 0)
-            if getattr(hf_config, "mm_prefix_clamp_sliding_window", False)
+            if get_mm_prefix_clamp_sliding_window(hf_config)
             else 0
         )
         self.prefill_index_width = self.window_size + self.max_image_tokens
@@ -485,7 +489,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Detect which DeepseekV4 layer types this model uses so we only build a
         # FlashMLA tile-scheduler plan for types that will actually be called.
         # Models without compress_ratios (pure SWA) fall back to swaonly.
-        compress_ratios = getattr(hf_config, "compress_ratios", None) or [1]
+        compress_ratios = get_compress_ratios(hf_config) or [1]
         self._layer_types: set[str] = set()
         for ratio in compress_ratios:
             self._layer_types.add(_layer_type_for(int(ratio)))
