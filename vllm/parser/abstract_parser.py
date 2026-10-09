@@ -50,6 +50,7 @@ from vllm.sampling_params import (
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
+    RequiredToolCallScanState,
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
@@ -78,6 +79,9 @@ class StreamState:
     # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
+    required_tool_call_scan_state: RequiredToolCallScanState = field(
+        default_factory=RequiredToolCallScanState
+    )
     engine_based: bool = False
 
     def advance(
@@ -743,6 +747,7 @@ class DelegatingParser(Parser):
                     current_text=current_text,
                     tool_call_idx=tool_call_idx,
                     tool_call_id_type=tool_call_id_type,
+                    scan_state=self._stream_state.required_tool_call_scan_state,
                 )
             )
             return delta_message, function_name_returned

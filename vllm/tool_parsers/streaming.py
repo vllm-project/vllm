@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -111,7 +111,26 @@ _IN_SCALAR_VALUE = 5
 _AFTER_VALUE = 6
 
 
-def _scan_required_tool_calls(text: str) -> list[_RequiredToolCallSpan]:
+@dataclass
+class RequiredToolCallScanState:
+    """Incremental scanner state for one required-tool-call stream."""
+
+    spans: list[_RequiredToolCallSpan] = field(default_factory=list)
+    offset: int = 0
+    depth: int = 0
+    in_string: bool = False
+    escaped: bool = False
+    string_start: int = 0
+    cur: _RequiredToolCallSpan | None = None
+    expect: int = _EXPECT_KEY
+    key: str | None = None
+    value_start: int = 0
+    done: bool = False
+
+
+def _scan_required_tool_calls(
+    text: str, state: RequiredToolCallScanState | None = None
+) -> list[_RequiredToolCallSpan]:
     """Locate every tool call of a (possibly partial) required-tool-call array.
 
     A single string- and nesting-aware pass over ``text`` that records, for
@@ -121,15 +140,19 @@ def _scan_required_tool_calls(text: str) -> list[_RequiredToolCallSpan]:
     interpreted, so braces, brackets and quotes inside nested values and
     strings cannot confuse it.
     """
-    spans: list[_RequiredToolCallSpan] = []
-    depth = 0  # nesting depth of ``{}`` and ``[]``; element objects sit at 2
-    in_string = False
-    escaped = False
-    string_start = 0
-    cur: _RequiredToolCallSpan | None = None
-    expect = _EXPECT_KEY
-    key: str | None = None
-    value_start = 0
+    if state is None:
+        state = RequiredToolCallScanState()
+    if state.done:
+        return state.spans
+    spans = state.spans
+    depth = state.depth  # element objects sit at nesting depth 2
+    in_string = state.in_string
+    escaped = state.escaped
+    string_start = state.string_start
+    cur = state.cur
+    expect = state.expect
+    key = state.key
+    value_start = state.value_start
 
     def end_value(pos: int) -> None:
         nonlocal expect
@@ -146,15 +169,16 @@ def _scan_required_tool_calls(text: str) -> list[_RequiredToolCallSpan]:
                 cur.name = None
         expect = _AFTER_VALUE
 
-    def start_value(pos: int, state: int) -> None:
+    def start_value(pos: int, value_state: int) -> None:
         nonlocal expect, value_start
         assert cur is not None
         value_start = pos
         if key == "parameters":
             cur.args_start = pos
-        expect = state
+        expect = value_state
 
-    for i, ch in enumerate(text):
+    for i in range(state.offset, len(text)):
+        ch = text[i]
         if in_string:
             if escaped:
                 escaped = False
@@ -180,9 +204,11 @@ def _scan_required_tool_calls(text: str) -> list[_RequiredToolCallSpan]:
         if ch in "{[":
             if depth == 0:
                 if ch != "[":
+                    state.done = True
                     return spans
             elif depth == 1:
                 if ch != "{":
+                    state.done = True
                     return spans
                 cur = _RequiredToolCallSpan()
                 spans.append(cur)
@@ -202,6 +228,7 @@ def _scan_required_tool_calls(text: str) -> list[_RequiredToolCallSpan]:
             elif depth == 1:
                 cur = None
             elif depth <= 0:
+                state.done = True
                 return spans
             continue
 
@@ -222,6 +249,15 @@ def _scan_required_tool_calls(text: str) -> list[_RequiredToolCallSpan]:
         elif expect == _EXPECT_VALUE:
             start_value(i, _IN_SCALAR_VALUE)
 
+    state.offset = len(text)
+    state.depth = depth
+    state.in_string = in_string
+    state.escaped = escaped
+    state.string_start = string_start
+    state.cur = cur
+    state.expect = expect
+    state.key = key
+    state.value_start = value_start
     return spans
 
 
@@ -231,6 +267,7 @@ def extract_required_tool_call_streaming(
     current_text: str | None,
     tool_call_idx: int | None,
     tool_call_id_type: str,
+    scan_state: RequiredToolCallScanState | None = None,
 ) -> tuple[DeltaMessage | None, bool]:
     """Stream the tool calls of a ``tool_choice="required"`` JSON array.
 
@@ -240,7 +277,8 @@ def extract_required_tool_call_streaming(
     ``DeltaToolCall`` entries: the first chunk of a call carries its id, name
     and the arguments generated so far; later chunks carry only new argument
     text. What was already sent is read off the same scan, since the spans
-    are prefix-stable, so no state is needed beyond the two texts.
+    are prefix-stable. Passing a per-stream ``scan_state`` avoids rescanning
+    the previously consumed prefix; both texts must still be accumulated.
 
     Returns the delta (``None`` when nothing is new) and whether at least one
     call has been announced so far.
@@ -248,7 +286,7 @@ def extract_required_tool_call_streaming(
     if not current_text:
         return None, False
 
-    spans = _scan_required_tool_calls(current_text)
+    spans = _scan_required_tool_calls(current_text, scan_state)
     sent_len = len(previous_text)
 
     tool_calls: list[DeltaToolCall] = []
