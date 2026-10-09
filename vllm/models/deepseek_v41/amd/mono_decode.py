@@ -128,7 +128,7 @@ def _max_rows() -> int:
 def _capture_plain_experts(experts) -> None:
     """gfx942: vLLM converts the routed experts to its Triton kernels' format
     when the weights are loaded and frees the plain scales. Wrap that step so
-    the mono's gfx942 copies (``weights942.moe_copies``) are made from the
+    the gfx942 copies (``weights942.moe_copies``) are made from the
     plain tensors first."""
     qm = experts.quant_method
     original = qm.process_weights_after_loading
@@ -173,9 +173,10 @@ ATTN_LINEARS_942 = ("fused_wqa_wkv", "wq_b", "wo_a", "wo_b")
 
 def _copy_linear_at_load(linear) -> None:
     """gfx942: make the dense MXFP8 linear's ``weights942.linear_copy`` right
-    after vLLM has processed its weights at load. vLLM dequantizes them to
-    bf16 there, and the copy re-encodes them as the gfx942 kernels read
-    them."""
+    after vLLM has processed its weights at load. By default
+    (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD) vLLM dequantizes them to bf16
+    there, and the copy re-encodes them as the gfx942 kernels read them.
+    Weights that stay e4m3 are copied as they are."""
     qm = linear.quant_method
     original = qm.process_weights_after_loading
 
@@ -193,8 +194,8 @@ def _copy_linear_at_load(linear) -> None:
 def _copy_942_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
     """gfx942: the kernels read their own copies of the layer's weights. Make
     them when vLLM processes the weights at load, so that they count as model
-    memory when vLLM sizes the KV cache. Made at the first decode step, they
-    counted only because that step is also the CUDA graph memory profile, and
+    memory when vLLM sizes the KV cache. Copies made at the first decode step
+    would count only when that step is also the CUDA graph memory profile, so
     with that profile off or with ``enforce_eager`` they would not count. A
     layer that takes only the FFN launch needs no attention copies."""
     ffn = layer.ffn
@@ -208,9 +209,9 @@ def _copy_942_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
 
 
 def _shadow_report(layer_id: int, rows: int, step: int, got: tuple, ref: tuple) -> None:
-    """Log, a layer and step of ``rows`` rows, each output's largest difference
-    relative to the largest reference value and the relative norm of the
-    difference."""
+    """Log, for a layer and step of ``rows`` rows, each output's largest
+    difference relative to the largest reference value and the relative norm
+    of the difference."""
     names = ("out", "residual", "post_mix", "res_mix", "pre_mix")
     parts = []
     for name, g, r in zip(names, got, ref):
@@ -332,7 +333,8 @@ class MonoDecodeLayer:
         # normed input row and q latent), one pair for each step size, so a
         # CUDA graph keeps their addresses.
         self._index_rows: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-        # A window-only layer's constant K1 inputs, one set for each step size.
+        # The constant K1 inputs of layer 0 and the Engram layers
+        # (``_window_seam``), one set for each step size.
         self._identity_seams: dict[int, tuple[torch.Tensor, ...]] = {}
         self._weights: MonoLayerWeights | None = None
         # The shadow steps that ran so far, one count for each step width.

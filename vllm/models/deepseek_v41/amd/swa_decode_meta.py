@@ -4,27 +4,29 @@
 
 DeepseekV4ROCMAiterSparseSWAMetadataBuilder.build runs once per SWA KV cache
 group, which is 8 times a step for DeepSeek-V4.1-Flash at TP 4. For a decode
-batch each build launched 8 small kernels: torch.ge for is_valid_token, the
-zero fill of the unused decode_swa_lens, _compute_swa_indices_and_lens_kernel,
-the ragged row count, torch.cumsum, the ragged compaction and 2 copies into
-the CUDA graph buffers. On MI325X each took about 4.2 us, so at 128k context
-the 8 builds held the GPU for 281 us of every step before the decode graph
-could start.
+batch that this file does not take, each build launches 8 small kernels:
+torch.ge for is_valid_token, the zero fill of the unused decode_swa_lens,
+_compute_swa_indices_and_lens_kernel, the ragged row count, torch.cumsum, the
+ragged compaction and 2 copies into the CUDA graph buffers. On MI325X each
+took about 4.2 us, so at 128k context the 8 builds held the GPU for 281 us of
+every step before the decode graph could start.
 
 _decode_swa_meta_kernel writes the same tensors with one program: the dense
 window indices and lengths, is_valid_token, the zero lengths after the batch,
 and the ragged indices and indptr directly into the graph buffers. It does not
-write the ragged entries past indptr[-1]. The old path copied them from an
-uninitialized tensor, and the attention kernels read only up to indptr.
+write the ragged entries past indptr[-1]. _copy_ragged_to_graph_buffers copies
+them from an uninitialized tensor, and the attention kernels read only up to
+indptr.
 
 The DSpark draft's 3 layers build their non-causal block the same way, with
 ComputeDSparkNoncausalSWAIndicesKernel in place of the window kernel. That
-was 3 more builds of 8 launches after every target step.
+is 3 more builds of 8 launches after every target step.
 
 On gfx942 with VLLM_ROCM_MONO_DECODE=1 (``dsv41_gfx942.enabled()``), decode
 batches of up to MAX_ROWS rows, causal or the draft block, use it. Other
-batches take the old build. tests/kernels/test_dsv41_gfx942_decode_meta.py
-compares it with the old ops.
+batches take the rest of DeepseekV4ROCMAiterSparseSWAMetadataBuilder.build.
+tests/kernels/test_dsv41_gfx942_decode_meta.py compares it with the vLLM ops
+that it replaces.
 """
 
 import torch
@@ -121,7 +123,8 @@ def _decode_swa_meta_kernel(
     rank = tl.cumsum(keep.to(tl.int32), axis=1) - 1
     tl.store(ragged_ptr + (ends - counts)[:, None] + rank, slots, mask=keep)
 
-    # The old build set the lengths of all rows after the batch to 0.
+    # Set the lengths of all rows after the batch to 0, as
+    # DeepseekSparseSWAMetadataBuilder.build does.
     for i in range(num_tokens, lens_size, TAIL):
         offs = i + tl.arange(0, TAIL)
         tl.store(lens_ptr + offs, 0, mask=offs < lens_size)
@@ -177,8 +180,8 @@ def launch(
 
 def build(builder, common_prefix_len, cam, fast_build, replay_start, metadata_cls):
     """Return the ROCm SWA metadata of a decode batch, causal or the DSpark
-    draft block, built with one launch, or None when the batch needs the old
-    build."""
+    draft block, built with one launch, or None when the batch needs the rest
+    of DeepseekV4ROCMAiterSparseSWAMetadataBuilder.build."""
     if not enabled():
         return None
     from vllm.v1.attention.backends.mla import sparse_swa
@@ -198,8 +201,9 @@ def build(builder, common_prefix_len, cam, fast_build, replay_start, metadata_cl
     ):
         return None
     if noncausal:
-        # The DSpark draft block's rows have their own wider buffer, which the
-        # old build creates the same way on its first non-causal batch.
+        # The DSpark draft block's rows have their own wider buffer, which
+        # DeepseekSparseSWAMetadataBuilder.build creates the same way on its
+        # first non-causal batch.
         width = builder.noncausal_index_width
         if builder.decode_swa_indices_noncausal is None:
             builder.decode_swa_indices_noncausal = torch.zeros(

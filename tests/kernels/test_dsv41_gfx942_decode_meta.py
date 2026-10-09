@@ -9,8 +9,9 @@ _compute_swa_indices_and_lens_kernel (or the DSpark draft block's
 ComputeDSparkNoncausalSWAIndicesKernel), build_ragged_indices_from_dense and
 _copy_ragged_to_graph_buffers. topk_pack.launch replaces
 compute_global_topk_ragged_indices_and_indptr. For each random decode batch
-the old ops run first. Then every output buffer is overwritten with -7, the
-fused launch runs, and every output that a reader uses must be equal.
+vLLM's ops run first. Then every output buffer is overwritten with -7
+(is_valid_token with its negation), the fused launch runs, and every output
+that a reader uses must be equal.
 """
 
 import pytest

@@ -90,10 +90,11 @@ def mfma_fp8_scaled(acc, a, b, code_sum):
 
 def ocp_to_fnuz(w):
     """Four OCP e4m3 bytes -> the FNUZ bytes for half their values. Every bit
-    pattern keeps its meaning (halved) except 0x80, OCP's -0, which is the
-    FNUZ NaN and becomes 0x00. A byte's magnitude plus 0x7F carries into its
-    sign bit exactly when the magnitude is not zero, without reaching the
-    next byte, so the sign survives only on nonzero bytes."""
+    pattern keeps its meaning (halved) except 0x80 and the OCP NaNs. 0x80,
+    OCP's -0, is the FNUZ NaN and becomes 0x00. The NaNs 0x7F and 0xFF stay
+    as they are and read as 240 and -240. A byte's magnitude plus 0x7F
+    carries into its sign bit exactly when the magnitude is not zero, without
+    reaching the next byte, so the sign survives only on nonzero bytes."""
     w = fx.Int32(w)
     nonzero = ((w & MAG_BYTES) + MAG_BYTES) & SIGN_BYTES
     return w & (nonzero | MAG_BYTES)
@@ -108,8 +109,8 @@ def fp4x8_fnuz(w):
     to bits 4 .. 2, which are the low two exponent bits and the top mantissa
     bit of e4m3 with bias 8. A scale code for these bytes is the e8m0 code
     plus 7. A negative zero nibble (0x8) would give 0x80, the FNUZ NaN, so
-    the weights must not hold one: the runner rewrites them to +0, which
-    changes no product."""
+    the weights must not hold one: ``weights942.fp4_drop_negative_zero_``
+    rewrites them to +0 at load, which changes no product."""
     w = fx.Int32(w)
     even = ((w << 2) & 0x1C1C1C1C) | ((w << 4) & SIGN_BYTES)
     odd = ((w >> 2) & 0x1C1C1C1C) | (w & SIGN_BYTES)

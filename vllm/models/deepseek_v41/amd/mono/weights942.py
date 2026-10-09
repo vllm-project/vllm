@@ -96,15 +96,15 @@ def linear_copy(w: torch.Tensor, scale: torch.Tensor):
 
 
 def moe_copies(w13, w13_s, w2, w2_s, inter: int):
-    """VLLM's plain MXFP4 expert tensors before its kernel conversion
-    (w13 [E, 2 Np, K / 2]: the gate rows, then the up rows, each padded with
-    zero rows from ``inter`` to Np; w2 [E, H, Np / 2]; codes [E, rows, K / 32])
-    -> the gfx942 mono copies: w13 [E, 2 inter, K / 2] with gate row i at 2 i
-    and up row i at 2 i + 1, w2 [E, H, inter / 2], their codes alike, no -0
-    nibbles. The weight bytes are in ``fp4_tile_major`` order. The w13 codes
-    are in ``codes_tile_rounds`` order, and the w2 codes stay row-major
-    because a lane group reads 4 whole rows of them. Refuses padding rows
-    that are not zero."""
+    """VLLM's plain MXFP4 expert tensors before its kernel conversion (w13
+    [E, 2 Np, K / 2], w2 [E, H, Np / 2] and codes [E, rows, K / 32], with
+    w13's gate rows, then its up rows, each padded with zero rows from
+    ``inter`` to Np) -> the gfx942 mono copies: w13 [E, 2 inter, K / 2] with
+    gate row i at 2 i and up row i at 2 i + 1, w2 [E, H, inter / 2], their
+    codes alike, no -0 nibbles. The weight bytes are in ``fp4_tile_major``
+    order. The w13 codes are in ``codes_tile_rounds`` order, and the w2 codes
+    stay row-major because a lane group reads 4 whole rows of them. Refuses
+    padding rows that are not zero."""
     e, two_np, kh = w13.shape
     np_ = two_np // 2
     assert inter <= np_ and inter % 32 == 0, (w13.shape, inter)
@@ -140,10 +140,11 @@ def fp4_tile_major(w: torch.Tensor) -> torch.Tensor:
     lane order. Lane 16 j + r holds the 16 bytes that ``fp4_lane_major``
     gives lane group j of row r. One 16-byte load a lane then reads 1 KB that
     is contiguous, 8 whole 128-byte lines. In the ``fp4_lane_major`` order
-    the same load read 64 bytes from each of 16 rows that are K / 2 bytes
-    apart, so it took 16 memory requests instead of 8 and each line was
-    fetched by two loads. On MI325X this order cut a CTA's ug GEMV from 32.5
-    to 23.2 us (6 rows, all 4 waves), with the same results bit for bit.
+    the same load would read 64 bytes from each of 16 rows that are K / 2
+    bytes apart, so it would take 16 memory requests instead of 8 and fetch
+    each line with two loads. On MI325X a CTA's ug GEMV takes 23.2 us in this
+    order and 32.5 us in the ``fp4_lane_major`` order (6 rows, all 4 waves),
+    with the same results bit for bit.
     A last 32-byte step (two K blocks, the 576-wide w2 rows) is stored the
     same way with 8 bytes a lane, 512 contiguous bytes."""
     kb = w.shape[-1]
@@ -164,8 +165,8 @@ def codes_tile_rounds(codes: torch.Tensor, blocks: int = 8) -> torch.Tensor:
     ``blocks`` K blocks (``moe.UG_ROUND_942``), the copy stores the 16 rows'
     codes of the round row after row, 16 x ``blocks`` bytes together. Lane
     group j then reads the codes of its rows 4 j .. 4 j + 3 with two 16-byte
-    loads from one line. Row-major codes took four 8-byte loads from four
-    lines."""
+    loads from one line. Row-major codes would take four 8-byte loads from
+    four lines."""
     kc = codes.shape[-1]
     assert kc % blocks == 0 and codes.shape[-2] % 16 == 0, codes.shape
     v = codes.reshape(-1, 16, kc // blocks, blocks)  # [tile, r, round, block]
@@ -173,8 +174,8 @@ def codes_tile_rounds(codes: torch.Tensor, blocks: int = 8) -> torch.Tensor:
 
 
 def fp4_lane_major(w: torch.Tensor) -> torch.Tensor:
-    """Packed e2m1 rows [..., K / 2] -> the byte order the gfx942 routed
-    GEMVs load. A lane of the 16 x 16 x 32 MFMA takes the dword of K
+    """Packed e2m1 rows [..., K / 2] -> each row's bytes in lane order, for
+    ``fp4_tile_major``. A lane of the 16 x 16 x 32 MFMA takes the dword of K
     32 i + 8 j .. + 8 of a row in each 32-wide K block i, with j = lane / 16.
     Within each 64-byte step (four K blocks) the copy stores lane group j's
     four dwords together at bytes 16 j .. 16 j + 15, so one 16-byte load a

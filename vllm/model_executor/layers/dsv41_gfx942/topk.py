@@ -37,9 +37,9 @@ _build_failed = False
 def _compile():
     from torch.utils.cpp_extension import load
 
-    # The container lists every ROCm target in PYTORCH_ROCM_ARCH. Build for
-    # gfx942 only, and restore the list afterwards so other extensions that
-    # this process builds are not affected.
+    # vLLM's ROCm Docker image lists all of its ROCm targets in
+    # PYTORCH_ROCM_ARCH. Build for gfx942 only, and then restore the list, so
+    # that other extensions built in this process still get the full list.
     saved = os.environ.get("PYTORCH_ROCM_ARCH")
     os.environ["PYTORCH_ROCM_ARCH"] = "gfx942"
     try:
@@ -87,7 +87,7 @@ def decode_top_k(logits, next_n, seq_lens, indices, topk_tokens) -> bool:
 
     When ``enabled()`` and the extension is built, a call with topK 512 and
     unit column strides runs here and returns True. Otherwise it returns
-    False and vLLM runs torch.ops._C.top_k_per_row_decode as before."""
+    False and vLLM runs torch.ops._C.top_k_per_row_decode."""
     if not _ready():
         return False
     taken = topk_tokens == 512 and logits.stride(1) == 1 and indices.stride(1) == 1
@@ -107,8 +107,7 @@ def candidate_top_k(
     returns True. vLLM then skips its mask and its top-k. The mask writes -inf
     to about 7 of every 8 logits of a 128k row, and the top-k then reads the
     whole row. Here only the 2048 x 8 candidate logits of a row are read.
-    Otherwise this returns False and vLLM masks and runs its top-k as
-    before."""
+    Otherwise this returns False and vLLM runs its mask and its top-k."""
     if not _ready():
         return False
     taken = (
@@ -148,7 +147,7 @@ def candidate_logits_top_k(
     its top-k for the layer. The call computes only the 2048 x 8 candidate
     logits of each row (cand_logits.py), bit-identical to the dense kernel's,
     and then runs the same top-512 as candidate_top_k. Otherwise this returns
-    False and vLLM runs the dense path as before.
+    False and vLLM runs the dense path.
 
     The hook only takes calls whose dense logits would come from AITER's
     gfx942 Gluon kernel, because cand_logits.py reproduces that kernel's
@@ -253,10 +252,11 @@ def skip_decode_fill(has_prefill, num_decode_tokens, num_tokens, decode) -> bool
     """Whether vLLM's decode indexer (rocm_aiter_mla_sparse.py) may skip its
     -1 fill of the step's top-k rows. When ``enabled()`` and the extension is
     built, it may when every row of the step is a decode row and none is
-    padded. The decode top-k (decode_top_k) then writes every entry of every
-    row, the -1 past a short row's end included. vLLM's own top-k does not,
-    so without the extension the fill stays. This saves one launch on each of
-    the 8 index layers."""
+    padded. The decode top-k then writes every entry of every row, the -1
+    past a short row's end included. The extension's top-k (decode_top_k and
+    candidate_top_k) and vLLM's top_k_per_row_decode both do. AITER's indexer
+    top-k, which runs before them on gfx950, is not used on gfx942. This saves
+    one launch on each of the 8 index layers."""
     return (
         _ready()
         and not has_prefill
@@ -279,11 +279,11 @@ def top_k_per_row_decode_512(
     indices[r, :512] gets the column indices of row r's 512 largest logits, in
     no particular order, and -1 past the row's length when it is shorter.
 
-    With ``register_select`` a row of up to 1M logits whose rows are 16-byte
-    aligned runs selectFromRegisters, which keeps a block's logits in
-    registers. Otherwise, and for other rows, the row runs the gfx942 build of
-    vLLM's radix job. The index sets are the same, except for ties at the
-    cut."""
+    With ``register_select``, rows of up to 1M logits that start at 16-byte
+    boundaries run selectFromRegisters, which keeps a block's logits in
+    registers. Other rows, and all rows without ``register_select``, run the
+    gfx942 build of vLLM's topKPerRowJob. The index sets are the same, except
+    for ties at the cut."""
     if (
         register_select
         and logits.stride(0) % 4 == 0

@@ -971,7 +971,8 @@ def ug_tile_task(c, task):
         # slot's picks past them belong to the slot's next tiles: their x rows
         # are not in this task's LDS tile, and their tasks write their MID
         # rows. On gfx950 a pick tile has an MFMA's 16 picks, and every use of
-        # count below already stops at 16, so gfx950 keeps the code of #60397.
+        # count below already stops at 16, so the gfx950 path runs without
+        # this clamp.
         count = fx.min(count, fx.Int32(TILE))
     return rs.union_expert(tab, s, u), task % ug_parts * rs.ug_groups, first, count
 
@@ -1237,11 +1238,11 @@ def code_byte(words, i):
 @traced
 def gemv_fp4_pair_942(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, col):
     """gfx942 ``gemv_fp4_pair``: tiles rg0 and rg0 + 1 of expert e's MXFP4
-    weight against 16 MXFP8 rows in LDS over this wave's K slice ``ks`` ->
-    both tiles' partial C, a Vector of 8 (tile t's rows 4 (lane / 16) + q,
-    column lane % 16, whose LDS row is ``col``). The activations hold each
-    8-value chunk even K first (``put_mxfp8_group``). A block's B operand and
-    code, read once from LDS, feed both tiles' MFMAs."""
+    weight against up to TILE MXFP8 rows in LDS over this wave's K slice
+    ``ks`` -> both tiles' partial C, a Vector of 8 (tile t's rows
+    4 (lane / 16) + q, column lane % 16, whose LDS row is ``col``). The
+    activations hold each 8-value chunk even K first (``put_mxfp8_group``).
+    A block's B operand and code, read once from LDS, feed both tiles' MFMAs."""
     lane = c["lane"]
     j = lane // 16
     slices = c["rs"].ug_k_slices
@@ -1307,10 +1308,10 @@ def ug_round_942(accs, wds, scs, kr, xl, xsl, col, x_row, s_row, j):
 
 def ug_gate_up_942(red, rs, p, half, r, t):
     """gfx942 ug epilogue: the gate and up sums of intermediate column 16 half
-    + r of group p for pick t. vLLM's gfx942 w13 interleaves gate and up a
-    row (row 2 i the gate of column i, row 2 i + 1 its up), so a wave's two
-    16-row tiles hold columns 16 half .. + 7 (tile 0) and + 8 .. + 15 (tile
-    1), the gate in an even row and the up in the next."""
+    + r of group p for pick t. The gfx942 w13 copy (``weights942.moe_copies``)
+    interleaves gate and up a row (row 2 i the gate of column i, row 2 i + 1
+    its up), so a wave's two 16-row tiles hold columns 16 half .. + 7 (tile 0)
+    and + 8 .. + 15 (tile 1), the gate in an even row and the up in the next."""
     tile = r // 8
     rg = 2 * (r % 8)
     out = []
@@ -1358,8 +1359,8 @@ def down_weights_942(c, e, task):
     inter_real / 2] bytes in ``weights942.fp4_tile_major`` order, e8m0 codes
     [experts * 5120, inter_real / 32] row-major): a dword of 8 e2m1 a K block
     a lane (row lane % 16, K chunk lane / 16), 4 blocks a 16-byte load (the
-    64 lanes 1 KB in a row) and the last 2 blocks with one 8-byte load (512
-    bytes in a row), and the codes of rows 4 (lane / 16) .. + 3, 4 rows x
+    64 lanes 1 contiguous KB) and the last 2 blocks with one 8-byte load (512
+    contiguous bytes), and the codes of rows 4 (lane / 16) .. + 3, 4 rows x
     inter_real / 32 contiguous bytes. Loads only."""
     lane, a, d = c["lane"], c["args"], c["d"]
     j = lane // 16
@@ -1483,10 +1484,11 @@ def down_mfma_942(c, j, task, mid, first, count, wop, live):
 
 def fresh_wop(wop):
     """A down task's packed weight words and codes (``down_weights_942``)
-    through opaque moves, for a slot's second pass. The pass then converts
-    the FP4 words and unpacks the code bytes again. Without the copies LLVM
-    keeps the first pass's converted words and unpacked codes for the second
-    pass, and from 18 rows the kernel needs more than 256 VGPRs and spills."""
+    through opaque moves, for a slot's later passes. Each of them then
+    converts the FP4 words and unpacks the code bytes again. Without the
+    copies LLVM keeps the first pass's converted words and unpacked codes for
+    the later passes, and from 18 rows the kernel needs more than 256 VGPRs
+    and spills."""
     wd, sc = wop
     return [fresh(w) for w in wd], [fresh(w) for w in sc]
 
@@ -1494,8 +1496,8 @@ def fresh_wop(wop):
 @traced
 def stage_down_942(c, tasks):
     """gfx942 ``stage_down``: a slot of U a wave a round (round robin), its
-    weights loaded straight into registers, so no LDS scale blocks; the
-    shared expert first, then the routed slots, then the combine."""
+    weights loaded straight into registers, so no LDS scale blocks. The
+    shared expert runs first, then the routed slots, then the combine."""
     s, wave, tab = c["S"], c["wave"], c["tab"]
     n = len(tasks)
     nu = c["rs"].n_union(tab, s)

@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2's key lists without K1: the KT and KLEN that K1's ``stage_kt`` writes.
+"""K2's key lists without K1's ``stage_kt``: the KT and KLEN that it writes.
 
 On an index layer (2, 8, 14, 20, 24, 28, 32 and 36 of DeepSeek-V4.1-Flash)
-vLLM runs the attention front: the projections, the KV insert, the compressor
-and the indexer, which writes the layer's top-512. K2 can then run the rest of
-the layer on vLLM's q, but it reads each token's keys from KT and KLEN, which
-only K1 wrote so far. ``launch`` writes them with one Triton program a token,
-from the same inputs ``stage_kt`` reads, in the same format:
+vLLM's compressor and indexer run between K1 and K2, and the indexer writes
+the layer's top-512, which the keys need. So K1 writes no keys there
+(``FrontBuild.index``), but K2 reads each token's keys from KT and KLEN,
+which ``stage_kt`` writes on the other layers. ``launch`` writes them with
+one Triton program a token, from the same inputs ``stage_kt`` reads, in the
+same format:
 
     KT[t * KEYS + k] = the compressed slot | 1 << 31 of top-k entry k, for
                        k < ntopk (-1 where the entry is -1), then the window

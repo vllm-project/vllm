@@ -211,8 +211,8 @@ def build_mono_k1(key: MonoBuild):
 
     params = dict(s=s, tp=tp, r=key.ratio, tl=key.timeline)
     if key.index:
-        # A profile tells the index layers' K1 apart, and the standard
-        # layers' symbol stays the same as before.
+        # A profile tells the index layers' K1 apart. The standard layers'
+        # K1 symbol has no ix, the same symbol as on gfx950.
         params["ix"] = 1
     name = kernel_symbol("dsv41_mono_k1", **params)
     keyed = key_tuple(key, SOURCES)

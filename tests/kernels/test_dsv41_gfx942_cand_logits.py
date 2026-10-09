@@ -8,7 +8,7 @@ For one decode request of 6 rows, every compact logit and id must be
 bit-identical to the dense logit gathered at the same candidate position,
 with -inf and id -1 where a candidate block is -1 or a position is at or past
 the row's end. The top 512 of the compact rows must then be the top 512 that
-vLLM's path takes from the dense rows within the candidate blocks.
+candidate_top_k_512 takes from the dense rows within the candidate blocks.
 """
 
 import pytest
@@ -77,7 +77,7 @@ def _make_candidates(context_lens: torch.Tensor, gen) -> torch.Tensor:
 
 
 def _gather_reference(dense, context_lens, cand):
-    """The compact rows that the candidate gather writes from dense logits."""
+    """The compact rows that gatherCandidates writes from dense logits."""
     i = torch.arange(CAND_BLOCKS * CAND_BLOCK, device=cand.device)
     block = cand[:, i // CAND_BLOCK].long()
     col = block * CAND_BLOCK + (i % CAND_BLOCK)[None, :]

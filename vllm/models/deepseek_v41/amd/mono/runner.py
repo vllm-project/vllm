@@ -196,7 +196,8 @@ class DSV41MonoLayer:
         self.tp, self.rank = tp, rank
         # A timeline runner builds K1 and K2 with clock stamps. Each CTA
         # writes its stamps into its own record of these buffers (100 MHz
-        # ticks), and a profiling script reads them after a step.
+        # ticks, except the two shader clock points of moe.TL_UG_POINTS), and
+        # a profiling script reads them after a step.
         self.timeline = timeline
         self.tl1 = torch.zeros(BLOCKS, FRONT_POINTS, dtype=torch.int64, device=device)
         self.tl2 = torch.zeros(BLOCKS, K2_POINTS, dtype=torch.int64, device=device)

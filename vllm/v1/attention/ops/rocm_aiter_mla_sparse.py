@@ -1202,9 +1202,9 @@ def rocm_aiter_sparse_attn_indexer(
     has_prefill = layer_attn_metadata.num_prefills > 0
     num_decode_tokens = layer_attn_metadata.num_decode_tokens
     # On gfx942 with VLLM_ROCM_MONO_DECODE=1, a step of only decode rows,
-    # none of them padded, skips this fill. The gfx942 decode top-k below
-    # then writes all topk_tokens entries of each of the step's rows, -1
-    # included.
+    # none of them padded, skips this fill. The decode top-k below, the gfx942
+    # extension's or vLLM's, then writes all topk_tokens entries of each of
+    # the step's rows, -1 included.
     if not gfx942_topk.skip_decode_fill(
         has_prefill,
         num_decode_tokens,
@@ -1346,8 +1346,8 @@ def rocm_aiter_sparse_attn_indexer(
         # are the same (tests/kernels/test_dsv41_gfx942_cand_logits.py). At
         # 128k context the dense call scores 8 times more positions than
         # the top-k reads. The hook only takes calls whose dense logits
-        # would come from AITER's gfx942 Gluon kernel, which is the
-        # arithmetic it copies.
+        # would come from AITER's gfx942 Gluon kernel, whose arithmetic it
+        # copies.
         if (
             candidate_blocks is not None
             and not candidate_write
@@ -1435,9 +1435,8 @@ def rocm_aiter_sparse_attn_indexer(
                 # wrote each row's top 512 among its candidate blocks. Those
                 # are the columns that the mask and the top-k below choose
                 # (tests/kernels/test_dsv41_gfx942_topk.py), so both are
-                # skipped. The mask
-                # wrote -inf to about 7 of every 8 logits of a 128k row, and
-                # the top-k then read the whole row.
+                # skipped. The mask writes -inf to about 7 of every 8 logits
+                # of a 128k row, and the top-k then reads the whole row.
                 candidates_done = True
             else:
                 row_starts, row_ends = row_bounds()
@@ -1483,10 +1482,10 @@ def rocm_aiter_sparse_attn_indexer(
             # On gfx942 the kernel below takes its generic path, which adds
             # every -inf logit to one shared-memory histogram bin with an
             # atomic. After the DSpark candidate mask most of a row is -inf,
-            # and the call took 100 us at 128k context. With
-            # VLLM_ROCM_MONO_DECODE=1 the gfx942 build of vLLM's top-512
-            # kernels ran instead and gave the same index sets
-            # (tests/kernels/test_dsv41_gfx942_topk.py).
+            # and the call takes 100 us at 128k context. With
+            # VLLM_ROCM_MONO_DECODE=1 the gfx942 extension's top-512 runs
+            # instead. It gives the same index sets, except for ties at the
+            # cut (tests/kernels/test_dsv41_gfx942_topk.py).
             pass
         else:
             torch.ops._C.top_k_per_row_decode(

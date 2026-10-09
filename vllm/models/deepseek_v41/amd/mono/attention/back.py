@@ -121,7 +121,7 @@ def head_groups(d: Dims, s: int) -> int:
 
 # gfx942 has 64 KB of LDS a workgroup: a split unit keeps 64 keys' raw records
 # (37 KB) instead of 128 (75 KB). Its first 4 waves load and score a 16-key
-# tile each; the other 4 compute the same scores and store nothing, and all 8
+# tile each. The other 4 compute the same scores and store nothing, and all 8
 # share the PV.
 SPLIT_KEYS_942 = 64
 
@@ -230,7 +230,7 @@ def _fp8_pair_f32(word, scale, hi):
 
 def owned(cond, owner):
     """``cond``, and on gfx942 also whether this wave owns its key tile's
-    stores (``owner``; None: every wave does)."""
+    stores (``owner``, None when every wave does)."""
     return cond if owner is None else cond & owner
 
 
@@ -262,7 +262,7 @@ def stage_split(c, unit):
     if const_expr(GFX942):
         data, sc, okv, is_c = key_rec(c, t, key)
         # Waves past the chunk's key tiles redo a tile's scores and store
-        # nothing (``SPLIT_KEYS_942``); the head tile is not wave dependent.
+        # nothing (``SPLIT_KEYS_942``). The head tile is not wave dependent.
         owner = hgi == 0
         hgi = 0
     else:

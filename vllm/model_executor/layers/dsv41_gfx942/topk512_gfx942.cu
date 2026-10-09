@@ -6,8 +6,8 @@
 // The helpers, processHistogramStep and topKPerRowJob in namespace vllm are
 // copied unchanged from vLLM's csrc/libtorch_stable/sampler.cu (lines 48 to
 // 571, the same from commit 92044241a02f to 72d59adc2c76). The installed vLLM
-// package has no csrc directory, so the extension that torch builds at the
-// first call needs the whole source in this file. topK512Decode is vLLM's
+// package has no csrc directory, so the extension that torch builds at run
+// time needs the whole source in this file. topK512Decode is vLLM's
 // topKPerRowDecode512DeviceLengthAware with two changes. vLLM compiles its body
 // for gfx950 only, so this file drops that guard. The number of blocks that a
 // row is split into comes from the launch, not from vLLM's gfx950 table.
@@ -625,7 +625,7 @@ __global__ __launch_bounds__(kNumThreads) void topK512Decode(
 
 // Layers 24 to 36 take their top 512 only from the candidate blocks that
 // layer 20 chose for the row. vLLM sets every other logit of the row to -inf
-// and then runs topK512Decode over the whole row. This kernel instead copies
+// and then runs its top-k over the whole row. This kernel instead copies
 // the candidate logits of row r into a compact row: position i holds column
 // blockSize * cand[r][i / blockSize] + i % blockSize with that column as its
 // id, or -inf with id -1 when the block entry is -1 or the column is at or
@@ -650,8 +650,8 @@ __global__ void gatherCandidates(const float* logits, const int* seqLens,
   compactIds[dst] = live ? static_cast<int>(col) : -1;
 }
 
-// The top 512 of a compact row, written as column ids by the merge form of
-// vLLM's job, which reports the id stored next to each logit. A row that ends
+// The top 512 of a compact row, written as column ids by topKPerRowJob with
+// mergeBlocks, which reports the id stored next to each logit. A row that ends
 // at or before 512 gets columns 0 to its end - 1 and then -1. topK512Decode
 // writes such a row the same way, whatever its logits are, and the readers
 // of the indices take only the first min(end, 512) entries. A longer row
@@ -682,10 +682,10 @@ __global__ __launch_bounds__(kNumThreads) void topK512Candidates(
 //
 // One CU does all the work of a row, and a CU retires 64 lanes of an
 // instruction a cycle, so each instruction per item costs about 256 cycles
-// for a row of 16384. So the code keeps the instructions per item few. A
-// version that spread a row over many blocks was slower: the device-scope
-// fence that hands the counts to the row's last block costs about 16 us on
-// gfx942, more than the whole select.
+// for a row of 16384. So the code keeps the instructions per item few.
+// Spreading a row over many blocks is slower: the device-scope fence that
+// hands the counts to the row's last block costs about 16 us on gfx942, more
+// than the whole select.
 
 // A larger float has a larger key. +NaN is above +inf, as torch.topk ranks
 // NaN. A key of 0 is below every float's key, so it can pad a row.
@@ -1167,13 +1167,12 @@ __device__ inline float maxPropagatingNan(float a, float b) {
 // row. Each thread scores whole blocks. With blocks of 8 and a 16-byte
 // aligned row, a block is two float4 loads, and the loop is unrolled so that
 // a thread has several blocks' loads in flight. The scores of the blocks
-// before the row's end go to the scores scratch, and vLLM's radix job picks
-// the top topkBlocks of them. vLLM also
-// scores the blocks past the row's end, as -inf, so it only picks them when
-// fewer than topkBlocks blocks are left, and then writes -1 for them. Here
-// those places get -1 directly. So the list holds the same block ids as
-// vLLM's, in no particular order, unless two scores are equal at the cut.
-// blockSize must be at least 1.
+// before the row's end go to the scores scratch, and vLLM's topKPerRowJob
+// picks the top topkBlocks of them. vLLM also scores the blocks past the
+// row's end, as -inf, so it only picks them when fewer than topkBlocks blocks
+// are left, and then writes -1 for them. Here those places get -1 directly.
+// So the list holds the same block ids as vLLM's, in no particular order,
+// unless two scores are equal at the cut. blockSize must be at least 1.
 __global__ __launch_bounds__(kNumThreads) void candidateBlocks(
     const float* logits, const int* visible, float* scores, int* out,
     int stride0, int outStride, int width, int scoresStride, int topkBlocks,
@@ -1399,8 +1398,8 @@ void compact_top_k_512(const torch::Tensor& compact_logits,
       seqLensIs2D);
 }
 
-// compact_top_k_512 with selectFromRegisters instead of vLLM's radix job. The
-// same arguments and the same index sets, except for ties at the cut.
+// compact_top_k_512 with selectFromRegisters instead of vLLM's topKPerRowJob.
+// The same arguments and the same index sets, except for ties at the cut.
 void compact_top_k_512_regs(const torch::Tensor& compact_logits,
                             const torch::Tensor& compact_ids,
                             const torch::Tensor& seq_lens, int64_t next_n,

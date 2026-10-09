@@ -692,8 +692,9 @@ def _prepare_dflash_inputs_kernel(
             last_query_end = num_reqs * num_query_per_req
             # The padding below writes up to max_num_tokens entries from
             # this one program. BLOCK_SIZE follows the step's rows (16 for
-            # one request with 5 drafts), so these loops took about 44 us
-            # a call. PAD_BLOCK entries a round write the same values.
+            # one request with 5 drafts), so loops of BLOCK_SIZE entries a
+            # round take about 44 us a call. Loops of PAD_BLOCK entries a
+            # round write the same values in fewer rounds.
             for i in range(num_reqs, max_num_reqs + 1, PAD_BLOCK):
                 block = i + tl.arange(0, PAD_BLOCK)
                 mask = block < max_num_reqs + 1

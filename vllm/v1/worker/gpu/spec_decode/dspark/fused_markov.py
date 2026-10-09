@@ -14,11 +14,10 @@ For each row, a program computes its block's bias from markov_w2, adds the
 base logits, stores the step's logits into the draft logits cache and takes
 the Gumbel-max of its block with vLLM's own ``gumbel_noised_argmax``. The
 next step's programs first take the argmax over the previous step's block
-maxima themselves, which gives the previous token,
-and the last step's tokens get one small launch. The noise depends only on
-the request's seed, the position and the token id, and both paths keep the
-first of equal maxima, so the sampled token does not depend on the block
-size.
+maxima themselves, which gives the previous token, and the last step's
+tokens get one small launch. The noise depends only on the request's seed,
+the position and the token id, and both paths keep the first of equal
+maxima, so the sampled token does not depend on the block size.
 
 The bias is an fp32 sum of 256 products rounded to bf16, as vLLM's GEMV
 output. The products are added in another order than in vLLM's GEMV, so a

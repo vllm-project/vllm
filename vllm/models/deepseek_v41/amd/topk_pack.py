@@ -4,19 +4,22 @@
 
 compute_global_topk_ragged_indices_and_indptr in vLLM's V4.1 ROCm model runs
 once a step for each index source layer, 8 times a step for
-DeepSeek-V4.1-Flash. It launched 4 kernels: the per-row count of valid top-k
-entries, the zero fill and the cumsum of indptr, and the mapping of the
-entries through the compressed cache's block table. On MI325X they took
-17.4 us of each index layer at 128k context, inside the decode graph.
+DeepSeek-V4.1-Flash. For a batch that this file does not take, it calls
+_compute_global_topk_ragged_indices_and_indptr_old, which launches 4 kernels:
+the per-row count of valid top-k entries, the zero fill and the cumsum of
+indptr, and the mapping of the entries through the compressed cache's block
+table. On MI325X they took 17.4 us of each index layer at 128k context,
+inside the decode graph.
 
 _topk_pack_kernel writes the same 3 tensors with one program: the row
 lengths (0 for a padded token), indptr, and the global slots of the first
 length entries of each row (-1 for a negative entry). It does not write the
-ragged entries past indptr[-1], which the old path also left uninitialized.
+ragged entries past indptr[-1], which
+_compute_global_topk_ragged_indices_and_indptr_old also leaves uninitialized.
 
 On gfx942 with VLLM_ROCM_MONO_DECODE=1 (``dsv41_gfx942.enabled()``), batches
 of up to MAX_ROWS rows use it. tests/kernels/test_dsv41_gfx942_decode_meta.py
-compares it with the old function.
+compares it with _compute_global_topk_ragged_indices_and_indptr_old.
 """
 
 import torch
@@ -128,8 +131,8 @@ def pack(
     block_size,
     is_valid_token,
 ):
-    """The fused packing, or None when the batch takes the old
-    compute_global_topk_ragged_indices_and_indptr."""
+    """The fused packing, or None when the batch takes
+    _compute_global_topk_ragged_indices_and_indptr_old."""
     if not enabled():
         return None
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1)

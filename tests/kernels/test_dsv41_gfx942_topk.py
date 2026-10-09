@@ -5,11 +5,9 @@
 
 Each helper must choose the columns or blocks that vLLM's op chooses. Equal
 values at the cut may be chosen differently, and then the chosen values must
-be the same multiset. The steps are one request with its 5 DSpark drafts
-(the step that the gfx942 mono decode path takes), 3 such requests, and 8
-requests without drafts, because the helpers also take the steps that are
-too large for the mono layers. The logits rows are as wide as the AgentX
-server's max_model_len (1M).
+be the same multiset. The steps are one request with its 5 DSpark drafts,
+3 such requests, and 8 requests without drafts. The logits rows are as wide
+as the AgentX server's max_model_len (1M).
 """
 
 import math
@@ -109,7 +107,7 @@ def _assert_same_top512(x, ref, got, ends, name):
 
 
 def _logits(ends: list[int], masked: bool, gen) -> torch.Tensor:
-    """Random logits. ``masked`` keeps 2048 random blocks of 8 and the newest
+    """Random logits. ``masked`` keeps 2047 random blocks of 8 and the newest
     block of each row and sets the rest of the row to -inf, as layers 24 to
     36 see their logits after the DSpark candidate mask."""
     x = torch.randn(len(ends), WIDTH, device="cuda", generator=gen) * 4.0
@@ -163,8 +161,9 @@ def _compact_rows(kind: str, rows: int, length: int, gen) -> torch.Tensor:
     if kind == "all equal":
         return torch.full((rows, length), 0.75)
     if kind == "near max":
-        # Most values sit just below the largest, in the first bins of the
-        # select by distance below the max.
+        # Most values sit just below the largest, so the first pass of
+        # selectFromRegisters, which bins by sign, exponent and the top 5
+        # mantissa bits, puts the whole row in one bin.
         return 1000.0 - torch.rand(rows, length, generator=gen) * 1e-3
     x = torch.randn(rows, length, generator=gen)
     x[:, 1000:1500] = float("-inf")
@@ -178,7 +177,7 @@ def _compact_rows(kind: str, rows: int, length: int, gen) -> torch.Tensor:
 )
 def test_compact_register_select_matches_radix_job(kind):
     """compact_top_k_512_regs (selectFromRegisters) against
-    compact_top_k_512 (vLLM's radix job) on compact candidate rows of 16384
+    compact_top_k_512 (vLLM's topKPerRowJob) on compact candidate rows of 16384
     logits, whose ids are their positions."""
     from vllm.model_executor.layers.dsv41_gfx942 import topk
 
@@ -273,7 +272,7 @@ def _block_scores(row: torch.Tensor, end: int) -> torch.Tensor:
 
 
 def _sort_key(v: float):
-    # NaN sorts above +inf, as both torch.topk and vLLM's radix job pick it.
+    # NaN sorts above +inf, as torch.topk and vLLM's topKPerRowJob pick it.
     return (1, 0.0) if v != v else (0, v)
 
 

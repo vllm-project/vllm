@@ -310,15 +310,15 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                # When layer 0 runs as a whole mono layer (gfx942), the
+                # When layer 0 is a whole mono layer (gfx942), the
                 # entry seam projects the expanded residual with the
                 # unfolded hc_attn_fn, as K1 does, instead of the embedding
                 # with the folded copy. The hc copies are equal, so the
                 # products are the same and only their order of addition
                 # changes, and pre_mix None still selects copy 0 as the
-                # layer input. AITER's fused delayed seam takes this form.
-                # The folded form has no AITER kernel on gfx942 and runs the
-                # eager reference instead, about 120 small kernels a step.
+                # layer input. The AITER op mhc_pre_delayed_aiter takes this
+                # form. The folded form has no AITER kernel on gfx942 and runs
+                # the eager reference instead, about 120 small kernels a step.
                 unfolded = self.mono is not None and self.mono.window
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
