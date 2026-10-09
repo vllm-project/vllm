@@ -532,10 +532,17 @@ void zero_buffer(T* data, int64_t size) {
 #endif
 
 #if defined(__x86_64__)
+// CPU_CAPABILITY_AVX10_2 is defined by cmake only when the compiler accepts
+// -mavx10.2; without it the builtin below is not merely absent but a hard
+// error, so the AVX512 paths have to stand in.
 bool avx10_2_available() {
+#ifdef CPU_CAPABILITY_AVX10_2
   // __builtin_cpu_supports returns the masked feature bit rather than 0/1.
   static const bool available = __builtin_cpu_supports("avx10.2");
   return available;
+#else
+  return false;
+#endif
 }
 #endif
 
