@@ -1,0 +1,7 @@
+model_name: "nvidia/Qwen3-30B-A3B-NVFP4"
+accuracy_threshold: 0.88
+num_questions: 1319
+num_fewshot: 5
+# 30B MoE + CuTeDSL/NIXL EP v2 JIT compile can exceed the 1200s default startup wait.
+startup_max_wait_seconds: 2400
+server_args: "--max-model-len 8192 --data-parallel-size 2 --enable-expert-parallel --all2all-backend=nixl_ep_v2 --moe-backend=flashinfer_cutedsl"
