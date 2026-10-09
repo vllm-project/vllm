@@ -953,6 +953,33 @@ def test_qsa_e4m3_byte_decode_matches_every_encoding() -> None:
 
 
 @requires_qsa_kernels
+def test_qsa_e4m3_packed_decode_is_bit_identical_in_every_byte_lane() -> None:
+    """The packed decode must give the reference fp16 bits for every code in
+    every byte of the 32-bit word, so the sm_80 reader output is unchanged."""
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import (
+        _e4m3_bits_to_scaled_fp16,
+        _e4m3_bits_to_scaled_fp16_packed,
+    )
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def _decode(src, reference, packed, n: tl.constexpr):
+        offsets = tl.arange(0, n)
+        bits = tl.load(src + offsets)
+        tl.store(reference + offsets, _e4m3_bits_to_scaled_fp16(bits))
+        tl.store(packed + offsets, _e4m3_bits_to_scaled_fp16_packed(bits))
+
+    codes = torch.arange(256, device="cuda", dtype=torch.int32)
+    # Row k holds code c at byte lane (c + k) % 4, so every code meets every lane.
+    bits = torch.cat([torch.roll(codes, k) for k in range(4)]).to(torch.uint8)
+    reference = torch.empty(bits.numel(), device="cuda", dtype=torch.float16)
+    packed = torch.empty_like(reference)
+    _decode[(1,)](bits, reference, packed, n=bits.numel())
+
+    assert torch.equal(packed.view(torch.int16), reference.view(torch.int16))
+
+
+@requires_qsa_kernels
 def test_qsa_block_expansion_correctness() -> None:
     blocks = torch.tensor([[0, -1], [1, 0]], device="cuda", dtype=torch.int32)
     query_positions = torch.tensor([5, 10], device="cuda")
