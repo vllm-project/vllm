@@ -61,6 +61,10 @@ pub struct GenerateRequest {
     pub reasoning_ended: Option<bool>,
     /// Optional LoRA adapter request applied to this generation.
     pub lora_request: Option<LoraRequest>,
+    /// Whether this ADD is part of a resumable streaming-input session.
+    ///
+    /// Only [`crate::Llm::generate_streaming`] accepts `true`.
+    pub resumable: bool,
 }
 
 #[derive(Debug)]
@@ -68,7 +72,35 @@ pub(crate) struct PreparedGenerateRequest {
     pub engine_request: EngineCoreRequest,
 }
 
+/// The dummy prompt Python's `final_req` uses to close a streaming-input
+/// session. Its content is irrelevant; only the ADD itself matters.
+const SENTINEL_PROMPT_TOKEN_IDS: [u32; 1] = [0];
+
 impl GenerateRequest {
+    /// The closing ADD of a resumable streaming-input session.
+    ///
+    /// Mirrors Python's `final_req`: a dummy `TokensPrompt([0])` with
+    /// `resumable: false`. The engine frees KV when it applies this ADD.
+    pub fn sentinel(request_id: String) -> Self {
+        Self {
+            request_id,
+            prompt_token_ids: SENTINEL_PROMPT_TOKEN_IDS.to_vec(),
+            sampling_params: EngineCoreSamplingParams::default(),
+            mm_features: None,
+            arrival_time: None,
+            cache_salt: None,
+            trace_headers: None,
+            priority: 0,
+            data_parallel_rank: None,
+            session_id: None,
+            kv_hints: None,
+            reasoning_parser_kwargs: None,
+            reasoning_ended: None,
+            lora_request: None,
+            resumable: false,
+        }
+    }
+
     /// Validate and lower this request into the raw engine-core request format.
     pub(crate) fn prepare(self, randomize_request_id: bool) -> Result<PreparedGenerateRequest> {
         if self.prompt_token_ids.is_empty() {
@@ -91,6 +123,7 @@ impl GenerateRequest {
             reasoning_parser_kwargs,
             reasoning_ended,
             lora_request,
+            resumable,
         } = self;
 
         let external_request_id = request_id;
@@ -117,7 +150,7 @@ impl GenerateRequest {
                 current_wave: 0,
                 priority,
                 trace_headers,
-                resumable: false,
+                resumable,
                 session_id,
                 kv_hints,
                 external_req_id: Some(external_request_id),
@@ -186,6 +219,7 @@ mod tests {
             }),
             reasoning_ended: None,
             lora_request: None,
+            resumable: false,
         }
     }
 
