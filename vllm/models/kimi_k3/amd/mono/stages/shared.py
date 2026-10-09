@@ -61,6 +61,7 @@ def shared_gate_up(
     SLOT,
     beta,
     linear_beta,
+    on_partials=None,
 ):
     """Ticket u: K split u % SH_KS of gate/up pair u / SH_KS, one K quarter per wave.
 
@@ -95,19 +96,33 @@ def shared_gate_up(
     av = [_bf16x8(x_rsrc, x_dw + fx.Int32(s * 16)) for s in range_constexpr(steps)]
     gv = [_bf16x8(w_rsrc, g_dw + fx.Int32(s * 16)) for s in range_constexpr(steps)]
     uv = [_bf16x8(w_rsrc, u_dw + fx.Int32(s * 16)) for s in range_constexpr(steps)]
+    # The scheduler otherwise sinks each load next to its MFMA and waits for
+    # it there: one load in flight per wave.
+    rocdl.sched_barrier(0)
     slice_row0 = (ks * fx.Int32(N_WAVES) + wave) * fx.Int32(ROWS)
+    # vmcnt counts loads and stores in issue order: every partial store waits
+    # until all m-blocks' MFMAs are done, so no activation load queues behind
+    # a write-through store, and the next m-block's loads are issued before
+    # this one's MFMAs.
+    accs = []
     for mb in range_constexpr(N_MB):
-        if const_expr(mb > 0):
-            mb_dw = fx.Int32(mb * BM * SH_HIDDEN // 2)
-            av = [
+        if const_expr(mb + 1 < N_MB):
+            mb_dw = fx.Int32((mb + 1) * BM * SH_HIDDEN // 2)
+            av_next = [
                 _bf16x8(x_rsrc, x_dw + mb_dw + fx.Int32(s * 16))
                 for s in range_constexpr(steps)
             ]
+            rocdl.sched_barrier(0)
         acc_g = _zero_f32x4()
         acc_u = _zero_f32x4()
         for s in range_constexpr(steps):
             acc_g = _mfma_bf16(av[s], gv[s], acc_g)
             acc_u = _mfma_bf16(av[s], uv[s], acc_u)
+        accs.append((acc_g, acc_u))
+        if const_expr(mb + 1 < N_MB):
+            av = av_next
+    for mb in range_constexpr(N_MB):
+        acc_g, acc_u = accs[mb]
         for r in range_constexpr(4):
             m = fx.Int32(mb * BM) + kq * fx.Int32(4) + fx.Int32(r)
             off = ((slice_row0 + m) * fx.Int32(NP) + p) * fx.Int32(32) + row
@@ -117,6 +132,8 @@ def shared_gate_up(
                 st_wt(arg_part, off, vg, 4)
                 st_wt(arg_part, off + fx.Int32(16), vu, 4)
     rocdl.s_waitcnt(vmcnt=0)
+    if const_expr(on_partials is not None):
+        on_partials()
     n = count(
         wave,
         lane,
@@ -134,17 +151,23 @@ def shared_gate_up(
         h_rsrc = buffer_ops.create_buffer_resource_from_addr(
             fx.Int64(arg_h), num_records_bytes=ROWS * SH_INTER * 2
         )
+        # All m-blocks' partial loads go out before the first h store (vmcnt
+        # order). Rows >= M read in-bounds workspace and are never stored.
+        sums = []
         for mb in range_constexpr(N_MB):
             m = fx.Int32(mb * BM) + tid // fx.Int32(16)
+            g = fx.Float32(0.0)
+            up = fx.Float32(0.0)
+            for sl in range_constexpr(N_SLICES):
+                off = ((fx.Int32(sl * ROWS) + m) * fx.Int32(NP) + p) * fx.Int32(
+                    32
+                ) + tid % fx.Int32(16)
+                g = g + fx.Float32(part[off])
+                up = up + fx.Float32(part[off + fx.Int32(16)])
+            sums.append((m, g, up))
+        for mb in range_constexpr(N_MB):
+            m, g, up = sums[mb]
             if m < i32_M:
-                g = fx.Float32(0.0)
-                up = fx.Float32(0.0)
-                for sl in range_constexpr(N_SLICES):
-                    off = ((fx.Int32(sl * ROWS) + m) * fx.Int32(NP) + p) * fx.Int32(
-                        32
-                    ) + tid % fx.Int32(16)
-                    g = g + fx.Float32(part[off])
-                    up = up + fx.Float32(part[off + fx.Int32(16)])
                 g = g.to(fx.BFloat16).to(fx.Float32)
                 up = up.to(fx.BFloat16).to(fx.Float32)
                 gate = (
@@ -199,18 +222,42 @@ def shared_down(
         fx.Int64(arg_out), num_records_bytes=fx.Int64(i32_M) * fx.Int64(SH_HIDDEN * 2)
     )
     h_dw = row * fx.Int32(SH_INTER // 2) + kq * fx.Int32(4)
+    steps = SH_INTER // 32
+    # K in chunks of `ck` steps, the next chunk's loads issued (and fenced from
+    # the scheduler) before this chunk's MFMAs: (1 + N_MB) * ck <= 24 loads of
+    # 4 VGPRs in flight per buffer.
+    ck = max(d for d in range(1, steps + 1) if steps % d == 0 and d * (1 + N_MB) <= 24)
     for sub in range_constexpr(SH_DN_BN // (16 * N_WAVES)):
         n0 = nb * fx.Int32(SH_DN_BN) + (fx.Int32(sub * N_WAVES) + wave) * fx.Int32(16)
         w_dw = (n0 + row) * fx.Int32(SH_INTER // 2) + kq * fx.Int32(4)
         acc = [_zero_f32x4() for _ in range_constexpr(N_MB)]
-        for s in range_constexpr(SH_INTER // 32):
-            wv = _bf16x8(w_rsrc, w_dw + fx.Int32(s * 16))
-            for mb in range_constexpr(N_MB):
-                acc[mb] = _mfma_bf16(
-                    _bf16x8(h_rsrc, h_dw + fx.Int32(mb * BM * SH_INTER // 2 + s * 16)),
-                    wv,
-                    acc[mb],
-                )
+
+        def chunk(c):
+            ws = [
+                _bf16x8(w_rsrc, w_dw + fx.Int32(s * 16))
+                for s in range_constexpr(c * ck, (c + 1) * ck)
+            ]
+            hs = [
+                [
+                    _bf16x8(h_rsrc, h_dw + fx.Int32(mb * BM * SH_INTER // 2 + s * 16))
+                    for s in range_constexpr(c * ck, (c + 1) * ck)
+                ]
+                for mb in range_constexpr(N_MB)
+            ]
+            return ws, hs
+
+        cur = chunk(0)
+        rocdl.sched_barrier(0)
+        for c in range_constexpr(steps // ck):
+            if const_expr(c + 1 < steps // ck):
+                nxt = chunk(c + 1)
+                rocdl.sched_barrier(0)
+            ws, hs = cur
+            for j in range_constexpr(ck):
+                for mb in range_constexpr(N_MB):
+                    acc[mb] = _mfma_bf16(hs[mb][j], ws[j], acc[mb])
+            if const_expr(c + 1 < steps // ck):
+                cur = nxt
         for mb in range_constexpr(N_MB):
             for r in range_constexpr(4):
                 m = fx.Int32(mb * BM) + kq * fx.Int32(4) + fx.Int32(r)

@@ -307,7 +307,8 @@ def compile_mono_moe(
                     t - i32_M, tid, lane, wave, lds_base, i32_M, arg_sh_x,
                     arg_sh_wgu, arg_sh_part, arg_sh_h, a_sh_pair, a_sh_done,
                     SH_KS=SH_KS, PAIR_STRIDE=MB_STRIDE, SLOT=S_SH_PAIR,
-                    beta=sh_beta, linear_beta=sh_linear_beta, **sh_kw,
+                    beta=sh_beta, linear_beta=sh_linear_beta,
+                    on_partials=lambda: mark(t, 1), **sh_kw,
                 )  # fmt: skip
                 rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
                 mark(t, 2)
