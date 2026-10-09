@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
     MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    BoundaryPut,
     LoadSpec,
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
@@ -20,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
+    _partial_tail_non_mamba_puts,
 )
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -1286,6 +1288,44 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
         assert all(pool.blocks[i].ref_cnt == 1 for i in expected + [50])
     scheduler.update_connector_output(_make_worker_output({req_meta.store_job_id: 1}))
     assert all(pool.blocks[i].ref_cnt == 0 for i in owned_ids)
+
+
+def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
+    """Core drops the Mamba checkpoint whenever EAGLE block drop is on, even if
+    only the Mamba group carries the eagle flag."""
+    groups = [
+        KVCacheGroupSpec(
+            ["attention"],
+            FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=16,
+                shapes=((1,),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+            is_eagle_group=True,
+        ),
+    ]
+    coord = MooncakeStoreCoordinator(groups, 16, 4, use_eagle=True)
+    # Core's checkpoint for a 49-token prompt: 48 minus one EAGLE hash unit.
+    req_meta = ReqMeta(
+        req_id="req-0",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3, 4], [50]),
+        block_hashes=[bytes([i]) for i in range(12)],
+        num_prompt_tokens=49,
+        completed_token_len=49,
+        boundary_puts=[BoundaryPut(1, 50, 44)],
+    )
+
+    assert _partial_tail_non_mamba_puts(coord, req_meta, [16, 16]) == [
+        BoundaryPut(0, 3, 44)
+    ]
 
 
 def test_decode_boundary_state_offload_dropped_unclaimed():

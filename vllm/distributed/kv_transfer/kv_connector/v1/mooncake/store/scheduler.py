@@ -100,8 +100,10 @@ def _partial_tail_non_mamba_puts(
     if not coord.enable_partial_hash_hits or not req_meta.block_hashes:
         return []
     hash_block_size = coord.hash_block_size
+    # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
+    # groups carry the eagle flag.
     boundary = get_mamba_prefill_checkpoint_position(
-        prompt_tokens, hash_block_size, bool(coord.eagle_proof_margin_by_group)
+        prompt_tokens, hash_block_size, coord.use_eagle
     )
     assert all(position == boundary for position in mamba_tails), (
         "Mamba tail offloads must match the prompt checkpoint boundary"
