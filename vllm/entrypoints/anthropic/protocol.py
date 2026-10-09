@@ -33,6 +33,15 @@ class AnthropicUsage(BaseModel):
     cache_read_input_tokens: int | None = None
 
 
+class AnthropicMessageDeltaUsage(BaseModel):
+    """Cumulative usage updates for message_delta events."""
+
+    output_tokens: int
+    input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+
+
 class AnthropicContentBlock(BaseModel):
     """Content block in message."""
 
@@ -229,6 +238,17 @@ class AnthropicMessagesRequest(BaseModel):
     top_p: float | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
+    usage_stream_interval: int = Field(
+        default_factory=lambda: envs.VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL,
+        ge=0,
+        validate_default=True,
+        description=(
+            "Emit cumulative usage every N non-terminal backend stream chunks. "
+            "Zero disables intermediate updates. Defaults to "
+            "VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL (0). "
+            "Ignored for non-streaming requests."
+        ),
+    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -344,7 +364,7 @@ class AnthropicStreamEvent(BaseModel):
     content_block: AnthropicContentBlock | None = None
     index: int | None = None
     error: AnthropicError | None = None
-    usage: AnthropicUsage | None = None
+    usage: AnthropicMessageDeltaUsage | None = None
 
 
 class AnthropicMessagesResponse(BaseModel):

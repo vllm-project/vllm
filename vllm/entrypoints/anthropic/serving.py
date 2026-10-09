@@ -26,6 +26,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
     AnthropicEffort,
     AnthropicError,
+    AnthropicMessageDeltaUsage,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
@@ -816,7 +817,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         elif isinstance(generator, ChatCompletionResponse):
             return self.messages_full_converter(generator)
 
-        return self.message_stream_converter(generator)
+        return self.message_stream_converter(
+            generator, usage_stream_interval=request.usage_stream_interval
+        )
 
     def messages_full_converter(
         self,
@@ -878,6 +881,8 @@ class AnthropicServingMessages(OpenAIServingChat):
     async def message_stream_converter(
         self,
         generator: AsyncGenerator[str, None],
+        *,
+        usage_stream_interval: int = 0,
     ) -> AsyncGenerator[str, None]:
         try:
 
@@ -916,6 +921,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                         self.tool_use_id = None
 
             first_item = True
+            chunks_since_usage = 0
             finish_reason = None
             # Matched stop string, when generation stopped on one (a str);
             # int stop-token-id / None are not stop sequences.
@@ -1051,7 +1057,11 @@ class AnthropicServingMessages(OpenAIServingChat):
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=stop_delta,
-                                usage=_build_anthropic_usage(origin_chunk.usage),
+                                usage=AnthropicMessageDeltaUsage(
+                                    **_build_anthropic_usage(
+                                        origin_chunk.usage
+                                    ).model_dump(exclude_unset=True)
+                                ),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
                             yield wrap_data_with_event(data, "message_delta")
@@ -1205,7 +1215,26 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         yield wrap_data_with_event(
                                             data, "content_block_delta"
                                         )
-                            continue
+                        if usage_stream_interval > 0 and finish_reason is None:
+                            chunks_since_usage += 1
+                            usage = origin_chunk.usage
+                            if (
+                                chunks_since_usage >= usage_stream_interval
+                                and usage is not None
+                                and usage.completion_tokens is not None
+                            ):
+                                chunk = AnthropicStreamEvent(
+                                    type="message_delta",
+                                    delta=AnthropicDelta(
+                                        stop_reason=None, stop_sequence=None
+                                    ),
+                                    usage=AnthropicMessageDeltaUsage(
+                                        output_tokens=usage.completion_tokens
+                                    ),
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True)
+                                yield wrap_data_with_event(data, "message_delta")
+                                chunks_since_usage = 0
                 else:
                     error_response = AnthropicStreamEvent(
                         type="error",
