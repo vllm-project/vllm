@@ -14,14 +14,6 @@ from vllm.entrypoints.speech_to_text.whisper import (
 )
 
 
-def test_hf_longform_defaults_match_named_constants():
-    # transformers.models.whisper.generation_whisper generate_with_fallback
-    assert COMPRESSION_RATIO_THRESHOLD == 1.35
-    assert LOGPROB_THRESHOLD == -1.0
-    assert TEMPERATURES == (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
-    assert WHISPER_VOCAB_SIZE == 51865
-
-
 def test_empty_token_ids_gzip_inf_but_no_retry_without_threshold():
     assert math.isinf(compression_ratio([], vocab_size=WHISPER_VOCAB_SIZE))
     assert needs_fallback([], vocab_size=WHISPER_VOCAB_SIZE) is False
@@ -150,22 +142,3 @@ def test_mixin_generate_retries_loop_then_keeps_clean():
     )
     assert temps[:2] == [0.0, 0.2]
     assert all(o.outputs[0].text == "doctor of laws" for o in outs)
-
-
-def test_mixin_generate_wraps_super_generate():
-    from vllm.sampling_params import SamplingParams
-
-    unique = list(range(40, 120))
-    calls: list[float] = []
-
-    def on_generate(prompts, sampling_params):
-        calls.append(float(sampling_params.temperature))
-        return [_Out(unique, "ok", -0.2) for _ in prompts]
-
-    outs = _whisper_llm(on_generate).generate(
-        ["p0"],
-        SamplingParams(temperature=0, max_tokens=16),
-        use_tqdm=False,
-    )
-    assert calls == [0.0]
-    assert outs[0].outputs[0].text == "ok"

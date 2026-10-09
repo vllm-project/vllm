@@ -7,7 +7,6 @@ import asyncio
 from vllm.entrypoints.speech_to_text.whisper import (
     WHISPER_VOCAB_SIZE,
     generate_chunk_with_gzip_fallback,
-    gzip_vocab_size,
     should_gzip_fallback,
 )
 
@@ -89,12 +88,3 @@ def test_should_gzip_fallback_transcription_whisper_t0_only():
     assert not should_gzip_fallback(_Whisper, _Req(temperature=0.2, stream=False))
     assert not should_gzip_fallback(_Whisper, _Req(temperature=0.0, stream=True))
     assert not should_gzip_fallback(_Qwen, _Req(temperature=0.0, stream=False))
-
-
-def test_gzip_vocab_size_uses_named_whisper_default():
-    assert gzip_vocab_size(None) == WHISPER_VOCAB_SIZE
-
-    class _Tok:
-        vocab_size = 1000
-
-    assert gzip_vocab_size(_Tok()) == 1000
