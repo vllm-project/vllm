@@ -63,6 +63,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MuseSparkConfig": "vllm.transformers_utils.configs.muse_spark",
     "KimiK3Config": "vllm.transformers_utils.configs.kimi_k3",
     "KimiK3VisionConfig": "vllm.transformers_utils.configs.kimi_k3",
+    "NemotronLabsDiffusionConfig": (
+        "vllm.transformers_utils.configs.nemotron_labs_diffusion"
+    ),
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
@@ -119,6 +122,7 @@ __all__ = [
     "MingV3ASRConfig",
     "MiniMaxM3MTPConfig",
     "MiniMaxM3VLConfig",
+    "NemotronLabsDiffusionConfig",
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
