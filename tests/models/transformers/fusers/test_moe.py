@@ -257,6 +257,23 @@ class MoEBlockUnaccountedBuffer(MoEBlockUnaccounted):
         self.extra = BufferScale()
 
 
+class MoEBlockSharedUnflattened(MoEBlockSharedNoGate):
+    """Gate and shared expert read the unflattened input (Kolibri-1)."""
+
+    def forward(self, hidden_states):
+        _, weights, index = self.gate(hidden_states)
+        x = hidden_states.view(-1, hidden_states.shape[-1])
+        out = self.experts(x, index, weights).view(*hidden_states.shape)
+        return out + self.shared_expert(hidden_states)
+
+
+class MoEBlockSharedAveraged(MoEBlockSharedUnflattened):
+    """Averages the experts' and shared expert's outputs (Cohere2-MoE)."""
+
+    def forward(self, hidden_states):
+        return super().forward(hidden_states) / 2
+
+
 @pytest.mark.parametrize("sigmoid", [False, True])
 def test_moe_fuser_detects_router(sigmoid):
     with torch.device("meta"):
@@ -374,3 +391,13 @@ def test_moe_fuser_router_requires_connected_dataflow():
     with torch.device("meta"):
         block = MoEBlock(DisconnectedRouter)
     assert MoEBlockFuser.match(block, "experts") is None
+
+
+@pytest.mark.parametrize(
+    ("block_cls", "shared_name"),
+    [(MoEBlockSharedUnflattened, "shared_expert"), (MoEBlockSharedAveraged, None)],
+)
+def test_moe_fuser_external_routing_moves_shared_expert(block_cls, shared_name):
+    with torch.device("meta"):
+        fuser = MoEBlockFuser.match_external(block_cls(), "experts")
+    assert (fuser and fuser.shared_name) == shared_name

@@ -332,15 +332,6 @@ class MoEMixin(MixtureOfExperts, Base):
                     if fuser is not None and not reaches_fp16_trick:
                         # MoE block forward is fully replaced.
                         # gate/router and shared expert (if any) runs in MoERunner.
-                        shared_experts = fuser.shared_experts(moe_block, prefix)
-                        # Store shared experts for later down projection adjustment
-                        if shared_experts is not None:
-                            hf_shared = shared_experts.shared_experts
-                            glu_fuser = get_fuser(hf_shared, GLUFuser)
-                            if glu_fuser is not None:
-                                down_name = glu_fuser.down_name
-                                if down_name is not None:
-                                    shared_down_projs.append((hf_shared, down_name))
                         # Prefer config, otherwise read it from fuser.
                         router_dtype = config_router_dtype or fuser.router_dtype
                         gate = fuser.gate(moe_block, prefix, router_dtype)
@@ -350,7 +341,6 @@ class MoEMixin(MixtureOfExperts, Base):
                                 self.parallel_config.use_sequence_parallel_moe
                             ),
                             gate=gate,
-                            shared_experts=shared_experts,
                         )
                         if router_dtype is not None:
                             kwargs["router_logits_dtype"] = router_dtype
@@ -361,7 +351,6 @@ class MoEMixin(MixtureOfExperts, Base):
                         bias = getattr(gate, "e_score_correction_bias", None)
                         if bias is not None:
                             kwargs["e_score_correction_bias"] = bias
-                        fuser.rewrite_forward(moe_block)
                         routed = "gate + experts"
                         if fuser.shared_name:
                             routed += " + shared experts"
@@ -371,8 +360,8 @@ class MoEMixin(MixtureOfExperts, Base):
                             moe_block_cls,
                         )
                     else:
-                        # MoE block forward is unmodified.
-                        # gate/router and shared expert (if any) runs in Transformers.
+                        # gate/router runs in Transformers, and so does the shared
+                        # expert (if any) unless `match_external` moves it to MoERunner.
                         # We then smuggle the topk_ids in using a custom op.
                         moe_state = TransformersMoEState()
 
@@ -409,10 +398,24 @@ class MoEMixin(MixtureOfExperts, Base):
                             runner_cls=TransformersMoERunner,
                             runner_args={"moe_state": moe_state},
                         )
+                        fuser = MoEBlockFuser.match_external(moe_block, experts_name)
                         logger.info_once(
-                            "Fused: experts (%s) -> MoERunner (external routing)",
+                            "Fused: experts (%s)%s -> MoERunner (external routing)",
                             experts_cls,
+                            " + shared experts" if fuser is not None else "",
                         )
+                    if fuser is not None:
+                        shared_experts = fuser.shared_experts(moe_block, prefix)
+                        # Store shared experts for later down projection adjustment
+                        if shared_experts is not None:
+                            hf_shared = shared_experts.shared_experts
+                            glu_fuser = get_fuser(hf_shared, GLUFuser)
+                            if glu_fuser is not None:
+                                down_name = glu_fuser.down_name
+                                if down_name is not None:
+                                    shared_down_projs.append((hf_shared, down_name))
+                        kwargs["shared_experts"] = shared_experts
+                        fuser.rewrite_forward(moe_block)
                     fused_experts = FusedMoEFactory(**kwargs)
                     moe_block.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
