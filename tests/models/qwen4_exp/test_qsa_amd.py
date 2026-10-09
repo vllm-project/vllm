@@ -357,11 +357,13 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
         pytest.param(513, 6, 1, 1024, id="tp4_split1"),
     ],
 )
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_qsa_sparse_paged_attention_matches_reference(
     num_rows: int,
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
+    dtype: torch.dtype,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
@@ -372,16 +374,14 @@ def test_qsa_sparse_paged_attention_matches_reference(
     indexer_budget = 2048
     indexer_compress_ratio = 4
     selection_width = indexer_budget + indexer_compress_ratio - 1
-    q = torch.randn(
-        num_rows, num_query_heads, head_dim, device="cuda", dtype=torch.bfloat16
-    )
+    q = torch.randn(num_rows, num_query_heads, head_dim, device="cuda", dtype=dtype)
     kv_cache = torch.randn(
         num_cache_blocks,
         page_size,
         num_kv_heads,
         2 * head_dim,
         device="cuda",
-        dtype=torch.bfloat16,
+        dtype=dtype,
     )
     k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
     block_table = (
