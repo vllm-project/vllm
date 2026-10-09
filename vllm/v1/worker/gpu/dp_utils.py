@@ -39,6 +39,8 @@ class DPSyncState:
     # Agreed upper bound on any rank's request count. Holds the padded count when
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
+    # Largest real request count scheduled on any rank before graph padding.
+    num_reqs_unpadded: int
 
 
 def sync_cudagraph_and_dp_padding(
@@ -139,7 +141,8 @@ def sync_cudagraph_and_dp_padding(
                 )
             # Refresh the token count to include CUDA graph padding.
             ubatch_num_tokens = ubatch_desc.num_tokens
-            num_reqs = int(num_reqs_across_dp.max())
+            num_reqs_unpadded = int(num_reqs_across_dp.max())
+            num_reqs = num_reqs_unpadded
             if ubatch_desc.cg_mode == CUDAGraphMode.FULL:
                 assert ubatch_desc.num_reqs is not None
                 num_reqs = ubatch_desc.num_reqs
@@ -150,6 +153,7 @@ def sync_cudagraph_and_dp_padding(
                 uniform_token_count=synced_uniform_token_count,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
                 num_reqs=num_reqs,
+                num_reqs_unpadded=num_reqs_unpadded,
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
@@ -168,6 +172,7 @@ def sync_cudagraph_and_dp_padding(
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
+                num_reqs_unpadded=int(num_reqs_across_dp.max()),
             ),
         )
 
@@ -207,6 +212,7 @@ def sync_cudagraph_and_dp_padding(
             and synced_desc.num_reqs is not None
             else int(num_reqs_across_dp.max())
         ),
+        num_reqs_unpadded=int(num_reqs_across_dp.max()),
     )
 
 

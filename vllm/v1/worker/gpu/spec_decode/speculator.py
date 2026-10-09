@@ -529,10 +529,11 @@ class DraftModelSpeculator(BaseSpeculator):
         num_reqs: int,
         num_query_per_req: int = 1,
     ) -> tuple[DPSyncState, int]:
-        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
-        assert num_reqs * num_query_per_req <= num_batch_tokens, (
-            "reusing a DP sync that does not cover this batch's requests"
+        num_reqs_synced = max(target_dp_sync.num_reqs_unpadded, num_reqs)
+        assert num_reqs_synced <= target_dp_sync.num_reqs, (
+            "reusing a DP sync whose request capacity is too small"
         )
+        num_batch_tokens = num_reqs_synced * num_query_per_req
         return replace(
             target_dp_sync,
             num_tokens_across_dp=torch.full_like(
