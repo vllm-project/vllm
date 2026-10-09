@@ -155,7 +155,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
-        # On SM120, batches whose 16-segment grid under-fills the SMs use 64.
+        # On SM120, batches whose 16-segment decode grid under-fills the SMs use
+        # 64. This counts requests, not Q blocks, on purpose: for 1..11 verify
+        # requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments were
+        # faster or within 6% at 2k, and 1.1-3.6x faster from 8k up.
         self.max_seqs_64_segments = 0
         if current_platform.is_cuda() and current_platform.is_device_capability(
             (12, 0)
@@ -171,8 +174,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             query_len = 1 + num_speculative_tokens * (
                 2 if speculative_config.parallel_drafting else 1
             )
-            if query_len <= MAX_3D_QUERY_LEN:
-                max_query_len_3d = query_len
+            max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
         # Scratch is indexed by query token, including verification tokens.
         max_num_seqs_3d = min(
             self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs

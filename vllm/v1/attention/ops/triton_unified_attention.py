@@ -1086,7 +1086,9 @@ def unified_attention(
         or num_seqs * triton.cdiv(max_seqlen_q, BLOCK_Q) > seq_threshold_3D
         or is_batch_invariant
     )
-    use_3d = use_3d and softmax_segm_max.shape[0] >= q.shape[0]
+    if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
+        logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
+        use_3d = False
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale

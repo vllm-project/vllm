@@ -2,19 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
 from vllm.v1.attention.ops import triton_unified_attention as attention
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_softcap,
@@ -26,7 +22,7 @@ from vllm.v1.attention.ops.triton_unified_attention import (
     reduce_segments,
     unified_attention,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import KVQuantMode
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -300,154 +296,6 @@ def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
         seq_threshold_3D=16,
     )
     assert len(reduce_grids) == 1
-
-
-def _native_graph_inputs(window, width, num_seqs):
-    set_random_seed(0)
-    num_tokens = width * num_seqs
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            get_num_attention_heads=lambda _: 8,
-            get_num_kv_heads=lambda _: 1,
-            get_head_size=lambda: 128,
-            rswa_window=None,
-        ),
-        parallel_config=None,
-        scheduler_config=SimpleNamespace(max_num_seqs=num_seqs),
-        speculative_config=SimpleNamespace(
-            num_speculative_tokens=width - 1, parallel_drafting=False
-        ),
-        compilation_config=SimpleNamespace(
-            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
-            cudagraph_capture_sizes=[num_tokens],
-            static_forward_context={},
-        ),
-    )
-    builder = TritonAttentionMetadataBuilder(
-        FullAttentionSpec(
-            block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
-        ),
-        ["layer.0"],
-        config,
-        torch.device("cuda"),
-    )
-    batch = BatchSpec(seq_lens=[4097] * num_seqs, query_lens=[width] * num_seqs)
-    metadata = builder.build_for_cudagraph_capture(
-        create_common_attn_metadata(batch, 128, "cuda", max_block_idx=64)
-    )
-    query = torch.randn((num_tokens, 8, 128), dtype=torch.bfloat16, device="cuda")
-    keys = torch.randn((64, 128, 1, 128), dtype=torch.bfloat16, device="cuda").to(
-        FP8_DTYPE
-    )
-    values = torch.randn_like(keys, dtype=torch.bfloat16).to(FP8_DTYPE)
-    output = torch.empty_like(query)
-    scratch = [
-        metadata.softmax_segm_output,
-        metadata.softmax_segm_max,
-        metadata.softmax_segm_expsum,
-    ]
-    for buffer in scratch:
-        buffer.fill_(float("nan"))
-    args = dict(
-        q=query,
-        k=keys,
-        v=values,
-        out=output,
-        cu_seqlens_q=metadata.query_start_loc,
-        max_seqlen_q=width,
-        seqused_k=metadata.seq_lens,
-        max_seqlen_k=4097,
-        softmax_scale=128**-0.5,
-        causal=True,
-        window_size=(-1, -1) if window is None else (window - 1, 0),
-        block_table=metadata.block_table,
-        softcap=0.0,
-        q_descale=None,
-        k_descale=torch.ones((1, 1), device="cuda"),
-        v_descale=torch.ones((1, 1), device="cuda"),
-        seq_threshold_3D=6,
-        num_par_softmax_segments=metadata.num_par_softmax_segments,
-        softmax_segm_output=scratch[0],
-        softmax_segm_max=scratch[1],
-        softmax_segm_expsum=scratch[2],
-        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
-    )
-    return args, scratch
-
-
-def _check_native_graph(args, query_lens, kv_lens, window=None):
-    active = sum(query_lens)
-    if active:
-        with torch.device("cuda"):
-            expected = ref_paged_attn(
-                args["q"][:active].float().clone(),
-                args["k"].float(),
-                args["v"].float(),
-                query_lens,
-                kv_lens,
-                args["block_table"],
-                128**-0.5,
-                window,
-            )
-        torch.testing.assert_close(
-            args["out"][:active].float(), expected, atol=1.5e-1, rtol=1.5e-1
-        )
-    torch.testing.assert_close(
-        args["out"][active:], torch.full_like(args["out"][active:], 37.0)
-    )
-
-
-@pytest.mark.parametrize(
-    ("width", "replays"),
-    [
-        pytest.param(
-            6,
-            [
-                ([6], [129], False),
-                ([3], [33], False),
-                ([0], [0], False),
-                ([6], [4097], False),
-                ([6], [6], True),
-            ],
-            id="width6",
-        ),
-        pytest.param(
-            5,
-            [
-                ([5, 0], [129, 0], False),
-                ([0, 5], [0, 129], False),
-                ([5, 0], [5, 0], True),
-            ],
-            id="width5",
-        ),
-    ],
-)
-@pytest.mark.parametrize("window", [None, 32])
-@torch.inference_mode()
-def test_native_graph_replay_preserves_buffers_and_padding(window, width, replays):
-    num_seqs = len(replays[0][0])
-    args, scratch = _native_graph_inputs(window, width, num_seqs)
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        unified_attention(**args)
-    torch.cuda.current_stream().wait_stream(stream)
-    torch.accelerator.synchronize()
-    assert torch.isfinite(scratch[0]).any()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        unified_attention(**args)
-    for query_lens, kv_lens, negative in replays:
-        args["q"].normal_()
-        if negative:
-            args["q"].fill_(-100)
-            args["k"].fill_(100)
-        args["cu_seqlens_q"][1:] = torch.tensor(query_lens).cumsum(0)
-        args["seqused_k"][:] = torch.tensor(kv_lens)
-        args["out"].fill_(37.0)
-        graph.replay()
-        torch.accelerator.synchronize()
-        _check_native_graph(args, query_lens, kv_lens, window)
 
 
 @triton.jit

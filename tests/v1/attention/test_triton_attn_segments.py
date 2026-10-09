@@ -97,7 +97,9 @@ def test_split_k_segments_follow_sm_occupancy(
 
 
 # Verify batches: the 64-segment scratch holds min(11, max_num_seqs) * (1 + K)
-# rows, and its 16-segment view covers every 3D-eligible sequence.
+# rows, and its 16-segment view covers every 3D-eligible sequence. 64 segments
+# follow the request count, not Q blocks: on SM12.0 they stay faster for verify
+# batches up to 11 requests (22 Q blocks at K=3).
 @pytest.mark.parametrize("builder_cls", BUILDERS)
 @pytest.mark.parametrize(
     "max_num_seqs,num_speculative_tokens,num_seqs,rows,segments",
@@ -139,9 +141,9 @@ def test_split_k_segment_rows_cover_verify_queries(
         (None, False, 8, 8),
         (4, False, 8, 40),
         (7, False, 8, 64),
-        (8, False, 8, 8),
+        (8, False, 8, 64),
         (3, True, 8, 56),
-        (4, True, 8, 8),
+        (4, True, 8, 64),
         (5, False, 1, 6),
     ],
 )
