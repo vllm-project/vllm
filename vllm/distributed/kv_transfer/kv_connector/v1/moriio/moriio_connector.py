@@ -2435,6 +2435,14 @@ class MoRIIOConnectorWorker:
         caches_data = []
         self.layer_base_addr_index = {}
         base_addr_idx = 0
+        # HMA (#53721 Gemma4 SWA, GLM-5.2 DSA, MiniMax): transfers already
+        # size RDMA from per-layer geometry, so allow divergent block_len
+        # (bytes) always, and divergent block_size (tokens/page) only when
+        # the hybrid KV cache manager is enabled. Without HMA, block_size
+        # must stay uniform for the peer page handshake.
+        hma_enabled = (
+            not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+        )
 
         for layer_name in kv_caches:
             self.layer_base_addr_index[layer_name] = base_addr_idx
@@ -2450,17 +2458,22 @@ class MoRIIOConnectorWorker:
                     base_addr_idx += 1
                 continue
             geometry = self._get_layer_transfer_geometry(layer_name)
-            # Tokens-per-block (block_size) must stay uniform for the peer page
-            # handshake. HMA / hybrid models (e.g. GLM-5.2 DSA, MiniMax) may
-            # still differ in per-layer block_len (bytes); transfers already
-            # size RDMA from per-layer geometry, so only allow that divergence.
             if geometry.block_size != self.block_size:
-                raise ValueError(
-                    "MoRIIO KV cache block size mismatch for layer "
-                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
+                if not hma_enabled:
+                    raise ValueError(
+                        "MoRIIO KV cache block size mismatch for layer "
+                        f"{layer_name}: {geometry.block_size} != "
+                        f"{self.block_size}"
+                    )
+                logger.debug(
+                    "MoRIIO HMA per-layer block_size for %s: %d "
+                    "(page/default %d); continuing with per-layer sizes.",
+                    layer_name,
+                    geometry.block_size,
+                    self.block_size,
                 )
             if geometry.block_len != self.block_len:
-                logger.info(
+                logger.debug(
                     "MoRIIO HMA per-layer block_len for %s: %d "
                     "(page/default %d); continuing with per-layer sizes.",
                     layer_name,
