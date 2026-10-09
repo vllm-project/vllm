@@ -33,7 +33,7 @@ use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
     prompt_logprobs_to_maps, text_len,
 };
-use super::utils::metrics::per_request_metrics;
+use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
@@ -199,11 +199,9 @@ async fn collect_completion(
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
-    let metrics = per_request_metrics(
-        enable_per_request_metrics,
-        collected.timestamps,
-        collected.usage.output_token_count,
-    );
+    let metrics = enable_per_request_metrics.then(|| {
+        PerRequestMetrics::from_timestamps(collected.timestamps, collected.usage.output_token_count)
+    });
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -365,19 +363,21 @@ async fn completion_chunk_stream(
                         yield_chunk!(final_chunk);
 
                         if include_usage {
-                            let mut chunk = usage_chunk(
+                            let metrics = enable_per_request_metrics.then(|| {
+                                PerRequestMetrics::from_timestamps(
+                                    finished.timestamps,
+                                    finished.usage.output_token_count,
+                                )
+                            });
+                            y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                                 &envelope,
                                 Usage::from_token_usage(
                                     finished.usage,
                                     enable_prompt_tokens_details,
                                 ),
-                            );
-                            chunk.metrics = per_request_metrics(
-                                enable_per_request_metrics,
-                                finished.timestamps,
-                                finished.usage.output_token_count,
-                            );
-                            y.yield_ok(CompletionSseChunk::Usage(chunk)).await;
+                                metrics,
+                            )))
+                            .await;
                         }
                     }
                     continue;
@@ -425,16 +425,18 @@ async fn completion_chunk_stream(
                     yield_chunk!(final_chunk);
 
                     if include_usage {
-                        let mut chunk = usage_chunk(
+                        let metrics = enable_per_request_metrics.then(|| {
+                            PerRequestMetrics::from_timestamps(
+                                finished.timestamps,
+                                finished.usage.output_token_count,
+                            )
+                        });
+                        y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
                             Usage::from_token_usage(finished.usage, enable_prompt_tokens_details),
-                        );
-                        chunk.metrics = per_request_metrics(
-                            enable_per_request_metrics,
-                            finished.timestamps,
-                            finished.usage.output_token_count,
-                        );
-                        y.yield_ok(CompletionSseChunk::Usage(chunk)).await;
+                            metrics,
+                        )))
+                        .await;
                     }
                 }
             }
@@ -528,9 +530,14 @@ fn prompt_only_logprobs_to_openai(
     ))
 }
 
-fn usage_chunk(envelope: &Arc<StreamResponseEnvelope>, usage: Usage) -> CompletionStreamResponse {
+fn usage_chunk(
+    envelope: &Arc<StreamResponseEnvelope>,
+    usage: Usage,
+    metrics: Option<PerRequestMetrics>,
+) -> CompletionStreamResponse {
     let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
+    chunk.metrics = metrics.map(Into::into);
     chunk
 }
 

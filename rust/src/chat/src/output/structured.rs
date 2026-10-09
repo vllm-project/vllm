@@ -10,6 +10,7 @@
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
+use vllm_llm::RequestTimestamps;
 use vllm_text::DecodedLogprobs;
 
 use super::{AssistantEvent, AssistantEventStream};
@@ -149,7 +150,7 @@ impl StructuredEventState {
     fn finish(
         &mut self,
         usage: ChatTokenUsage,
-        timestamps: vllm_llm::RequestTimestamps,
+        timestamps: RequestTimestamps,
         finish_reason: FinishReason,
         kv_transfer_params: Option<Box<serde_json::Value>>,
         ec_transfer_params: Option<Box<serde_json::Value>>,
