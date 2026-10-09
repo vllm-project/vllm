@@ -59,6 +59,7 @@ def _decode_kernel(
     propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = True,
 ):
+    """Decode FP8 test inputs into the selected floating-point dtype."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0)
@@ -79,6 +80,7 @@ def _encode_kernel(
     propagate_nan: tl.constexpr = False,
     FORCE_SOFTWARE_CONVERSION: tl.constexpr = True,
 ):
+    """Encode floating-point test inputs into FP8 bytes."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
@@ -98,6 +100,7 @@ def _finite_fp8_bytes() -> torch.Tensor:
 def _run_decode(
     x_u8: torch.Tensor, dtype: torch.dtype, propagate_nan: bool = False
 ) -> torch.Tensor:
+    """Launch software decoding and return its output tensor."""
     out = torch.empty(x_u8.numel(), dtype=dtype, device="cuda")
     n = x_u8.numel()
     _decode_kernel[(triton.cdiv(n, 256),)](
@@ -117,6 +120,7 @@ def _run_decode(
 def _run_encode(
     x: torch.Tensor, block: int = 256, propagate_nan: bool = False
 ) -> torch.Tensor:
+    """Launch software encoding and return the resulting FP8 bytes."""
     out = torch.empty(x.numel(), dtype=torch.uint8, device="cuda")
     n = x.numel()
     _encode_kernel[(triton.cdiv(n, block),)](
@@ -267,6 +271,7 @@ def test_encode_fp32_avoids_16bit_double_rounding(
     rounded_byte: int,
     min_cap: int,
 ):
+    """Verify direct FP32 encoding avoids rounding through FP16 or BF16."""
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
     x = torch.tensor([value], dtype=torch.float32, device="cuda")
