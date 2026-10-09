@@ -935,8 +935,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if engram_hashes is not None:
                 # Gather all Engram rows before entering the decoder layers.
                 # One gather feeds every layer sharing the DP-split table.
-                batch = self.engram_batch
-                if batch is None or not batch.prepare_embeddings(engram_hashes):
+                if self.engram_batch is not None:
+                    self.engram_batch.prepare_embeddings(engram_hashes)
+                else:
                     gathered_hashes = gather_engram_hashes(
                         engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
                     )

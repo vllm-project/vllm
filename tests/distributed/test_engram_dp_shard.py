@@ -65,14 +65,8 @@ HEAD_SIZES = (97, 101, 103, 107, 109, 113, 127, 131)
 
 
 def _token_counts(dp_size: int) -> tuple[tuple[int, ...], ...]:
-    """Even loads, then uneven ones with an idle replica to pad around; the
-    last exchanges rows by all-to-all."""
-    return (
-        (8,) * dp_size,
-        (7, 0, 5, 1)[:dp_size],
-        (7,) * dp_size,
-        (257, 0, 129, 1)[:dp_size],
-    )
+    """Even loads, then uneven ones with an idle replica to pad around."""
+    return ((8,) * dp_size, (7, 0, 5, 1)[:dp_size], (7,) * dp_size)
 
 
 def _full_table(rows: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -181,9 +175,9 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
             data_parallel_rank=dp_rank,
         ),
         scheduler_config=SchedulerConfig(
-            max_model_len=257,
+            max_model_len=8,
             is_encoder_decoder=False,
-            max_num_batched_tokens=257,
+            max_num_batched_tokens=8,
             max_num_seqs=8,
         ),
     )
@@ -230,7 +224,7 @@ def _check_fp8_batch(vllm_config):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
-    tables, layers = [], []
+    layers = []
     for index in range(2):
         weight, scale = _full_table(sum(HEAD_SIZES))
         weight = (weight.float() * (1 - 2 * index)).to(torch.float8_e4m3fn)
@@ -239,20 +233,19 @@ def _check_fp8_batch(vllm_config):
         )
         table.weight.weight_loader(table.weight, weight)
         table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
-        tables.append((weight.cuda(), scale.cuda()))
         staged = torch.empty(0, device="cuda")
+        reference = (weight.cuda(), scale.cuda())
         layers.append(SimpleNamespace(embed_tokens=table, staged_rows=staged))
-        layers[-1].layer_hash_index, layers[-1]._use_fp8 = index, True
-    batch = EngramBatch.create(layers, 257)
-    assert batch is not None
+        layers[-1].layer_hash_index, layers[-1].reference = index, reference
+    batch = EngramBatch(layers, 257)
 
-    def check(ids, width=8 * DIM):
+    def check(ids):
         tokens = ids.shape[0]
-        for (weight, scale), layer in zip(tables, layers):
-            sf = layer.fp8_scales[: engram_ops._mxfp8_scale_bytes(tokens, width)]
-            sf = convert_swizzled_to_linear(sf, tokens, width, BLOCK)
-            values = layer.fp8_values[:tokens].view(torch.float8_e4m3fn)
-            actual = dequant_mxfp8_to_bf16(values, sf).view(tokens, width // DIM, DIM)
+        for layer in layers:
+            x = batch.wkv_input(layer, tokens)
+            sf = convert_swizzled_to_linear(x.scale, tokens, x.data.shape[1], BLOCK)
+            actual = dequant_mxfp8_to_bf16(x.data, sf).unflatten(-1, (-1, DIM))
+            weight, scale = layer.reference
             expected = _reference(weight, scale, ids[:, layer.layer_hash_index])
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
@@ -266,8 +259,7 @@ def _check_fp8_batch(vllm_config):
             num_tokens=tokens,
             num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
         ):
-            if not batch.prepare_embeddings(ids):
-                continue  # Per-layer BF16, covered by _check_table.
+            batch.prepare_embeddings(ids)
             check(ids)
             for capture in ("full", "breakable") if len(set(counts)) == 1 else ():
                 warmup = torch.cuda.Stream()
@@ -546,7 +538,7 @@ def _check_table(
             with m.context() as storage_patch:
                 storage_patch.setattr(layer.weight, "data", layer.weight.data.clone())
                 with pytest.raises(RuntimeError, match="storage must not be replaced"):
-                    layer(_make_ids(head_sizes, 1, seed=901))
+                    layer(ids)
 
 
 def _check_dummy_hash_model_forward(
