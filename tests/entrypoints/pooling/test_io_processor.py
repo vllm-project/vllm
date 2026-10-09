@@ -258,3 +258,77 @@ def test_score_leaves_caller_pooling_params_untouched(monkeypatch):
         "PoolingParams; reusing that object with another pooling model now "
         "fails with 'You cannot overwrite ...' before any inference runs."
     )
+
+
+@pytest.mark.parametrize(
+    "explicit_chat_template,tokenizer_chat_template",
+    [
+        (None, "unrelated chat template"),
+        ("explicit", "unrelated chat template"),
+        (None, {"default": "unrelated chat template", "score": "score template"}),
+    ],
+)
+def test_saved_sentence_transformers_chat_template(
+    monkeypatch, tmp_path, explicit_chat_template, tokenizer_chat_template
+):
+    """The chat template named by the Sentence Transformers config must exist,
+    unless an explicit chat template takes precedence. It is resolved the same
+    way by every processor of the model (e.g. /score and /rerank)."""
+    import json
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.get_model_cls", lambda *_: MagicMock()
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.models.interfaces.supports_score_template",
+        lambda *_: False,
+    )
+    monkeypatch.setattr(
+        "vllm.entrypoints.pooling.scoring.io_processor.is_mistral_tokenizer",
+        lambda *_: False,
+    )
+    st_files = {
+        "config_sentence_transformers.json": {"model_type": "CrossEncoder"},
+        "modules.json": [
+            {"path": "", "type": "sentence_transformers.models.Transformer"}
+        ],
+        "sentence_bert_config.json": {
+            "transformer_task": "sequence-classification",
+            "modality_config": {"message": {"format": "flat"}},
+            "processing_kwargs": {"chat_template": {"chat_template": "score"}},
+        },
+    }
+    for name, content in st_files.items():
+        (tmp_path / name).write_text(json.dumps(content))
+
+    model_config = MagicMock(model=str(tmp_path), revision=None)
+    model_config.hf_config.is_original_qwen3_reranker = False
+    from tokenizers import Tokenizer, models
+    from transformers import TokenizersBackend
+
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(models.WordLevel({"[UNK]": 0}, "[UNK]")),
+        unk_token="[UNK]",
+    )
+    tokenizer.chat_template = tokenizer_chat_template
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = tokenizer
+
+    def create():
+        return CrossEncoderIOProcessor(
+            vllm_config=MagicMock(model_config=model_config),
+            renderer=renderer,
+            chat_template_config=MagicMock(chat_template=explicit_chat_template),
+        )
+
+    if explicit_chat_template is not None:
+        assert create().saved_chat_template is None
+    elif isinstance(tokenizer_chat_template, str):
+        with pytest.raises(ValueError, match="no 'score' chat template"):
+            create()
+    else:
+        assert [create().saved_chat_template for _ in range(2)] == [
+            "score template",
+            "score template",
+        ]
