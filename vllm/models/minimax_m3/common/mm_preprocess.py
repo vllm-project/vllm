@@ -17,10 +17,13 @@ from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
+    VideoItem,
 )
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
+    MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -33,6 +36,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
+    DecodedFrames,
     VideoBackend,
     VideoDecoderBackend,
     VideoSourceMetadata,
@@ -60,6 +64,23 @@ from vllm.transformers_utils.processors.minimax_m3 import (
 _MAX_FRAMES_PER_VIDEO = 500
 
 
+class MiniMaxM3VLMultiModalDataParser(MultiModalDataParser):
+    """Keeps each video's loader metadata (fps, sampled frame indices) on the
+    item handed to the HF processor, so both the processor and
+    ``_get_prompt_updates`` emit the per-frame timestamp markers. Videos that
+    arrive without metadata (bare frame arrays, profiling dummies) get ``{}``
+    instead of being rejected, which keeps them timestamp-free as before.
+    Overrides the private ``_get_video_with_metadata`` hook for that fallback.
+    """
+
+    def _get_video_with_metadata(
+        self,
+        video: VideoItem,
+    ) -> tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any] | None]:
+        video, metadata = super()._get_video_with_metadata(video)
+        return video, {} if metadata is None else metadata
+
+
 class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     IMAGE_TOKEN = "]<]image[>["
     VIDEO_TOKEN = "]<]video[>["
@@ -77,6 +98,18 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
+
+    def get_data_parser(self) -> MultiModalDataParser:
+        # Keep (frames, metadata) together in each parsed item. With bare
+        # frames, the processor-cache path re-parses cache-miss items
+        # (_get_cache_missing_items) and builds the prompt updates from them,
+        # losing fps/frames_indices, so the per-frame timestamps would appear
+        # only when the processor cache is disabled.
+        return MiniMaxM3VLMultiModalDataParser(
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_mm_max_tokens_per_item(
         self,
