@@ -906,7 +906,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
-        dp_sync = self.execute_model_state.dp_sync
+        dp_sync_state = self.execute_model_state.dp_sync_state
         self.execute_model_state = None
 
         self.step_timing.forward_end()
@@ -944,7 +944,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     next_prefill_tokens=self.req_states.next_prefill_tokens,
                     temperature=self.sampler.sampling_states.temperature.gpu,
                     seeds=self.sampler.sampling_states.seeds.gpu,
-                    dp_sync=dp_sync,
+                    dp_sync_state=dp_sync_state,
                     dummy_run=True,
                     skip_attn_for_dummy_run=skip_attn,
                     mm_inputs=mm_inputs,
@@ -1772,7 +1772,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
-        batch_desc, dp_sync = dispatch_cg_and_sync_dp(
+        batch_desc, dp_sync_state = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
             num_toks,
@@ -2014,9 +2014,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
-                num_tokens_across_dp=(
-                    dp_sync.num_tokens_across_dp if dp_sync is not None else None
-                ),
+                num_tokens_across_dp=dp_sync_state
+                and dp_sync_state.num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
                 slot_mapping=slot_mappings_by_layer,
@@ -2065,7 +2064,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings_by_layer=slot_mappings_by_layer,
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
-            dp_sync=dp_sync,
+            dp_sync_state=dp_sync_state,
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
@@ -2095,7 +2094,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
-        dp_sync = self.execute_model_state.dp_sync
+        dp_sync_state = self.execute_model_state.dp_sync_state
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
@@ -2247,7 +2246,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler.sampling_states.temperature.gpu,
                     self.sampler.sampling_states.seeds.gpu,
                     num_speculative_tokens=num_spec_tokens,
-                    dp_sync=dp_sync,
+                    dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
                 )
             if num_spec_tokens < self.num_speculative_steps:
@@ -2404,7 +2403,7 @@ class ExecuteModelState(NamedTuple):
     slot_mappings_by_layer: dict[str, torch.Tensor] | None
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
-    dp_sync: DPSyncState | None
+    dp_sync_state: DPSyncState | None
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
