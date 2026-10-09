@@ -38,6 +38,91 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
+
+def is_batch_invariant_quant_kernel_enabled() -> bool:
+    return hasattr(torch.ops._C, "fused_silu_mul_per_token_group_quant")
+
+
+def require_batch_invariant_quant_kernel() -> None:
+    """Fail if the stable CUDA extension lacks the BI activation kernel."""
+    if not is_batch_invariant_quant_kernel_enabled():
+        raise RuntimeError("batch-invariant quant kernel is not available")
+
+
+def fused_silu_mul_per_token_group_quant_fp8(
+    input: torch.Tensor,
+    *,
+    use_ue8m0: bool,
+    round_scale: bool | None = None,
+    clamp_limit: float | None = None,
+    masked_m: torch.Tensor | None,
+    output_q: torch.Tensor | None = None,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the batch-invariant fused SiLU*up and per-token FP8 quant kernel."""
+    require_batch_invariant_quant_kernel()
+    if round_scale is None:
+        round_scale = use_ue8m0
+    if use_ue8m0 and not round_scale:
+        raise ValueError("packed UE8M0 scales require round_scale=True")
+    if input.ndim not in (2, 3) or input.shape[-1] % (2 * group_size):
+        raise ValueError(
+            f"invalid batch-invariant activation shape: {tuple(input.shape)}"
+        )
+    if not input.is_contiguous() or input.dtype != torch.bfloat16:
+        raise ValueError("input must be contiguous BF16")
+
+    hidden = input.shape[-1] // 2
+    groups = hidden // group_size
+    if output_q is None:
+        output_q = torch.empty(
+            (*input.shape[:-1], hidden),
+            device=input.device,
+            dtype=torch.float8_e4m3fn,
+        )
+
+    packed_groups = (groups + 3) // 4 if use_ue8m0 else groups
+    if masked_m is None:
+        if input.ndim != 2:
+            raise ValueError("contiguous input must be 2D")
+        tokens = input.shape[0]
+        output_s = torch.empty_strided(
+            (tokens, packed_groups),
+            (1, tokens),
+            device=input.device,
+            dtype=torch.int32 if use_ue8m0 else torch.float32,
+        )
+    else:
+        if input.ndim != 3:
+            raise ValueError("masked input must be 3D")
+        experts, tokens = input.shape[:2]
+        if masked_m.shape != (experts,) or masked_m.dtype != torch.int32:
+            raise ValueError("masked_m must be int32 with one count per expert")
+        output_s = torch.empty_strided(
+            (experts, tokens, packed_groups),
+            (tokens * packed_groups, 1, tokens),
+            device=input.device,
+            dtype=torch.int32 if use_ue8m0 else torch.float32,
+        )
+    output_s.zero_()
+
+    torch.ops._C.fused_silu_mul_per_token_group_quant(
+        input,
+        output_q,
+        output_s,
+        group_size,
+        1e-10,
+        -448.0,
+        448.0,
+        0.0 if clamp_limit is None else float(clamp_limit),
+        round_scale,
+        use_ue8m0,
+        True,
+        masked_m,
+    )
+    return output_q, output_s
+
+
 # Pre-fill value for scale parameters whose shards load independently. The
 # shards are combined with .max(), so an unloaded shard must never win; the
 # smallest representable float32 guarantees that.
