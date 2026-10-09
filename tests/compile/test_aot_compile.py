@@ -890,3 +890,37 @@ def test_disable_compile_cache_skips_aot_load(
         mod(*args)
 
     assert not mod.was_aot_compile_fn_loaded_from_disk
+
+
+def test_make_compile_cache_dir_creates_the_directory(tmp_path: Path):
+    from vllm.compilation.caching import make_compile_cache_dir
+
+    target = tmp_path / "hash" / "inductor_cache"
+    assert make_compile_cache_dir(str(target)) == str(target)
+    assert target.is_dir()
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root may write regardless of directory permissions"
+)
+def test_make_compile_cache_dir_names_the_fix_when_not_writable(tmp_path: Path):
+    """An unwritable cache root is what an earlier run as another user leaves.
+
+    The bare PermissionError surfaces to the user as "Engine core initialization
+    failed ... Failed core proc(s): {}", so the message has to carry the cause
+    and the variable that controls it.
+    """
+    from vllm.compilation.caching import make_compile_cache_dir
+
+    read_only = tmp_path / "read_only"
+    read_only.mkdir()
+    read_only.chmod(0o500)
+    try:
+        with pytest.raises(PermissionError) as excinfo:
+            make_compile_cache_dir(str(read_only / "hash" / "inductor_cache"))
+    finally:
+        read_only.chmod(0o700)
+
+    message = str(excinfo.value)
+    assert "VLLM_CACHE_ROOT" in message
+    assert str(read_only) in message
