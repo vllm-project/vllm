@@ -2,17 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The sparse indexer's decode top-512 for gfx942 (topk512_gfx942.cu).
 
-The first call builds the extension with hipcc into torch's extension cache
-(about a minute) and later processes load the cached build. The TP ranks
-share one build: torch's extension loader makes the other ranks wait for the
-rank that builds it.
+``build`` builds the extension with hipcc into torch's extension cache (about
+a minute), and later processes load the cached build. The mono decode layers
+call it when the model is created, so that the build happens at startup and
+not at the first decode step. The TP ranks share one build: torch's extension
+loader makes the other ranks wait for the rank that builds it. When the build
+fails, every hook here returns False and vLLM runs its own ops.
 """
 
 import os
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.dsv41_gfx942 import enabled
+
+logger = init_logger(__name__)
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
 _SOURCE = os.path.join(_HERE, "topk512_gfx942.cu")
@@ -26,37 +31,64 @@ MAX_BLOCKS = 8
 MIN_CHUNK = 16384
 
 _ext = None
+_build_failed = False
+
+
+def _compile():
+    from torch.utils.cpp_extension import load
+
+    # The container lists every ROCm target in PYTORCH_ROCM_ARCH. Build for
+    # gfx942 only, and restore the list afterwards so other extensions that
+    # this process builds are not affected.
+    saved = os.environ.get("PYTORCH_ROCM_ARCH")
+    os.environ["PYTORCH_ROCM_ARCH"] = "gfx942"
+    try:
+        return load(name="dsv41_topk942", sources=[_SOURCE], extra_cuda_cflags=["-O3"])
+    finally:
+        if saved is None:
+            del os.environ["PYTORCH_ROCM_ARCH"]
+        else:
+            os.environ["PYTORCH_ROCM_ARCH"] = saved
+
+
+def build() -> bool:
+    """Build or load the extension once, and return whether it is available.
+    A failed build, for example without hipcc or without a writable extension
+    cache, logs a warning. The hooks then return False and vLLM runs its own
+    top-k ops for the rest of the process."""
+    global _ext, _build_failed
+    if _ext is None and not _build_failed:
+        try:
+            _ext = _compile()
+        except Exception as err:
+            _build_failed = True
+            logger.warning(
+                "DSv4.1 gfx942 top-k: building topk512_gfx942.cu failed, so "
+                "vLLM's top-k ops run instead: %s",
+                err,
+            )
+    return _ext is not None
+
+
+def _ready() -> bool:
+    return enabled() and build()
 
 
 def _load():
-    global _ext
-    if _ext is None:
-        from torch.utils.cpp_extension import load
-
-        # The container lists every ROCm target in PYTORCH_ROCM_ARCH. Build for
-        # gfx942 only, and restore the list afterwards so other extensions
-        # that this process builds are not affected.
-        saved = os.environ.get("PYTORCH_ROCM_ARCH")
-        os.environ["PYTORCH_ROCM_ARCH"] = "gfx942"
-        try:
-            _ext = load(
-                name="dsv41_topk942", sources=[_SOURCE], extra_cuda_cflags=["-O3"]
-            )
-        finally:
-            if saved is None:
-                del os.environ["PYTORCH_ROCM_ARCH"]
-            else:
-                os.environ["PYTORCH_ROCM_ARCH"] = saved
+    # The hooks call build through _ready first. Direct callers such as the
+    # kernel tests get the build here, and an error when it failed.
+    if not build():
+        raise RuntimeError("topk512_gfx942.cu did not build, see the warning")
     return _ext
 
 
 def decode_top_k(logits, next_n, seq_lens, indices, topk_tokens) -> bool:
     """The hook in vLLM's ROCm decode indexer (rocm_aiter_mla_sparse.py).
 
-    When ``enabled()``, a call with topK 512 and unit column strides runs here
-    and returns True. Otherwise it returns False and vLLM runs
-    torch.ops._C.top_k_per_row_decode as before."""
-    if not enabled():
+    When ``enabled()`` and the extension is built, a call with topK 512 and
+    unit column strides runs here and returns True. Otherwise it returns
+    False and vLLM runs torch.ops._C.top_k_per_row_decode as before."""
+    if not _ready():
         return False
     taken = topk_tokens == 512 and logits.stride(1) == 1 and indices.stride(1) == 1
     if taken:
@@ -70,13 +102,14 @@ def candidate_top_k(
     """The hook in front of the DSpark candidate mask of the decode indexer
     (rocm_aiter_mla_sparse.py), on layers 24 to 36.
 
-    When ``enabled()``, a call with topK 512 writes each row's top 512 among
-    its candidate blocks to ``indices`` and returns True. vLLM then skips its
-    mask and its top-k. The mask writes -inf to about 7 of every 8 logits of a
-    128k row, and the top-k then reads the whole row. Here only the 2048 x 8
-    candidate logits of a row are read. Otherwise this returns False and vLLM
-    masks and runs its top-k as before."""
-    if not enabled():
+    When ``enabled()`` and the extension is built, a call with topK 512
+    writes each row's top 512 among its candidate blocks to ``indices`` and
+    returns True. vLLM then skips its mask and its top-k. The mask writes -inf
+    to about 7 of every 8 logits of a 128k row, and the top-k then reads the
+    whole row. Here only the 2048 x 8 candidate logits of a row are read.
+    Otherwise this returns False and vLLM masks and runs its top-k as
+    before."""
+    if not _ready():
         return False
     taken = (
         topk_tokens == 512
@@ -109,18 +142,18 @@ def candidate_logits_top_k(
     """The hook in front of the dense logits of the decode indexer
     (rocm_aiter_mla_sparse.py), on layers 24 to 36.
 
-    When ``enabled()``, a call that the hook takes writes each row's top 512
-    among its candidate blocks to ``indices`` and returns True. vLLM then
-    skips its dense logits, its candidate mask and its top-k for the layer.
-    The call computes only the 2048 x 8 candidate logits of each row
-    (cand_logits.py), bit-identical to the dense kernel's, and then runs the
-    same top-512 as candidate_top_k. Otherwise this returns False and vLLM
-    runs the dense path as before.
+    When ``enabled()`` and the extension is built, a call that the hook
+    takes writes each row's top 512 among its candidate blocks to ``indices``
+    and returns True. vLLM then skips its dense logits, its candidate mask and
+    its top-k for the layer. The call computes only the 2048 x 8 candidate
+    logits of each row (cand_logits.py), bit-identical to the dense kernel's,
+    and then runs the same top-512 as candidate_top_k. Otherwise this returns
+    False and vLLM runs the dense path as before.
 
     The hook only takes calls whose dense logits would come from AITER's
     gfx942 Gluon kernel, because cand_logits.py reproduces that kernel's
     arithmetic. dense_is_aiter_gluon says whether they would."""
-    if not enabled():
+    if not _ready():
         return False
     rows = q_fp8.shape[0] * q_fp8.shape[1]
     taken = (
@@ -189,13 +222,13 @@ def select_candidates(logits, next_n, seq_lens, block_size, candidates) -> bool:
     indexer (rocm_aiter_mla_sparse.py), on layer 20, which writes the
     candidate blocks of layers 24 to 36.
 
-    When ``enabled()``, ``candidates`` gets each row's block ids from one
-    launch (candidateBlocks in topk512_gfx942.cu) and this returns True. vLLM
-    takes three launches and torch.topk, which also sorts the picks, and
-    about 100 us for a 128k step's 6 rows. The block ids are the same, in no
-    particular order. Otherwise this returns False and vLLM runs its
-    version."""
-    if not enabled():
+    When ``enabled()`` and the extension is built, ``candidates`` gets each
+    row's block ids from one launch (candidateBlocks in topk512_gfx942.cu) and
+    this returns True. vLLM takes three launches and torch.topk, which also
+    sorts the picks, and about 100 us for a 128k step's 6 rows. The block ids
+    are the same, in no particular order. Otherwise this returns False and
+    vLLM runs its version."""
+    if not _ready():
         return False
     ends = seq_lens.reshape(-1)
     rows = logits.shape[0]
@@ -218,13 +251,14 @@ def select_candidates(logits, next_n, seq_lens, block_size, candidates) -> bool:
 
 def skip_decode_fill(has_prefill, num_decode_tokens, num_tokens, decode) -> bool:
     """Whether vLLM's decode indexer (rocm_aiter_mla_sparse.py) may skip its
-    -1 fill of the step's top-k rows. When ``enabled()`` it may when every row
-    of the step is a decode row and none is padded. The decode top-k
-    (decode_top_k) then writes every entry of every row, the -1 past a short
-    row's end included. This saves one launch on each of the 8 index
-    layers."""
+    -1 fill of the step's top-k rows. When ``enabled()`` and the extension is
+    built, it may when every row of the step is a decode row and none is
+    padded. The decode top-k (decode_top_k) then writes every entry of every
+    row, the -1 past a short row's end included. vLLM's own top-k does not,
+    so without the extension the fill stays. This saves one launch on each of
+    the 8 index layers."""
     return (
-        enabled()
+        _ready()
         and not has_prefill
         and decode is not None
         and not decode.requires_padding

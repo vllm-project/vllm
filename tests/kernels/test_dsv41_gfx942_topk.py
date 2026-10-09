@@ -13,6 +13,7 @@ server's max_model_len (1M).
 """
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -327,3 +328,30 @@ def test_select_candidates_matches_vllm(
             assert all((a != a and b != b) or a == b for a, b in zip(vw, vg)), (
                 f"row {r}: different chosen block scores"
             )
+
+
+def test_failed_build_leaves_the_top_k_to_vllm(monkeypatch):
+    """A failed build of topk512_gfx942.cu, for example without hipcc, must not
+    fail a decode step. build returns False, every hook returns False, and the
+    indexer keeps its -1 fill, so vLLM runs its own top-k ops."""
+    from vllm.model_executor.layers.dsv41_gfx942 import topk
+
+    def fail():
+        raise RuntimeError("hipcc not found")
+
+    monkeypatch.setattr(topk, "enabled", lambda: True)
+    monkeypatch.setattr(topk, "_ext", None)
+    monkeypatch.setattr(topk, "_build_failed", False)
+    monkeypatch.setattr(topk, "_compile", fail)
+    assert not topk.build()
+    logits = torch.zeros(6, 4096)
+    indices = torch.zeros(6, 512, dtype=torch.int32)
+    seq_lens = torch.full((1,), 4096, dtype=torch.int32)
+    assert not topk.decode_top_k(logits, 6, seq_lens, indices, 512)
+    candidates = torch.zeros(6, 2048, dtype=torch.int32)
+    assert not topk.candidate_top_k(logits, 6, seq_lens, candidates, 8, indices, 512)
+    assert not topk.select_candidates(logits, 6, seq_lens, 8, candidates)
+    decode = SimpleNamespace(requires_padding=False)
+    assert not topk.skip_decode_fill(False, 6, 6, decode)
+    with pytest.raises(RuntimeError, match="did not build"):
+        topk.top_k_per_row_decode_512(logits, 6, seq_lens, indices)

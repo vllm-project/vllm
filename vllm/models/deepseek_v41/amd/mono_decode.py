@@ -306,6 +306,14 @@ class MonoDecodeLayer:
         config = vllm_config.model_config.hf_config
         attn, ffn = layer.attn, layer.ffn
         gfx942 = _on_gfx942()
+        if gfx942:
+            # The gfx942 indexer's top-k hooks need topk512_gfx942.cu. Build it
+            # when the model is created, so that a failed build shows at
+            # startup and the hooks leave the top-k to vLLM from the first
+            # step on. Later layers get the result of the first build.
+            from vllm.model_executor.layers.dsv41_gfx942 import topk
+
+            topk.build()
         draft = attn.layer_id >= config.num_hidden_layers
         routing = DRAFT_ROUTING if draft else TARGET_ROUTING
         if layer.use_sequence_parallel:

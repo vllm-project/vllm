@@ -287,6 +287,11 @@ def _deployment(monkeypatch, cdna=4, cus=256, tp=2):
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
     monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: tp)
     monkeypatch.setattr(md, "_compute_units", lambda: cus)
+    # On gfx942, create builds the top-k extension with hipcc. These tests do
+    # not need it, so they skip the build.
+    from vllm.model_executor.layers.dsv41_gfx942 import topk
+
+    monkeypatch.setattr(topk, "build", lambda: True)
     name = "vllm.models.deepseek_v41.amd.mono.runner"
     runner = ModuleType(name)
     runner.BLOCKS = 256  # type: ignore[attr-defined]
