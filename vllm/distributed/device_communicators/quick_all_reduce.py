@@ -405,6 +405,9 @@ class QuickAllReduce:
         if self._flydsl_int4 is not None:
             self._flydsl_int4.close()
             self._flydsl_int4 = None
+            # Without this, should_quick_allreduce() would fall through to the
+            # HIP path with no communicator behind it.
+            self.disabled = True
         if not self.disabled and getattr(self, "_ptr", None):
             if ops is not None:
                 ops.qr_destroy(self._ptr)
