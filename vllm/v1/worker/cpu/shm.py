@@ -103,6 +103,7 @@ gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
 from vllm.triton_utils import HAS_TRITON, tl
 
 if not HAS_TRITON:
+    gpu_input_batch.prepare_prefill_inputs = cpu_input_batch.prepare_prefill_inputs
     gpu_input_batch.get_num_sampled_and_rejected = (
         cpu_input_batch.get_num_sampled_and_rejected
     )

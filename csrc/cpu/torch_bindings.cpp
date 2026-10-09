@@ -401,6 +401,13 @@ torch::Tensor greedy_argmax(const torch::Tensor& logits);
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
+void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
+                                torch::Tensor& next_prefill_tokens,
+                                const torch::Tensor& idx_mapping,
+                                const torch::Tensor& query_start_loc,
+                                const torch::Tensor& all_token_ids,
+                                const torch::Tensor& prefill_len,
+                                const torch::Tensor& num_computed_tokens);
 void eagle_prepare_inputs_padded_kernel_impl(
     const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& valid_sampled_tokens_count,
@@ -983,6 +990,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &mamba_chunk_scan_fwd_cpu_impl);
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
+
+  ops.def(
+      "prepare_prefill_inputs_cpu(Tensor(a0!) input_ids, "
+      "Tensor(a1!) next_prefill_tokens, Tensor idx_mapping, "
+      "Tensor query_start_loc, Tensor all_token_ids, Tensor prefill_len, "
+      "Tensor num_computed_tokens) -> ()",
+      &cpu_utils::prepare_prefill_inputs_cpu);
 
   // Fused sampling kernels
   ops.def("fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor");

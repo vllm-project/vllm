@@ -1949,6 +1949,26 @@ def scaled_int8_quant(
     return output, input_scales, input_azp
 
 
+def prepare_prefill_inputs_cpu(
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_prefill_inputs_cpu(
+        input_ids,
+        next_prefill_tokens,
+        idx_mapping,
+        query_start_loc,
+        all_token_ids,
+        prefill_len,
+        num_computed_tokens,
+    )
+
+
 # mamba
 def selective_scan_fwd(
     u: torch.Tensor,
