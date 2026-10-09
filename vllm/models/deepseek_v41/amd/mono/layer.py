@@ -40,6 +40,10 @@ MAX_TOKENS = 48
 X_WORDS = HIDDEN // 4
 X_GROUPS = HIDDEN // 32
 SLICES = seam.SLICES  # 160
+# K1's MXFP8 x and the MoE's: plain words in both, the same size, so the two
+# launches share the MoE's (placed later); any other name is one region, so a
+# word is never a tag to one launch and data to another
+SHARED_REGIONS = ("x8", "x8s")
 COUNTER_WORDS = 2 * 256  # the MoE's ug queue and down counts, a word a slot
 COUNTERS = ("ugq", "dq")
 # the epoch buffer, in words: the epoch, a mark a CTA (back.EPOCH_MARKS), then on
@@ -83,6 +87,7 @@ def scratch_layout(s: int, tp: int) -> dict:
         nonlocal off
         base = off
         for name, (o, n) in regions.items():
+            assert name not in out or name in SHARED_REGIONS, name
             out[name] = (base + o, n)
         off = max(off, base + max(o + n for o, n in regions.values()))
         off = -(-off // 256) * 256
