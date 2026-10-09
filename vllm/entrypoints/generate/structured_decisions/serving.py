@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import Request
@@ -11,6 +12,11 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
+from vllm.tracing import (
+    contains_trace_headers,
+    extract_trace_headers,
+    log_tracing_disabled_warning,
+)
 
 from .protocol import (
     DecisionUsage,
@@ -71,6 +77,16 @@ class ServingStructuredDecisions(BaseServing):
         self.strategy = strategy
         self.limits = strategy.limits()
 
+    async def _get_trace_headers(
+        self, headers: Mapping[str, str]
+    ) -> Mapping[str, str] | None:
+        if not contains_trace_headers(headers):
+            return None
+        if not await self.strategy.context.engine_client.is_tracing_enabled():
+            log_tracing_disabled_warning()
+            return None
+        return extract_trace_headers(headers)
+
     async def create_decision(
         self,
         request: StructuredDecisionRequest,
@@ -88,6 +104,11 @@ class ServingStructuredDecisions(BaseServing):
             questions = parse_questions(request, self.limits)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine_client.check_admission(len(questions))
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
             reads = await self.strategy.read(
                 questions,
                 request.instructions,
@@ -96,6 +117,8 @@ class ServingStructuredDecisions(BaseServing):
                 chat_template_kwargs=request.chat_template_kwargs,
                 lora_request=lora_request,
                 priority=request.priority,
+                cache_salt=request.cache_salt,
+                trace_headers=trace_headers,
             )
         except StructuredDecisionError as e:
             return self.create_error_response(e)
