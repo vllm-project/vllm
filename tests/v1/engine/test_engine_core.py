@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import queue
 import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -25,8 +27,13 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
+from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
+from vllm.v1.engine.core import (
+    DPEngineCoreProc,
+    EngineCore,
+    EngineCoreProc,
+    EngineShutdownState,
+)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -460,6 +467,118 @@ def test_engine_core_no_schedule_ahead_of_uncapped_lone_prefill():
 
     while engine_core.scheduler.has_requests():
         engine_core.step_with_batch_queue()
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@create_new_process_for_each_test()
+def test_engine_core_input_queue_arrival_during_uncapped_prefill(async_scheduling):
+    """Drain an uncapped prefill before polling a newcomer and recapping it."""
+    engine_args = EngineArgs(
+        model=MODEL_NAME,
+        max_num_seqs=2,
+        enable_prefix_caching=False,
+        max_num_batched_tokens=10,
+        long_prefill_token_threshold=5,
+        enforce_eager=True,
+        async_scheduling=async_scheduling,
+    )
+    # Exercise the process's queue dispatch without starting ZMQ I/O threads.
+    core = EngineCoreProc.__new__(EngineCoreProc)
+    core.input_queue = queue.Queue()
+    core.output_queue = queue.Queue()
+    core.engines_running = False
+    core.shutdown_state = EngineShutdownState.RUNNING
+    core.process_input_queue_block = False
+    with (
+        set_default_torch_num_threads(1),
+        patch.object(
+            VllmConfig,
+            "max_concurrent_batches",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+    ):
+        EngineCore.__init__(
+            core,
+            vllm_config=engine_args.create_engine_config(),
+            log_stats=False,
+            executor_class=DummyExecutor,
+        )
+
+    release_execution = Event()
+    waiting_for_output = Event()
+    try:
+        long_req = make_request_with_max_tokens("long", 2)
+        long_req.prompt_token_ids = PROMPT_TOKENS * 2
+        assert len(long_req.prompt_token_ids) == 24
+        short_req = make_request_with_max_tokens("short", 2)
+        short_req.prompt_token_ids = PROMPT_TOKENS[:1]
+        newcomer = core.preprocess_add_request(short_req)
+        core.input_queue.put_nowait(
+            (EngineCoreRequestType.ADD, core.preprocess_add_request(long_req))
+        )
+        core._process_input_queue()
+        blocker = core.model_executor.thread_pool.submit(release_execution.wait, 30)
+
+        with patch.object(
+            core.scheduler, "schedule", wraps=core.scheduler.schedule
+        ) as spy:
+            core._process_engine_step()
+            assert core.batch_queue is not None
+            first_future, first_batch, _ = core.batch_queue[0]
+            assert first_batch.num_scheduled_tokens == {"long": 10}
+            assert not first_future.done()
+
+            result = first_future.result
+
+            def wait_for_first_batch(timeout=None):
+                waiting_for_output.set()
+                return result(timeout=30)
+
+            def receive_newcomer():
+                try:
+                    assert waiting_for_output.wait(30)
+                    core.input_queue.put_nowait((EngineCoreRequestType.ADD, newcomer))
+                finally:
+                    release_execution.set()
+
+            # The arrival misses this poll and lands while the step awaits batch 1.
+            core._process_input_queue()
+            with ThreadPoolExecutor(max_workers=1) as receiver:
+                arrival = receiver.submit(receive_newcomer)
+                with patch.object(
+                    first_future, "result", side_effect=wait_for_first_batch
+                ):
+                    core._process_engine_step()
+                arrival.result(timeout=30)
+
+            assert blocker.result(timeout=30)
+            assert spy.call_count == 1, "Scheduled ahead of the uncapped prefill"
+            assert not core.batch_queue
+            assert core.input_queue.qsize() == 1
+            assert "short" not in core.scheduler.requests
+            assert core.scheduler.requests["long"].num_computed_tokens == 10
+            assert core.scheduler.requests["long"].num_tokens == 24
+
+            core._process_input_queue()
+            assert core.input_queue.empty()
+            core._process_engine_step()
+            assert spy.call_count == 2
+            assert core.batch_queue[0][1].num_scheduled_tokens == {
+                "long": 5,
+                "short": 1,
+            }
+
+        for _ in range(20):
+            if not core.has_work():
+                break
+            core._process_input_queue()
+            core._process_engine_step()
+        assert not core.has_work()
+    finally:
+        release_execution.set()
+        core.model_executor.thread_pool.shutdown(wait=True)
+        core.shutdown()
 
 
 @pytest.mark.parametrize("encoder_only", [True, False])
