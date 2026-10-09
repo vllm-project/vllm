@@ -118,6 +118,7 @@ class WorkerBase:
             kv_transfer_config is None
             or not kv_transfer_config.is_kv_transfer_instance
             or not kv_transfer_config.has_connector("NixlConnector")
+            or self.vllm_config.parallel_config.decode_context_parallel_size <= 1
         ):
             return
 
