@@ -313,19 +313,15 @@ class FusedMMInputNorm(CustomOp):
     def forward_xpu(
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
-        """XPU fused custom kernel path.
-
-        On XPU, fuse the whole rescale + normalise into a single custom
-        kernel. The eager path materializes an fp32 intermediate and then
-        casts back, which adds device-side compute that cancels the
-        bandwidth saving of transferring uint8 pixel_values. The fused
-        kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
+        """XPU fused custom kernel path for uint8 and Triton kernel path
+        for others.
         """
-        # The out-of-tree XPU kernel only supports the uint8 input that
-        # device-side normalisation guarantees; fail loudly otherwise.
-        assert pixel_values.dtype == torch.uint8, (
-            f"xpu_fused_input_norm requires uint8 input, got {pixel_values.dtype}"
-        )
+        if pixel_values.dtype != torch.uint8:
+            return self.forward_cuda(pixel_values, visual_dtype)
+
+        # For uint8 input, falls to xpu_fused_input_norm from xpu kernels
+        import vllm._xpu_ops  # noqa: F401
+
         return torch.ops.vllm.xpu_fused_input_norm(
             pixel_values, self.weight, self.bias, visual_dtype
         )
