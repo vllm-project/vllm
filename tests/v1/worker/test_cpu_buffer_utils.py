@@ -6,10 +6,11 @@ import torch
 
 from vllm.v1.worker.cpu.buffer_utils import (
     UvaBuffer,
+    _fused_staged_writer_apply,
     _staged_write_tensor_apply_write,
 )
 from vllm.v1.worker.gpu import buffer_utils as buffer_utils_module
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
+from vllm.v1.worker.gpu.buffer_utils import FusedStagedWriter, StagedWriteTensor
 
 
 @pytest.fixture
@@ -19,6 +20,11 @@ def cpu_staged_writes(monkeypatch: pytest.MonkeyPatch) -> None:
         buffer_utils_module.StagedWriteTensor,
         "apply_write",
         _staged_write_tensor_apply_write,
+    )
+    monkeypatch.setattr(
+        buffer_utils_module.FusedStagedWriter,
+        "apply",
+        _fused_staged_writer_apply,
     )
 
 
@@ -65,3 +71,22 @@ def test_staged_write_tensor_apply_write(
     assert not staged._staged_write_starts
     assert not staged._staged_write_contents
     assert not staged._staged_write_cu_lens
+
+
+def test_fused_staged_writer_apply(cpu_staged_writes: None) -> None:
+    first = StagedWriteTensor((2, 4), torch.int32, torch.device("cpu"))
+    second = StagedWriteTensor((2, 4), torch.int32, torch.device("cpu"))
+    first.stage_write(1, 1, [4, 5])
+    second.stage_write(0, 2, [8, 9])
+
+    writer = FusedStagedWriter(torch.device("cpu"), max_writes=2)
+    output_ptrs = torch.tensor(
+        [first.gpu.data_ptr(), second.gpu.data_ptr()], dtype=torch.uint64
+    )
+    output_strides = torch.tensor(
+        [first.gpu.stride(0), second.gpu.stride(0)], dtype=torch.int64
+    )
+    writer.apply([first, second], output_ptrs, output_strides)
+
+    assert first.gpu.tolist() == [[0, 0, 0, 0], [0, 4, 5, 0]]
+    assert second.gpu.tolist() == [[0, 0, 8, 9], [0, 0, 0, 0]]

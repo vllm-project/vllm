@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
+    from vllm.v1.worker.gpu.buffer_utils import FusedStagedWriter, StagedWriteTensor
 
 
 def _staged_write_tensor_apply_write(self: "StagedWriteTensor") -> None:
@@ -36,6 +36,17 @@ def _staged_write_tensor_apply_write(self: "StagedWriteTensor") -> None:
         cu_start = cu_end
 
     self.clear_staged_writes()
+
+
+def _fused_staged_writer_apply(
+    self: "FusedStagedWriter",
+    tensors: Sequence["StagedWriteTensor"],
+    output_ptrs: torch.Tensor,
+    output_strides: torch.Tensor,
+) -> None:
+    del self, output_ptrs, output_strides
+    for tensor in tensors:
+        _staged_write_tensor_apply_write(tensor)
 
 
 class UvaBuffer:
