@@ -70,6 +70,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.kimi_k3.amd import mono_decode as mono
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
@@ -354,9 +355,16 @@ class KimiMoE(nn.Module):
                 moe_intermediate_size // self.tp_size
             )
 
+        self._mono_moe: mono.MonoMoe | None = None
+        if mono.enabled():
+            runner = mono.MonoMoe(self)
+            self._mono_moe = runner if runner.ok else None
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
+        if self._mono_moe is not None and self._mono_moe.eligible(hidden_states):
+            return self._mono_moe.forward(hidden_states)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -627,6 +635,22 @@ class KimiDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp_res_proj",
             )
 
+        self._mono_kda: mono.MonoKda | None = None
+        self._mono_k2: mono.MonoK2 | None = None
+        if self.use_attn_residuals and mono.enabled():
+            if config.is_kda_layer(layer_idx):
+                runner = mono.MonoKda(self)
+                self._mono_kda = runner if runner.ok else None
+            if (
+                isinstance(self.mlp, KimiMoE)
+                and self.mlp._mono_moe is not None
+                and (
+                    self._mono_kda is not None
+                    or isinstance(self.self_attn, KimiMLAAttention)
+                )
+            ):
+                self._mono_k2 = mono.MonoK2(self)
+
     def _run_self_attn(
         self,
         positions: torch.Tensor,
@@ -677,6 +701,10 @@ class KimiDecoderLayer(nn.Module):
         prefix_delta: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prefix_sum = hidden_states
+        if self._mono_kda is not None:
+            return self._forward_mono_kda(
+                positions, prefix_sum, block_residual, prefix_delta
+            )
         attention_quant_key = (
             self.self_attn.get_input_quant_key()
             if isinstance(self.self_attn, (KimiK3DeltaAttention, KimiMLAAttention))
@@ -697,8 +725,57 @@ class KimiDecoderLayer(nn.Module):
         if self.is_block_write_layer:
             prefix_sum = None
 
-        hidden_states = self._run_self_attn(positions, hidden_states)
+        if (
+            self._mono_k2 is not None
+            and prefix_sum is not None
+            and isinstance(self.self_attn, KimiMLAAttention)
+            and self._mono_k2.eligible(prefix_sum)
+        ):
+            # MLA up to o_proj's input, then o_proj + its all-reduce + the MLP
+            # AttnRes + the MoE in one launch
+            core = self.self_attn.mla_attn.forward_core(positions, hidden_states)
+            out = self._mono_k2.forward(core, prefix_sum, block_residual)
+            return prefix_sum, block_residual, out
 
+        hidden_states = self._run_self_attn(positions, hidden_states)
+        return self._forward_mlp_residual(
+            prefix_sum, block_residual, prefix_delta, hidden_states
+        )
+
+    def _forward_mono_kda(
+        self,
+        positions: torch.Tensor,
+        prefix_sum: torch.Tensor,
+        block_residual: torch.Tensor,
+        prefix_delta: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert self._mono_kda is not None
+        core = self._mono_kda.core(prefix_sum, block_residual, prefix_delta, positions)
+        if self._mono_k2 is not None and self._mono_k2.eligible(core):
+            if self.is_block_write_layer:
+                # the prefix restarts at the attention's output
+                new_prefix = torch.empty_like(prefix_sum)
+                out = self._mono_k2.forward(
+                    core, new_prefix, block_residual, reset=True
+                )
+                return new_prefix, block_residual, out
+            out = self._mono_k2.forward(core, prefix_sum, block_residual)
+            return prefix_sum, block_residual, out
+        hidden_states = self.self_attn.o_proj(core)[0]
+        return self._forward_mlp_residual(
+            None if self.is_block_write_layer else prefix_sum,
+            block_residual,
+            prefix_delta,
+            hidden_states,
+        )
+
+    def _forward_mlp_residual(
+        self,
+        prefix_sum: torch.Tensor | None,
+        block_residual: torch.Tensor,
+        prefix_delta: torch.Tensor | None,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if prefix_sum is None:
             prefix_sum = hidden_states
             prefix_delta = None
@@ -830,6 +907,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        mono.step_begin()
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
