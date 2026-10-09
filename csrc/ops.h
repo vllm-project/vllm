@@ -53,6 +53,46 @@ void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales,
                                std::optional<torch::Tensor> const& azp);
 
+// Octave KV cache (ROCm). fmt: V bits (3 or 4), plus 16 for compact K.
+void octave_cache_store(torch::Tensor key, torch::Tensor value,
+                        torch::Tensor cache, torch::Tensor slot_mapping,
+                        torch::Tensor k_signs, torch::Tensor v_signs,
+                        int64_t fmt);
+
+void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
+                   torch::Tensor block_table, torch::Tensor q_to_req,
+                   torch::Tensor q_to_klen, torch::Tensor mid_o,
+                   torch::Tensor k_signs, torch::Tensor v_signs,
+                   double sm_scale, int64_t num_kv_splits, int64_t fmt,
+                   int64_t query_group, bool use_wmma);
+
+void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
+                          torch::Tensor cache, torch::Tensor block_table,
+                          torch::Tensor q_to_req, torch::Tensor indices,
+                          torch::Tensor mid_o, torch::Tensor k_signs,
+                          torch::Tensor v_signs, double sm_scale,
+                          int64_t num_kv_splits, int64_t fmt,
+                          const std::optional<torch::Tensor>& positions,
+                          const std::optional<torch::Tensor>& wtab,
+                          const std::optional<torch::Tensor>& wtags,
+                          const std::optional<torch::Tensor>& stab,
+                          const std::optional<torch::Tensor>& stags);
+
+void octave_window_store(torch::Tensor key, torch::Tensor value,
+                         torch::Tensor slot_mapping, torch::Tensor positions,
+                         torch::Tensor wtab, torch::Tensor wtags,
+                         torch::Tensor wlocks, torch::Tensor stab,
+                         torch::Tensor stags, torch::Tensor slocks);
+
+void octave_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
+                   bool inverse);
+
+void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
+                    torch::Tensor v, torch::Tensor cache,
+                    torch::Tensor block_table, torch::Tensor cu_seqlens_q,
+                    torch::Tensor seq_lens, int64_t max_query_len,
+                    double sm_scale, int64_t fmt);
+
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
     torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t hidden_size,
