@@ -106,6 +106,9 @@ if not HAS_TRITON:
     gpu_input_batch.get_num_sampled_and_rejected = (
         cpu_input_batch.get_num_sampled_and_rejected
     )
+    gpu_buffer_utils.StagedWriteTensor.apply_write = (
+        cpu_buffer_utils._staged_write_tensor_apply_write
+    )
 
 if HAS_TRITON:
     tl.debug_barrier = noop
