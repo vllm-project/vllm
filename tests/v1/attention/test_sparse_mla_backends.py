@@ -3235,7 +3235,9 @@ def test_hisparse_prefill_resident_sources_follow_each_resident_group():
         staging_block_capacity=2,
     )
     # The prefill runs in request state row 1; one table holds both groups.
-    state_rows = torch.zeros((4, 2, 4), dtype=torch.int32)
+    # Rows are wide so that a cache keyed on a freed per-call gather of a row
+    # would see the next gather reuse its address.
+    state_rows = torch.zeros((4, 2, 1024), dtype=torch.int32)
     state_rows[1, 0, :2] = torch.tensor([11, 12])
     state_rows[1, 1, :2] = torch.tensor([21, 22])
     state_indices = torch.tensor([1], dtype=torch.int32)
