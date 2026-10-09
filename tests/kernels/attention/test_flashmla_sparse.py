@@ -1000,6 +1000,7 @@ def test_full_row_compressor_routes_to_cutedsl(
         overlap=False,
         use_fp4_cache=False,
         norm=SimpleNamespace(weight=None, eps=1e-6),
+        rms_norm_eps=1e-6,
         _quant_block=128,
         _token_stride=512,
         _scale_dim=4,
