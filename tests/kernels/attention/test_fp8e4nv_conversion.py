@@ -334,6 +334,7 @@ def test_decode_partial_per_thread_packs(dtype, block, handle_nan):
 
 
 def test_packaged_bitcode_matches_cuda_source(tmp_path):
+    """Verify packaged LLVM bitcode matches a rebuild of its CUDA source."""
     compiler = shutil.which("clang++-18")
     if compiler is None:
         pytest.skip("bitcode regeneration requires the documented clang++-18 compiler")

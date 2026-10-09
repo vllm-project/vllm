@@ -198,6 +198,7 @@ def _decode_bf16_pack4(x0, x1, x2, x3, HANDLE_NAN: tl.constexpr = False):
 
 @tl.core.extern
 def _fp16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
+    """Encode four FP16 values from two packed words into four FP8 bytes."""
     u32 = tl.core.dtype("uint32")
     return tl.core.extern_elementwise(
         "fp8e4nv",
@@ -217,6 +218,7 @@ def _fp16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
 
 @tl.core.extern
 def _bf16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
+    """Encode four BF16 values from two packed words into four FP8 bytes."""
     u32 = tl.core.dtype("uint32")
     return tl.core.extern_elementwise(
         "fp8e4nv",
@@ -236,6 +238,7 @@ def _bf16x4_to_fp8e4m3x4(arg0, arg1, HANDLE_NAN=False, _semantic=None):
 
 @triton.jit
 def _encode_pack4(x0, x1, x2, x3, HANDLE_NAN: tl.constexpr = False):
+    """Encode four FP16/BF16/FP32 values into four E4M3 bytes."""
     if x0.dtype == tl.float32:
         b0 = x0.to(tl.uint32, bitcast=True)
         b1 = x1.to(tl.uint32, bitcast=True)
