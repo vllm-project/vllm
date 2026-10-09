@@ -304,8 +304,10 @@ def flash_attn_supports_kv_cache_dtype(
         supports_fa4_hd256=supports_fa4_hd256,
     )
     is_sm90 = current_platform.is_device_capability_family(90)
+    # FA3 retains smaller FP8/Diff-KV configurations. FA4's SM90 FP8 MMA
+    # specialization supports equal d512 heads, including sinks and dynamic causal.
     sm90_fp8_kv_supported = fa_version == 3 or (
-        fa_version == 4 and head_size in (None, 512)
+        fa_version == 4 and head_size in (None, 512) and head_size_v in (None, 512)
     )
     return (sm90_fp8_kv_supported and is_sm90) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)
