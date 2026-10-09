@@ -1191,6 +1191,24 @@ def test_promotion_hit_precedes_stored_event_translation(
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_streaming_session_stores_new_chunks(request_runner, async_scheduling: bool):
+    """A streaming session resumed for its next input chunk arrives with its
+    full block table, so its new chunks must be stored from their own blocks."""
+    runner = request_runner(
+        block_size=4, num_gpu_blocks=100, async_scheduling=async_scheduling
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    runner.new_request(token_ids=list(range(1, 9)), req_id="s", resumable=True)
+    runner.run(decoded_tokens=[100, EOS_TOKEN_ID], expected_stored=(0, 1))
+
+    runner.new_request(token_ids=list(range(200, 212)), req_id="s", resumable=True)
+    runner.run(decoded_tokens=[300, EOS_TOKEN_ID], expected_stored=(2, 3, 4))
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_offloading_connector(request_runner, async_scheduling: bool):
     block_size = 4
     blocks_per_chunk = 3
