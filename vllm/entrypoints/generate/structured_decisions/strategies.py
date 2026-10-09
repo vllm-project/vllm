@@ -259,7 +259,7 @@ class NextTokenStrategy(ReadStrategy):
         return reads
 
 
-class CanvasStrategy(NextTokenStrategy):
+class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
     """DiffusionGemma. Each question is one read-only request with one denoising
     step."""
 
@@ -288,7 +288,6 @@ class CanvasStrategy(NextTokenStrategy):
             and vllm_config.diffusion_config.canvas_length
             else vllm_config.model_config.hf_config.canvas_length
         )
-        # The label and the end of the turn.
         self.width = self.CANVAS_STEP
         if self.width > served:
             raise ValueError(
@@ -324,7 +323,7 @@ class CanvasStrategy(NextTokenStrategy):
         if len(prompt_ids) + extra > self.max_model_len:
             raise StructuredDecisionError(
                 f"the prompt has {len(prompt_ids)} tokens and a canvas read adds "
-                f"{extra}; together they exceed max_model_len={self.max_model_len}"
+                f"{extra}, more than max_model_len={self.max_model_len}"
             )
         salt = engine_input.get("cache_salt")
         # The thought block _must_ appear outside of the canvas (far worse results
@@ -339,7 +338,7 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "Qwen3ForCausalLM": NextTokenStrategy,
     "Qwen3_5ForConditionalGeneration": NextTokenStrategy,
     "Qwen3_5MoeForConditionalGeneration": NextTokenStrategy,
-    "DiffusionGemmaForBlockDiffusion": CanvasStrategy,
+    "DiffusionGemmaForBlockDiffusion": DiffusionGemmaCanvasStrategy,
 }
 
 

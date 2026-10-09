@@ -26,7 +26,7 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
     state_text,
 )
 from vllm.entrypoints.generate.structured_decisions.strategies import (
-    CanvasStrategy,
+    DiffusionGemmaCanvasStrategy,
     NextTokenStrategy,
     ReadContext,
     reply_label_ids,
@@ -57,7 +57,8 @@ def test_strategy_selection():
     assert select_read_strategy(model(qwen)) is NextTokenStrategy
     assert select_read_strategy(model(qwen, "processed_logprobs")) is NextTokenStrategy
     assert (
-        select_read_strategy(model("DiffusionGemmaForBlockDiffusion")) is CanvasStrategy
+        select_read_strategy(model("DiffusionGemmaForBlockDiffusion"))
+        is DiffusionGemmaCanvasStrategy
     )
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"))
@@ -230,7 +231,7 @@ async def test_request_metadata_reaches_every_question(
 
 
 def test_canvas_read():
-    strategy = CanvasStrategy.__new__(CanvasStrategy)
+    strategy = DiffusionGemmaCanvasStrategy.__new__(DiffusionGemmaCanvasStrategy)
     strategy.thought, strategy.end, strategy.pad = [10, 11, 12, 13], 106, 0
     strategy.width, strategy.vocab_size = 16, 1000
     strategy.max_model_len = 23

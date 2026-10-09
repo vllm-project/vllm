@@ -20,6 +20,11 @@ log probabilities.
 
 Thinking is off unless `chat_template_kwargs` turns it on.
 
+Probabilities can differ between identical requests. They depend on which
+requests share a batch and on whether a read hits the prefix cache. Set
+`VLLM_BATCH_INVARIANT=1` for reads that repeat exactly, at a cost in
+throughput.
+
 Every read of a request starts with the state, so with
 `--enable-prefix-caching` the state is prefilled once and each further
 question prefills only its own text, then reads one token.
