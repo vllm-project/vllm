@@ -666,6 +666,8 @@ def _requires_qwen38_tep8_emulation(
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
+    *,
+    use_deepseek_v4_priority: bool = False,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary MXFP4 MoE backend.
 
@@ -675,12 +677,20 @@ def select_mxfp4_moe_backend(
             the checkpoint. Backends that match it are preferred, with BF16
             activation backends as a fallback.
             Use kFp8StaticTensorSym for W4A8 scheme.
+        use_deepseek_v4_priority: Use the DeepSeek-V4 priority list (MXFP8
+            activation first, then BF16) for ``Mxfp4MoEMethod`` checkpoints.
+            Explicit ``moe_backend`` aliases then try every variant instead of
+            narrowing to BF16, and the user activation override is ignored.
 
     Note: Shape-specific fallbacks may still occur at runtime.
 
     """
     runner_backend = config.moe_backend
-    requested_activation_key = _resolve_activation_key(activation_key)
+    requested_activation_key = (
+        activation_key
+        if use_deepseek_v4_priority
+        else _resolve_activation_key(activation_key)
+    )
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
@@ -689,9 +699,17 @@ def select_mxfp4_moe_backend(
     )
 
     if runner_backend != "auto":
-        requested_backends = _get_requested_backends(
-            runner_backend, requested_activation_key
-        )
+        if not use_deepseek_v4_priority:
+            requested_backends = _get_requested_backends(
+                runner_backend, requested_activation_key
+            )
+        elif runner_backend == "b12x":
+            requested_backends = _get_requested_backends(runner_backend, None)
+        else:
+            # Try every variant of the alias in priority order. Narrowing to
+            # the BF16 variant would drop SM100+ W4A8 variants on devices where
+            # the BF16 variant is gated to SM90.
+            requested_backends = map_mxfp4_backend(runner_backend)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -740,10 +758,23 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _filter_by_activation(
-        _get_priority_backends_for_gpt_oss(), requested_activation_key
-    )
+    if not use_deepseek_v4_priority:
+        # Select kernels in order of backend.
+        AVAILABLE_BACKENDS = _filter_by_activation(
+            _get_priority_backends_for_gpt_oss(), requested_activation_key
+        )
+    elif (
+        current_platform.is_rocm()
+        and config.routing_method == RoutingMethodType.DeepseekV4
+    ):
+        # DeepSeek-V4 on ROCm: prefer AITER FlyDSL MoE (better perf + accuracy
+        # after shuffle/TP-offset fixes), with Triton-unfused as fallback.
+        AVAILABLE_BACKENDS = [
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+        ]
+    else:
+        AVAILABLE_BACKENDS = _get_priority_backends()
 
     unsupported_reasons = []
     for backend in AVAILABLE_BACKENDS:
@@ -788,80 +819,6 @@ def select_mxfp4_moe_backend(
         f"Candidate backends were: "
         f"{[backend.value for backend in AVAILABLE_BACKENDS]}. "
         f"Unsupported reasons: {unsupported_log}. "
-    )
-
-
-def select_deepseek_v4_mxfp4_moe_backend(
-    config: FusedMoEConfig,
-) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
-    Falls back through BF16 and other backends.
-    """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-    # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
-    # falling back to the auto priority list.
-    runner_backend = config.moe_backend
-    if runner_backend != "auto":
-        if runner_backend == "b12x":
-            requested_backends = _get_requested_backends(runner_backend, None)
-        else:
-            # Try every variant of the alias in priority order. Narrowing to
-            # the BF16 variant would drop SM100+ W4A8 variants on devices where
-            # the BF16 variant is gated to SM90.
-            requested_backends = map_mxfp4_backend(runner_backend)
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-            requested_backends = [
-                Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
-                for b in requested_backends
-            ]
-        last_error: Exception | None = None
-        for requested_backend in requested_backends:
-            try:
-                return _return_or_raise(
-                    requested_backend,
-                    config,
-                    kMxfp4Static,
-                    _backend_activation_key(requested_backend),
-                    activation_format,
-                )
-            except ValueError as e:
-                last_error = e
-        assert last_error is not None
-        raise last_error
-
-    # DeepSeek-V4 on ROCm: prefer AITER FlyDSL MoE (better perf + accuracy
-    # after shuffle/TP-offset fixes), with Triton-unfused as fallback.
-    if (
-        current_platform.is_rocm()
-        and config.routing_method == RoutingMethodType.DeepseekV4
-    ):
-        priority_backends = [
-            Mxfp4MoeBackend.AITER_MXFP4_BF16,
-            Mxfp4MoeBackend.TRITON_UNFUSED,
-        ]
-    else:
-        priority_backends = _get_priority_backends()
-
-    # Iterate priority backends: TRTLLM MXFP8, then Triton.
-    for backend in priority_backends:
-        activation_key = _backend_activation_key(backend)
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
-
-    raise NotImplementedError(
-        "No MXFP4 MoE backend supports the deployment configuration."
     )
 
 

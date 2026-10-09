@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
-    select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -567,8 +566,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 # TODO: Remove once AITER takes this as a kernel argument.
                 os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
         else:
-            self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
-                moe
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, use_deepseek_v4_priority=True
             )
 
         self.max_capture_size = moe.max_capture_size

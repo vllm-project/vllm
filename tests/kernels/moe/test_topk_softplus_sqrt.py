@@ -105,7 +105,7 @@ def test_hash_routing_backend_selection(
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-        select_deepseek_v4_mxfp4_moe_backend,
+        select_mxfp4_moe_backend,
     )
     from vllm.platforms import rocm
 
@@ -134,9 +134,9 @@ def test_hash_routing_backend_selection(
 
     if has_hash_routing and backend == "aiter_triton_mxfp4_bf16":
         with pytest.raises(ValueError, match="hash routing"):
-            select_deepseek_v4_mxfp4_moe_backend(config)
+            select_mxfp4_moe_backend(config, use_deepseek_v4_priority=True)
     else:
-        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+        _, experts_cls = select_mxfp4_moe_backend(config, use_deepseek_v4_priority=True)
         assert experts_cls.__name__ == expected_experts
 
 
