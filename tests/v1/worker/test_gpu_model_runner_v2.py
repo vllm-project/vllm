@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 
@@ -259,7 +260,9 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
+    )
     runner.cudagraph_manager = SimpleNamespace(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
@@ -335,3 +338,32 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+
+@pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
+def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer):
+    """Targets allocate the MTP hidden buffer only for hidden-state drafters."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    hidden_states = torch.zeros(4, 8)
+    buffer = torch.arange(16 * 8, dtype=torch.float32).view(16, 8)
+    if target_buffer == "absent":
+        runner.model = SimpleNamespace()
+    else:
+        returned = buffer if target_buffer == "tensor" else None
+        runner.model = SimpleNamespace(get_mtp_target_hidden_states=lambda: returned)
+
+    out = runner._get_drafter_hidden_states(hidden_states)
+
+    if target_buffer == "tensor":
+        assert torch.equal(out, buffer[:4])
+    else:
+        assert out is hidden_states
+
+
+def test_async_copy_to_np_does_not_alias_reused_buffer():
+    buffer = torch.zeros(4, dtype=torch.int64)
+
+    snapshot = async_copy_to_np(buffer)
+    buffer.fill_(1)
+
+    assert snapshot.tolist() == [0, 0, 0, 0]
