@@ -625,15 +625,7 @@ def assign_loras(requests, args):
 
 def validate_args(args):
     """Validate command-line arguments."""
-    # === Deprecation and Defaulting ===
-    if args.dataset is not None:
-        warnings.warn(
-            "The '--dataset' argument will be deprecated in the next release. "
-            "Please use '--dataset-name' and '--dataset-path' instead.",
-            stacklevel=2,
-        )
-        args.dataset_path = args.dataset
-
+    # === Defaulting ===
     if not getattr(args, "tokenizer", None):
         args.tokenizer = args.model
 
@@ -647,11 +639,7 @@ def validate_args(args):
         raise ValueError("--prequeue-requests is not supported with --async-engine")
 
     # === Dataset Configuration ===
-    if (
-        not args.dataset
-        and not args.dataset_path
-        and args.dataset_name not in {"prefix_repetition"}
-    ):
+    if not args.dataset_path and args.dataset_name != "prefix_repetition":
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
         random_input_len = getattr(args, "random_input_len", None)
@@ -808,15 +796,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         ],
         help="Name of the dataset to benchmark on.",
         default="sharegpt",
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="Path to the ShareGPT dataset, will be deprecated in\
-            the next release. The dataset is expected to "
-        "be a json in form of list[dict[..., conversations: "
-        "list[dict[..., value: <prompt_or_response>]]]]",
     )
     parser.add_argument(
         "--dataset-path", type=str, default=None, help="Path to the dataset"
